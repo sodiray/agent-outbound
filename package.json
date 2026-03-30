@@ -1,0 +1,38 @@
+{
+  "name": "agent-outbound",
+  "version": "0.2.0",
+  "description": "AI-powered outbound pipeline for Claude Code. Source, enrich, and sequence outreach using any connected MCP tools.",
+  "type": "module",
+  "bin": {
+    "agent-outbound": "./src/cli.js"
+  },
+  "files": [
+    "src/",
+    "command.md"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "outbound",
+    "outreach",
+    "sales",
+    "lead-generation",
+    "enrichment",
+    "ai"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rayepps/agent-outbound"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "js-yaml": "^4.1.0",
+    "radash": "^12.0.0",
+    "zod": "^3.25.76"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

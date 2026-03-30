@@ -1,0 +1,196 @@
+source:
+  searches:
+    - id: google_maps_plumbers_boise
+      description: Search Google Maps for plumbers in Boise, Idaho and fetch website via place details
+      args:
+        query:
+          literal: plumbers in Boise Idaho
+      output_fields:
+        - business_name
+        - address
+        - phone
+        - website
+        - rating
+        - review_count
+        - google_place_id
+      dedup_keys:
+        - google_place_id
+      columns:
+        business_name: business_name
+        address: address
+        phone: phone
+        website: website
+        rating: rating
+        review_count: review_count
+        google_place_id: google_place_id
+      prompt: >-
+        Use mcp__google-maps__maps_search_places with query 'plumbers in Boise Idaho'. For each place returned, call
+        mcp__google-maps__maps_place_details with that place's place_id to retrieve full details including the website
+        field. Return each result as a row with: business_name (name), address (formatted_address), phone
+        (formatted_phone_number), website (from place details, empty string if not listed), rating, review_count
+        (user_ratings_total), google_place_id (place_id).
+      cache: 7d
+      concurrency: 1
+      timeout: 5m
+    - id: google_maps_hvac_boise
+      description: Search Google Maps for HVAC contractors in Boise, Idaho and fetch website via place details
+      args:
+        query:
+          literal: HVAC contractors in Boise Idaho
+      output_fields:
+        - business_name
+        - address
+        - phone
+        - website
+        - rating
+        - review_count
+        - google_place_id
+      dedup_keys:
+        - google_place_id
+      columns:
+        business_name: business_name
+        address: address
+        phone: phone
+        website: website
+        rating: rating
+        review_count: review_count
+        google_place_id: google_place_id
+      prompt: >-
+        Use mcp__google-maps__maps_search_places with query 'HVAC contractors in Boise Idaho'. For each place returned,
+        call mcp__google-maps__maps_place_details with that place's place_id to retrieve full details including the
+        website field. Return each result as a row with: business_name (name), address (formatted_address), phone
+        (formatted_phone_number), website (from place details, empty string if not listed), rating, review_count
+        (user_ratings_total), google_place_id (place_id).
+      cache: 7d
+      concurrency: 1
+      timeout: 5m
+  filters:
+    - description: Keep only businesses that have a website URL
+      condition: Return true only when the website field is a non-empty, valid-looking URL
+      config:
+        args:
+          website:
+            from_column: website
+        writes:
+          passed_column: filter_has_website_passed
+        model: haiku
+        timeout: 5m
+enrich:
+  - description: >-
+      Scrape the business website using Firecrawl and write detailed research notes covering services offered,
+      tone/brand, location signals, any pricing or specialties, and anything that would help personalize outreach
+    config:
+      id: website_research
+      args:
+        website:
+          from_column: website
+        business_name:
+          from_column: business_name
+      columns:
+        research_notes: research_notes
+      prompt: >-
+        You are researching a local plumbing business for outreach purposes. Use mcp__firecrawl__firecrawl_scrape to
+        scrape the business website provided in the `website` arg. Read the scraped content carefully and write detailed
+        research notes covering: (1) services offered and any specialties or niches (e.g. emergency plumbing, remodels,
+        commercial, etc.), (2) tone and brand voice (professional, family-owned, budget-focused, premium, etc.), (3) any
+        mentions of pricing, financing, or guarantees, (4) team or owner names mentioned on the site, (5) geographic
+        service area signals, (6) how long they've been in business if mentioned, (7) any notable differentiators or
+        unique selling points, (8) anything else that would help write a compelling, personalized outreach email. Return
+        a single `research_notes` field containing a thorough, structured prose summary (minimum 150 words). If the
+        scrape fails or returns no usable content, set research_notes to an empty string.
+      model: sonnet
+      cache: 14d
+      concurrency: 3
+      timeout: 4m
+  - description: Write a personalized cold outreach email using research notes, contact info, and business context
+    config:
+      id: outreach_email_draft
+      depends_on:
+        - website_research
+      args:
+        business_name:
+          from_column: business_name
+        contact_name:
+          from_column: contact_name
+        contact_email:
+          from_column: contact_email
+        phone:
+          from_column: phone
+        website:
+          from_column: website
+        research_notes:
+          from_column: research_notes
+        review_count:
+          from_column: review_count
+        rating:
+          from_column: rating
+      columns:
+        outreach_email: outreach_email
+      prompt: >-
+        You are writing a cold outreach email to a local plumbing business on behalf of Mission — an AI platform that
+        helps small businesses automate follow-ups, appointment reminders, and customer communications. Using the
+        research notes and business context provided in the args, write a short, warm, personalized email (3–4 short
+        paragraphs, plain text). Guidelines: (1) Address the contact by first name if contact_name is available,
+        otherwise use a generic opener. (2) Open with a specific, genuine observation about the business drawn from the
+        research notes — not a generic compliment. (3) Briefly explain how Mission could help this specific type of
+        plumbing business (tie to their services/pain points surfaced in research). (4) End with a low-friction CTA
+        (e.g. a quick 15-min call). (5) Keep it under 200 words. (6) Do not mention competitors. (7) Do not use hollow
+        phrases like 'I hope this email finds you well'. If research_notes is empty or very short (under 50 words),
+        still write the best email you can using the business name and any other available context. Return a single
+        `outreach_email` field containing the full plain-text email body (no subject line needed). If contact_email is
+        empty, still write the email — it may be used for another outreach channel.
+      model: opus
+      cache: 30d
+      concurrency: 3
+      timeout: 4m
+rubric:
+  - description: Has a contact email address
+    score: 3
+    config:
+      columns:
+        - contact_email
+      result_column: rubric_has_email
+  - description: Has a phone number
+    score: 1
+    config:
+      columns:
+        - phone
+      result_column: rubric_has_phone
+  - description: Has 10 or more reviews
+    score: 2
+    config:
+      columns:
+        - review_count
+      result_column: rubric_has_10_reviews
+  - description: Research notes are detailed (at least 100 words and cover services, brand, and relevant context)
+    score: 2
+    config:
+      columns:
+        - research_notes
+      result_column: rubric_research_notes_detailed
+  - description: Outreach email was written (non-empty email draft exists)
+    score: 3
+    config:
+      columns:
+        - outreach_email
+      result_column: rubric_email_written
+  - description: No contact email address was found
+    score: -3
+    config:
+      columns:
+        - contact_email
+      result_column: rubric_no_email
+rubric_config:
+  score_column: lead_score
+  breakdown_column: lead_score_breakdown
+  cache: 30d
+sequence:
+  steps: []
+  on_reply: pause
+  on_bounce: pause
+resolve_dependency_order:
+  - - website_research
+  - - outreach_email_draft
+resolve_manual_fields: []
+resolve_warnings: []
+resolve_column_errors: []
