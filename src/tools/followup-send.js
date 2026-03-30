@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext } from '../orchestrator/lib/activity.js';
 import { runFollowupSend } from '../orchestrator/sequencer/runner.js';
 
 export const followupSendTool = {
@@ -32,17 +33,19 @@ export const followupSendTool = {
       return { error: `List "${args.list}" not found.` };
     }
 
-    const summary = await runFollowupSend({
-      listDir,
-      filter: args.filter,
-      rowRange: args.rows,
-      staggerSeconds: Number(args.stagger_seconds ?? 3),
-    });
+    return withActivityContext({ listDir, listName: args.list }, async () => {
+      const summary = await runFollowupSend({
+        listDir,
+        filter: args.filter,
+        rowRange: args.rows,
+        staggerSeconds: Number(args.stagger_seconds ?? 3),
+      });
 
-    return {
-      status: 'completed',
-      list: args.list,
-      ...summary,
-    };
+      return {
+        status: 'completed',
+        list: args.list,
+        ...summary,
+      };
+    });
   },
 };

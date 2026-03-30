@@ -3,6 +3,7 @@
  * Spawns `claude` from $PATH with --print mode for LLM boundary actions.
  */
 import { spawn } from 'node:child_process';
+import { emitActivity, emitLive } from './activity.js';
 
 /**
  * Run a Claude CLI prompt and return the output.
@@ -15,6 +16,11 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
   new Promise((res) => {
     const args = ['--print', '--dangerously-skip-permissions', '-p', '-'];
     if (model) args.push('--model', model);
+    emitActivity({
+      event: 'claude_start',
+      model: String(model || ''),
+      timeout_ms: Number(timeout || 0) || undefined,
+    });
 
     const proc = spawn('claude', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -24,8 +30,16 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
     let stdout = '';
     let stderr = '';
     let settled = false;
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.stdout.on('data', (d) => {
+      const chunk = d.toString();
+      stdout += chunk;
+      emitLive({ event: 'claude_chunk', data: chunk });
+    });
+    proc.stderr.on('data', (d) => {
+      const chunk = d.toString();
+      stderr += chunk;
+      emitLive({ event: 'claude_stderr', data: chunk });
+    });
 
     const resolveOnce = (payload) => {
       if (settled) return;
@@ -37,26 +51,60 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
       ? setTimeout(() => {
         proc.kill('SIGTERM');
         setTimeout(() => {
+          if (settled) return;
           if (!proc.killed) {
             proc.kill('SIGKILL');
           }
-          resolveOnce({
-            output: stdout.trim(),
-            exitCode: 1,
-            stderr: stderr.trim() || `Claude CLI timed out after ${timeout}ms.`,
-            timedOut: true,
-          });
+      emitActivity({
+        event: 'claude_complete',
+        model: String(model || ''),
+        exit_code: 1,
+        timed_out: true,
+        output_length: stdout.length,
+        stderr_length: stderr.length,
+        summary: stdout.trim().slice(0, 300),
+        stderr_tail: stderr.trim().slice(-200) || undefined,
+      });
+      resolveOnce({
+        output: stdout.trim(),
+        exitCode: 1,
+        stderr: stderr.trim() || `Claude CLI timed out after ${timeout}ms.`,
+        timedOut: true,
+      });
         }, 5000);
       }, timeout)
       : null;
 
     proc.on('close', (code) => {
       if (timer) clearTimeout(timer);
+      if (settled) return;
+      const failed = (code ?? 1) !== 0;
+      emitActivity({
+        event: 'claude_complete',
+        model: String(model || ''),
+        exit_code: code ?? 1,
+        timed_out: false,
+        output_length: stdout.length,
+        stderr_length: stderr.length,
+        summary: stdout.trim().slice(0, 300),
+        stderr_tail: failed ? (stderr.trim().slice(-200) || undefined) : undefined,
+      });
       resolveOnce({ output: stdout.trim(), exitCode: code ?? 1, stderr: stderr.trim(), timedOut: false });
     });
 
     proc.on('error', (err) => {
       if (timer) clearTimeout(timer);
+      if (settled) return;
+      emitActivity({
+        event: 'claude_complete',
+        model: String(model || ''),
+        exit_code: 1,
+        timed_out: false,
+        output_length: stdout.length,
+        stderr_length: stderr.length,
+        summary: String(err.message || '').slice(0, 300),
+        stderr_tail: stderr.trim().slice(-200) || String(err.message || '').slice(0, 200) || undefined,
+      });
       resolveOnce({ output: '', exitCode: 1, stderr: err.message, timedOut: false });
     });
 

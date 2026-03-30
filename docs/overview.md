@@ -87,6 +87,7 @@ agent-outbound/
     enrichment.md      # enrichment phase: steps, staleness, rubric
     sequencer.md       # sequence phase: state machine, timing, execution
     operator.md        # daily operator dashboard
+    watch.md           # live activity monitoring
     user-flows.md      # example interactions
   src/
     cli.js             # CLI entry point and command routing

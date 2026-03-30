@@ -20,6 +20,7 @@ import {
   resolveVirtualPath,
   syncDestinations,
 } from '../lib/runtime.js';
+import { emitActivity } from '../lib/activity.js';
 
 const formatDate = (date = new Date()) => date.toISOString().slice(0, 10);
 const getRowLabel = (row) => String(row?._row_id || '').trim() || 'row';
@@ -236,6 +237,12 @@ export const runSequencer = async ({ listDir, dryRun = false }) => {
     followup_list: [],
     errors: [],
   };
+  emitActivity({
+    event: 'phase_start',
+    phase: 'sequencer',
+    due_rows: dueRows.length,
+    dry_run: Boolean(dryRun),
+  });
 
   for (const row of dueRows) {
     row.launch_date = getLaunchDate(row);
@@ -243,6 +250,11 @@ export const runSequencer = async ({ listDir, dryRun = false }) => {
 
   // Phase 1: Reply detection in parallel
   if (sequence.on_reply === 'pause' && !dryRun) {
+    emitActivity({
+      event: 'step_start',
+      phase: 'reply_detection',
+      rows: dueRows.length,
+    });
     await parallel(10, dueRows, async (row) => {
       try {
         const reply = await maybeDetectReply({ listDir, sequenceConfig: outboundConfig.sequence, row });
@@ -257,12 +269,24 @@ export const runSequencer = async ({ listDir, dryRun = false }) => {
             row.sequence_outcome,
             `[${today}] reply_detected: ${reply.content || 'Prospect replied'}`
           );
+          emitActivity({
+            event: 'row_complete',
+            phase: 'reply_detection',
+            row: String(row.business_name || row.name || row._row_id || ''),
+            replied: true,
+          });
         }
       } catch (error) {
         summary.errors.push({
           row: getRowLabel(row),
           step: row.sequence_step || '',
           error: error.message,
+        });
+        emitActivity({
+          event: 'error',
+          phase: 'reply_detection',
+          row: String(row.business_name || row.name || row._row_id || ''),
+          detail: error.message,
         });
       }
     });
@@ -274,6 +298,12 @@ export const runSequencer = async ({ listDir, dryRun = false }) => {
         delete row._reply_detected;
       }
     }
+    emitActivity({
+      event: 'step_complete',
+      phase: 'reply_detection',
+      replies_detected: summary.replies_detected,
+      paused_as_engaged: summary.paused_as_engaged,
+    });
   }
 
   // Phase 2: Classify due rows (sequential — cheap, no LLM calls)
@@ -322,6 +352,11 @@ export const runSequencer = async ({ listDir, dryRun = false }) => {
 
   // Phase 3: Follow-up drafting in parallel
   if (rowsToDraft.length > 0) {
+    emitActivity({
+      event: 'step_start',
+      phase: 'followup_draft',
+      rows: rowsToDraft.length,
+    });
     await parallel(10, rowsToDraft, async ({ row, step, stepNumber }) => {
       try {
         const stepConfig = getExecutionStepConfig(step);
@@ -357,6 +392,13 @@ export const runSequencer = async ({ listDir, dryRun = false }) => {
 
         if (draftId) summary.followup_drafts_created += 1;
         else summary.followup_failures += 1;
+        emitActivity({
+          event: 'row_complete',
+          phase: 'followup_draft',
+          step: String(stepNumber),
+          row: String(row.business_name || row.name || row._row_id || ''),
+          drafted: Boolean(draftId),
+        });
       } catch (error) {
         summary.followup_failures += 1;
         row.followup_preview_status = 'failed';
@@ -370,7 +412,20 @@ export const runSequencer = async ({ listDir, dryRun = false }) => {
           step: stepNumber,
           error: error.message,
         });
+        emitActivity({
+          event: 'error',
+          phase: 'followup_draft',
+          step: String(stepNumber),
+          row: String(row.business_name || row.name || row._row_id || ''),
+          detail: error.message,
+        });
       }
+    });
+    emitActivity({
+      event: 'step_complete',
+      phase: 'followup_draft',
+      drafted: summary.followup_drafts_created,
+      failed: summary.followup_failures,
     });
   }
 
@@ -388,6 +443,15 @@ export const runSequencer = async ({ listDir, dryRun = false }) => {
       summary.errors.push({ error: error.message });
     }
   }
+  emitActivity({
+    event: 'phase_complete',
+    phase: 'sequencer',
+    rows_due: summary.rows_due,
+    replies_detected: summary.replies_detected,
+    followup_drafts_created: summary.followup_drafts_created,
+    followup_failures: summary.followup_failures,
+    errors: summary.errors.length,
+  });
 
   return summary;
 };
@@ -503,6 +567,11 @@ export const runFollowupSend = async ({
     sequence_advanced: 0,
     errors: [],
   };
+  emitActivity({
+    event: 'phase_start',
+    phase: 'followup_send',
+    rows: selected.length,
+  });
 
   for (let i = 0; i < selected.length; i += 1) {
     const { row, index } = selected[i];
@@ -567,6 +636,13 @@ export const runFollowupSend = async ({
 
       summary.sent += 1;
       summary.sequence_advanced += 1;
+      emitActivity({
+        event: 'row_complete',
+        phase: 'followup_send',
+        step: String(stepNumber),
+        row: String(row.business_name || row.name || row._row_id || ''),
+        sent: true,
+      });
     } catch (error) {
       row.followup_preview_status = 'failed';
       row.followup_preview_error = error.message;
@@ -574,6 +650,13 @@ export const runFollowupSend = async ({
       row.followup_draft_error = error.message;
       summary.failed_send += 1;
       summary.errors.push({ index, row: getRowLabel(row), error: error.message });
+      emitActivity({
+        event: 'error',
+        phase: 'followup_send',
+        step: String(stepNumber),
+        row: String(row.business_name || row.name || row._row_id || ''),
+        detail: error.message,
+      });
     }
 
     if (i < selected.length - 1 && staggerSeconds > 0) {
@@ -593,6 +676,13 @@ export const runFollowupSend = async ({
     summary.destination_sync = { synced: false, error: error.message };
     summary.errors.push({ error: error.message });
   }
+  emitActivity({
+    event: 'phase_complete',
+    phase: 'followup_send',
+    sent: summary.sent,
+    failed_send: summary.failed_send,
+    errors: summary.errors.length,
+  });
 
   return summary;
 };
@@ -652,6 +742,13 @@ export const logOutcome = async ({ listDir, prospect, action, note, transition }
   row.launch_date = getLaunchDate(row);
   const today = formatDate();
   row.sequence_outcome = appendOutcome(row.sequence_outcome, `[${today}] ${action}: ${note || ''}`.trim());
+  emitActivity({
+    event: 'log_outcome',
+    phase: 'operator',
+    prospect: String(row.business_name || row.name || row._row_id || ''),
+    action: String(action || ''),
+    transition: String(transition || ''),
+  });
 
   const actionText = String(action || '').trim();
   const transitionText = String(transition || '').trim().toLowerCase();

@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext } from '../orchestrator/lib/activity.js';
 import { logOutcome } from '../orchestrator/sequencer/runner.js';
 import { getCanonicalCsvPath } from '../orchestrator/lib/runtime.js';
 
@@ -38,12 +39,12 @@ export const logTool = {
       return { error: `No canonical prospects CSV found for list "${args.list}".` };
     }
 
-    return logOutcome({
+    return withActivityContext({ listDir, listName: args.list }, () => logOutcome({
       listDir,
       prospect: args.prospect,
       action: args.action,
       transition: args.transition,
       note: args.note,
-    });
+    }));
   },
 };

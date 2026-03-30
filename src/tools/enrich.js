@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext } from '../orchestrator/lib/activity.js';
 import { runEnrichment } from '../orchestrator/enrichment/runner.js';
 
 export const enrichTool = {
@@ -32,17 +33,19 @@ export const enrichTool = {
       return { error: `List "${args.list}" not found.` };
     }
 
-    const summary = await runEnrichment({
-      listDir,
-      sourceName: args.source,
-      rowRange: args.rows,
-      concurrencyOverride: args.concurrency,
-    });
+    return withActivityContext({ listDir, listName: args.list }, async () => {
+      const summary = await runEnrichment({
+        listDir,
+        sourceName: args.source,
+        rowRange: args.rows,
+        concurrencyOverride: args.concurrency,
+      });
 
-    return {
-      status: 'completed',
-      list: args.list,
-      ...summary,
-    };
+      return {
+        status: 'completed',
+        list: args.list,
+        ...summary,
+      };
+    });
   },
 };

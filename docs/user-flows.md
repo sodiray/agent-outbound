@@ -1,6 +1,6 @@
 # User Flows
 
-How the operator interacts with the system and what happens under the hood. All interactions go through `/outbound`, which runs CLI commands.
+How the operator interacts with the system and what happens under the hood. All interactions go through `/outbound`, which runs CLI commands. For long-running operations, `agent-outbound watch` provides real-time visibility from a separate terminal.
 
 ## Flow 1: Create a New List
 
@@ -102,3 +102,19 @@ How the operator interacts with the system and what happens under the hood. All 
 2. Orchestrator reads the destination config from `outbound.yaml`
 3. Calls the `sync-destination` action — a single Claude session that reads the local CSV file, reads the Google Sheet, and syncs owned columns while preserving any additional data in the sheet
 4. Progress streams to stdout — the user sees the read, diff, and write operations as they happen
+
+## Flow 10: Watch a Long-Running Operation
+
+**User says:** (in a second terminal) "I want to see what's happening while enrichment runs."
+
+**What they do:**
+1. In terminal 1: `/outbound enrich boise-dental` — this kicks off a 20-minute enrichment run
+2. In terminal 2: `npx agent-outbound watch ./boise-dental`
+
+**What they see:**
+
+The watch terminal shows a short summary of recent activity (what phase started, how far along), then switches to a live stream of everything happening — each row being processed, each Claude call, each tool invocation, each result, each error. When the enrichment run finishes, the watch terminal shows the completion and waits for the next operation.
+
+The user can start `watch` before, during, or after an operation. If they connect mid-run, they see recent history first, then the live stream picks up. If nothing is running, they see the last batch of activity and a "waiting" state until the next operation starts.
+
+The `watch` terminal is read-only. The user doesn't type anything — they just observe. Ctrl+C to exit.

@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext } from '../orchestrator/lib/activity.js';
 import { runSourcing } from '../orchestrator/sourcing/runner.js';
 
 export const sourceTool = {
@@ -28,16 +29,18 @@ export const sourceTool = {
       return { error: `List "${args.list}" not found.` };
     }
 
-    const summary = await runSourcing({
-      listDir,
-      limit: args.limit,
-      searchIndex: args.search_index,
-    });
+    return withActivityContext({ listDir, listName: args.list }, async () => {
+      const summary = await runSourcing({
+        listDir,
+        limit: args.limit,
+        searchIndex: args.search_index,
+      });
 
-    return {
-      status: 'completed',
-      list: args.list,
-      ...summary,
-    };
+      return {
+        status: 'completed',
+        list: args.list,
+        ...summary,
+      };
+    });
   },
 };

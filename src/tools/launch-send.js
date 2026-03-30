@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext } from '../orchestrator/lib/activity.js';
 import { runLaunchSend } from '../orchestrator/launch/runner.js';
 
 export const launchSendTool = {
@@ -28,16 +29,18 @@ export const launchSendTool = {
       return { error: `List "${args.list}" not found.` };
     }
 
-    const summary = await runLaunchSend({
-      listDir,
-      filter: args.filter,
-      staggerSeconds: Number(args.stagger_seconds ?? 3),
-    });
+    return withActivityContext({ listDir, listName: args.list }, async () => {
+      const summary = await runLaunchSend({
+        listDir,
+        filter: args.filter,
+        staggerSeconds: Number(args.stagger_seconds ?? 3),
+      });
 
-    return {
-      status: 'completed',
-      list: args.list,
-      ...summary,
-    };
+      return {
+        status: 'completed',
+        list: args.list,
+        ...summary,
+      };
+    });
   },
 };

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext, emitActivity } from '../orchestrator/lib/activity.js';
 
 export const listCreateTool = {
   name: 'outbound_list_create',
@@ -27,34 +28,42 @@ export const listCreateTool = {
       return { error: `List already exists at "${listDir}".` };
     }
 
-    mkdirSync(listDir, { recursive: true });
-    mkdirSync(join(listDir, 'prompts'), { recursive: true });
-    mkdirSync(join(listDir, '.outbound', '.cache'), { recursive: true });
+    return withActivityContext({ listDir, listName: args.list }, async () => {
+      mkdirSync(listDir, { recursive: true });
+      mkdirSync(join(listDir, 'prompts'), { recursive: true });
+      mkdirSync(join(listDir, '.outbound', '.cache'), { recursive: true });
 
-    const name = args.list.split('/').pop();
-    const outboundConfig = [
-      `# Outbound config for ${name}`,
-      args.description ? `# ${args.description}` : '',
-      '',
-      'source:',
-      '  searches: []',
-      '',
-      'enrich: []',
-      '',
-      'rubric: []',
-      '',
-      'sequence:',
-      '  steps: []',
-    ].filter(Boolean).join('\n');
+      const name = args.list.split('/').pop();
+      const outboundConfig = [
+        `# Outbound config for ${name}`,
+        args.description ? `# ${args.description}` : '',
+        '',
+        'source:',
+        '  searches: []',
+        '',
+        'enrich: []',
+        '',
+        'rubric: []',
+        '',
+        'sequence:',
+        '  steps: []',
+      ].filter(Boolean).join('\n');
 
-    writeFileSync(join(listDir, 'outbound.yaml'), outboundConfig + '\n');
-    writeFileSync(join(listDir, '.outbound', 'prospects.csv'), '_row_id\n');
-    writeFileSync(join(listDir, '.outbound', '.cache', 'hashes.json'), '{}');
+      writeFileSync(join(listDir, 'outbound.yaml'), outboundConfig + '\n');
+      writeFileSync(join(listDir, '.outbound', 'prospects.csv'), '_row_id\n');
+      writeFileSync(join(listDir, '.outbound', '.cache', 'hashes.json'), '{}');
 
-    return {
-      status: 'created',
-      list: listDir,
-      files: ['outbound.yaml', '.outbound/prospects.csv', 'prompts/', '.outbound/.cache/'],
-    };
+      emitActivity({
+        event: 'list_created',
+        phase: 'setup',
+        detail: `Created list at ${listDir}`,
+      });
+
+      return {
+        status: 'created',
+        list: listDir,
+        files: ['outbound.yaml', '.outbound/prospects.csv', 'prompts/', '.outbound/.cache/'],
+      };
+    });
   },
 };

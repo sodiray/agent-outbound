@@ -9,6 +9,7 @@ import { readYaml } from '../lib/yaml.js';
 import { loadResolvedConfigFromOutbound, getDependsOnColumns, getOutputColumns } from '../enrichment/schema.js';
 import { getStepRuntimeOverrides } from '../lib/step-runtime.js';
 import { applyStepOutputs } from '../lib/step-outputs.js';
+import { emitActivity } from '../lib/activity.js';
 import {
   ensureCanonicalCsvExists,
   ensureRuntimeDirs,
@@ -211,6 +212,11 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
     rows_failed_any_filter: 0,
     errors: [],
   };
+  emitActivity({
+    event: 'phase_start',
+    phase: 'sourcing',
+    searches: selectedSearches.length,
+  });
 
   const newRowIds = new Set();
 
@@ -218,6 +224,11 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
   const indexedSearches = selectedSearches.map((search, i) => ({ search, i }));
   const searchResults = await parallel(selectedSearches.length, indexedSearches, async ({ search, i }) => {
     const index = Number.isInteger(searchIndex) ? searchIndex : i;
+    emitActivity({
+      event: 'step_start',
+      phase: 'sourcing_search',
+      step: String(search.id || search.description || `search_${index + 1}`),
+    });
     try {
       const result = await executeStep({
         listDir,
@@ -236,6 +247,12 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
       });
       return { index, search, result, error: null };
     } catch (error) {
+      emitActivity({
+        event: 'error',
+        phase: 'sourcing_search',
+        step: String(search.id || search.description || `search_${index + 1}`),
+        detail: error.message,
+      });
       return { index, search, result: null, error };
     }
   });
@@ -340,6 +357,14 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
       deduped,
       status: result.status === 'failed' ? 'failed' : 'completed',
     });
+    emitActivity({
+      event: 'step_complete',
+      phase: 'sourcing_search',
+      step: String(search.id || search.description || `search_${index + 1}`),
+      found: discoveredRows.length,
+      added,
+      deduped,
+    });
   }
 
   const resolvedConfig = loadResolvedConfigFromOutbound(listDir);
@@ -347,11 +372,21 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
   summary.filter_count = filterEntries.length;
 
   if (filterEntries.length > 0 && rows.length > 0) {
+    emitActivity({
+      event: 'phase_start',
+      phase: 'sourcing_filter',
+      filters: filterEntries.length,
+    });
     const cachePath = getCachePath(listDir);
     const cache = readCache(cachePath);
     const reevaluatedRowIds = new Set();
 
     for (const [filterName, filterConfig] of filterEntries) {
+      emitActivity({
+        event: 'step_start',
+        phase: 'sourcing_filter',
+        step: String(filterName),
+      });
       const passedColumn = String(
         filterConfig?.writes?.passed_column || `filter_${String(filterName).replace(/^filter_/, '')}_passed`
       );
@@ -415,6 +450,13 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
           } else {
             passed += 1;
           }
+          emitActivity({
+            event: 'row_complete',
+            phase: 'sourcing_filter',
+            step: String(filterName),
+            row: String(row.business_name || row.name || row._row_id || ''),
+            passed: decision.passed,
+          });
 
           const depHash = hashDeps(row, dependsOnColumns, [JSON.stringify(filterConfig || {})]);
           recordRun(cache, row._row_id, `filter:${filterName}`, depHash);
@@ -425,6 +467,13 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
           failed += 1;
           processed += 1;
           summary.errors.push({ phase: 'filter', filter: filterName, row: row._row_id, error: error.message });
+          emitActivity({
+            event: 'error',
+            phase: 'sourcing_filter',
+            step: String(filterName),
+            row: String(row.business_name || row.name || row._row_id || ''),
+            detail: error.message,
+          });
         }
       });
 
@@ -434,6 +483,14 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
         rows_passed: passed,
         rows_failed: failed,
         rows_skipped: rows.length - staleRows.length,
+      });
+      emitActivity({
+        event: 'step_complete',
+        phase: 'sourcing_filter',
+        step: String(filterName),
+        processed,
+        passed,
+        failed,
       });
     }
 
@@ -485,6 +542,14 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
 
   const logPath = getSourcingLogPath(listDir);
   appendFileSync(logPath, `${JSON.stringify({ at: new Date().toISOString(), ...summary })}\n`);
+  emitActivity({
+    event: 'phase_complete',
+    phase: 'sourcing',
+    found_total: summary.found_total,
+    added_total: summary.added_total,
+    rows_failed_any_filter: summary.rows_failed_any_filter,
+    errors: summary.errors.length,
+  });
 
   return summary;
 };

@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext } from '../orchestrator/lib/activity.js';
 import { runLaunchDraft } from '../orchestrator/launch/runner.js';
 
 export const launchDraftTool = {
@@ -28,17 +29,19 @@ export const launchDraftTool = {
       return { error: `List "${args.list}" not found.` };
     }
 
-    const summary = await runLaunchDraft({
-      listDir,
-      listName: args.list,
-      filter: args.filter,
-      rows: args.rows,
-    });
+    return withActivityContext({ listDir, listName: args.list }, async () => {
+      const summary = await runLaunchDraft({
+        listDir,
+        listName: args.list,
+        filter: args.filter,
+        rows: args.rows,
+      });
 
-    return {
-      status: 'completed',
-      list: args.list,
-      ...summary,
-    };
+      return {
+        status: 'completed',
+        list: args.list,
+        ...summary,
+      };
+    });
   },
 };

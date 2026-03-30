@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext } from '../orchestrator/lib/activity.js';
 import { readYaml } from '../orchestrator/lib/yaml.js';
 import { readCSV } from '../orchestrator/lib/csv.js';
 import {
@@ -31,35 +32,37 @@ export const syncTool = {
       return { error: `No outbound.yaml found for list "${args.list}".` };
     }
 
-    const outboundConfig = readYaml(outboundPath);
-    if (outboundConfig._raw) {
-      return { error: 'Could not parse outbound.yaml.' };
-    }
+    return withActivityContext({ listDir, listName: args.list }, async () => {
+      const outboundConfig = readYaml(outboundPath);
+      if (outboundConfig._raw) {
+        return { error: 'Could not parse outbound.yaml.' };
+      }
 
-    ensureCanonicalCsvExists(listDir);
-    const csvPath = getCanonicalCsvPath(listDir);
-    const { headers, rows } = readCSV(csvPath);
+      ensureCanonicalCsvExists(listDir);
+      const csvPath = getCanonicalCsvPath(listDir);
+      const { headers, rows } = readCSV(csvPath);
 
-    try {
-      const result = await syncDestinations({
-        listDir,
-        outboundConfig,
-        headers,
-        rows,
-      });
+      try {
+        const result = await syncDestinations({
+          listDir,
+          outboundConfig,
+          headers,
+          rows,
+        });
 
-      return {
-        status: 'completed',
-        list: args.list,
-        row_count: rows.length,
-        ...result,
-      };
-    } catch (error) {
-      return {
-        status: 'failed',
-        list: args.list,
-        error: error.message,
-      };
-    }
+        return {
+          status: 'completed',
+          list: args.list,
+          row_count: rows.length,
+          ...result,
+        };
+      } catch (error) {
+        return {
+          status: 'failed',
+          list: args.list,
+          error: error.message,
+        };
+      }
+    });
   },
 };

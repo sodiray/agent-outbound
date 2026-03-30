@@ -45,6 +45,7 @@ import { syncTool } from './tools/sync.js';
 
 // Operator
 import { logTool } from './tools/log.js';
+import { cleanupSockets } from './orchestrator/lib/activity.js';
 
 const tools = new Map(
   [
@@ -182,3 +183,25 @@ await server.connect(transport);
 process.stderr.write(
   `outbound-mcp ready (tools=${tools.size}; started_at=${new Date(serverStartedAt).toISOString()})\n`
 );
+
+process.on('exit', () => {
+  cleanupSockets();
+});
+process.on('SIGTERM', () => {
+  cleanupSockets();
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  cleanupSockets();
+  process.exit(0);
+});
+process.on('uncaughtException', (err) => {
+  cleanupSockets();
+  process.stderr.write(`outbound-mcp uncaughtException: ${err?.message || err}\n`);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  cleanupSockets();
+  process.stderr.write(`outbound-mcp unhandledRejection: ${reason?.message || reason}\n`);
+  process.exit(1);
+});

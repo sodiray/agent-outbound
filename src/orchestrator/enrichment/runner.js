@@ -19,6 +19,7 @@ import {
 } from '../lib/runtime.js';
 import { getStepRuntimeOverrides } from '../lib/step-runtime.js';
 import { applyStepOutputs } from '../lib/step-outputs.js';
+import { emitActivity } from '../lib/activity.js';
 export { getEnrichmentStatus } from './status.js';
 
 const parseRowRange = (rowRange) => {
@@ -73,6 +74,15 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
     rubric: undefined,
     errors: [],
   };
+  const enrichmentStepCount = depOrder
+    .map((level) => (Array.isArray(level) ? level.length : 1))
+    .reduce((sum, count) => sum + count, 0);
+  emitActivity({
+    event: 'phase_start',
+    phase: 'enrichment',
+    steps: enrichmentStepCount,
+    rows: rows.length,
+  });
 
   for (const level of depOrder) {
     const levelSources = Array.isArray(level) ? level : [level];
@@ -93,6 +103,12 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
       const srcConfig = parsedConfig.sources[srcName];
       if (!srcConfig) {
         summary.errors.push({ source: srcName, error: 'Source not found in config.' });
+        emitActivity({
+          event: 'error',
+          phase: 'enrichment',
+          step: String(srcName),
+          detail: 'Source not found in config.',
+        });
         return;
       }
 
@@ -116,6 +132,13 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
 
         if (stale) staleRows.push(row);
       }
+      emitActivity({
+        event: 'step_start',
+        phase: 'enrichment',
+        step: String(srcName),
+        rows: staleRows.length,
+        skipped: rows.length - staleRows.length,
+      });
 
       let processed = 0;
       let failed = 0;
@@ -144,6 +167,13 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
           recordRun(cache, row._row_id, srcName, depHash);
           touchedRowIds.add(row._row_id);
           processed += 1;
+          emitActivity({
+            event: 'row_complete',
+            phase: 'enrichment',
+            step: String(srcName),
+            row: String(row.business_name || row.name || row._row_id || ''),
+            progress: `${processed}/${staleRows.length || 0}`,
+          });
         } catch (error) {
           failed += 1;
           failedRowIds.add(row._row_id);
@@ -151,6 +181,13 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
             source: srcName,
             row: row._row_id,
             error: error.message,
+          });
+          emitActivity({
+            event: 'error',
+            phase: 'enrichment',
+            step: String(srcName),
+            row: String(row.business_name || row.name || row._row_id || ''),
+            detail: error.message,
           });
         }
       });
@@ -160,6 +197,13 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
         processed,
         failed,
         skipped: rows.length - staleRows.length,
+      });
+      emitActivity({
+        event: 'step_complete',
+        phase: 'enrichment',
+        step: String(srcName),
+        processed,
+        failed,
       });
     });
   }
@@ -213,6 +257,12 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
 
       staleRubricRows.push(row);
     }
+    emitActivity({
+      event: 'phase_start',
+      phase: 'rubric',
+      rows: staleRubricRows.length,
+      criteria: criteria.length,
+    });
 
     let processed = 0;
     let failed = 0;
@@ -266,10 +316,22 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
         recordRun(cache, row._row_id, 'rubric', depHash);
         touchedRowIds.add(row._row_id);
         processed += 1;
+        emitActivity({
+          event: 'row_complete',
+          phase: 'rubric',
+          row: String(row.business_name || row.name || row._row_id || ''),
+          progress: `${processed}/${staleRubricRows.length || 0}`,
+        });
       } catch (error) {
         failed += 1;
         failedRowIds.add(row._row_id);
         summary.errors.push({ source: 'rubric', row: row._row_id, error: error.message });
+        emitActivity({
+          event: 'error',
+          phase: 'rubric',
+          row: String(row.business_name || row.name || row._row_id || ''),
+          detail: error.message,
+        });
       }
     });
 
@@ -279,6 +341,13 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
       failed,
       skipped,
     };
+    emitActivity({
+      event: 'phase_complete',
+      phase: 'rubric',
+      processed,
+      failed,
+      skipped,
+    });
   }
 
   writeCSV(csvPath, headers, allRows);
@@ -299,6 +368,14 @@ export const runEnrichment = async ({ listDir, sourceName, rowRange, concurrency
   summary.rows_enriched = touchedRowIds.size;
   summary.rows_failed = failedRowIds.size;
   summary.rows_skipped = summary.rows_total - touchedRowIds.size - failedRowIds.size;
+  emitActivity({
+    event: 'phase_complete',
+    phase: 'enrichment',
+    rows_enriched: summary.rows_enriched,
+    rows_failed: summary.rows_failed,
+    rows_skipped: summary.rows_skipped,
+    errors: summary.errors.length,
+  });
 
   return summary;
 };

@@ -13,6 +13,7 @@ import {
   resolveVirtualPath,
   syncDestinations,
 } from '../lib/runtime.js';
+import { emitActivity } from '../lib/activity.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const getRowLabel = (row) => String(row._row_id || '').trim() || 'row';
@@ -115,6 +116,11 @@ export const runLaunchDraft = async ({
     failed: 0,
     errors: [],
   };
+  emitActivity({
+    event: 'phase_start',
+    phase: 'launch_draft',
+    rows: selected.length,
+  });
 
   const toDraft = selected.filter(({ row }) => {
     const hasExistingPreview = String(row.launch_preview_id || row.draft_id || '').trim();
@@ -165,9 +171,21 @@ export const runLaunchDraft = async ({
       if (draftId) {
         summary.previewed += 1;
         summary.drafted += 1;
+        emitActivity({
+          event: 'row_complete',
+          phase: 'launch_draft',
+          row: String(row.business_name || row.name || row._row_id || ''),
+          drafted: true,
+        });
       } else {
         summary.failed += 1;
         summary.errors.push({ index, row: getRowLabel(row), error: row.draft_error });
+        emitActivity({
+          event: 'error',
+          phase: 'launch_draft',
+          row: String(row.business_name || row.name || row._row_id || ''),
+          detail: row.draft_error,
+        });
       }
     } catch (error) {
       row.launch_preview_status = 'failed';
@@ -176,6 +194,12 @@ export const runLaunchDraft = async ({
       row.draft_error = error.message;
       summary.failed += 1;
       summary.errors.push({ index, row: getRowLabel(row), error: error.message });
+      emitActivity({
+        event: 'error',
+        phase: 'launch_draft',
+        row: String(row.business_name || row.name || row._row_id || ''),
+        detail: error.message,
+      });
     }
   });
 
@@ -191,6 +215,13 @@ export const runLaunchDraft = async ({
     summary.destination_sync = { synced: false, error: error.message };
     summary.errors.push({ error: error.message });
   }
+  emitActivity({
+    event: 'phase_complete',
+    phase: 'launch_draft',
+    drafted: summary.drafted,
+    failed: summary.failed,
+    errors: summary.errors.length,
+  });
 
   return summary;
 };
@@ -249,6 +280,11 @@ export const runLaunchSend = async ({
     sequence_initialized: 0,
     errors: [],
   };
+  emitActivity({
+    event: 'phase_start',
+    phase: 'launch_send',
+    rows: selected.length,
+  });
 
   for (let i = 0; i < selected.length; i += 1) {
     const { row, index } = selected[i];
@@ -311,6 +347,12 @@ export const runLaunchSend = async ({
       summary.sent += 1;
       summary.executed += 1;
       summary.sequence_initialized += 1;
+      emitActivity({
+        event: 'row_complete',
+        phase: 'launch_send',
+        row: String(row.business_name || row.name || row._row_id || ''),
+        sent: true,
+      });
     } catch (error) {
       row.launch_execute_status = 'failed';
       row.launch_execute_error = error.message;
@@ -318,6 +360,12 @@ export const runLaunchSend = async ({
       row.send_error = error.message;
       summary.failed_send += 1;
       summary.errors.push({ index, row: getRowLabel(row), error: error.message });
+      emitActivity({
+        event: 'error',
+        phase: 'launch_send',
+        row: String(row.business_name || row.name || row._row_id || ''),
+        detail: error.message,
+      });
     }
 
     if (i < selected.length - 1 && staggerSeconds > 0) {
@@ -337,6 +385,13 @@ export const runLaunchSend = async ({
     summary.destination_sync = { synced: false, error: error.message };
     summary.errors.push({ error: error.message });
   }
+  emitActivity({
+    event: 'phase_complete',
+    phase: 'launch_send',
+    sent: summary.sent,
+    failed_send: summary.failed_send,
+    errors: summary.errors.length,
+  });
 
   return summary;
 };

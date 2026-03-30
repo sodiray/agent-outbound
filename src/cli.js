@@ -78,6 +78,14 @@ const serve = async () => {
   await import('./server.js');
 };
 
+const watch = async () => {
+  const watchArgs = args.slice(1);
+  const showAllHistory = watchArgs.includes('--history');
+  const listPath = watchArgs.find((item) => !String(item || '').startsWith('-')) || '.';
+  const { runWatch } = await import('./watch.js');
+  await runWatch({ listPath, showAllHistory });
+};
+
 const printHelp = () => {
   console.log('agent-outbound - AI-powered outbound pipeline for Claude Code');
   console.log();
@@ -87,15 +95,22 @@ const printHelp = () => {
   console.log();
   console.log('  serve    Start the MCP server (used by Claude Code, not typically run directly)');
   console.log();
+  console.log('  watch    Stream live activity for a list');
+  console.log('           Usage: npx agent-outbound watch <list-path> [--history]');
+  console.log('           Each watch session is scoped to a single list.');
+  console.log();
   console.log('Usage:');
   console.log('  npx agent-outbound init');
   console.log('  npx agent-outbound serve');
+  console.log('  npx agent-outbound watch ./my-list');
 };
 
 if (command === 'init') {
   init();
 } else if (command === 'serve') {
   await serve();
+} else if (command === 'watch') {
+  await watch();
 } else if (command === 'help' || command === '--help' || command === '-h') {
   printHelp();
 } else {

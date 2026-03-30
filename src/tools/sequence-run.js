@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { resolveListDir } from '../lib.js';
+import { withActivityContext } from '../orchestrator/lib/activity.js';
 import { runSequencer } from '../orchestrator/sequencer/runner.js';
 
 export const sequenceRunTool = {
@@ -26,15 +27,17 @@ export const sequenceRunTool = {
       return { error: `List "${args.list}" not found.` };
     }
 
-    const summary = await runSequencer({
-      listDir,
-      dryRun: Boolean(args.dry_run),
-    });
+    return withActivityContext({ listDir, listName: args.list }, async () => {
+      const summary = await runSequencer({
+        listDir,
+        dryRun: Boolean(args.dry_run),
+      });
 
-    return {
-      status: 'completed',
-      list: args.list,
-      ...summary,
-    };
+      return {
+        status: 'completed',
+        list: args.list,
+        ...summary,
+      };
+    });
   },
 };
