@@ -1,6 +1,15 @@
 /**
  * Claude CLI subprocess runner.
  * Spawns `claude` from $PATH with --print mode for LLM boundary actions.
+ *
+ * All Claude subprocess stdout is piped to the CLI's stderr in real time
+ * so the caller has visibility into what's happening. The captured stdout
+ * is still returned for parsing.
+ *
+ * Why stderr? The CLI uses stdout for structured JSON output (the final
+ * result). Progress/streaming goes to stderr so it doesn't corrupt the
+ * JSON. When Claude Code runs a Bash command, it shows both stdout and
+ * stderr to the user.
  */
 import { spawn } from 'node:child_process';
 
@@ -8,10 +17,10 @@ import { spawn } from 'node:child_process';
  * Run a Claude CLI prompt and return the output.
  *
  * @param {string} prompt - The prompt to send
- * @param {{ model?: string, timeout?: number }} options
+ * @param {{ model?: string, timeout?: number, streamTo?: NodeJS.WritableStream }} options
  * @returns {Promise<{ output: string, exitCode: number, stderr: string, timedOut: boolean }>}
  */
-export const runClaude = (prompt, { model, timeout } = {}) =>
+export const runClaude = (prompt, { model, timeout, streamTo } = {}) =>
   new Promise((res) => {
     const args = ['--print', '--dangerously-skip-permissions', '-p', '-'];
     if (model) args.push('--model', model);
@@ -21,11 +30,21 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
       env: { ...process.env, FORCE_COLOR: '0' },
     });
 
+    const stream = streamTo || process.stderr;
     let stdout = '';
     let stderr = '';
     let settled = false;
-    proc.stdout.on('data', (d) => { stdout += d.toString(); });
-    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    proc.stdout.on('data', (d) => {
+      const chunk = d.toString();
+      stdout += chunk;
+      // Stream Claude's output to the caller in real time
+      stream.write(chunk);
+    });
+
+    proc.stderr.on('data', (d) => {
+      stderr += d.toString();
+    });
 
     const resolveOnce = (payload) => {
       if (settled) return;
