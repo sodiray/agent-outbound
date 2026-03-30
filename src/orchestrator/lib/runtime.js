@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { readCSV, writeCSV } from './csv.js';
 import { runClaude } from './claude.js';
 import { parseModelJsonObject, zBooleanish } from './model-json.js';
+import { syncDestination } from '../actions/sync-destination.js';
 
 const INTERNAL_DIR_NAME = '.outbound';
 const MAX_SHEET_BATCH_ROWS = 100;
@@ -288,102 +289,27 @@ const syncCsvDestination = ({ listDir, destinationConfig, headers, rows }) => {
   };
 };
 
-const syncGoogleSheetsDestination = async ({ destinationConfig, headers, rows }) => {
+const syncGoogleSheetsDestination = async ({ csvPath, destinationConfig, headers }) => {
   const sheetId = normalizeRef(destinationConfig?.sheet_id);
-  const worksheet = normalizeRef(destinationConfig?.worksheet || 'Prospects');
-  const readTool = normalizeRef(destinationConfig?.composio_read_tool);
-  const updateTool = normalizeRef(destinationConfig?.composio_update_tool);
   if (!sheetId) {
     throw new Error('Google Sheets sync requires data.google_sheets.sheet_id.');
   }
-  if (!readTool || !updateTool) {
-    throw new Error(
-      'Google Sheets destination is missing bound Composio tools. Re-run outbound_config_update to bind destination tools.'
-    );
-  }
 
   const ownedColumns = normalizeOwnedColumns({ headers, destinationConfig });
-  const existingMatrix = await readSheetMatrix({
+
+  const result = await syncDestination({
+    csvPath,
+    destinationType: 'google_sheets',
     destinationConfig,
-    readTool,
-    worksheet,
-    sheetId,
+    ownedColumns,
   });
-
-  const existingHeaders = existingMatrix[0] ? existingMatrix[0].map((v) => String(v || '')) : [];
-  const preservedColumns = existingHeaders.filter((col) => col && !ownedColumns.includes(col));
-  const mergedHeaders = [...ownedColumns, ...preservedColumns];
-  const existingRows = existingMatrix.slice(1);
-  const existingById = new Map();
-  const rowIdHeaderIndex = existingHeaders.indexOf('_row_id');
-  if (rowIdHeaderIndex >= 0) {
-    for (const sheetRow of existingRows) {
-      const rowId = String(sheetRow[rowIdHeaderIndex] ?? '').trim();
-      if (!rowId) continue;
-      const rowObj = {};
-      for (let i = 0; i < existingHeaders.length; i += 1) {
-        const header = existingHeaders[i];
-        rowObj[header] = String(sheetRow[i] ?? '');
-      }
-      existingById.set(rowId, rowObj);
-    }
-  }
-
-  const mergedRows = rows.map((row) => {
-    const rowId = String(row._row_id ?? '');
-    const existingRow = existingById.get(rowId) || {};
-    const merged = {};
-    for (const col of ownedColumns) merged[col] = String(row[col] ?? '');
-    for (const col of preservedColumns) merged[col] = String(existingRow[col] ?? '');
-    return merged;
-  });
-
-  const fullMatrix = [
-    mergedHeaders,
-    ...mergedRows.map((row) => mergedHeaders.map((col) => String(row[col] ?? ''))),
-  ];
-
-  const batches = [];
-  if (fullMatrix.length > 0) {
-    batches.push({
-      startRow: 1,
-      values: [fullMatrix[0]],
-    });
-  }
-  for (let rowIndex = 1; rowIndex < fullMatrix.length; rowIndex += MAX_SHEET_BATCH_ROWS) {
-    batches.push({
-      startRow: rowIndex + 1,
-      values: fullMatrix.slice(rowIndex, rowIndex + MAX_SHEET_BATCH_ROWS),
-    });
-  }
-
-  for (const batch of batches) {
-    if (batch.values.length === 0) continue;
-    const range = rangeForMatrix({
-      startRow: batch.startRow,
-      colCount: mergedHeaders.length,
-      rowCount: batch.values.length,
-    });
-    await writeSheetBatch({
-      destinationConfig,
-      updateTool,
-      sheetId,
-      worksheet,
-      range,
-      values: batch.values,
-    });
-  }
 
   return {
     destination: 'google_sheets',
     sheet_id: sheetId,
-    worksheet,
-    status: 'ok',
-    synced_rows: mergedRows.length,
-    preserved_columns: preservedColumns.length,
-    read_tool: readTool,
-    update_tool: updateTool,
-    batches_written: batches.length,
+    worksheet: normalizeRef(destinationConfig?.worksheet || 'Prospects'),
+    status: result.status === 'success' ? 'ok' : 'failed',
+    synced_rows: result.rows_synced,
   };
 };
 
@@ -391,6 +317,7 @@ export const syncDestinations = async ({ listDir, outboundConfig, headers, rows 
   const destinations = normalizeDestinations(outboundConfig?.data || {});
   if (destinations.length === 0) return { synced: false, destinations: [] };
 
+  const csvPath = getCanonicalCsvPath(listDir);
   const results = [];
   for (const destination of destinations) {
     if (destination === 'csv') {
@@ -407,9 +334,9 @@ export const syncDestinations = async ({ listDir, outboundConfig, headers, rows 
 
     if (destination === 'google_sheets') {
       const result = await syncGoogleSheetsDestination({
+        csvPath,
         destinationConfig: outboundConfig?.data?.google_sheets || {},
         headers,
-        rows,
       });
       results.push(result);
       continue;
