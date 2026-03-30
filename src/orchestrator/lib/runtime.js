@@ -171,7 +171,6 @@ const executeComposioToolViaClaude = async ({ tool, argumentsPayload }) => {
 
   const { output, exitCode, stderr } = await runClaude(prompt, {
     model: 'haiku',
-    timeout: 120 * 1000,
   });
 
   if (exitCode !== 0) {
