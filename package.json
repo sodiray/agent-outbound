@@ -24,7 +24,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/rayepps/agent-outbound"
+    "url": "https://github.com/sodiray/agent-outbound"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.4",
