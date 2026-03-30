@@ -54,6 +54,9 @@ Pipeline phases:
 - `outbound_sequence_run` -- advance sequences: check replies, evaluate conditions, generate follow-up drafts, output call/manual to-do lists
 - `outbound_sequence_status` -- pipeline counts + due actions by type (emails, calls, manual)
 
+### Sync
+- `outbound_sync` -- sync current CSV data to configured destinations (Google Sheets, CSV file, etc.). Use to retry a failed sync or force an update.
+
 ### Operator
 - `outbound_log` -- log an outcome for a prospect (call result, meeting, opt-out)
 

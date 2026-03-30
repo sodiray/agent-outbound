@@ -40,6 +40,9 @@ import { followupSendTool } from './tools/followup-send.js';
 import { sequenceRunTool } from './tools/sequence-run.js';
 import { sequenceStatusTool } from './tools/sequence-status.js';
 
+// Sync
+import { syncTool } from './tools/sync.js';
+
 // Operator
 import { logTool } from './tools/log.js';
 
@@ -62,6 +65,7 @@ const tools = new Map(
     followupSendTool,
     sequenceRunTool,
     sequenceStatusTool,
+    syncTool,
     logTool,
   ].map((tool) => [tool.name, tool])
 );

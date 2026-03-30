@@ -87,7 +87,7 @@ This works with any MCP client (Claude Desktop, Cursor, Windsurf, etc.). You get
 
 ## Tools
 
-The MCP server exposes 18 tools:
+The MCP server exposes 19 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -108,6 +108,7 @@ The MCP server exposes 18 tools:
 | `outbound_followup_send` | Send follow-up drafts |
 | `outbound_sequence_run` | Advance sequences |
 | `outbound_sequence_status` | Pipeline status |
+| `outbound_sync` | Sync CSV data to configured destinations |
 | `outbound_log` | Log prospect outcomes |
 
 ## License
