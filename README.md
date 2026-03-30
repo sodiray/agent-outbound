@@ -29,6 +29,7 @@ npx agent-outbound init
 
 This creates:
 - `.claude/commands/outbound.md` — the `/outbound` command for Claude Code
+- `.mcp.json` entry — registers the outbound MCP server
 
 Then open Claude Code and type:
 
@@ -66,37 +67,49 @@ You never write `outbound.yaml` by hand. The `/outbound` command takes natural l
 
 Claude searches your available MCP tools, finds one that can look up emails (Hunter, Apollo, etc.), and writes the config with proper tool references, argument bindings, and output column mappings.
 
-## CLI Commands
+## Using as an MCP server only
 
-Run `agent-outbound --help` for the full command list. Run `agent-outbound <command> --schema` for argument details.
+If you don't use Claude Code or prefer to wire things manually:
 
-| Command | Description |
-|---------|-------------|
-| `lists` | Overview of all lists |
-| `list info` | Detailed status of a list |
-| `list create` | Create a new outreach list |
-| `config author` | Author config from natural language |
-| `config read` | Read current config |
-| `config update` | Write raw YAML config |
-| `source` | Run sourcing (search + filter) |
-| `enrich` | Run enrichment steps |
-| `enrich-status` | Enrichment progress per source |
-| `csv read` | Read CSV rows with filters |
-| `csv stats` | Column stats and fill rates |
-| `launch draft` | Create step 1 drafts |
-| `launch send` | Send step 1 drafts |
-| `launch status` | Draft/send counts |
-| `sequence run` | Advance sequences |
-| `sequence status` | Pipeline status |
-| `followup send` | Send follow-up drafts |
-| `sync` | Sync CSV data to configured destinations |
-| `log` | Log prospect outcomes |
+```json
+{
+  "mcpServers": {
+    "outbound": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "agent-outbound", "serve"]
+    }
+  }
+}
+```
 
-All commands that run LLM operations (source, enrich, sync) stream progress to stderr in real time.
+This works with any MCP client (Claude Desktop, Cursor, Windsurf, etc.). You get all 18 outbound tools without the `/outbound` command wrapper.
 
-## MCP server (backward compatibility)
+## Tools
 
-The MCP server is still available via `agent-outbound serve` for use with MCP clients that don't support CLI tools.
+The MCP server exposes 19 tools:
+
+| Tool | Description |
+|------|-------------|
+| `outbound_list_create` | Create a new outreach list |
+| `outbound_list_info` | Detailed status of a list |
+| `outbound_lists` | Overview of all lists |
+| `outbound_config_author` | Author config from natural language |
+| `outbound_config_read` | Read current config |
+| `outbound_config_update` | Write raw YAML config |
+| `outbound_source` | Run sourcing (search + filter) |
+| `outbound_enrich` | Run enrichment steps |
+| `outbound_enrich_status` | Enrichment progress per source |
+| `outbound_csv_read` | Read CSV rows with filters |
+| `outbound_csv_stats` | Column stats and fill rates |
+| `outbound_launch_draft` | Create step 1 drafts |
+| `outbound_launch_send` | Send step 1 drafts |
+| `outbound_launch_status` | Draft/send counts |
+| `outbound_followup_send` | Send follow-up drafts |
+| `outbound_sequence_run` | Advance sequences |
+| `outbound_sequence_status` | Pipeline status |
+| `outbound_sync` | Sync CSV data to configured destinations |
+| `outbound_log` | Log prospect outcomes |
 
 ## License
 
