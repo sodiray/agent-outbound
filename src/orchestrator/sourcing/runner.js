@@ -436,9 +436,16 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
             headers,
           });
 
+          // Scope condition evaluation to only filter-relevant columns
+          const filterOutputColumns = Object.values(filterConfig.columns || {}).map((c) => String(c));
+          const conditionRow = {};
+          for (const col of filterOutputColumns) {
+            if (col in row) conditionRow[col] = row[col];
+          }
+
           const decision = await evaluateCondition({
             conditionText: String(filterConfig.condition || ''),
-            row,
+            row: conditionRow,
             stepOutput: result.outputs,
           });
 
