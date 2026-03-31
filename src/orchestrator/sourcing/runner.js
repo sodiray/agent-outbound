@@ -10,6 +10,7 @@ import { loadResolvedConfigFromOutbound, getDependsOnColumns, getOutputColumns }
 import { getStepRuntimeOverrides } from '../lib/step-runtime.js';
 import { applyStepOutputs } from '../lib/step-outputs.js';
 import { emitActivity } from '../lib/activity.js';
+import { getSearchPagination, setSearchPagination, isSearchExhausted } from '../lib/search-state.js';
 import {
   ensureCanonicalCsvExists,
   ensureRuntimeDirs,
@@ -224,16 +225,34 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
   const indexedSearches = selectedSearches.map((search, i) => ({ search, i }));
   const searchResults = await parallel(selectedSearches.length, indexedSearches, async ({ search, i }) => {
     const index = Number.isInteger(searchIndex) ? searchIndex : i;
+    const searchId = String(search.id || `search_${index + 1}`);
+
+    // Check if this search is exhausted (no more pages)
+    if (isSearchExhausted(listDir, searchId)) {
+      emitActivity({
+        event: 'step_start',
+        phase: 'sourcing_search',
+        step: searchId,
+        detail: 'exhausted — no more pages',
+      });
+      return { index, search, result: { status: 'skipped', rows: [] }, error: null, exhausted: true };
+    }
+
+    // Load stored pagination from previous runs
+    const storedPagination = getSearchPagination(listDir, searchId);
+
     emitActivity({
       event: 'step_start',
       phase: 'sourcing_search',
-      step: String(search.id || search.description || `search_${index + 1}`),
+      step: searchId,
+      detail: storedPagination ? 'continuing from stored pagination' : 'first page',
     });
+
     try {
       const result = await executeStep({
         listDir,
         phase: 'sourcing_search',
-        stepId: `search_${index + 1}`,
+        stepId: searchId,
         description: String(search.description || search.query || `search ${index + 1}`),
         stepConfig: search,
         row: {},
@@ -242,15 +261,30 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
           expected_output_fields: Array.isArray(search.output_fields)
             ? search.output_fields.map((field) => String(field || '').trim()).filter(Boolean)
             : [],
+          pagination: storedPagination,
         },
         ...getStepRuntimeOverrides(search),
       });
+
+      // Store the pagination state returned by the sourcer
+      const returnedPagination = result.pagination ?? null;
+      setSearchPagination(listDir, searchId, returnedPagination);
+
+      emitActivity({
+        event: 'step_complete',
+        phase: 'sourcing_search',
+        step: searchId,
+        detail: returnedPagination
+          ? 'has more pages'
+          : 'no more pages (exhausted)',
+      });
+
       return { index, search, result, error: null };
     } catch (error) {
       emitActivity({
         event: 'error',
         phase: 'sourcing_search',
-        step: String(search.id || search.description || `search_${index + 1}`),
+        step: searchId,
         detail: error.message,
       });
       return { index, search, result: null, error };
@@ -258,10 +292,15 @@ export const runSourcing = async ({ listDir, limit, searchIndex }) => {
   });
 
   // Process search results sequentially: normalize, dedup, enforce limit
-  for (const { index, search, result, error } of searchResults) {
+  for (const { index, search, result, error, exhausted } of searchResults) {
     if (error) {
       summary.errors.push({ index, error: error.message });
       summary.searches_run.push({ index, query: String(search.query || ''), status: 'failed' });
+      continue;
+    }
+
+    if (exhausted) {
+      summary.searches_run.push({ index, query: String(search.query || ''), status: 'exhausted' });
       continue;
     }
 

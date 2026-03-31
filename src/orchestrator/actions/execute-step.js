@@ -10,6 +10,7 @@ const ExecuteStepResultSchema = z.object({
   outputs: z.record(zStringish).default({}),
   rows: z.array(z.record(zStringish)).default([]),
   artifacts: z.record(zStringish).default({}),
+  pagination: z.any().optional(),
   error: zStringish.default(''),
 });
 
@@ -258,6 +259,7 @@ export const executeStep = async ({
     '  "outputs": { "key": "string value" },',
     '  "rows": [ { "column": "string value" } ],',
     '  "artifacts": { "key": "string value" },',
+    phase === 'sourcing_search' ? '  "pagination": { ...tool-specific state for fetching the next page... } or null,' : '',
     '  "error": "string"',
     '}',
     '',
@@ -280,6 +282,22 @@ export const executeStep = async ({
     '- If no rows or outputs are produced, return empty objects/arrays.',
     '- Do not return markdown or prose.',
     '- Do NOT produce outputs for columns or steps other than this one. Your scope is strictly this step only.',
+    phase === 'sourcing_search' ? [
+      '',
+      'Pagination (sourcing_search only):',
+      '- You MUST return a "pagination" field in your response.',
+      '- The pagination object should contain whatever state is needed to fetch the NEXT page of results from the tool you used.',
+      '- This is tool-specific — you decide what to include based on the tool:',
+      '  - For Google Maps: include the nextPageToken if one was returned.',
+      '  - For Apollo, LinkedIn, or paginated APIs: include the offset, page number, or cursor.',
+      '  - For web search tools: include the start index or page number.',
+      '  - For any tool: include whatever parameter would cause the next call to return DIFFERENT results than this call.',
+      '- If the Context below includes a "pagination" object from a previous run, use it to continue from where you left off — do NOT re-fetch the first page.',
+      '  - For Google Maps: pass the nextPageToken to get the next page.',
+      '  - For paginated APIs: use the offset/cursor to fetch the next batch.',
+      '- If there are no more results (no next page token, offset exceeds total), set pagination to null.',
+      '- If you cannot determine pagination state from the tool response, return pagination as { "exhausted": true, "reason": "..." }.',
+    ].join('\n') : '',
     AGENT_CONSTRAINTS,
   ].filter(Boolean).join('\n');
 
@@ -310,6 +328,7 @@ export const executeStep = async ({
     outputs: normalizedOutputs,
     rows: toStringRowArray(parsed.rows),
     artifacts: toStringRecord(parsed.artifacts),
+    pagination: parsed.pagination ?? null,
     error: String(parsed.error || ''),
   };
 };
