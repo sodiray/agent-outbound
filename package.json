@@ -1,6 +1,6 @@
 {
   "name": "agent-outbound",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "AI-powered outbound pipeline for Claude Code. Source, enrich, and sequence outreach using any connected MCP tools.",
   "type": "module",
   "bin": {

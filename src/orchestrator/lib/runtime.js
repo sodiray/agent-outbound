@@ -289,7 +289,7 @@ const syncCsvDestination = ({ listDir, destinationConfig, headers, rows }) => {
   };
 };
 
-const syncGoogleSheetsDestination = async ({ csvPath, destinationConfig, headers }) => {
+const syncGoogleSheetsDestination = async ({ listDir, csvPath, destinationConfig, headers }) => {
   const sheetId = normalizeRef(destinationConfig?.sheet_id);
   if (!sheetId) {
     throw new Error('Google Sheets sync requires data.google_sheets.sheet_id.');
@@ -298,6 +298,7 @@ const syncGoogleSheetsDestination = async ({ csvPath, destinationConfig, headers
   const ownedColumns = normalizeOwnedColumns({ headers, destinationConfig });
 
   const result = await syncDestination({
+    listDir,
     csvPath,
     destinationType: 'google_sheets',
     destinationConfig,
@@ -310,6 +311,7 @@ const syncGoogleSheetsDestination = async ({ csvPath, destinationConfig, headers
     worksheet: normalizeRef(destinationConfig?.worksheet || 'Prospects'),
     status: result.status === 'success' ? 'ok' : 'failed',
     synced_rows: result.rows_synced,
+    preserved_columns: result.preserved_columns || 0,
   };
 };
 
@@ -334,6 +336,7 @@ export const syncDestinations = async ({ listDir, outboundConfig, headers, rows 
 
     if (destination === 'google_sheets') {
       const result = await syncGoogleSheetsDestination({
+        listDir,
         csvPath,
         destinationConfig: outboundConfig?.data?.google_sheets || {},
         headers,
