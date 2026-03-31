@@ -2,6 +2,8 @@
 
 AI-powered outbound pipeline for Claude Code. Source leads, enrich data, score prospects, and run multi-step outreach sequences — all driven by natural language and whatever MCP tools you have connected.
 
+> **Security warning:** agent-outbound spawns Claude subprocesses with `--dangerously-skip-permissions`. These subprocesses run without permission prompts and have full access to your tools and file system. If a subprocess is orphaned (e.g. the parent MCP server exits unexpectedly), it will continue running until it finishes or you kill it manually. Only use this tool in environments where you trust the outbound config and connected MCP tools. Run `npx agent-outbound kill` to terminate any lingering subprocesses.
+
 ## What it does
 
 This is a config-driven outbound system that runs inside Claude Code. You describe what you want in plain English, and it:
@@ -84,6 +86,75 @@ If you don't use Claude Code or prefer to wire things manually:
 ```
 
 This works with any MCP client (Claude Desktop, Cursor, Windsurf, etc.). You get all 18 outbound tools without the `/outbound` command wrapper.
+
+## CLI commands
+
+agent-outbound ships four CLI commands, used directly in your terminal (not through Claude Code).
+
+### `init`
+
+Set up outbound in your project directory. Installs the `/outbound` Claude Code command and registers the MCP server.
+
+```bash
+npx agent-outbound init
+```
+
+### `serve`
+
+Start the MCP server manually. Claude Code calls this automatically via `.mcp.json` — you don't normally run it yourself.
+
+```bash
+npx agent-outbound serve
+```
+
+### `watch`
+
+Stream live activity for a list from a second terminal. Shows recent history on connect, then switches to a live feed of every phase, step, row, and Claude call as it happens.
+
+```bash
+# Watch a list while it enriches
+npx agent-outbound watch ./boise-dental
+
+# Watch with full history (all stored events, not just recent)
+npx agent-outbound watch ./boise-dental --history
+```
+
+Example output:
+
+```
+=== recent activity ===
+[14:20:01] enrichment started (3 steps, 45 rows)
+[14:21:15] step hiring_contact: 12/45 complete
+
+=== live ===
+[14:21:16] hiring_contact: Master Pilates — calling claude
+  Scraping website at masterpilates.com...
+  Found: Jane Smith, Studio Manager
+  ✓ complete
+[14:21:34] hiring_contact: Boise Hot Yoga — calling claude
+  No team page found, trying Google...
+  Found: Mike Torres, Owner
+  ✓ complete
+```
+
+Connect before, during, or after an operation. If you connect mid-run, you see recent history first, then the live stream picks up. Multiple terminals can watch the same list simultaneously.
+
+### `kill`
+
+Terminate all Claude subprocesses spawned by agent-outbound. Use this when the MCP server exits unexpectedly and leaves orphaned subprocesses running.
+
+```bash
+npx agent-outbound kill
+```
+
+Finds processes by their unique argument signature (`--output-format stream-json --dangerously-skip-permissions`) and sends SIGTERM to each. Safe to run at any time — reports what it found and what it killed.
+
+```
+Found 2 subprocess(es):
+  PID 84201: killed
+  PID 84312: killed
+Done.
+```
 
 ## Tools
 
