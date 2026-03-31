@@ -86,6 +86,21 @@ const watch = async () => {
   await runWatch({ listPath, showAllHistory });
 };
 
+const kill = async () => {
+  const { getTrackedPids, killAll } = await import('./orchestrator/lib/pids.js');
+  const alive = getTrackedPids();
+  if (alive.length === 0) {
+    console.log('No tracked processes.');
+    return;
+  }
+  console.log(`Killing ${alive.length} tracked process(es)...`);
+  const results = killAll();
+  for (const r of results) {
+    console.log(`  PID ${r.pid}: ${r.status}`);
+  }
+  console.log('Done.');
+};
+
 const printHelp = () => {
   console.log('agent-outbound - AI-powered outbound pipeline for Claude Code');
   console.log();
@@ -99,10 +114,14 @@ const printHelp = () => {
   console.log('           Usage: npx agent-outbound watch <list-path> [--history]');
   console.log('           Each watch session is scoped to a single list.');
   console.log();
+  console.log('  kill     Kill all tracked Claude subprocesses');
+  console.log('           Use when the MCP server has lingering processes after exiting Claude.');
+  console.log();
   console.log('Usage:');
   console.log('  npx agent-outbound init');
   console.log('  npx agent-outbound serve');
   console.log('  npx agent-outbound watch ./my-list');
+  console.log('  npx agent-outbound kill');
 };
 
 if (command === 'init') {
@@ -111,6 +130,8 @@ if (command === 'init') {
   await serve();
 } else if (command === 'watch') {
   await watch();
+} else if (command === 'kill') {
+  await kill();
 } else if (command === 'help' || command === '--help' || command === '-h') {
   printHelp();
 } else {

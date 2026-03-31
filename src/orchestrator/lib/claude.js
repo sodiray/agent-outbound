@@ -5,6 +5,7 @@
  */
 import { spawn } from 'node:child_process';
 import { emitActivity, emitLive } from './activity.js';
+import { trackPid, untrackPid } from './pids.js';
 
 const tryParseJson = (line) => {
   try {
@@ -44,6 +45,8 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, FORCE_COLOR: '0' },
     });
+
+    if (proc.pid) trackPid(proc.pid);
 
     let resultText = '';
     let stderr = '';
@@ -94,6 +97,7 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
     const resolveOnce = (payload) => {
       if (settled) return;
       settled = true;
+      if (proc.pid) untrackPid(proc.pid);
       res(payload);
     };
 

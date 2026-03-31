@@ -174,20 +174,23 @@ const renderClaudeEvent = (event, prefix) => {
     if (!Array.isArray(content)) return;
     for (const block of content) {
       if (block.type === 'tool_result') {
-        const text = String(block.content || '');
+        const raw = block.content;
+        const text = typeof raw === 'string' ? raw : JSON.stringify(raw || '', null, 0);
         const isError = block.is_error === true;
         if (isError) {
-          console.log(`${c('  ✗ ', 'red')}${c(truncate(text, 200), 'red')}`);
-        } else if (text) {
-          console.log(`${c('  ← ', 'dim')}${truncate(text, 200)}`);
+          console.log(`${c('  ✗ ', 'red')}${c(truncate(text, 300), 'red')}`);
+        } else if (text && text !== '""') {
+          console.log(`${c('  ← ', 'dim')}${truncate(text, 300)}`);
         }
       }
     }
     // Also check tool_use_result at top level
-    if (data.tool_use_result && typeof data.tool_use_result === 'string') {
-      const isErr = data.tool_use_result.startsWith('Error:');
+    const topResult = data.tool_use_result;
+    if (topResult) {
+      const text = typeof topResult === 'string' ? topResult : JSON.stringify(topResult, null, 0);
+      const isErr = text.startsWith('Error:');
       if (isErr) {
-        console.log(`${c('  ✗ ', 'red')}${c(truncate(data.tool_use_result, 200), 'red')}`);
+        console.log(`${c('  ✗ ', 'red')}${c(truncate(text, 300), 'red')}`);
       }
     }
     return;
