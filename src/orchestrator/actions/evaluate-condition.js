@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AGENT_CONSTRAINTS } from './constraints.js';
 import { runClaude } from '../lib/claude.js';
 import { parseModelJsonObject, zBooleanish, zStringish } from '../lib/model-json.js';
 
@@ -163,6 +164,7 @@ export const evaluateCondition = async ({
     '',
     'Merged Data JSON:',
     JSON.stringify(data, null, 2),
+    AGENT_CONSTRAINTS,
     '',
     'Return ONLY JSON:',
     '{',

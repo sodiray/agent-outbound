@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { existsSync, readFileSync } from 'node:fs';
+import { AGENT_CONSTRAINTS } from './constraints.js';
 import { runClaude } from '../lib/claude.js';
 import { parseModelJsonObject, zStringish } from '../lib/model-json.js';
 import { resolveVirtualPath } from '../lib/runtime.js';
@@ -239,6 +240,7 @@ export const executeStep = async ({
     '- Use "artifacts" for metadata (draft/thread/message IDs, notes, etc).',
     '- If no rows or outputs are produced, return empty objects/arrays.',
     '- Do not return markdown or prose.',
+    AGENT_CONSTRAINTS,
   ].join('\n');
 
   const { output, exitCode, stderr } = await runClaude(prompt, {

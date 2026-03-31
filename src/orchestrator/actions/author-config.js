@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { AGENT_CONSTRAINTS } from './constraints.js';
 import { runClaude } from '../lib/claude.js';
 import { parseModelJsonObject, zStringish } from '../lib/model-json.js';
 
@@ -292,6 +293,7 @@ export const authorConfig = async ({
     '',
     'Config Schema Reference:',
     CONFIG_SCHEMA_REFERENCE,
+    AGENT_CONSTRAINTS,
     '',
     'Return ONLY JSON:',
     '{',

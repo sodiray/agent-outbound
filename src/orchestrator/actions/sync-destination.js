@@ -1,3 +1,4 @@
+import { AGENT_CONSTRAINTS } from './constraints.js';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -42,6 +43,7 @@ const pullDestination = async ({ destinationConfig, tempPullPath }) => {
     '- If the sheet is empty, write an empty file and return status "empty".',
     '- Use the Read and Write tools to write the file, or Bash to create it.',
     '- Do NOT modify any data. Just copy exactly what is in the sheet.',
+    AGENT_CONSTRAINTS,
     '',
     '## Output',
     '',
@@ -160,6 +162,7 @@ const pushDestination = async ({ destinationConfig, patchedCsvPath, rowCount }) 
     '- OVERWRITE the entire sheet content — clear existing data first if needed, then write.',
     '- Preserve the exact column order from the CSV file.',
     '- Do NOT add, remove, or reorder any columns.',
+    AGENT_CONSTRAINTS,
     '',
     '## Output',
     '',
