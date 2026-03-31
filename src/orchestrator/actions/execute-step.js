@@ -188,9 +188,9 @@ export const executeStep = async ({
   });
   const prompt = [
     'You are the outbound execute-step action.',
-    'Execute the provided step exactly as described in config.',
-    'Use any available MCP tools to complete this step. Search all available tools and make all tool and interpretation decisions yourself.',
-    'If stepConfig contains a "prompt" field, treat it as the primary instruction for this step. Follow those instructions as your main directive, using the args and row data as context.',
+    'Execute the provided step EXACTLY as described in config. Do not deviate.',
+    'The step config contains a "prompt" field with specific instructions — follow those instructions precisely. Use ONLY the tools named in the step prompt. Do NOT search for tools, discover tools, or use tools that are not explicitly referenced in the step instructions.',
+    'If the step prompt names a specific tool (e.g. mcp__firecrawl__firecrawl_scrape), call that tool directly. Do NOT call ToolSearch, COMPOSIO_SEARCH_TOOLS, or any discovery tool unless the step prompt explicitly instructs you to.',
     '',
     `Phase: ${String(phase || '')}`,
     `Step ID: ${String(stepId || '')}`,
@@ -235,7 +235,7 @@ export const executeStep = async ({
     expectedSearchFields.length > 0
       ? '- If an expected field has no value after all lookup attempts, include it as an empty string.'
       : '- Preserve stable key names for discovered rows and avoid introducing duplicate aliases for the same field.',
-    '- For sourcing_search: if expected output fields are missing from initial search results, attempt to backfill them using a details/lookup tool for the same source when one is available.',
+    '- For sourcing_search: if expected output fields are missing from initial search results and the step prompt instructs backfilling, use the tool named in the prompt for that purpose.',
     '- Match expected output field keys exactly. Do not introduce alternate names or aliases for the same field.',
     '- Use "artifacts" for metadata (draft/thread/message IDs, notes, etc).',
     '- If no rows or outputs are produced, return empty objects/arrays.',
