@@ -3,8 +3,18 @@ import { z } from 'zod';
 import { AGENT_CONSTRAINTS } from './constraints.js';
 import { runClaude } from '../lib/claude.js';
 import { parseModelJsonObject, zStringish } from '../lib/model-json.js';
+import { buildColumnManifest, formatManifestForPrompt } from '../lib/column-manifest.js';
 
-const AuthorConfigResultSchema = z.object({
+// ── Schemas ──────────────────────────────────────────────────────────────────
+
+const FocusedItemSchema = z.object({
+  item: z.any(),
+  summary: zStringish.default(''),
+  warnings: z.array(zStringish).default([]),
+  depends_on: z.array(zStringish).default([]),
+});
+
+const FullConfigResultSchema = z.object({
   updated_config: z.record(z.any()).default({}),
   summary: zStringish.default(''),
   warnings: z.array(zStringish).default([]),
@@ -17,273 +27,290 @@ try {
     'utf8'
   );
 } catch {
-  CONFIG_SCHEMA_REFERENCE = [
-    'Config schema reference unavailable.',
-    'Infer structure from current config and preserve existing shape.',
-    'Top-level sections: source, enrich, rubric, sequence, data.',
-  ].join('\n');
+  CONFIG_SCHEMA_REFERENCE = 'Config schema reference unavailable. Infer structure from current config.';
 }
 
-const STEP_CONFIG_KEYS = new Set([
-  'id',
-  'args',
-  'columns',
-  'depends_on',
-  'condition',
-  'concurrency',
-  'cache',
-  'prompt',
-  'files',
-  'writes',
-  'model',
-  'platform_model',
-  'timeout',
-]);
+// ── Request classification ───────────────────────────────────────────────────
 
-const RESERVED_ORCHESTRATOR_COLUMNS = new Set([
-  '_row_id',
-  'source',
-  'source_query',
-  'sourced_at',
-  'source_filter_result',
-  'source_filter_failures',
-  'sequence_step',
-  'sequence_status',
-  'next_action_date',
-  'draft_id',
-  'draft_status',
-  'draft_error',
-  'draft_created_at',
-  'sent_at',
-  'send_status',
-  'send_error',
-  'last_outreach_date',
-]);
+const classifyRequest = (request) => {
+  const lower = String(request || '').toLowerCase();
 
-const FILTER_AGGREGATE_COLUMNS = new Set([
-  'source_filter_result',
-  'source_filter_failures',
-]);
-
-const slugify = (text) =>
-  String(text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 60);
-
-const requestIncludesAny = (requestText, keywords) => {
-  const lower = String(requestText || '').toLowerCase();
-  return keywords.some((keyword) => lower.includes(String(keyword).toLowerCase()));
-};
-
-const ensureStepConfigBlocks = ({ updatedConfig, path, stepConfigKeys = STEP_CONFIG_KEYS }) => {
-  let cursor = updatedConfig;
-  for (const segment of path) {
-    if (!cursor || typeof cursor !== 'object') return updatedConfig;
-    cursor = cursor[segment];
+  if (lower.includes('remove') || lower.includes('delete')) {
+    if (lower.includes('search') || lower.includes('source')) return 'remove_search';
+    if (lower.includes('filter')) return 'remove_filter';
+    if (lower.includes('enrich') || lower.includes('step')) return 'remove_enrichment';
+    if (lower.includes('rubric') || lower.includes('score') || lower.includes('criteria')) return 'remove_rubric';
+    return 'full_config';
   }
 
-  if (!Array.isArray(cursor)) return updatedConfig;
+  if (lower.includes('add') || lower.includes('create') || lower.includes('new')) {
+    if (lower.includes('search') || lower.includes('source') || lower.includes('find businesses') || lower.includes('google maps') || lower.includes('apollo')) return 'add_search';
+    if (lower.includes('filter') || lower.includes('only keep') || lower.includes('check that') || lower.includes('check if')) return 'add_filter';
+    if (lower.includes('rubric') || lower.includes('score') || lower.includes('criteria')) return 'add_rubric';
+    if (lower.includes('enrich') || lower.includes('step') || lower.includes('column') || lower.includes('find email') || lower.includes('research') || lower.includes('scrape') || lower.includes('write')) return 'add_enrichment';
+    // Default add to enrichment — most common
+    return 'add_enrichment';
+  }
 
-  const nextItems = cursor.map((step) => {
-    const base = step && typeof step === 'object' ? { ...step } : {};
-    if (base.config && typeof base.config === 'object') return base;
+  if (lower.includes('modify') || lower.includes('update') || lower.includes('change') || lower.includes('swap') || lower.includes('replace')) {
+    return 'modify_step';
+  }
 
-    const config = {};
-    for (const key of Object.keys(base)) {
-      if (!stepConfigKeys.has(key)) continue;
-      config[key] = base[key];
-      delete base[key];
+  // Can't classify — use full config approach
+  return 'full_config';
+};
+
+// ── Focused prompts ──────────────────────────────────────────────────────────
+
+const buildFocusedPrompt = ({ operation, request, manifest, currentStep }) => {
+  const manifestText = formatManifestForPrompt(manifest);
+
+  const sharedRules = [
+    '- Return ONLY the JSON object described below. No markdown, no prose.',
+    '- Use from_column / literal bindings for args.',
+    '- Include a nested "config" object with: id, args, columns, depends_on, prompt, model, cache, concurrency.',
+    '- The "id" should be a short snake_case identifier.',
+    '- Only reference columns that exist in the manifest or that this step itself produces.',
+    '- Before referencing any external tool, search available MCP tools to confirm it exists. Use ONLY tools that are available.',
+    AGENT_CONSTRAINTS,
+  ].join('\n');
+
+  if (operation === 'add_search') {
+    return [
+      'You are the outbound config author. Produce a SINGLE search config entry.',
+      '',
+      `User Request: ${request}`,
+      '',
+      manifestText,
+      '',
+      'Return ONLY JSON:',
+      '{',
+      '  "item": { <single source.searches[] entry with id, description, args, output_fields, dedup_keys, columns, prompt, cache, model, timeout> },',
+      '  "summary": "what this search does",',
+      '  "warnings": ["optional"]',
+      '}',
+      '',
+      'Rules:',
+      '- Include output_fields listing the columns this search will produce.',
+      '- Include dedup_keys for stable identity (e.g., place_id).',
+      '- Include a prompt field with specific tool instructions.',
+      sharedRules,
+    ].join('\n');
+  }
+
+  if (operation === 'add_filter') {
+    return [
+      'You are the outbound config author. Produce a SINGLE filter config entry.',
+      '',
+      `User Request: ${request}`,
+      '',
+      manifestText,
+      '',
+      'Return ONLY JSON:',
+      '{',
+      '  "item": { "description": "...", "condition": "...", "config": { <stepConfig> } },',
+      '  "summary": "what this filter does",',
+      '  "warnings": ["optional"],',
+      '  "depends_on": ["filter_id_this_depends_on"]',
+      '}',
+      '',
+      'Rules:',
+      '- The condition field is a natural-language pass/fail text.',
+      '- config.writes.passed_column must be a unique column name (e.g., filter_has_website_passed). NEVER use source_filter_result or source_filter_failures.',
+      '- depends_on lists filter IDs this filter should run after (if it needs columns from another filter).',
+      sharedRules,
+    ].join('\n');
+  }
+
+  if (operation === 'add_enrichment') {
+    return [
+      'You are the outbound config author. Produce a SINGLE enrichment step config entry.',
+      '',
+      `User Request: ${request}`,
+      '',
+      manifestText,
+      '',
+      'Return ONLY JSON:',
+      '{',
+      '  "item": { "description": "...", "config": { <stepConfig with id, args, columns, depends_on, prompt, model, cache, concurrency> } },',
+      '  "summary": "what this step does",',
+      '  "warnings": ["optional"],',
+      '  "depends_on": ["step_id_this_depends_on"]',
+      '}',
+      '',
+      'Rules:',
+      '- config.depends_on should reference enrichment step IDs that produce columns this step needs.',
+      '- config.columns maps output keys to CSV column names.',
+      '- config.args uses from_column bindings to reference existing columns.',
+      '- config.prompt contains the specific instructions for this step, including which tools to call.',
+      sharedRules,
+    ].join('\n');
+  }
+
+  if (operation === 'add_rubric') {
+    return [
+      'You are the outbound config author. Produce rubric criteria entries.',
+      '',
+      `User Request: ${request}`,
+      '',
+      manifestText,
+      '',
+      'Return ONLY JSON:',
+      '{',
+      '  "item": [ { "description": "...", "score": <number>, "config": { "columns": ["col"], "result_column": "rubric_..." } } ],',
+      '  "summary": "what criteria were added",',
+      '  "warnings": ["optional"]',
+      '}',
+      '',
+      'Rules:',
+      '- item is an ARRAY of rubric criteria.',
+      '- Each criterion has description, score (positive or negative integer), and config with columns (input columns to evaluate) and result_column.',
+      '- result_column must be unique per criterion (e.g., rubric_has_email, rubric_no_phone).',
+      '- Only reference columns that exist in the manifest.',
+      sharedRules,
+    ].join('\n');
+  }
+
+  if (operation === 'modify_step' && currentStep) {
+    return [
+      'You are the outbound config author. Modify an existing step.',
+      '',
+      `User Request: ${request}`,
+      '',
+      'Current step:',
+      JSON.stringify(currentStep, null, 2),
+      '',
+      manifestText,
+      '',
+      'Return ONLY JSON:',
+      '{',
+      '  "item": { <the modified step, same structure as current> },',
+      '  "summary": "what changed",',
+      '  "warnings": ["optional"]',
+      '}',
+      '',
+      'Rules:',
+      '- Preserve all fields not mentioned in the user request.',
+      '- Only modify what the user explicitly asked to change.',
+      sharedRules,
+    ].join('\n');
+  }
+
+  // full_config fallback — should rarely be needed
+  return null;
+};
+
+// ── Deterministic insertion ──────────────────────────────────────────────────
+
+const insertSearch = (config, item) => {
+  if (!config.source) config.source = {};
+  if (!Array.isArray(config.source.searches)) config.source.searches = [];
+  config.source.searches.push(item);
+};
+
+const insertFilter = (config, item, dependsOn) => {
+  if (!config.source) config.source = {};
+  if (!Array.isArray(config.source.filters)) config.source.filters = [];
+  // Insert after the last filter it depends on
+  if (dependsOn && dependsOn.length > 0) {
+    let insertIndex = config.source.filters.length;
+    for (let i = config.source.filters.length - 1; i >= 0; i -= 1) {
+      const filterId = String(config.source.filters[i]?.config?.id || '');
+      if (dependsOn.includes(filterId)) {
+        insertIndex = i + 1;
+        break;
+      }
     }
-    base.config = config;
-    return base;
-  });
+    config.source.filters.splice(insertIndex, 0, item);
+  } else {
+    config.source.filters.push(item);
+  }
+};
 
-  let target = updatedConfig;
-  for (let i = 0; i < path.length - 1; i += 1) {
-    const segment = path[i];
-    if (!target[segment] || typeof target[segment] !== 'object') {
-      target[segment] = {};
+const insertEnrichment = (config, item, dependsOn) => {
+  if (!Array.isArray(config.enrich)) config.enrich = [];
+  // Insert after the last step it depends on
+  if (dependsOn && dependsOn.length > 0) {
+    let insertIndex = config.enrich.length;
+    for (let i = config.enrich.length - 1; i >= 0; i -= 1) {
+      const stepId = String(config.enrich[i]?.config?.id || '');
+      if (dependsOn.includes(stepId)) {
+        insertIndex = i + 1;
+        break;
+      }
     }
-    target = target[segment];
+    config.enrich.splice(insertIndex, 0, item);
+  } else {
+    config.enrich.push(item);
   }
-  target[path[path.length - 1]] = nextItems;
-  return updatedConfig;
 };
 
-const ensureCompiledConfigBlocks = (updatedConfig) => {
-  const cfg = updatedConfig && typeof updatedConfig === 'object'
-    ? structuredClone(updatedConfig)
-    : {};
-
-  ensureStepConfigBlocks({ updatedConfig: cfg, path: ['source', 'filters'] });
-  ensureStepConfigBlocks({ updatedConfig: cfg, path: ['enrich'] });
-  ensureStepConfigBlocks({ updatedConfig: cfg, path: ['sequence', 'steps'] });
-  return cfg;
+const insertRubric = (config, items) => {
+  if (!Array.isArray(config.rubric)) config.rubric = [];
+  config.rubric.push(...items);
 };
 
-const normalizeFilterPassedColumns = (updatedConfig) => {
-  const cfg = updatedConfig && typeof updatedConfig === 'object'
-    ? structuredClone(updatedConfig)
-    : {};
-  const warnings = [];
-  const filters = Array.isArray(cfg?.source?.filters) ? cfg.source.filters : [];
+// ── Remove operations ────────────────────────────────────────────────────────
 
-  for (let i = 0; i < filters.length; i += 1) {
-    const filter = filters[i] && typeof filters[i] === 'object' ? filters[i] : {};
-    if (!filter.config || typeof filter.config !== 'object') continue;
-    if (!filter.config.writes || typeof filter.config.writes !== 'object') {
-      filter.config.writes = {};
-    }
+const findAndRemove = (request, config) => {
+  const lower = String(request || '').toLowerCase();
+  let removed = null;
 
-    const baseId = slugify(
-      filter.config.id
-      || filter.id
-      || filter.description
-      || `filter_${i + 1}`
-    ) || `filter_${i + 1}`;
-    const defaultPassedColumn = `filter_${baseId.replace(/^filter_/, '')}_passed`;
-    const currentPassedColumn = String(filter.config.writes.passed_column || '').trim();
+  // Try to find what to remove by matching description or ID in the request
+  const matchesRequest = (entry) => {
+    const desc = String(entry?.description || entry?.config?.id || '').toLowerCase();
+    // Check if any significant words from the entry appear in the request
+    const words = desc.split(/\s+/).filter((w) => w.length > 3);
+    return words.some((w) => lower.includes(w));
+  };
 
-    if (!currentPassedColumn) {
-      filter.config.writes.passed_column = defaultPassedColumn;
-      continue;
-    }
-
-    if (FILTER_AGGREGATE_COLUMNS.has(currentPassedColumn)) {
-      filter.config.writes.passed_column = defaultPassedColumn;
-      warnings.push(
-        `Filter "${filter.description || filter.config.id || i + 1}" used reserved column "${currentPassedColumn}" for writes.passed_column. Replaced with "${defaultPassedColumn}".`
-      );
-    }
+  if (lower.includes('search') || lower.includes('source')) {
+    const searches = config.source?.searches || [];
+    const idx = searches.findIndex(matchesRequest);
+    if (idx >= 0) { removed = searches.splice(idx, 1)[0]; }
+  } else if (lower.includes('filter')) {
+    const filters = config.source?.filters || [];
+    const idx = filters.findIndex(matchesRequest);
+    if (idx >= 0) { removed = filters.splice(idx, 1)[0]; }
+  } else if (lower.includes('enrich') || lower.includes('step')) {
+    const steps = config.enrich || [];
+    const idx = steps.findIndex(matchesRequest);
+    if (idx >= 0) { removed = steps.splice(idx, 1)[0]; }
+  } else if (lower.includes('rubric') || lower.includes('criteria')) {
+    const criteria = config.rubric || [];
+    const idx = criteria.findIndex(matchesRequest);
+    if (idx >= 0) { removed = criteria.splice(idx, 1)[0]; }
   }
 
-  return { updatedConfig: cfg, warnings };
+  return removed;
 };
 
-const collectOutputColumns = (value, out = new Set()) => {
-  if (Array.isArray(value)) {
-    for (const item of value) collectOutputColumns(item, out);
-    return out;
-  }
-  if (!value || typeof value !== 'object') return out;
+// ── Full config fallback (existing approach, for complex requests) ───────────
 
-  if (value.columns && typeof value.columns === 'object' && !Array.isArray(value.columns)) {
-    for (const mapped of Object.values(value.columns)) {
-      const col = String(mapped || '').trim();
-      if (col) out.add(col);
-    }
-  }
+const runFullConfigAuthoring = async ({ request, currentConfig, csvState, manifest, model, timeout }) => {
+  const manifestText = formatManifestForPrompt(manifest);
 
-  for (const nested of Object.values(value)) {
-    collectOutputColumns(nested, out);
-  }
-  return out;
-};
-
-const collectFromColumnRefs = (value, out = new Set()) => {
-  if (Array.isArray(value)) {
-    for (const item of value) collectFromColumnRefs(item, out);
-    return out;
-  }
-  if (!value || typeof value !== 'object') return out;
-
-  if (typeof value.from_column === 'string' && value.from_column.trim()) {
-    out.add(value.from_column.trim());
-  }
-
-  for (const nested of Object.values(value)) {
-    collectFromColumnRefs(nested, out);
-  }
-  return out;
-};
-
-const validateFromColumnReferences = ({ updatedConfig, csvState }) => {
-  const knownColumns = new Set();
-  const headers = Array.isArray(csvState?.headers) ? csvState.headers : [];
-  for (const header of headers) {
-    const col = String(header || '').trim();
-    if (col) knownColumns.add(col);
-  }
-  for (const col of RESERVED_ORCHESTRATOR_COLUMNS) knownColumns.add(col);
-  for (const col of collectOutputColumns(updatedConfig)) knownColumns.add(col);
-
-  const refs = [...collectFromColumnRefs(updatedConfig)];
-  const unresolved = refs
-    .map((ref) => String(ref).trim())
-    .filter((ref) => ref && !knownColumns.has(ref));
-
-  return [...new Set(unresolved)].sort();
-};
-
-const validateRequestedSections = ({ request, updatedConfig }) => {
-  const warnings = [];
-  const rubric = Array.isArray(updatedConfig?.rubric) ? updatedConfig.rubric : [];
-  const searches = Array.isArray(updatedConfig?.source?.searches) ? updatedConfig.source.searches : [];
-  const filters = Array.isArray(updatedConfig?.source?.filters) ? updatedConfig.source.filters : [];
-
-  if (requestIncludesAny(request, ['rubric', 'score'])) {
-    const rubricCriteria = rubric.filter((item) => String(item?.description || '').trim());
-    if (rubricCriteria.length === 0) {
-      warnings.push('Rubric criteria were requested but none were generated.');
-    }
-  }
-
-  if (requestIncludesAny(request, ['search', 'source', 'find businesses']) && searches.length === 0) {
-    warnings.push('Sourcing/search was requested but source.searches is empty.');
-  }
-
-  if (requestIncludesAny(request, ['filter']) && filters.length === 0) {
-    warnings.push('Filter logic was requested but source.filters is empty.');
-  }
-
-  return warnings;
-};
-
-/**
- * LLM boundary action: author or modify outbound config based on operator intent.
- */
-export const authorConfig = async ({
-  request,
-  currentConfig,
-  csvState,
-  model = 'sonnet',
-  timeout,
-}) => {
   const prompt = [
     'You are the outbound author-config action.',
     'Your job is to update outbound config based on the user request.',
-    'You may use any available MCP tools to discover capabilities before writing config. Search all available tools in this environment to find what is connected.',
-    'The config you produce will be executed by an orchestrator that delegates each step to Claude via the execute-step action.',
-    'For each step, Claude receives the step config, resolved args (from_column bindings evaluated from CSV row data), and row context.',
-    'Claude then calls any available MCP tools as needed and returns structured output. Write step prompts and args with this execution model in mind.',
+    'You may use connected MCP tools to discover capabilities before writing config.',
     'Return config that is structurally valid for the orchestrator schema.',
     '',
     'Rules:',
     '- Produce a complete outbound config object in updated_config.',
     '- Preserve existing config sections unless the request explicitly changes them.',
     '- Before referencing any external tool in config, search all available tools in this environment.',
-    '- Search all available MCP tools before referencing them in config. Direct MCP tools are preferred when available.',
-    '- If Composio is available, also search COMPOSIO_SEARCH_TOOLS for additional tools. Use COMPOSIO_GET_TOOL_SCHEMAS to inspect parameters before referencing.',
-    '- Only reference tools that are available and connected in this environment.',
-    '- If no suitable connected tool exists, do not invent one. Add a warning explaining what is missing and what the user needs to connect.',
-    '- Prefer generic step config; do not hardcode vendor assumptions in orchestrator-facing fields.',
-    '- For source.searches entries, include output_fields with the exact row keys that downstream steps should use.',
-    '- Keep source.searches output_fields minimal and provider-relevant. Do not include empty placeholder fields for unrelated platforms.',
-    '- For source.searches entries, include dedup_keys when a stable identity field is available.',
-    '- When a search source may return incomplete results (missing detail fields like contact info, website, or reviews), add a follow-up filter or enrichment step to backfill those fields using a details/lookup tool before downstream steps depend on them.',
-    '- Check what fields the search tool actually returns by inspecting its schema before assuming fields will be available.',
-    '- Use from_column / literal bindings for args and template_args where appropriate.',
-    '- Source filters, enrich steps, and sequence steps should always include a nested "config" object for execution details.',
-    '- For source.filters[*].config.writes.passed_column, use a unique per-filter column (for example filter_has_website_passed). Never use source_filter_result or source_filter_failures because those are orchestrator-managed aggregate columns.',
-    '- Do not include resolve_dependency_order, resolve_manual_fields, resolve_warnings, or resolve_column_errors in updated_config. These are orchestrator-computed metadata and will be overwritten.',
-    '- Every step MUST declare its output columns in config.columns (mapping output key to CSV column name). The orchestrator uses these declarations to validate that downstream from_column references are satisfiable. If a step produces a column, it must appear in config.columns.',
-    '- If you cannot fulfill part of the request (missing tool, unsupported capability, ambiguous intent), you MUST include a warning explaining what was not done and why. Never silently drop a requested change.',
-    '- If you use a workaround or fallback tool instead of the tool the user likely expects (for example, web scraping instead of a native API), include a warning that clearly states: what the user asked for, what tool you used instead, why (the expected tool is not connected/available), and any limitations of the fallback approach. The user must be able to accept or reject this substitution.',
-    '- If unsure, add a warning describing uncertainty.',
+    '- Only reference tools that are available and connected.',
+    '- If no suitable tool exists, do not invent one. Add a warning.',
+    '- Every step MUST declare its output columns in config.columns.',
+    '- Do not include resolve_dependency_order, resolve_manual_fields, resolve_warnings, or resolve_column_errors in updated_config.',
+    '- If you cannot fulfill part of the request, include a warning explaining why.',
+    AGENT_CONSTRAINTS,
     '',
-    `User Request: ${String(request || '')}`,
+    `User Request: ${request}`,
+    '',
+    'Column Manifest:',
+    manifestText,
     '',
     'Current Config JSON:',
     JSON.stringify(currentConfig || {}, null, 2),
@@ -293,7 +320,6 @@ export const authorConfig = async ({
     '',
     'Config Schema Reference:',
     CONFIG_SCHEMA_REFERENCE,
-    AGENT_CONSTRAINTS,
     '',
     'Return ONLY JSON:',
     '{',
@@ -305,35 +331,110 @@ export const authorConfig = async ({
 
   const { output, exitCode, stderr } = await runClaude(prompt, { model, timeout });
   if (exitCode !== 0) {
-    throw new Error(`author-config failed: exit ${exitCode}. ${String(stderr || '').slice(0, 300)}`);
+    throw new Error(`author-config (full) failed: exit ${exitCode}. ${String(stderr || '').slice(0, 300)}`);
+  }
+
+  return parseModelJsonObject({
+    output,
+    schema: FullConfigResultSchema,
+    label: 'author-config (full) result',
+  });
+};
+
+// ── Main entry point ─────────────────────────────────────────────────────────
+
+/**
+ * LLM boundary action: author or modify outbound config based on operator intent.
+ *
+ * Routes requests to focused handlers that return just the new/modified item,
+ * or falls back to full-config authoring for complex requests.
+ */
+export const authorConfig = async ({
+  request,
+  currentConfig,
+  csvState,
+  model = 'sonnet',
+  timeout,
+}) => {
+  const manifest = buildColumnManifest(currentConfig);
+  const operation = classifyRequest(request);
+
+  // ── Remove operations: pure orchestrator, no LLM ──
+  if (operation.startsWith('remove_')) {
+    const config = structuredClone(currentConfig);
+    const removed = findAndRemove(request, config);
+    if (!removed) {
+      return {
+        updatedConfig: currentConfig,
+        summary: '',
+        warnings: ['Could not identify which item to remove. Try being more specific.'],
+      };
+    }
+    return {
+      updatedConfig: config,
+      summary: `Removed: ${JSON.stringify(removed.description || removed.config?.id || '').slice(0, 100)}`,
+      warnings: [],
+    };
+  }
+
+  // ── Full config fallback ──
+  if (operation === 'full_config' || operation === 'modify_step') {
+    // For modify_step we'd need to identify which step — for now use full config
+    const result = await runFullConfigAuthoring({ request, currentConfig, csvState, manifest, model, timeout });
+    return {
+      updatedConfig: result.updated_config,
+      summary: String(result.summary || ''),
+      warnings: Array.isArray(result.warnings) ? result.warnings.map(String) : [],
+    };
+  }
+
+  // ── Focused add operations ──
+  const prompt = buildFocusedPrompt({ operation, request, manifest });
+  if (!prompt) {
+    // Fallback if prompt builder returns null
+    const result = await runFullConfigAuthoring({ request, currentConfig, csvState, manifest, model, timeout });
+    return {
+      updatedConfig: result.updated_config,
+      summary: String(result.summary || ''),
+      warnings: Array.isArray(result.warnings) ? result.warnings.map(String) : [],
+    };
+  }
+
+  const { output, exitCode, stderr } = await runClaude(prompt, { model, timeout });
+  if (exitCode !== 0) {
+    throw new Error(`author-config (${operation}) failed: exit ${exitCode}. ${String(stderr || '').slice(0, 300)}`);
   }
 
   const parsed = parseModelJsonObject({
     output,
-    schema: AuthorConfigResultSchema,
-    label: 'author-config result',
+    schema: FocusedItemSchema,
+    label: `author-config (${operation})`,
   });
 
-  const normalizedConfig = ensureCompiledConfigBlocks(parsed.updated_config || {});
-  const passedColumnNormalized = normalizeFilterPassedColumns(normalizedConfig);
-  const unresolvedRefs = validateFromColumnReferences({
-    updatedConfig: passedColumnNormalized.updatedConfig,
-    csvState,
-  });
-  const warnings = Array.isArray(parsed.warnings) ? parsed.warnings.map((item) => String(item)) : [];
-  warnings.push(...passedColumnNormalized.warnings);
-  warnings.push(...validateRequestedSections({
-    request,
-    updatedConfig: passedColumnNormalized.updatedConfig,
-  }));
-  if (unresolvedRefs.length > 0) {
-    warnings.push(
-      `Unresolved from_column references: ${unresolvedRefs.join(', ')}. Check CSV headers or upstream step outputs.`
-    );
+  const warnings = Array.isArray(parsed.warnings) ? parsed.warnings.map(String) : [];
+  const dependsOn = Array.isArray(parsed.depends_on) ? parsed.depends_on.map(String) : [];
+
+  if (!parsed.item) {
+    warnings.push('LLM returned no item. The request may not have been understood.');
+    return { updatedConfig: currentConfig, summary: '', warnings };
+  }
+
+  // ── Deterministic insertion ──
+  const config = structuredClone(currentConfig);
+
+  if (operation === 'add_search') {
+    insertSearch(config, parsed.item);
+  } else if (operation === 'add_filter') {
+    insertFilter(config, parsed.item, dependsOn);
+  } else if (operation === 'add_enrichment') {
+    insertEnrichment(config, parsed.item, dependsOn);
+  } else if (operation === 'add_rubric') {
+    const items = Array.isArray(parsed.item) ? parsed.item : [parsed.item];
+    insertRubric(config, items);
   }
 
   return {
-    updatedConfig: passedColumnNormalized.updatedConfig,
+    updatedConfig: config,
     summary: String(parsed.summary || ''),
     warnings,
   };
