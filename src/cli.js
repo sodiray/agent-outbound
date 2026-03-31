@@ -87,16 +87,33 @@ const watch = async () => {
 };
 
 const kill = async () => {
-  const { getTrackedPids, killAll } = await import('./orchestrator/lib/pids.js');
-  const alive = getTrackedPids();
-  if (alive.length === 0) {
-    console.log('No tracked processes.');
+  const { execSync } = await import('node:child_process');
+  // Find all Claude subprocesses spawned by agent-outbound.
+  // Our processes have a unique argument signature:
+  //   --output-format stream-json --dangerously-skip-permissions
+  // No normal Claude usage has both flags together.
+  const PATTERN = 'output-format stream-json.*dangerously-skip-permissions';
+  let pids;
+  try {
+    const out = execSync(`pgrep -f "${PATTERN}"`, { encoding: 'utf8' }).trim();
+    pids = out.split('\n').map((p) => p.trim()).filter(Boolean).map(Number).filter(Number.isFinite);
+  } catch {
+    pids = [];
+  }
+
+  if (pids.length === 0) {
+    console.log('No agent-outbound Claude subprocesses found.');
     return;
   }
-  console.log(`Killing ${alive.length} tracked process(es)...`);
-  const results = killAll();
-  for (const r of results) {
-    console.log(`  PID ${r.pid}: ${r.status}`);
+
+  console.log(`Found ${pids.length} subprocess(es):`);
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+      console.log(`  PID ${pid}: killed`);
+    } catch (err) {
+      console.log(`  PID ${pid}: ${err.code === 'ESRCH' ? 'already exited' : err.code}`);
+    }
   }
   console.log('Done.');
 };
