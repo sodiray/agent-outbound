@@ -181,14 +181,13 @@ const ensureSocketServer = (listDir) => {
     if (entry.starting || entry.ready) return;
     entry.starting = true;
     try {
+      // Always remove existing socket file — the MCP server is the authoritative
+      // socket owner. Watch clients reconnect automatically when the socket is replaced.
       if (existsSync(socketPath)) {
-        const active = await isSocketPathActive(socketPath);
-        if (!active) {
-          try {
-            unlinkSync(socketPath);
-          } catch {
-            // noop
-          }
+        try {
+          unlinkSync(socketPath);
+        } catch {
+          // noop
         }
       }
 

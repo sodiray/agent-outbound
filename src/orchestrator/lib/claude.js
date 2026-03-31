@@ -1,9 +1,18 @@
 /**
  * Claude CLI subprocess runner.
- * Spawns `claude` from $PATH with --print mode for LLM boundary actions.
+ * Spawns `claude` with --print --output-format stream-json --verbose --include-partial-messages.
+ * Every stream-json event is emitted to the activity socket as raw JSON.
  */
 import { spawn } from 'node:child_process';
 import { emitActivity, emitLive } from './activity.js';
+
+const tryParseJson = (line) => {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+};
 
 /**
  * Run a Claude CLI prompt and return the output.
@@ -14,12 +23,21 @@ import { emitActivity, emitLive } from './activity.js';
  */
 export const runClaude = (prompt, { model, timeout } = {}) =>
   new Promise((res) => {
-    const args = ['--print', '--dangerously-skip-permissions', '-p', '-'];
+    const args = [
+      '--print',
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--include-partial-messages',
+      '--dangerously-skip-permissions',
+      '-p', '-',
+    ];
     if (model) args.push('--model', model);
+
+    // Emit start event with the full prompt
     emitActivity({
       event: 'claude_start',
       model: String(model || ''),
-      timeout_ms: Number(timeout || 0) || undefined,
+      prompt,
     });
 
     const proc = spawn('claude', args, {
@@ -27,14 +45,46 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
       env: { ...process.env, FORCE_COLOR: '0' },
     });
 
-    let stdout = '';
+    let resultText = '';
     let stderr = '';
     let settled = false;
+    let lineBuffer = '';
+
     proc.stdout.on('data', (d) => {
-      const chunk = d.toString();
-      stdout += chunk;
-      emitLive({ event: 'claude_chunk', data: chunk });
+      lineBuffer += d.toString();
+      let newlineIndex = lineBuffer.indexOf('\n');
+      while (newlineIndex >= 0) {
+        const line = lineBuffer.slice(0, newlineIndex).trim();
+        lineBuffer = lineBuffer.slice(newlineIndex + 1);
+        newlineIndex = lineBuffer.indexOf('\n');
+
+        if (!line) continue;
+        const event = tryParseJson(line);
+
+        if (!event) {
+          // Non-JSON line — emit raw
+          emitLive({ event: 'claude_raw', data: line });
+          continue;
+        }
+
+        // Extract final result text
+        if (event.type === 'result' && event.result) {
+          resultText = String(event.result);
+        }
+        // Also capture text from full assistant messages
+        if (event.type === 'assistant' && Array.isArray(event.message?.content)) {
+          for (const block of event.message.content) {
+            if (block.type === 'text' && block.text) {
+              resultText = String(block.text);
+            }
+          }
+        }
+
+        // Emit every stream-json event to the socket as-is
+        emitLive({ event: 'claude_event', type: event.type, data: event });
+      }
     });
+
     proc.stderr.on('data', (d) => {
       const chunk = d.toString();
       stderr += chunk;
@@ -52,25 +102,9 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
         proc.kill('SIGTERM');
         setTimeout(() => {
           if (settled) return;
-          if (!proc.killed) {
-            proc.kill('SIGKILL');
-          }
-      emitActivity({
-        event: 'claude_complete',
-        model: String(model || ''),
-        exit_code: 1,
-        timed_out: true,
-        output_length: stdout.length,
-        stderr_length: stderr.length,
-        summary: stdout.trim().slice(0, 300),
-        stderr_tail: stderr.trim().slice(-200) || undefined,
-      });
-      resolveOnce({
-        output: stdout.trim(),
-        exitCode: 1,
-        stderr: stderr.trim() || `Claude CLI timed out after ${timeout}ms.`,
-        timedOut: true,
-      });
+          if (!proc.killed) proc.kill('SIGKILL');
+          emitActivity({ event: 'claude_complete', model: String(model || ''), exit_code: 1, timed_out: true });
+          resolveOnce({ output: resultText.trim(), exitCode: 1, stderr: stderr.trim() || `Timed out after ${timeout}ms.`, timedOut: true });
         }, 5000);
       }, timeout)
       : null;
@@ -78,37 +112,22 @@ export const runClaude = (prompt, { model, timeout } = {}) =>
     proc.on('close', (code) => {
       if (timer) clearTimeout(timer);
       if (settled) return;
-      const failed = (code ?? 1) !== 0;
-      emitActivity({
-        event: 'claude_complete',
-        model: String(model || ''),
-        exit_code: code ?? 1,
-        timed_out: false,
-        output_length: stdout.length,
-        stderr_length: stderr.length,
-        summary: stdout.trim().slice(0, 300),
-        stderr_tail: failed ? (stderr.trim().slice(-200) || undefined) : undefined,
-      });
-      resolveOnce({ output: stdout.trim(), exitCode: code ?? 1, stderr: stderr.trim(), timedOut: false });
+      // Process remaining buffer
+      if (lineBuffer.trim()) {
+        const event = tryParseJson(lineBuffer.trim());
+        if (event?.type === 'result' && event.result) resultText = String(event.result);
+      }
+      emitActivity({ event: 'claude_complete', model: String(model || ''), exit_code: code ?? 1, timed_out: false });
+      resolveOnce({ output: resultText.trim(), exitCode: code ?? 1, stderr: stderr.trim(), timedOut: false });
     });
 
     proc.on('error', (err) => {
       if (timer) clearTimeout(timer);
       if (settled) return;
-      emitActivity({
-        event: 'claude_complete',
-        model: String(model || ''),
-        exit_code: 1,
-        timed_out: false,
-        output_length: stdout.length,
-        stderr_length: stderr.length,
-        summary: String(err.message || '').slice(0, 300),
-        stderr_tail: stderr.trim().slice(-200) || String(err.message || '').slice(0, 200) || undefined,
-      });
+      emitActivity({ event: 'claude_complete', model: String(model || ''), exit_code: 1, timed_out: false });
       resolveOnce({ output: '', exitCode: 1, stderr: err.message, timedOut: false });
     });
 
-    // Pipe prompt via stdin and close immediately
     proc.stdin.write(prompt);
     proc.stdin.end();
   });
