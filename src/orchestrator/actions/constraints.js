@@ -12,6 +12,7 @@ export const AGENT_CONSTRAINTS = [
   '- NEVER open a browser, use Chrome, use computer-use, or interact with any GUI.',
   '- NEVER install packages, download software, or modify system configuration.',
   '- NEVER use Bash to run curl, wget, or any network commands as workarounds.',
+  '- NEVER clear, delete, or remove data from any external system (sheets, databases, files) unless the task EXPLICITLY says to delete specific items.',
   '- NEVER attempt creative workarounds if a tool fails. If the specified tool or approach does not work, STOP and return a failure response immediately.',
   '- If a tool call returns an authentication error, permission error, or "not connected" error, return status "failed" with the error message. Do NOT try alternative tools or approaches.',
   '- If you cannot complete the task with the tools available, return status "failed" explaining what is missing. Do NOT improvise.',
