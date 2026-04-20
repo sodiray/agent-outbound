@@ -1,979 +1,264 @@
+list:
+  name: pilates
+  territory:
+    home_base: Boise, ID
+    max_visits_per_day: 8
+    preferred_visit_days:
+      - tue
+      - wed
+      - thu
+    max_drive_radius_miles: 20
 source:
+  identity:
+    - business_name
+    - address
   searches:
-    - id: search_boise
-      description: Find pilates studios in Boise, ID
+    - id: yelp_pilates_boise
+      description: Search Yelp for Pilates studios in Boise, ID
+      query: Pilates studios in Boise, ID
+      max_results: 100
+      tool:
+        toolkits:
+          - YELP
       args:
-        query:
-          literal: pilates studio Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 12000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_meridian
-      description: Find pilates studios in Meridian, ID
+        term: pilates
+        location: Boise, ID
+      output_map:
+        business_name: name
+        address: location.display_address
+    - id: yelp_pilates_eagle
+      description: Search Yelp for Pilates studios in Eagle, ID
+      query: Pilates studios in Eagle, ID
+      max_results: 100
+      tool:
+        toolkits:
+          - YELP
       args:
-        query:
-          literal: pilates studio Meridian ID
-        location:
-          literal:
-            latitude: 43.6121
-            longitude: -116.3915
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_eagle
-      description: Find pilates studios in Eagle, ID
+        term: pilates
+        location: Eagle, ID
+      output_map:
+        business_name: name
+        address: location.display_address
+    - id: yelp_pilates_meridian
+      description: Search Yelp for Pilates studios in Meridian, ID
+      query: Pilates studios in Meridian, ID
+      max_results: 100
+      tool:
+        toolkits:
+          - YELP
       args:
-        query:
-          literal: pilates studio Eagle ID
-        location:
-          literal:
-            latitude: 43.6955
-            longitude: -116.3542
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_nampa
-      description: Find pilates studios in Nampa, ID
+        term: pilates
+        location: Meridian, ID
+      output_map:
+        business_name: name
+        address: location.display_address
+    - id: yelp_pilates_garden_city
+      description: Search Yelp for Pilates studios in Garden City, ID
+      query: Pilates studios in Garden City, ID
+      max_results: 100
+      tool:
+        toolkits:
+          - YELP
       args:
-        query:
-          literal: pilates studio Nampa ID
-        location:
-          literal:
-            latitude: 43.5407
-            longitude: -116.5635
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_reformer_pilates
-      description: Find reformer pilates studios across greater Boise metro (25km radius)
-      args:
-        query:
-          literal: reformer pilates Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 25000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_megaformer
-      description: Find megaformer studios (Lagree/solidcore/BODYROK ecosystem) across greater Boise metro
-      args:
-        query:
-          literal: megaformer studio Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 25000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_lagree_fitness
-      description: Find Lagree fitness studios across greater Boise metro
-      args:
-        query:
-          literal: lagree fitness Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 25000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_barre_studio
-      description: Find barre studios (Pure Barre, barre3, Bar Method, independents) across greater Boise metro
-      args:
-        query:
-          literal: barre studio Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 25000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_solidcore
-      description: Find Solidcore franchise locations across greater Boise metro
-      args:
-        query:
-          literal: solidcore Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 25000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_pvolve
-      description: Find Pvolve functional fitness studios across greater Boise metro
-      args:
-        query:
-          literal: Pvolve Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 25000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_hotworx
-      description: Find HOTWORX infrared fitness studios (offering hot pilates) across greater Boise metro
-      args:
-        query:
-          literal: HOTWORX Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 25000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_movement_studio
-      description: Find movement studios (independents that brand as movement not pilates) across greater Boise metro
-      args:
-        query:
-          literal: movement studio Boise ID
-        location:
-          literal:
-            latitude: 43.615
-            longitude: -116.2023
-        radius:
-          literal: 25000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_garden_city_pilates
-      description: Find pilates studios in Garden City, ID
-      args:
-        query:
-          literal: pilates studio Garden City ID
-        location:
-          literal:
-            latitude: 43.6263
-            longitude: -116.2816
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_garden_city_reformer
-      description: Find reformer pilates studios in Garden City, ID
-      args:
-        query:
-          literal: reformer pilates Garden City ID
-        location:
-          literal:
-            latitude: 43.6263
-            longitude: -116.2816
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_garden_city_megaformer
-      description: Find megaformer studios in Garden City, ID
-      args:
-        query:
-          literal: megaformer Garden City ID
-        location:
-          literal:
-            latitude: 43.6263
-            longitude: -116.2816
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_garden_city_lagree
-      description: Find Lagree fitness studios in Garden City, ID
-      args:
-        query:
-          literal: lagree fitness Garden City ID
-        location:
-          literal:
-            latitude: 43.6263
-            longitude: -116.2816
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_garden_city_barre
-      description: Find barre studios in Garden City, ID
-      args:
-        query:
-          literal: barre studio Garden City ID
-        location:
-          literal:
-            latitude: 43.6263
-            longitude: -116.2816
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
-    - id: search_garden_city_movement
-      description: Find movement studios in Garden City, ID
-      args:
-        query:
-          literal: movement studio Garden City ID
-        location:
-          literal:
-            latitude: 43.6263
-            longitude: -116.2816
-        radius:
-          literal: 10000
-      output_fields:
-        - place_id
-        - business_name
-        - address
-        - rating
-        - review_count
-        - business_status
-        - latitude
-        - longitude
-      dedup_keys:
-        - place_id
-      columns:
-        place_id: place_id
-        name: business_name
-        formatted_address: address
-        rating: rating
-        user_ratings_total: review_count
-        business_status: business_status
-        geometry.location.lat: latitude
-        geometry.location.lng: longitude
-      cache: 7d
+        term: pilates
+        location: Garden City, ID
+      output_map:
+        business_name: name
+        address: location.display_address
+    - id: firecrawl_pilates_boise_metro
+      description: Web search via Firecrawl for Pilates studios across the Boise metro area (Boise, Eagle, Meridian, Garden City)
+      query: Pilates studios Boise metro area Eagle Meridian Garden City Idaho
+      max_results: 100
+      tool:
+        toolkits:
+          - FIRECRAWL
+      output_map:
+        business_name: name
+        address: address
   filters:
-    - description: >-
-        Keep only DEDICATED pilates or pilates-adjacent studios where pilates/barre/lagree is the PRIMARY business — not
-        a general gym or multi-purpose facility that happens to offer pilates classes
-      condition: >-
-        You are evaluating whether a fitness business is a DEDICATED pilates or pilates-adjacent studio. The core
-        question is: Is pilates (or a pilates-adjacent discipline like barre or Lagree) the PRIMARY business of this
-        location?
-
-
-        Return TRUE if the business name strongly indicates it is a dedicated studio in one of these categories:
-
-        - Pilates studios of any style: reformer, mat, classical, contemporary (e.g. names containing 'Pilates',
-        'Reformer Pilates')
-
-        - Megaformer / Lagree method studios (e.g. names containing 'Megaformer', 'Lagree', 'SLT', 'BODYROK',
-        'solidcore', 'Solidcore')
-
-        - Barre studios where barre is the primary or sole offering (e.g. names containing 'Barre', 'Pure Barre',
-        'barre3', 'Bar Method', 'The Bar Method')
-
-        - Pvolve or HOTWORX (franchises whose primary offering is pilates-adjacent functional fitness)
-
-        - Boutique fitness studios whose name explicitly centers pilates or one of the above disciplines as the lead
-        concept
-
-        - Studios that include yoga or other modalities in their name BUT lead with or prominently feature pilates (e.g.
-        'Embody Pilates, Yoga & Fitness' — pilates is named first and is the lead brand)
-
-
-        Return FALSE for any of the following — even if they offer some pilates classes:
-
-        - General gyms, fitness centers, or athletic clubs (e.g. names containing 'Athletic Club', 'Fitness Center',
-        'Gym', 'Lifetime', 'Planet Fitness', 'Anytime Fitness', 'Gold's Gym', '24 Hour Fitness', 'YMCA', 'YWCA',
-        'Recreation Center', 'Rec Center', 'Community Center')
-
-        - CrossFit boxes (e.g. names containing 'CrossFit', 'CF ', 'Box')
-
-        - Yoga-only studios where yoga — not pilates — is clearly the primary identity (e.g. names like '[Name] Yoga',
-        '[Name] Yoga Studio', 'Hot Yoga [Name]', names containing 'Yoga' with no pilates or barre qualifier)
-
-        - Martial arts studios (e.g. names containing 'Martial Arts', 'Karate', 'BJJ', 'Jiu Jitsu', 'MMA', 'Kickboxing',
-        'Taekwondo', 'Krav Maga')
-
-        - Dance studios that are not barre-focused (e.g. names containing 'Dance', 'Ballet', 'Ballroom', 'Dance Academy'
-        without a barre qualifier)
-
-        - Physical therapy, chiropractic, or clinical wellness practices (e.g. names containing 'Physical Therapy', 'PT
-        ', 'Chiropractic', 'Rehab', 'Sports Medicine', 'Wellness Clinic')
-
-        - Large multi-sport or multi-purpose recreation facilities
-
-        - Personal training studios with no pilates branding
-
-        - Generic 'movement studio' or 'wellness studio' names with no specific pilates/barre/lagree identifier in the
-        name
-
-
-        When uncertain — for example, a studio name that is ambiguous (e.g. 'CoreStrong', 'The Studio', 'Movement Lab')
-        with no explicit pilates/barre/lagree term — return FALSE. Do not give the benefit of the doubt to ambiguous
-        names. Only pass businesses whose name clearly signals a dedicated pilates-adjacent primary offering.
+    - id: filter_real_street_address
+      description: >-
+        Keep only studios that have a real street address located in Boise, Eagle, Meridian, or Garden City, ID. Exclude
+        listings with missing, PO Box, or non-physical addresses, and exclude any records whose address falls outside
+        these four cities.
       config:
-        id: filter_pilates_adjacent
-        args:
-          business_name:
-            from_column: business_name
-          address:
-            from_column: address
-        columns:
-          reason: pilates_filter_reason
-        writes:
-          passed_column: filter_pilates_adjacent_passed
         model: haiku
-        timeout: 90s
-    - description: >-
-        Keep only businesses located in target cities: Boise, Meridian, Eagle, or Garden City (Idaho). Reject leads in
-        Nampa, Caldwell, Star, Kuna, or any other city.
-      condition: >-
-        Return true only if the address field contains one of these exact city names: 'Boise', 'Meridian', 'Eagle', or
-        'Garden City'. Return false if the address contains 'Nampa', 'Caldwell', 'Star', 'Kuna', or any other city name
-        not in the allowed list. Match city names case-insensitively. When the city cannot be determined from the
-        address, return false.
-      config:
-        id: filter_target_cities
-        args:
-          address:
-            from_column: address
-        columns:
-          reason: target_cities_filter_reason
-        writes:
-          passed_column: filter_target_cities_passed
-        model: haiku
-        timeout: 90s
+        concurrency: 10
+        condition: >-
+          The record has a valid physical street address (not a PO Box, not blank, not a suite-only address) and the
+          city in the address is one of: Boise, Eagle, Meridian, or Garden City (all in Idaho).
 enrich:
-  - description: Fetch phone number and website for each studio via Google Place Details
+  - id: website_research
+    description: >-
+      Scrape the studio's website using Firecrawl to extract detailed information about offerings, brand, pricing, class
+      types, studio vibe, and ownership.
     config:
-      id: place_details
-      args:
-        place_id:
-          from_column: place_id
-      columns:
-        formatted_phone_number: phone
-        website: website
-        international_phone_number: phone_international
-      depends_on:
-        - search_boise
-        - search_meridian
-        - search_eagle
-        - search_nampa
-        - search_reformer_pilates
-        - search_megaformer
-        - search_lagree_fitness
-        - search_barre_studio
-        - search_solidcore
-        - search_pvolve
-        - search_hotworx
-        - search_movement_studio
-        - search_garden_city_pilates
-        - search_garden_city_reformer
-        - search_garden_city_megaformer
-        - search_garden_city_lagree
-        - search_garden_city_barre
-        - search_garden_city_movement
-      concurrency: 5
+      model: sonnet
+      concurrency: 10
       cache: 14d
-      prompt: >-
-        Call maps_place_details with the given place_id. Extract formatted_phone_number, website, and
-        international_phone_number from the result. Return nulls for any fields not present.
-      timeout: 2m
-  - description: >-
-      Find the hiring decision maker at each pilates studio using web research (website scrape + Google search).
-      Priority: Manager/GM > Studio Director/Owner > Owner/Operator/Founder.
+      tool:
+        toolkits:
+          - FIRECRAWL
+      outputs:
+        research_notes:
+          type: string
+          description: >-
+            Detailed summary of the studio's offerings, brand identity, pricing signals, and general positioning — at
+            least 150 words.
+        owner_name:
+          type: string
+          description: >-
+            Name of the studio owner or founder if found anywhere on the site (About page, bio, etc.). Leave blank if
+            not found.
+        class_types:
+          type: string
+          description: Comma-separated list of class or session types offered (e.g. 'Reformer, Mat, Barre, Private Sessions').
+        studio_vibe:
+          type: string
+          description: Overall character and positioning of the studio based on its website content and branding.
+          enum:
+            - boutique
+            - clinical
+            - fitness-chain
+            - community
+            - luxury
+  - id: contact_lookup
+    description: >-
+      Use Hunter and FullEnrich to find the best contact email and details for the studio owner, based on the owner name
+      found during website research.
     config:
-      id: hiring_contact
-      args:
-        business_name:
-          from_column: business_name
-        address:
-          from_column: address
-        website:
-          from_column: website
-      columns:
-        contact_name: contact_name
-        contact_title: contact_title
-        contact_source: contact_source
-      depends_on:
-        - place_details
-      concurrency: 3
-      cache: 30d
       model: sonnet
-      timeout: 6m
-      prompt: >-
-        You are researching the hiring decision maker for a boutique fitness/pilates studio. Your goal is to find the
-        specific named person most likely responsible for hiring decisions at this location.
-
-
-        Inputs:
-
-        - business_name: the studio's name
-
-        - address: full address (use to extract city/state for searches)
-
-        - website: the studio's website URL (may be null)
-
-
-        Priority order for who to find:
-
-        1. Manager or General Manager — most common hiring decision maker at individual studio locations
-
-        2. Studio Director or Studio Director/Owner — next best
-
-        3. Owner, Operator, or Founder — fallback if no manager-level contact found
-
-
-        Research steps (execute in order, stop when you find a high-confidence result):
-
-
-        Step 1 — Scrape the studio website (if website is provided):
-          - Use firecrawl_scrape on the website homepage.
-          - Then try common sub-pages: /about, /team, /staff, /meet-us, /our-team (append to base URL).
-          - Look for named staff with titles matching Manager, General Manager, Studio Director, Director, Owner, Founder, or Operator.
-          - If found, set contact_source to 'website'.
-
-        Step 2 — Google search for staff (if website scrape yields nothing):
-          - Use firecrawl_search with queries like:
-            - "[business_name] [city] general manager"
-            - "[business_name] [city] studio manager"
-            - "[business_name] [city] owner"
-          - Scan results for a named person with a relevant title.
-          - If found, set contact_source to 'Google'.
-
-        Step 3 — LinkedIn search (if Steps 1–2 yield nothing):
-          - Use firecrawl_search with: "site:linkedin.com [business_name] [city] manager OR director OR owner"
-          - Extract a name and title from the result snippets.
-          - If found, set contact_source to 'LinkedIn'.
-
-        Return exactly:
-
-        - contact_name: full name of the best decision maker found (string, or null if not found)
-
-        - contact_title: their exact title as you found it (e.g. 'General Manager', 'Studio Owner', 'Founder') — null if
-        not found
-
-        - contact_source: where the info came from ('website', 'Google', 'LinkedIn') — null if not found
-
-
-        If no contact can be found after all steps, return null for all three fields. Do not guess or fabricate.
-  - description: >-
-      Find the email address of the hiring decision maker using Hunter Email Finder (primary) with Firecrawl web search
-      as fallback.
-    config:
-      id: contact_email
-      args:
+      concurrency: 10
+      cache: 30d
+      tool:
+        toolkits:
+          - HUNTER
+          - FULLENRICH
+      outputs:
+        contact_email:
+          type: string
+          description: Best email address found for the studio owner or primary contact.
         contact_name:
-          from_column: contact_name
-        website:
-          from_column: website
-        business_name:
-          from_column: business_name
-      columns:
-        contact_email: contact_email
+          type: string
+          description: Full name of the contact found.
+        contact_title:
+          type: string
+          description: Role or title of the contact (e.g. Owner, Founder, Studio Director).
       depends_on:
-        - hiring_contact
-      concurrency: 3
-      cache: 30d
-      model: sonnet
-      timeout: 4m
-      prompt: >-
-        You are finding the email address for a named hiring decision maker at a boutique fitness studio.
-
-
-        Inputs:
-
-        - contact_name: full name of the decision maker (may be null — if null, return null immediately)
-
-        - website: the studio's website URL (used to extract the domain for Hunter lookup)
-
-        - business_name: the studio's name (used as context for fallback search)
-
-
-        If contact_name is null or empty, return null for contact_email immediately — do not proceed.
-
-
-        Step 1 — Hunter Email Finder (primary):
-          - Extract the domain from the website URL by stripping the scheme and any path (e.g. 'https://www.thrivepilatess.com/about' → 'thrivepilatess.com'). Remove 'www.' prefix if present.
-          - If website is null or you cannot extract a valid domain, skip to Step 2.
-          - Call the Hunter Email-Finder tool with the person's full name and the extracted domain.
-          - If Hunter returns an email address (even with low confidence score), use it as contact_email and stop.
-
-        Step 2 — Firecrawl web search fallback (if Hunter returned no result):
-          - Use firecrawl_search with a targeted query such as:
-            - '"[contact_name]" "[business_name]" email'
-            - '"[contact_name]" site:[domain] email' (if domain is available)
-          - Scan result snippets for a valid email address pattern (e.g. name@domain.com).
-          - If a plausible business email is found in the search results, use it as contact_email.
-
-        Return exactly:
-
-        - contact_email: the email address found (string), or null if neither Hunter nor web search produced a result.
-
-
-        Do not guess, fabricate, or construct email addresses by pattern (e.g. do not infer first.last@domain.com
-        without confirmation). Only return addresses explicitly found by a tool.
-  - description: >-
-      Research current hiring status for each studio by checking the studio website's careers/jobs pages and searching
-      major job boards (Indeed, Glassdoor, LinkedIn Jobs, ZipRecruiter) via Firecrawl.
+        - website_research
+  - id: online_content
+    description: >-
+      Search for the studio's blog and social media presence using web crawling. Identify active content channels and
+      summarize their content footprint.
     config:
-      id: job_postings
-      args:
-        business_name:
-          from_column: business_name
-        address:
-          from_column: address
-        website:
-          from_column: website
-      columns:
-        is_hiring: is_hiring
-        open_positions: open_positions
-        pay_info: pay_info
-        job_posting_source: job_posting_source
-        hiring_notes: hiring_notes
-      depends_on:
-        - place_details
-      concurrency: 3
+      model: sonnet
+      concurrency: 10
+      cache: 14d
+      tool:
+        toolkits:
+          - FIRECRAWL
+      outputs:
+        has_blog:
+          type: boolean
+          description: Whether the studio has an active blog with published posts.
+        has_social_media:
+          type: boolean
+          description: Whether the studio has active social media accounts on any platform.
+        content_summary:
+          type: string
+          description: Short summary of the studio's overall content presence across blog and social channels.
+        social_platforms:
+          type: string
+          description: >-
+            Comma-separated list of social media platform names where the studio has a presence (e.g. 'Instagram,
+            Facebook, TikTok').
+  - id: hiring_check
+    description: >-
+      Search for open job postings associated with the studio using web crawling. Identify whether they are actively
+      hiring and what roles are listed.
+    config:
+      model: haiku
+      concurrency: 10
       cache: 7d
-      model: sonnet
-      timeout: 8m
-      prompt: >-
-        You are researching whether a boutique fitness/pilates studio is currently hiring. Search both the studio's own
-        website and major job boards to find active job postings.
-
-
-        Inputs:
-
-        - business_name: the studio's name
-
-        - address: full address — extract city and state for search queries (e.g. 'Boise, ID' or 'Meridian, ID')
-
-        - website: the studio's website URL (may be null)
-
-
-        Execute ALL of the following steps and aggregate findings across all sources before returning results.
-
-
-        --- STEP 1: Studio Website Careers Pages ---
-
-        If website is provided:
-          - Extract the base URL (scheme + domain, e.g. 'https://www.thrivepilatess.com').
-          - Use firecrawl_scrape on each of these paths in sequence (stop early for a path if it 404s or returns a clearly irrelevant page):
-            - [base_url]/careers
-            - [base_url]/jobs
-            - [base_url]/hiring
-            - [base_url]/work-with-us
-            - [base_url]/join-our-team
-          - Scan page content for job titles, position descriptions, compensation info, application instructions, or any hiring language.
-          - If postings found, note the source as 'studio website'.
-
-        --- STEP 2: Job Board Searches ---
-
-        Use firecrawl_search to run ALL FOUR of the following searches. Use the city/state extracted from the address
-        (e.g. 'Boise' or 'Meridian'). Run each search independently and collect all results.
-
-
-        Search A (Indeed):
-          Query: site:indeed.com "[business_name]" [city]
-
-        Search B (Glassdoor):
-          Query: site:glassdoor.com "[business_name]" [city] jobs
-
-        Search C (LinkedIn Jobs):
-          Query: site:linkedin.com/jobs "[business_name]" [city]
-
-        Search D (ZipRecruiter):
-          Query: site:ziprecruiter.com "[business_name]" [city]
-
-        For each search result, scan snippets and titles for:
-          - Named positions (e.g. 'Pilates Instructor', 'Front Desk', 'Studio Manager')
-          - Compensation details (hourly rates, salary ranges, pay ranges)
-          - Urgency language ('immediately hiring', 'urgent', 'now hiring', 'start ASAP')
-          - Job type (full-time, part-time, contract)
-          - Experience or certification requirements
-          - Number of openings
-
-        Note which job board each result came from.
-
-
-        --- AGGREGATION ---
-
-        After running all steps, synthesize findings and return exactly these fields:
-
-
-        - is_hiring: 'yes' if ANY active job posting was found across any source; 'no' if no postings were found
-        anywhere.
-
-        - open_positions: comma-separated list of distinct position titles found. Leave blank ('') if none found.
-
-        - pay_info: any mentioned hourly rates, salary ranges, or compensation details. Combine details from all
-        sources. Leave blank ('') if no pay info found anywhere.
-
-        - job_posting_source: comma-separated list of sources where postings were found. Leave blank ('') if is_hiring
-        is 'no'.
-
-        - hiring_notes: any additional relevant hiring details not captured above. Leave blank ('') if nothing
-        additional found.
-
-
-        Do not fabricate positions or details. Only report what you explicitly found in search results or scraped page
-        content.
-rubric:
-  - description: >-
-      Business has a real website URL populated from place details — confirms it is a traceable, online brick-and-mortar
-      business
-    score: 2
-    config:
-      columns:
-        - website
-      result_column: rubric_has_website
-  - description: >-
-      Business has NO website — cannot be verified as a real brick-and-mortar business with an online presence;
-      disqualify
-    score: -10
-    config:
-      columns:
-        - website
-      result_column: rubric_no_website
-rubric_config:
-  score_column: lead_score
-  breakdown_column: lead_score_breakdown
-  cache: 30d
-sequence:
-  steps: []
-  on_reply: pause
-  on_bounce: pause
-resolve_dependency_order:
-  - - place_details
-  - - hiring_contact
-    - job_postings
-  - - contact_email
-resolve_manual_fields: []
-resolve_warnings: []
-resolve_column_errors: []
+      tool:
+        toolkits:
+          - FIRECRAWL
+      outputs:
+        is_hiring:
+          type: boolean
+          description: Whether the studio currently has open job postings.
+        hiring_roles:
+          type: string
+          description: Comma-separated list of open role names found (e.g. 'Pilates Instructor, Front Desk, Studio Manager').
+        hiring_summary:
+          type: string
+          description: Short summary of what the hiring activity signals about the studio's growth or operational state.
+score:
+  fit:
+    description: >-
+      Rate how well this Pilates studio fits our ideal customer profile. Award high scores to independently owned
+      (non-franchise) studios that have a professional website, offer multiple class types (especially Reformer), have
+      been operating for at least a year, and have an identifiable owner with reachable contact information. Penalize
+      franchises or chain affiliates, studios with no website or a very thin web presence, and records where no owner
+      name or contact email could be found.
+    model: haiku
+  trigger:
+    description: >-
+      Rate the urgency of reaching out to this studio right now based on real-time buying signals. Score higher when the
+      studio is actively hiring (especially instructor or operations roles), is producing content regularly on a blog or
+      social media, or shows signs of growing review velocity. Lower urgency when there are no hiring signals, dormant
+      or absent content channels, and flat or declining review activity.
+    model: haiku
+  priority:
+    weight:
+      fit: 0.6
+      trigger: 0.4
+sequences:
+  default:
+    on_reply: pause
+    on_bounce: pause
+    on_opt_out: stop
+    steps:
+      - id: day0_intro_email
+        description: >-
+          Send a personalized introductory email to the studio owner referencing specific details found on their website
+          — class offerings, studio vibe, and brand positioning. Open with a relevant observation about their studio to
+          establish credibility and introduce the value proposition.
+        day: 0
+        config:
+          tool:
+            tools:
+              - GMAIL_SEND_EMAIL
+          model: sonnet
+          step_budget: 4
+      - id: day3_followup_email
+        description: >-
+          Send a follow-up email in the same thread as the Day 0 intro. Lead with a new insight — a relevant industry
+          trend, a hiring signal observed, or a content angle specific to this studio — to add value and prompt a reply.
+          Keep it brief and conversational.
+        day: 3
+        condition: no reply to prior email
+        config:
+          tool:
+            tools:
+              - GMAIL_SEND_EMAIL
+          model: sonnet
+          step_budget: 4
+      - id: day7_visit
+        description: >-
+          Conduct an in-person visit to the studio. Introduce yourself, ask for the owner or manager, leave collateral
+          if unavailable, and note the outcome. Use the studio's class schedule and vibe details from enrichment to time
+          the visit appropriately.
+        day: 7
+        condition: no reply to prior emails and at least one prior touchpoint has been completed
+        config:
+          disposition_options:
+            - talked_to_owner
+            - talked_to_staff
+            - left_flyer
+            - closed
+            - come_back
+            - not_a_fit
+channels: {}
+crm:
+  provider: attio

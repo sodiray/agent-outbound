@@ -1,4 +1,7 @@
 source:
+  identity:
+    - business_name
+    - address
   searches:
     - id: google_maps_plumbers_boise
       description: Search Google Maps for plumbers in Boise, Idaho and fetch website via place details
@@ -12,8 +15,6 @@ source:
         - website
         - rating
         - review_count
-        - google_place_id
-      dedup_keys:
         - google_place_id
       columns:
         business_name: business_name
@@ -44,8 +45,6 @@ source:
         - website
         - rating
         - review_count
-        - google_place_id
-      dedup_keys:
         - google_place_id
       columns:
         business_name: business_name
@@ -184,10 +183,18 @@ rubric_config:
   score_column: lead_score
   breakdown_column: lead_score_breakdown
   cache: 30d
-sequence:
-  steps: []
-  on_reply: pause
-  on_bounce: pause
+sequences:
+  default:
+    on_reply: pause
+    on_bounce: pause
+    steps:
+      - day: 0
+        description: >-
+          Send the outreach email to the best available contact with a concise CTA.
+        config:
+          tool:
+            tools:
+              - GMAIL_SEND_EMAIL
 resolve_dependency_order:
   - - website_research
   - - outreach_email_draft

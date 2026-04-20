@@ -1,19 +1,21 @@
 {
   "name": "agent-outbound",
-  "version": "0.8.1",
-  "description": "AI-powered outbound pipeline for Claude Code. Source, enrich, and sequence outreach using any connected MCP tools.",
+  "version": "0.9.0",
+  "description": "Local multi-channel outbound orchestrator with SQLite canonical state, Composio integrations, and in-process AI SDK actions.",
   "type": "module",
   "bin": {
-    "agent-outbound": "./src/cli.js"
+    "agent-outbound": "./dist/cli.js"
   },
   "files": [
-    "src/",
-    "command.md"
+    "dist/",
+    "src/"
   ],
   "keywords": [
     "claude",
     "claude-code",
-    "mcp",
+    "composio",
+    "attio",
+    "sqlite",
     "outbound",
     "outreach",
     "sales",
@@ -27,10 +29,24 @@
     "url": "https://github.com/sodiray/agent-outbound"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.4",
+    "@ai-sdk/anthropic": "^2.0.8",
+    "@hono/node-server": "^1.13.8",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@xenova/transformers": "^2.17.2",
+    "ai": "^6.0.0",
+    "better-sqlite3": "^11.10.0",
+    "hono": "^4.7.11",
     "js-yaml": "^4.1.0",
     "radash": "^12.0.0",
     "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
     "node": ">=18"

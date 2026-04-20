@@ -1,0 +1,177 @@
+list:
+  name: coffee-shops
+  territory:
+    home_base: Boise, ID
+source:
+  identity:
+    - business_name
+    - address
+  searches:
+    - id: yelp-boise-coffee
+      description: Search for coffee shops in Boise, Idaho
+      tool:
+        toolkits:
+          - YELP
+        tools:
+          - YELP_SEARCH_BUSINESSES
+          - YELP_SEARCH_AND_CHAT
+          - YELP_GET_BUSINESS_DETAILS
+          - YELP_GET_BUSINESS_REVIEWS
+          - YELP_SEARCH_BY_PHONE
+          - YELP_GET_REVIEW_HIGHLIGHTS
+  filters:
+    - id: has-website
+      type: field_check
+      condition:
+        field: website
+        operator: is_not_empty
+      config:
+        tool:
+          toolkits: []
+          tools: []
+    - id: independent-only
+      type: semantic
+      condition: Business appears to be independently owned, not a franchise or national chain
+      config:
+        tool:
+          toolkits: []
+          tools: []
+enrich:
+  - id: website-research
+    description: Scrape the business website for details
+    config:
+      model: sonnet
+      step_budget: 6
+      concurrency: 3
+      cache: 14d
+      tool:
+        toolkits:
+          - FIRECRAWL
+        tools:
+          - FIRECRAWL_CREDIT_USAGE_GET
+          - FIRECRAWL_EXTRACT
+          - FIRECRAWL_TOKEN_USAGE_GET
+          - FIRECRAWL_BATCH_SCRAPE
+          - FIRECRAWL_CRAWL_V2
+          - FIRECRAWL_SEARCH
+          - FIRECRAWL_SCRAPE
+          - FIRECRAWL_CRAWL_DELETE
+          - FIRECRAWL_GET_THE_STATUS_OF_A_CRAWL_JOB
+          - FIRECRAWL_CRAWL
+          - FIRECRAWL_START_AGENT
+          - FIRECRAWL_CRAWL_PARAMS_PREVIEW
+          - FIRECRAWL_CRAWL_GET
+          - FIRECRAWL_CRAWL_GET_ERRORS
+          - FIRECRAWL_EXTRACT_GET
+          - FIRECRAWL_GET_AGENT_STATUS
+      outputs:
+        owner_name:
+          type: string
+          description: Name of the owner or manager
+        about_text:
+          type: string
+          description: About section text from the website
+  - id: social-research
+    description: Find social media presence and activity
+    config:
+      model: sonnet
+      step_budget: 6
+      concurrency: 3
+      cache: 14d
+      tool:
+        toolkits:
+          - SERPAPI
+        tools:
+          - SERPAPI_SEARCH
+          - SERPAPI_GOOGLE_LIGHT_SEARCH
+          - SERPAPI_GET_GOOGLE_ABOUT_THIS_RESULT
+          - SERPAPI_NEWS_SEARCH
+          - SERPAPI_IMAGE_SEARCH
+          - SERPAPI_GET_AVAILABLE_LOCATION_OPTIONS_FOR_GOOGLE_SEARCHES
+          - SERPAPI_GOOGLE_MAPS_SEARCH
+      outputs:
+        instagram_url:
+          type: string
+          description: Instagram profile URL
+        facebook_url:
+          type: string
+          description: Facebook page URL
+  - id: hiring-check
+    description: Check if the business has open job postings
+    config:
+      model: haiku
+      step_budget: 4
+      concurrency: 3
+      cache: 7d
+      tool:
+        toolkits:
+          - SERPAPI
+        tools:
+          - SERPAPI_SEARCH
+          - SERPAPI_GOOGLE_LIGHT_SEARCH
+          - SERPAPI_GET_GOOGLE_ABOUT_THIS_RESULT
+          - SERPAPI_NEWS_SEARCH
+          - SERPAPI_IMAGE_SEARCH
+          - SERPAPI_GET_AVAILABLE_LOCATION_OPTIONS_FOR_GOOGLE_SEARCHES
+          - SERPAPI_GOOGLE_MAPS_SEARCH
+      outputs:
+        is_hiring:
+          type: boolean
+          description: Whether the business has open job postings
+        job_count:
+          type: integer
+          description: Number of open positions found
+      depends_on:
+        - website-research
+  - id: contact-lookup
+    description: Find contact email for the decision maker
+    config:
+      model: sonnet
+      step_budget: 4
+      concurrency: 3
+      cache: 90d
+      tool:
+        toolkits:
+          - HUNTER
+        tools:
+          - HUNTER_DOMAIN_SEARCH
+          - HUNTER_EMAIL_COUNT
+          - HUNTER_ACCOUNT_INFORMATION
+          - HUNTER_EMAIL_VERIFIER
+          - HUNTER_EMAIL_FINDER
+          - HUNTER_COMPANY_ENRICHMENT
+          - HUNTER_UPSERT_LEAD
+      outputs:
+        contact_email:
+          type: string
+          description: Email address for the primary contact
+        email_confidence:
+          type: string
+          description: Confidence level of the email
+          enum:
+            - high
+            - medium
+            - low
+      depends_on:
+        - website-research
+score:
+  fit:
+    description: >-
+      Evaluate how well this coffee shop matches our ideal customer for wholesale beans. Weight heavily: independently
+      owned, has a website, owner name known. Moderate: social media presence, reviews.
+    model: haiku
+  trigger:
+    description: 'Evaluate timing signals. Strong: actively hiring (growth). Moderate: recent social activity, website updates.'
+    model: haiku
+  priority:
+    weight:
+      fit: 0.6
+      trigger: 0.4
+sequences:
+  default:
+    reply_check:
+      tool:
+        toolkits: []
+        tools: []
+    steps: []
+channels: {}
