@@ -1,6 +1,6 @@
 # User Flows
 
-How the operator interacts with the system and what happens under the hood. All interactions go through `/outbound`, which runs CLI commands. For long-running operations, `agent-outbound watch` provides real-time visibility from a separate terminal.
+How the operator interacts with the system and what happens under the hood. All interactions go through `/outbound` — the operator talks to Claude Code (or another agent), and the agent runs CLI commands on their behalf. The agent drives both execution (sourcing, enrichment, scoring, sequencing) and the reads it uses to compose answers (queries, exports, record detail). For long-running operations, `agent-outbound watch` provides real-time visibility from a separate terminal.
 
 ## Flow 1: Create a New List
 
@@ -115,7 +115,7 @@ The visit landed 1 day after delivery rather than 3 days after dispatch — exac
 
 **Under the hood:**
 1. Gmail trigger fires (or polling catches it) → `detect-replies` runs
-2. `detect-replies` classifier (Haiku via `generateObject`) tags it `positive` — "sounds interesting, call me"
+2. `detect-replies` classifier (a fast evaluation model, via `generateObject`) tags it `positive` — "sounds interesting, call me"
 3. Orchestrator updates `email_last_reply_at`, `email_reply_classification`, `sequence_status = engaged`
 4. Sequence paused — no further steps fire until operator intervenes
 5. Reply surfaces on today's dashboard under `REPLIES`
@@ -177,3 +177,76 @@ The watch terminal shows recent activity, then switches to a live stream — eac
 **Under the hood:**
 1. `/outbound` runs `agent-outbound forget --email someone@example.com`
 2. Orchestrator adds to global suppression, clears PII columns on matching records, writes to compliance audit log, flips `do_not_contact` in the CRM
+
+## Flow 17: Preview Before a Big Enrichment
+
+**User says:** "I want to add an enrichment step that pulls recent news mentions. Sanity-check it before running on the full list."
+
+**Under the hood:**
+1. `/outbound` runs `agent-outbound config author boise-plumbers "add an enrichment step for recent news mentions"`
+2. `/outbound` runs `agent-outbound enrich boise-plumbers --step news-mentions --sample 5`
+3. The tool runs the new step against 5 representative records, reports what it extracted, projected AI spend at full scale, and projected tool call counts
+4. The agent summarizes the sample output for the operator: what was pulled on each of the 5, the projected full-list cost, and any missing dependencies
+5. Operator approves; `/outbound` runs `agent-outbound enrich boise-plumbers --step news-mentions` for real
+
+See [Safety and Preview](./safety-and-preview.md) and [AI Usage](./ai-usage.md).
+
+## Flow 18: Route Briefs via Export
+
+**User says:** "Write me a brief for each stop on Thursday's route and drop them in a Google Doc."
+
+**Under the hood:**
+1. `/outbound` runs `agent-outbound route show boise-plumbers --date 2026-04-23 --include enrichment,contacts,prior-touches`
+2. The agent receives the full per-stop payload as JSON
+3. The agent composes a brief per stop (owner name, hooks from enrichment, what to open with, mail piece landed, persona cue) — no further tool calls needed
+4. The agent writes the briefs to a Google Doc (via its own Google Drive tool) and shares the link back to the operator
+
+This is the pattern for "write me X about Y" asks across the product: the tool provides the data, the agent provides the narrative. See [Data Access](./data-access.md) and [Visits → Per-Stop Briefs](./visits.md#per-stop-briefs).
+
+## Flow 19: Ad-hoc Analysis via Export
+
+**User says:** "Pull everyone who replied with booking intent in the last 30 days, put it in a CSV, I want to import into Attio."
+
+**Under the hood:**
+1. `/outbound` runs `agent-outbound export boise-plumbers --select "business_name, primary_contact.email, primary_contact.name, fit_score, website-scrape.summary, latest_reply_at, latest_reply_content" --where "latest_reply_classification = 'booking_intent' AND latest_reply_at >= date('now', '-30 days')" --to ./exports/booking-intent-30d.csv`
+2. Agent reports the path, record count, and a one-line preview
+
+The agent picked the projection — which columns matter for an Attio import, which filter captures the operator's ask. The operator gets a file; the agent never needed to pass hundreds of rows through its context. See [Data Access → Export](./data-access.md#3-export--project-data-to-a-file).
+
+## Flow 20: Approve Drafts
+
+**User says:** "Show me the drafts waiting on approval for boise-plumbers, let's go through them."
+
+**Under the hood:**
+1. `/outbound` runs `agent-outbound drafts list boise-plumbers --status pending_approval`
+2. Agent walks through them one by one (or in batches) with the operator
+3. For each: operator says "send it" / "edit this line" / "skip this one"
+4. Agent runs `agent-outbound drafts approve|edit|reject` accordingly
+5. On the next scheduler tick, approved drafts dispatch via the configured channel
+
+See [Sequencing → Draft Approval Queue](./sequencing.md#draft-approval-queue).
+
+## Flow 21: Snapshot Before a Risky Change
+
+**User says:** "I want to swap the hiring detection from Firecrawl to Apollo, but I'm nervous — can you back it up first?"
+
+**Under the hood:**
+1. `/outbound` runs `agent-outbound snapshot create boise-plumbers --label "before-hiring-step-swap"`
+2. `/outbound` runs `agent-outbound config diff boise-plumbers --file ./proposed-hiring-change.yaml` — agent shows the operator the diff
+3. Operator approves; `/outbound` runs `agent-outbound config update boise-plumbers --file ./proposed-hiring-change.yaml`
+4. `/outbound` runs `agent-outbound enrich boise-plumbers --step hiring-check --sample 5` — agent checks the new step's outputs look reasonable
+5. If the new step is producing bad data: `/outbound` runs `agent-outbound snapshot restore boise-plumbers --id <snapshot_id>` — agent confirms with the operator first, explaining what will be lost
+
+See [Safety and Preview](./safety-and-preview.md).
+
+## Flow 22: Cost Check Before Authorizing a Run
+
+**User says:** "How much will it cost me to enrich the whole list tonight?"
+
+**Under the hood:**
+1. `/outbound` runs `agent-outbound enrich boise-plumbers --sample 5`
+2. Agent reads the sample report (LLM $ and tool call counts at full scale)
+3. Agent reads `agent-outbound ai-usage boise-plumbers --period today` to show current usage against any budgets
+4. Agent answers: *"About $12 in AI, ~500 Firecrawl calls, ~800 SerpAPI calls. You've used $3.20 of your $20 daily cap. Third-party costs are on your own Firecrawl/SerpAPI bills — I don't see those."*
+
+See [AI Usage](./ai-usage.md).

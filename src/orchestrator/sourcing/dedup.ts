@@ -56,7 +56,7 @@ const resolveCanonicalRowId = ({ db, startRowId }: { db: any; startRowId: string
   return current;
 };
 
-const confirmDuplicate = async ({ incoming, candidate }: { incoming: any; candidate: any }) => {
+const confirmDuplicate = async ({ incoming, candidate, aiConfig }: { incoming: any; candidate: any; aiConfig?: any }) => {
   const prompt = [
     'Determine whether these two business records represent the same business location.',
     'Return same/confidence/reasoning. Confidence is a 0-1 decimal.',
@@ -70,7 +70,8 @@ const confirmDuplicate = async ({ incoming, candidate }: { incoming: any; candid
 
   const result = await generateObjectWithTools({
     task: 'dedup-confirm',
-    model: 'haiku',
+    role: 'evaluation',
+    aiConfig: aiConfig || {},
     schema: DuplicateConfirmationSchema,
     prompt,
     toolSpec: {},
@@ -80,6 +81,8 @@ const confirmDuplicate = async ({ incoming, candidate }: { incoming: any; candid
   return {
     ...DuplicateConfirmationSchema.parse(result.object),
     usage: result.usage,
+    model: result.model,
+    provider: result.provider,
   };
 };
 
@@ -134,11 +137,12 @@ export const upsertRecordEmbedding = ({ db, rowId, embedding, identityHash }: {
   );
 };
 
-export const aiDedupLink = async ({ db, row, identityFields, threshold = 0.85 }: {
+export const aiDedupLink = async ({ db, row, identityFields, threshold = 0.85, aiConfig = {} }: {
   db: any;
   row: any;
   identityFields: string[];
   threshold?: number;
+  aiConfig?: any;
 }) => {
   const sourceRowId = String(row?._row_id || '').trim();
   const identityText = buildIdentityString({ row, identityFields });
@@ -153,6 +157,8 @@ export const aiDedupLink = async ({ db, row, identityFields, threshold = 0.85 }:
       reasoning: '',
       confidence: 0,
       similarity: 0,
+      model: '',
+      provider: '',
     };
   }
 
@@ -165,6 +171,7 @@ export const aiDedupLink = async ({ db, row, identityFields, threshold = 0.85 }:
     const confirmed = await confirmDuplicate({
       incoming: row,
       candidate: candidateRow,
+      aiConfig,
     });
 
     if (!confirmed.same) continue;
@@ -182,6 +189,8 @@ export const aiDedupLink = async ({ db, row, identityFields, threshold = 0.85 }:
       confidence: Number(confirmed.confidence || 0),
       similarity: Number(candidate.similarity || 0),
       usage: confirmed.usage || null,
+      model: String(confirmed.model || ''),
+      provider: String(confirmed.provider || ''),
     };
   }
 
@@ -194,5 +203,7 @@ export const aiDedupLink = async ({ db, row, identityFields, threshold = 0.85 }:
     confidence: 0,
     similarity: 0,
     usage: null,
+    model: '',
+    provider: '',
   };
 };

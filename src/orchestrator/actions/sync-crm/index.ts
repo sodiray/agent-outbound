@@ -13,11 +13,13 @@ export const syncCrmAction = async ({
   record,
   crmConfig = {} as any,
   toolCatalog,
+  aiConfig = {},
 }: {
   mcp: Client;
   record: any;
   crmConfig?: any;
   toolCatalog?: ToolCatalog;
+  aiConfig?: any;
 }) => {
   const prompt = renderPromptTemplate({
     template: promptTemplate,
@@ -42,7 +44,9 @@ export const syncCrmAction = async ({
     const result = await generateObjectWithTools({
       mcp,
       task: 'sync-crm',
-      model: 'sonnet',
+      model: crmConfig?.model || '',
+      role: 'research',
+      aiConfig,
       schema: SyncCrmResultSchema,
       prompt,
       toolSpec,
@@ -53,6 +57,8 @@ export const syncCrmAction = async ({
     return {
       ...SyncCrmResultSchema.parse(result.object),
       usage: result.usage,
+      model: result.model,
+      provider: result.provider,
     };
   } catch (error) {
     return {

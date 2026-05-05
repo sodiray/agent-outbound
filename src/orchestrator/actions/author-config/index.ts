@@ -83,7 +83,8 @@ export const authorConfigAction = async ({
   try {
     const result = await generateObjectWithTools({
       task: 'author-config',
-      model: 'sonnet',
+      role: 'research',
+      aiConfig: current?.ai || {},
       schema: AuthorConfigOutputSchema,
       prompt: withCatalog,
       toolSpec: {},
@@ -120,6 +121,8 @@ export const authorConfigAction = async ({
           ].filter(Boolean),
           notes: parsed.notes,
           usage: result.usage,
+          model: result.model,
+          provider: result.provider,
         };
       }
     }
@@ -134,6 +137,8 @@ export const authorConfigAction = async ({
         notes: parsed.notes,
         tool_resolution: resolved.stats,
         usage: result.usage,
+        model: result.model,
+        provider: result.provider,
       };
     }
     return {
@@ -143,6 +148,8 @@ export const authorConfigAction = async ({
       notes: parsed.notes,
       tool_resolution: resolved.stats,
       usage: result.usage,
+      model: result.model,
+      provider: result.provider,
     };
   } catch (error) {
     throw new Error(`author-config failed: ${String((error as any)?.message || error)}`);

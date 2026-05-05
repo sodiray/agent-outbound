@@ -85,6 +85,50 @@ For example, a hiring detection step would declare outputs like `is_hiring` (boo
 
 Enrichment runs can take 5–45 minutes depending on the list size and how many steps are configured. Progress streams as it happens (see [Watch](./watch.md)).
 
+## Preview Before Running
+
+New enrichment steps, or runs against large lists, are previewed before full commit:
+
+```
+/outbound sample 5 records through the new hiring step
+/outbound show me what it would cost to enrich the whole list
+```
+
+Under the hood the agent runs `enrich --sample 5` or `enrich --dry-run`, which reports:
+
+- What outputs the step produced on the sample records (so the operator can sanity-check the extraction)
+- Projected AI spend at full list scale
+- Projected third-party tool call counts at full list scale
+- Whether any declared dependencies are missing
+
+The operator reads the preview and decides whether to commit. See [Safety and Preview](./safety-and-preview.md) and [AI Usage](./ai-usage.md).
+
+## Auditing Enrichment Outputs
+
+After a run, the operator often asks questions like:
+
+> "How many records is the hiring step returning empty for?"
+> "Show me the owner names we pulled — I want to spot-check them."
+> "Which records failed the website-scrape step?"
+
+The agent answers by reading the list's data — usually through [data access](./data-access.md):
+
+```
+agent-outbound query boise-plumbers --sql "
+  SELECT business_name, hiring_check.is_hiring, hiring_check.hiring_summary
+  FROM records_enriched
+  WHERE hiring_check.is_hiring IS NULL
+  ORDER BY priority_rank DESC LIMIT 20
+"
+
+agent-outbound export boise-plumbers \
+  --select "business_name, website-scrape.owner_name, website-scrape.confidence" \
+  --where "website-scrape.owner_name IS NOT NULL" \
+  --to ./exports/owner-names-sample.csv
+```
+
+The agent composes the answer and passes it back. This is how the operator calibrates an enrichment step over time — the agent projects the data, the operator reviews, the operator refines the step description if needed.
+
 ## What Enrichment Doesn't Do
 
 - Does not add new records to the list.

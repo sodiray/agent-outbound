@@ -69,6 +69,7 @@ Primary libraries:
 |---|---|
 | `ai` | Vercel AI SDK — `generateText`, `generateObject`, tool loop |
 | `@ai-sdk/anthropic` | Anthropic provider for the AI SDK |
+| `@ai-sdk/deepinfra` | DeepInfra provider for the AI SDK |
 | `@modelcontextprotocol/sdk` | MCP client talking to `connect.composio.dev/mcp` |
 | `@xenova/transformers` | Local embedding model (`all-MiniLM-L6-v2`) for dedup vector similarity |
 | `zod` | Output schemas for every action |
@@ -118,7 +119,7 @@ Each action exports:
 - An **output type** (Zod-derived) — structured return
 - A **prompt** (loaded from `prompt.md`, templated with input values)
 - A **tool pinner** — which Composio toolkits/actions to load for this action
-- A **model choice** — `opus`, `sonnet`, or `haiku`
+- A **model choice** — a `provider/model` ID (e.g. `anthropic/claude-sonnet-4-6`), resolved against the config's defaults if the step doesn't pin one
 - A **step budget** — `stepCountIs(N)` for the agent loop
 - An **execute function** — wires it all together, emits activity events, returns typed output
 
@@ -161,7 +162,7 @@ Called when a phase needs to run a specific step for a specific record. The step
 const outputShape = buildOutputZodSchema(step.config.outputs);
 
 const { output } = await generateText({
-  model: pickModel(step.config.model),
+  model: resolveModel(step.config.model, aiConfig),   // returns a built provider model instance
   system: loadPrompt(step.config.prompt_file, step.config.prompt_args),
   messages: [{ role: "user", content: renderedUserPrompt }],
   tools: await loadTools(step.config.tool),
@@ -178,7 +179,7 @@ Side-effect-only steps (sending an email, dispatching mail) use `generateText` w
 
 Called for filter conditions and sequence step gates. Conditions are natural language descriptions evaluated by the agent against the record's current state.
 
-The agent receives the full record (all columns) and the condition text, then returns `{ passed: boolean, defer: boolean, reason: string }`. Uses Haiku for cost efficiency since conditions are evaluated frequently.
+The agent receives the full record (all columns) and the condition text, then returns `{ passed: boolean, defer: boolean, reason: string }`. Defaults to the `evaluation`-tier model (resolved from `ai.defaults.evaluation` in config) since conditions are evaluated frequently and don't need a frontier model.
 
 For simple sourcing filters (e.g., "has a website"), the orchestrator may use a deterministic fast path for patterns like `<column> is not null` to avoid unnecessary LLM calls. But scoring and sequence conditions are always agent-evaluated — they require judgment, not field checks.
 
@@ -186,7 +187,7 @@ For simple sourcing filters (e.g., "has a website"), the orchestrator may use a 
 
 Called during sequence execution when a batch of `visit` steps is due. Output is a structured route with ordered stops and calendar events.
 
-Tools pinned: whichever routing toolkit is configured in `channels.visit.tool`. Validated at config time and re-checked at execution time. Model: `sonnet`.
+Tools pinned: whichever routing toolkit is configured in `channels.visit.tool`. Validated at config time and re-checked at execution time. Defaults to the top-level `ai.default_model` (typically a Sonnet-class model for tool-heavy research).
 
 ### `sync-crm`
 
@@ -198,7 +199,7 @@ Scans tracked threads for new messages via polling (e.g. `GMAIL_LIST_MESSAGES` f
 
 ### `classify-reply`
 
-`generateObject` call with Haiku. Produces `{ classification: "positive" | "negative" | "ooo" | "auto" | "bounce", reason: string }`.
+`generateObject` call at the evaluation tier. Produces `{ classification: "positive" | "negative" | "ooo" | "auto" | "bounce", reason: string }`.
 
 ## Schema-Driven Outputs
 
@@ -213,13 +214,27 @@ Default is single-call.
 
 ## Model Routing
 
-| Config | Model ID | Used for |
-|---|---|---|
-| `opus` | `claude-opus-4-6` | Copywriting, nuanced messaging, subtle classifications |
-| `sonnet` (default) | `claude-sonnet-4-6` | Research, tool-heavy steps, sequencing logic |
-| `haiku` | `claude-haiku-4-5-20251001` | Condition evaluation, reply classification, simple extraction |
+Every LLM-driven step pins a model using a `provider/model` ID. There is no shorthand (`opus`/`sonnet`/`haiku` are gone); the provider prefix is required so config is always unambiguous.
 
-Haiku fits hot paths (filter evaluation, reply classification, scoring) that fire many times per list. Using Sonnet there wastes money; using Opus wastes a lot of money.
+Resolution order when a step runs:
+
+1. The step's own `config.model` (a `provider/model` string), if set.
+2. The action-role default from top-level config (`ai.defaults.evaluation` for filters/conditions/scoring, `ai.defaults.copywriting` for drafting, `ai.defaults.research` otherwise).
+3. The top-level `ai.default_model`.
+
+Example:
+
+```yaml
+ai:
+  default_model: anthropic/claude-sonnet-4-6
+  defaults:
+    evaluation: anthropic/claude-haiku-4-5-20251001
+    copywriting: anthropic/claude-opus-4-6
+```
+
+The resolver returns the full `provider/model` string. The LLM runtime splits on the first `/`, looks up the provider module in the registry, builds a model instance via that provider's `@ai-sdk/<provider>` package, and hands it to `generateText` / `generateObject`.
+
+Providers are first-class: Anthropic and DeepInfra ship in the box. Adding a provider is a new module under `src/orchestrator/runtime/providers/` plus an entry in the registry. See `runtime.md § Model Providers`.
 
 ## Step Budgeting
 
@@ -328,7 +343,7 @@ See `watch.md`.
 - SQLite writes serialize via WAL locking — contention is tens of ms in the worst case. For high concurrency, batch writes after parallel LLM calls complete.
 - Tool execution through Composio is rate-limited per-toolkit by Composio and per-service by upstream providers. The orchestrator respects 429s with exponential backoff.
 
-Concurrency is bounded by: step's `concurrency` config, process-level cap, Composio rate limits, Anthropic API rate limits, SQLite write serialization. See `performance.md § Priority 2` for implementation details.
+Concurrency is bounded by: step's `concurrency` config, process-level cap, Composio rate limits, LLM provider rate limits, SQLite write serialization. See `performance.md § Priority 2` for implementation details.
 
 ## Error Handling & Idempotency
 
@@ -360,7 +375,7 @@ Errors surface at three levels:
 
 See `runtime.md` for the full flow. Summary:
 
-- **One-time:** operator runs `agent-outbound init`. Interactive, two steps. Step 1 captures `COMPOSIO_API_KEY` (the consumer `ck_...` key from the Composio dashboard, masked), validates it by opening an MCP connection to `connect.composio.dev/mcp` and calling `tools/list`, then enumerates connected toolkits as a sanity check. Step 2 captures `ANTHROPIC_API_KEY` (masked), validates via Anthropic's `/v1/models` endpoint. Writes to `~/.agent-outbound/env` (chmod 600). Non-interactive mode via flags for CI.
+- **One-time:** operator runs `agent-outbound init`. Interactive. First captures `COMPOSIO_API_KEY` (the consumer `ck_...` key from the Composio dashboard, masked), validates it by opening an MCP connection to `connect.composio.dev/mcp` and calling `tools/list`, then enumerates connected toolkits as a sanity check. Then, for each registered LLM provider, asks whether to configure it and captures the key (`ANTHROPIC_API_KEY`, `DEEPINFRA_API_KEY`, …). Each key is validated against that provider's model-list endpoint before saving. Writes to `~/.agent-outbound/env` (chmod 600). Non-interactive mode via flags for CI.
 - **Per-run:** CLI reads `COMPOSIO_API_KEY` at startup, opens an MCP client once, and reuses it for every action. Consumer MCP is single-tenant — there is no userId anywhere.
 - **Connecting toolkits:** operator connects toolkits (Gmail, Hunter, Apollo, etc.) in the Composio dashboard under their own account. This tool never initiates OAuth, never manages connections.
 - **Disconnect recovery:** if a step errors with "connection not active," orchestrator surfaces the MCP error verbatim and halts the channel. Operator reconnects in the Composio dashboard; next run works.
@@ -450,7 +465,7 @@ enrich:
       depends_on: [business_name, website]
       cache: 90d
       concurrency: 10
-      model: sonnet
+      model: anthropic/claude-sonnet-4-6
       step_budget: 10
       prompt_file: ./prompts/decision_maker.md
       prompt_args:

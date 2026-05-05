@@ -34,9 +34,9 @@ When you connect, you first see recent activity from the history buffer (the las
 ```
 === recent activity ===
 [14:20:01] phase.start enrichment (4 steps, 45 records)
-[14:20:01] step.start place_details (45 records, model=sonnet, concurrency=10)
+[14:20:01] step.start place_details (45 records, model=anthropic/claude-sonnet-4-6, concurrency=10)
 [14:20:45] step.complete place_details (45 ok, 0 failed, total $0.18)
-[14:21:01] step.start hiring_contact (45 records, model=sonnet, concurrency=10)
+[14:21:01] step.start hiring_contact (45 records, model=anthropic/claude-sonnet-4-6, concurrency=10)
 [14:21:15] step progress hiring_contact 12/45
 
 === live ===

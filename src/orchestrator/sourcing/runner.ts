@@ -19,22 +19,25 @@ import { embed } from '../runtime/embeddings.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
+import { assertPhaseModelReferences } from '../lib/model-validation.js';
 
 const toSearchRows = async ({
   mcp,
   listDir,
   search,
   toolCatalog,
+  aiConfig,
   paginationState = null,
 }: {
   mcp: any;
   listDir: string;
   search: any;
   toolCatalog: any;
+  aiConfig: any;
   paginationState?: any;
 }) => {
   const manual = Array.isArray(search?.manual_results) ? search.manual_results : [];
-  if (manual.length > 0) return { rows: manual, usage: null, pagination: null };
+  if (manual.length > 0) return { rows: manual, usage: null, pagination: null, model: '', provider: '' };
 
   const context: any = {
     query: search?.query || '',
@@ -63,6 +66,8 @@ const toSearchRows = async ({
     record: {},
     context,
     toolCatalog,
+    aiConfig,
+    role: 'research',
   });
 
   const rows = Array.isArray(result?.artifacts?.results)
@@ -74,6 +79,8 @@ const toSearchRows = async ({
   return {
     rows,
     usage: result.usage || null,
+    model: String((result as any)?.model || ''),
+    provider: String((result as any)?.provider || ''),
     pagination: Object.prototype.hasOwnProperty.call(result, 'pagination')
       ? (result as any).pagination
       : undefined,
@@ -157,12 +164,14 @@ const evaluateSemanticFilterBatches = async ({
   listDir,
   filter,
   rows,
+  aiConfig,
   batchSize = 10,
 }: {
   db: any;
   listDir: string;
   filter: any;
   rows: any[];
+  aiConfig: any;
   batchSize?: number;
 }) => {
   const chunks = chunk(rows, Math.max(1, Number(batchSize || 10)));
@@ -191,7 +200,9 @@ const evaluateSemanticFilterBatches = async ({
     try {
       const llm = await generateObjectWithTools({
         task: `sourcing-filter-batch:${filterId}`,
-        model: 'haiku',
+        model: filter?.config?.model || '',
+        role: 'evaluation',
+        aiConfig,
         schema: SemanticFilterBatchSchema,
         prompt: userPrompt,
         systemPrompt,
@@ -203,7 +214,8 @@ const evaluateSemanticFilterBatches = async ({
         db,
         listDir,
         stepId: `sourcing_filter_batch:${filterId}`,
-        model: 'haiku',
+        model: String((llm as any)?.model || ''),
+        provider: String((llm as any)?.provider || ''),
         usage: llm.usage,
       });
       const parsed = SemanticFilterBatchSchema.parse(llm.object);
@@ -223,13 +235,16 @@ const evaluateSemanticFilterBatches = async ({
             conditionText,
             row,
             stepOutput: row,
+            model: filter?.config?.model || '',
+            aiConfig,
           });
           recordCostEvent({
             db,
             listDir,
             recordId: rowId,
             stepId: `sourcing_filter:${filterId}`,
-            model: 'haiku',
+            model: String((fallback as any)?.model || ''),
+            provider: String((fallback as any)?.provider || ''),
             usage: fallback.usage,
           });
           results.set(rowId, {
@@ -253,10 +268,12 @@ const refreshEmbeddingsAndLinks = async ({
   db,
   listDir,
   identityFields,
+  aiConfig,
 }: {
   db: any;
   listDir: string;
   identityFields: string[];
+  aiConfig: any;
 }) => {
   const refreshRows = db.prepare(`
     SELECT r.*, re.identity_hash
@@ -282,6 +299,7 @@ const refreshEmbeddingsAndLinks = async ({
       db,
       row: { ...row, _row_id: recordId },
       identityFields,
+      aiConfig,
     });
     upsertRecord({
       db,
@@ -298,7 +316,8 @@ const refreshEmbeddingsAndLinks = async ({
       listDir,
       recordId,
       stepId: 'sourcing:dedup_relink',
-      model: 'haiku',
+      model: String((relink as any)?.model || ''),
+      provider: String((relink as any)?.provider || ''),
       usage: relink.usage || null,
     });
 
@@ -308,6 +327,7 @@ const refreshEmbeddingsAndLinks = async ({
         db,
         row: child,
         identityFields,
+        aiConfig,
       });
       upsertRecord({
         db,
@@ -328,6 +348,7 @@ const processAndInsertRows = async ({
   identityFields,
   listName,
   listDir,
+  aiConfig,
   limit = 0,
 }: {
   db: any;
@@ -336,6 +357,7 @@ const processAndInsertRows = async ({
   identityFields: string[];
   listName: string;
   listDir: string;
+  aiConfig: any;
   limit?: number;
 }) => {
   const rowsToProcess = Number(limit || 0) > 0 ? rows.slice(0, Number(limit || 0)) : rows;
@@ -385,6 +407,7 @@ const processAndInsertRows = async ({
       listDir,
       filter: { ...filter, condition: conditionText },
       rows: rowsToProcess,
+      aiConfig,
       batchSize: Number((filter as any)?.config?.batch_size || 10),
     });
 
@@ -435,6 +458,7 @@ const processAndInsertRows = async ({
         db,
         row: shape,
         identityFields,
+        aiConfig,
       });
       if (dedup.duplicate_of) {
         shape.duplicate_of = dedup.duplicate_of;
@@ -459,7 +483,8 @@ const processAndInsertRows = async ({
         listDir,
         recordId: getRecordRowId(shape),
         stepId: 'sourcing:dedup',
-        model: 'haiku',
+        model: String((dedup as any)?.model || ''),
+        provider: String((dedup as any)?.provider || ''),
         usage: dedup.usage || null,
       });
       emitActivity({ event: 'row_complete', phase: 'sourcing', row: shape.business_name || shape.id });
@@ -514,6 +539,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
   if (errors.length > 0) {
     throw new Error(`Invalid config: ${errors.join('; ')}`);
   }
+  assertPhaseModelReferences({ config, phase: 'source' });
 
   const listName = config?.list?.name || 'list';
   const searches = Array.isArray(config?.source?.searches) ? config.source.searches : [];
@@ -536,7 +562,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
   };
 
   try {
-    await refreshEmbeddingsAndLinks({ db, listDir, identityFields });
+    await refreshEmbeddingsAndLinks({ db, listDir, identityFields, aiConfig: config?.ai || {} });
 
     const allRows = [];
     for (const search of searches) {
@@ -548,12 +574,14 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
         listDir,
         search,
         toolCatalog,
+        aiConfig: config?.ai || {},
       });
       recordCostEvent({
         db,
         listDir,
         stepId: `sourcing:${search?.id || 'search'}`,
-        model: String((search as any)?.model || 'sonnet'),
+        model: String((searchResult as any)?.model || ''),
+        provider: String((searchResult as any)?.provider || ''),
         usage: searchResult.usage,
       });
       for (const row of searchResult.rows || []) {
@@ -588,6 +616,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
       identityFields,
       listName,
       listDir,
+      aiConfig: config?.ai || {},
       limit: Number(limit || 0),
     });
     summary.inserted_ids = processed.insertedIds;
@@ -620,6 +649,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
   if (errors.length > 0) {
     throw new Error(`Invalid config: ${errors.join('; ')}`);
   }
+  assertPhaseModelReferences({ config, phase: 'source' });
 
   const target = Math.max(0, Number(targetNew || 0));
   if (target <= 0) {
@@ -661,7 +691,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
   emitActivity({ event: 'phase_start', phase: 'sourcing_more', target_new: target, searches: searches.length });
 
   try {
-    await refreshEmbeddingsAndLinks({ db, listDir, identityFields });
+    await refreshEmbeddingsAndLinks({ db, listDir, identityFields, aiConfig: config?.ai || {} });
 
     for (const search of searches) {
       if (summary.inserted_total >= target) break;
@@ -689,13 +719,15 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
           listDir,
           search,
           toolCatalog,
+          aiConfig: config?.ai || {},
           paginationState,
         });
         recordCostEvent({
           db,
           listDir,
           stepId: `sourcing_more:${searchId}`,
-          model: String((search as any)?.model || 'sonnet'),
+          model: String((searchResult as any)?.model || ''),
+          provider: String((searchResult as any)?.provider || ''),
           usage: searchResult.usage,
         });
 
@@ -714,6 +746,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
           identityFields,
           listName,
           listDir,
+          aiConfig: config?.ai || {},
           limit: remaining,
         });
 

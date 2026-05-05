@@ -17,7 +17,7 @@ In-person visits are the highest-signal, highest-conversion touch in local SMB o
 
 ## Dispositions
 
-Every visit ends with a disposition — the operator logs what happened. Default options:
+Every visit ends with a disposition — a typed value the operator logs that captures what actually happened. Visit dispositions are part of the broader disposition model (see [Record Model → Disposition](./record-model.md#disposition)). Default options:
 
 | Disposition | Meaning | Downstream behavior |
 |---|---|---|
@@ -31,7 +31,9 @@ Every visit ends with a disposition — the operator logs what happened. Default
 | `booked_meeting` | Booked a formal meeting | Advance to engaged |
 | `no_show` | Didn't visit | Reschedule or skip |
 
-Dispositions are configurable per sequence.
+Dispositions are configurable per sequence — a sequence can extend the default set or restrict it.
+
+Because dispositions are typed, the sequencer branches on them deterministically (`condition: "visit.disposition == talked_to_owner"`). The agent reads the disposition when composing post-visit follow-ups, so the follow-up email referencing "our conversation with the owner" only goes out when `talked_to_owner` was actually logged.
 
 ## Route Planning
 
@@ -66,6 +68,23 @@ The operator sees this as a single ordered list:
           456 Oak Ave, Boise
           ...
 ```
+
+## Per-Stop Briefs
+
+The operator often wants more than a line per stop — a short brief per visit summarizing who to ask for, what to open with, what's known about the business, and what the prior touches were. The tool exposes the raw data; the agent composes the brief.
+
+```
+/outbound write briefs for Thursday's route and email them to me
+```
+
+Under the hood the agent reads the full route payload including enrichment, contacts, and prior touch history:
+
+```
+agent-outbound route show boise-plumbers --date 2026-04-21 \
+  --include enrichment,contacts,prior-touches
+```
+
+Then composes a brief per stop — referencing the owner name from `website-scrape`, the hiring summary, the mail piece that landed, the workflow tags — and emails it to the operator, drops it in a folder, or renders it in chat. This is the pattern for most "write me X about Y" asks: the tool provides the data, the agent provides the narrative. See [Data Access](./data-access.md).
 
 ## Daily Visit Flow
 
@@ -106,8 +125,9 @@ Daily visit capacity is a real constraint. The tool caps visits per day at a con
 Territory can be further constrained:
 
 - A home base and max drive radius
-- Preferred visit days (e.g., Tuesday–Thursday only)
 - Excluded ZIP codes
+
+Which days visits are allowed at all is controlled by the sequence's `working_days` config — see [Sequencing → Working Days](./sequencing.md#working-days). The common case for SMB outbound is excluding Sunday; many operators also exclude Monday mornings.
 
 ## Gating on Other Steps
 

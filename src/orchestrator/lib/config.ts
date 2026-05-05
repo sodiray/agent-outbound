@@ -193,6 +193,26 @@ export const applyConfigChange = (config, change) => {
     return setAtPath(next, `channels.${channel}`, deepMergeConfig(current, change.patch || {}));
   }
 
+  if (op === 'set_sequence') {
+    const sequence = String(change?.sequence || 'default');
+    const current = next?.sequences?.[sequence] || { steps: [] };
+    return setAtPath(next, `sequences.${sequence}`, deepMergeConfig(current, change.patch || {}));
+  }
+
+  if (op === 'set_template') {
+    const template = String(change?.template || '').trim();
+    if (!template) return next;
+    const current = next?.templates?.[template] || { id: template, versions: [] };
+    const patch = deepMergeConfig(current, change.patch || {});
+    if (!patch.id) patch.id = template;
+    return setAtPath(next, `templates.${template}`, patch);
+  }
+
+  if (op === 'set_budget') {
+    const current = next?.budgets || {};
+    return setAtPath(next, 'budgets', deepMergeConfig(current, change.patch || {}));
+  }
+
   if (op === 'set_territory') {
     const current = next?.list?.territory || {};
     return setAtPath(next, 'list.territory', deepMergeConfig(current, change.patch || {}));

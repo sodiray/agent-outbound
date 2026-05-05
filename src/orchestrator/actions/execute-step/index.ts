@@ -5,6 +5,7 @@ import { ExecuteStepResultSchema } from './schema.js';
 import { generateObjectWithTools } from '../../runtime/llm.js';
 import { readPromptFileIfAny, renderPromptTemplate } from '../shared.js';
 import type { ToolCatalog } from '../../runtime/tools.js';
+import type { ActionRole } from '../../runtime/models.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
@@ -64,6 +65,8 @@ export const executeStepAction = async ({
   context = {},
   outputSchema,
   toolCatalog,
+  aiConfig = {},
+  role = 'research',
 }: {
   mcp: Client;
   listDir: string;
@@ -74,6 +77,8 @@ export const executeStepAction = async ({
   context?: any;
   outputSchema?: z.ZodTypeAny;
   toolCatalog?: ToolCatalog;
+  aiConfig?: any;
+  role?: ActionRole;
 }) => {
   const promptFileBody = readPromptFileIfAny({ listDir, promptFile: stepConfig?.prompt_file });
   const systemPrompt = renderPromptTemplate({
@@ -97,7 +102,9 @@ export const executeStepAction = async ({
     const result = await generateObjectWithTools({
       mcp,
       task: 'execute-step',
-      model: stepConfig?.model || 'sonnet',
+      model: stepConfig?.model,
+      role,
+      aiConfig,
       schema: buildExecuteStepResultSchema(outputSchema),
       prompt: userPrompt,
       systemPrompt,
@@ -110,6 +117,8 @@ export const executeStepAction = async ({
     return {
       ...normalizeResultObject(result.object, outputSchema),
       usage: result.usage,
+      model: result.model,
+      provider: result.provider,
     };
   } catch (error) {
     const detail = String((error as any)?.message || error);

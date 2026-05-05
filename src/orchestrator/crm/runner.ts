@@ -6,6 +6,7 @@ import { recordCostEvent } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { assertToolSpecAvailable, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
+import { assertPhaseModelReferences } from '../lib/model-validation.js';
 
 const stableHash = (value: any) => createHash('sha256').update(JSON.stringify(value || {})).digest('hex');
 
@@ -43,6 +44,7 @@ const syncSnapshot = ({ record, contacts, config }: { record: any; contacts: any
 export const runCrmSync = async ({ listDir, where = "1=1", limit = 200 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
+  assertPhaseModelReferences({ config, phase: 'crm' });
   const crmConfig = config?.crm || {};
 
   const db = openListDb({ listDir, readonly: false });
@@ -80,13 +82,15 @@ export const runCrmSync = async ({ listDir, where = "1=1", limit = 200 }) => {
         },
         crmConfig,
         toolCatalog,
+        aiConfig: config?.ai || {},
       });
       recordCostEvent({
         db,
         listDir,
         recordId,
         stepId: 'crm:sync',
-        model: 'sonnet',
+        model: String((result as any)?.model || ''),
+        provider: String((result as any)?.provider || ''),
         usage: result.usage,
       });
 

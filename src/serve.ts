@@ -4,12 +4,22 @@ import { createConnection } from 'node:net';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import {
+  aiUsageCommand,
   configAuthorCommand,
+  configDiffCommand,
   configReadCommand,
   configUpdateCommand,
+  configValidateCommand,
   crmSyncCommand,
   dashboardCommand,
+  describeCommand,
+  draftsApproveCommand,
+  draftsEditCommand,
+  draftsListCommand,
+  draftsRejectCommand,
+  draftsShowCommand,
   enrichCommand,
+  exportCommand,
   followupSendCommand,
   launchDraftCommand,
   launchSendCommand,
@@ -17,10 +27,23 @@ import {
   listInfoCommand,
   listsCommand,
   logCommand,
+  modelsAddCommand,
+  modelsListCommand,
+  modelsRefreshCommand,
+  modelsRemoveCommand,
+  pipelineShowCommand,
+  queryCommand,
   refreshToolsCommand,
   reconcileCommand,
+  recordRevertScoreCommand,
+  recordRevertSequenceCommand,
+  recordRevertStepCommand,
+  recordShowCommand,
   removeCommand,
+  repliesShowCommand,
+  routeShowCommand,
   runCommand,
+  schemaCommand,
   suppressCommand,
   forgetCommand,
   scoreCommand,
@@ -28,7 +51,17 @@ import {
   sequenceStatusCommand,
   sourceCommand,
   sourceMoreCommand,
+  snapshotCreateCommand,
+  snapshotDeleteCommand,
+  snapshotListCommand,
+  snapshotRestoreCommand,
+  templatesCreateCommand,
+  templatesListCommand,
+  templatesShowCommand,
+  templatesUpdateCommand,
+  usageCommand,
   visitsTodayCommand,
+  viewsSaveCommand,
   routePlanCommand,
 } from './commands/index.js';
 import { ensureListDirs, getServePidPath, getServePortPath, resolveListDir } from './orchestrator/runtime/paths.js';
@@ -37,17 +70,36 @@ import { openGlobalSuppressionDb, openListDb } from './orchestrator/runtime/db.j
 import { closeMcpClient, getMcpClient } from './orchestrator/runtime/mcp.js';
 import { startPollingScheduler, type PollingSchedulerHandle } from './orchestrator/runtime/polling.js';
 import { readConfig } from './orchestrator/lib/config.js';
+import { failureEnvelope, successEnvelope, toStructuredError } from './orchestrator/runtime/contract.js';
+import { claimIdempotency, completeIdempotency, failIdempotency, getIdempotencyRecord } from './orchestrator/runtime/idempotency.js';
 
 const app = new Hono();
 let activeListDir = '';
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 const ACTIONS: Record<string, any> = {
+  describe: describeCommand,
+  query: queryCommand,
+  schema: schemaCommand,
+  export: exportCommand,
+  views_save: viewsSaveCommand,
+  record_show: recordShowCommand,
+  pipeline_show: pipelineShowCommand,
+  route_show: routeShowCommand,
+  replies_show: repliesShowCommand,
+  ai_usage: aiUsageCommand,
+  usage: usageCommand,
   list_create: listCreateCommand,
   list_info: listInfoCommand,
   lists: listsCommand,
+  models_list: modelsListCommand,
+  models_add: modelsAddCommand,
+  models_remove: modelsRemoveCommand,
+  models_refresh: modelsRefreshCommand,
   config_read: configReadCommand,
   config_update: configUpdateCommand,
+  config_validate: configValidateCommand,
+  config_diff: configDiffCommand,
   config_author: configAuthorCommand,
   refresh_tools: refreshToolsCommand,
   source: sourceCommand,
@@ -65,11 +117,64 @@ const ACTIONS: Record<string, any> = {
   dashboard: dashboardCommand,
   visits_today: visitsTodayCommand,
   route_plan: routePlanCommand,
+  drafts_list: draftsListCommand,
+  drafts_show: draftsShowCommand,
+  drafts_approve: draftsApproveCommand,
+  drafts_reject: draftsRejectCommand,
+  drafts_edit: draftsEditCommand,
+  templates_list: templatesListCommand,
+  templates_show: templatesShowCommand,
+  templates_create: templatesCreateCommand,
+  templates_update: templatesUpdateCommand,
+  snapshot_create: snapshotCreateCommand,
+  snapshot_list: snapshotListCommand,
+  snapshot_restore: snapshotRestoreCommand,
+  snapshot_delete: snapshotDeleteCommand,
+  record_revert: recordRevertStepCommand,
+  record_revert_score: recordRevertScoreCommand,
+  record_revert_sequence: recordRevertSequenceCommand,
   crm_sync: crmSyncCommand,
   reconcile: reconcileCommand,
   suppress: suppressCommand,
   forget: forgetCommand,
 };
+
+const MUTATING_ACTIONS = new Set([
+  'list_create',
+  'models_add',
+  'models_remove',
+  'models_refresh',
+  'config_update',
+  'config_author',
+  'refresh_tools',
+  'source',
+  'source_more',
+  'remove',
+  'enrich',
+  'score',
+  'run',
+  'sequence_run',
+  'launch_draft',
+  'launch_send',
+  'followup_send',
+  'log',
+  'route_plan',
+  'drafts_approve',
+  'drafts_reject',
+  'drafts_edit',
+  'templates_create',
+  'templates_update',
+  'snapshot_create',
+  'snapshot_restore',
+  'snapshot_delete',
+  'record_revert',
+  'record_revert_score',
+  'record_revert_sequence',
+  'crm_sync',
+  'reconcile',
+  'suppress',
+  'forget',
+]);
 
 const nowIso = () => new Date().toISOString();
 
@@ -79,16 +184,107 @@ app.get('/v1/health', (c) => c.json({ status: 'ok', started_at: nowIso() }));
 const handleAction = async (c: any) => {
   const action = String(c.req.param('action') || '').trim();
   const fn = ACTIONS[action];
+  let payload: any = {};
   if (!fn) {
-    return c.json({ error: `Unknown action: ${action}`, available: Object.keys(ACTIONS) }, 404);
+    return c.json(failureEnvelope({
+      command: action || 'unknown',
+      error: {
+        code: 'NOT_FOUND',
+        message: `Unknown action: ${action}`,
+        retryable: false,
+        hint: 'Call describe to list available commands.',
+        fields: { available: Object.keys(ACTIONS) },
+      },
+    }), 404);
   }
 
   try {
-    const payload = await c.req.json().catch(() => ({}));
+    payload = await c.req.json().catch(() => ({}));
+    const idemKey = String(payload?.idem_key || '').trim();
+    const hasList = String(payload?.list || '').trim();
+    const mutating = MUTATING_ACTIONS.has(action);
+    let idemScope = '';
+    let idemDb: any = null;
+
+    if (mutating && idemKey && hasList) {
+      const listDir = resolveListDir(hasList);
+      idemScope = `command:${action}`;
+      idemDb = openListDb({ listDir, readonly: false });
+      const existing = getIdempotencyRecord({ db: idemDb, idemKey, scope: idemScope });
+      if (existing?.status === 'sent') {
+        let prior: any = {};
+        try { prior = JSON.parse(String(existing?.payload_json || '{}')); } catch { prior = {}; }
+        if (idemDb) idemDb.close();
+        return c.json(successEnvelope({
+          command: action,
+          list: hasList,
+          result: prior?.result ?? {},
+          idemKey,
+          alreadyDone: true,
+        }));
+      }
+      if (existing?.status === 'pending') {
+        if (idemDb) idemDb.close();
+        return c.json(failureEnvelope({
+          command: action,
+          list: hasList,
+          error: {
+            code: 'IDEMPOTENCY_KEY_CONFLICT',
+            message: `Idempotency key is already pending for ${action}.`,
+            retryable: true,
+            hint: 'Retry later or use a new --idem-key.',
+            fields: { idem_key: idemKey, action },
+          },
+        }), 409);
+      }
+      claimIdempotency({
+        db: idemDb,
+        idemKey,
+        scope: idemScope,
+        payload: { action, requested_at: nowIso() },
+      });
+    }
+
     const result = await fn(payload || {});
-    return c.json({ ok: true, result });
+    if (idemDb && idemKey) {
+      completeIdempotency({
+        db: idemDb,
+        idemKey,
+        scope: idemScope,
+        payload: { result, action, completed_at: nowIso() },
+      });
+      idemDb.close();
+    }
+    return c.json(successEnvelope({
+      command: action,
+      list: String((payload || {}).list || ''),
+      result,
+      idemKey: String(payload?.idem_key || ''),
+    }));
   } catch (error) {
-    return c.json({ ok: false, error: String((error as any)?.message || error) }, 500);
+    try {
+      const idemKey = String(payload?.idem_key || '').trim();
+      const hasList = String(payload?.list || '').trim();
+      if (MUTATING_ACTIONS.has(action) && idemKey && hasList) {
+        const listDir = resolveListDir(hasList);
+        const scope = `command:${action}`;
+        const idemDb = openListDb({ listDir, readonly: false });
+        failIdempotency({
+          db: idemDb,
+          idemKey,
+          scope,
+          payload: { action, error: String((error as any)?.message || error), failed_at: nowIso() },
+        });
+        idemDb.close();
+      }
+    } catch {
+      // ignore idempotency cleanup failures
+    }
+    return c.json(failureEnvelope({
+      command: action,
+      list: String((payload || {}).list || ''),
+      error: toStructuredError(error),
+    }), 500);
   }
 };
 app.post('/actions/:action', handleAction);

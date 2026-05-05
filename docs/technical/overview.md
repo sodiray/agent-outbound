@@ -83,9 +83,9 @@ The main Claude agent prefers HTTP if `serve` is running, otherwise falls back t
 - **Every action has a Zod schema.** `generateObject` validates model output at the SDK boundary; invalid output is a typed error, not a parsing surprise.
 - **Tools are pinned per step.** Each step's config declares exactly which Composio toolkits and action slugs it needs. Tool context stays small, model performance stays high.
 - **Capability-described prompts.** Prompts describe the job; config declares the tool. Providers are swappable without prompt or code changes.
-- **Model routing is per step.** Haiku for evaluation and classification, Sonnet for research and tool-heavy steps, Opus for copywriting.
+- **Model and provider choice are per step.** Every LLM-driven step pins a `provider/model` ID (e.g. `anthropic/claude-sonnet-4-6`, `deepinfra/meta-llama/Meta-Llama-3.1-70B-Instruct`). Anthropic and DeepInfra are first-party. Top-level defaults cover the common case; per-step overrides let the operator spend where it matters. See `runtime.md § Model Providers`.
 - **Composio-only for external work.** No custom API clients. Swapping a provider is a config change.
-- **AI-driven deduplication.** Identity fields embedded via `all-MiniLM-L6-v2` (`@xenova/transformers`, in-process), stored as BLOBs in SQLite, similarity via dot product, confirmed by Haiku-class model. Duplicates linked, not deleted.
+- **AI-driven deduplication.** Identity fields embedded via `all-MiniLM-L6-v2` (`@xenova/transformers`, in-process), stored as BLOBs in SQLite, similarity via dot product, confirmed by a fast evaluation-tier model. Duplicates linked, not deleted.
 - **Deterministic DB writes.** AI SDK calls return typed output; only orchestrator code writes to SQLite. AI never has a "write to SQLite" tool.
 - **The CRM is the external system of record.** The tool mirrors state into the operator's configured CRM; it does not duplicate the CRM's role.
 - **Cross-step coordination is first-class.** Sequence steps gate on other steps' state (mail delivered, email replied, visit completed). Steps are generic — no hardcoded step-type enum.
@@ -120,7 +120,8 @@ agent-outbound/
       runtime/
         db.ts               # SQLite client + single authoritative SCHEMA; the only module that runs SQL
         mcp.ts              # Composio consumer MCP client + tool loader
-        models.ts           # model router (opus/sonnet/haiku)
+        providers/          # one module per LLM provider (anthropic, deepinfra, …)
+        models.ts           # resolves a step's model (provider/model) against top-level defaults
         prompts.ts          # prompt rendering (merge-field resolution)
         activity.ts         # activity event emitter
         idempotency.ts      # destructive-action markers

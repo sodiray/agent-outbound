@@ -4,7 +4,7 @@ import { generateObjectWithTools } from '../../runtime/llm.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
-export const evaluateConditionAction = async ({ conditionText, row, stepOutput }) => {
+export const evaluateConditionAction = async ({ conditionText, row, stepOutput, model = '', aiConfig = {} }) => {
   const ctx = { ...(row || {}), ...(stepOutput || {}) };
 
   const prompt = promptTemplate
@@ -22,7 +22,9 @@ export const evaluateConditionAction = async ({ conditionText, row, stepOutput }
   try {
     const result = await generateObjectWithTools({
       task: 'evaluate-condition',
-      model: 'haiku',
+      model,
+      role: 'evaluation',
+      aiConfig,
       schema: ConditionResultSchema,
       prompt: userPrompt,
       systemPrompt: prompt,
@@ -33,6 +35,8 @@ export const evaluateConditionAction = async ({ conditionText, row, stepOutput }
     return {
       ...ConditionResultSchema.parse(result.object),
       usage: result.usage,
+      model: result.model,
+      provider: result.provider,
     };
   } catch (error) {
     return {

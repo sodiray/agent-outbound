@@ -22,6 +22,17 @@ import { generateObjectWithTools } from '../runtime/llm.js';
 import { assertToolSpecAvailable } from '../runtime/mcp.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
+import {
+  addIsoDays,
+  applyWorkingDaysFilter,
+  computeNextScheduledAction,
+  resolveWorkingDayConfig,
+  toIsoDate,
+} from '../lib/working-days.js';
+import { evaluateStructuredCondition } from '../lib/sequence-conditions.js';
+import { resolveStepTemplate } from '../lib/templates.js';
+import { isBudgetExceededError } from '../runtime/contract.js';
+import { assertPhaseModelReferences } from '../lib/model-validation.js';
 
 const parseExtra = (value) => {
   try {
@@ -75,6 +86,43 @@ const getStepDay = (step) => {
   return Number(step?.day || 0);
 };
 
+const toLaunchTimestamp = (isoDate) => `${isoDate}T00:00:00.000Z`;
+
+const advanceAfterCompletedStep = ({ record, completedStepNumber, steps, timing, today, lastError = '' }) => {
+  const launchTimestamp = String(record?.launched_at || '').trim() || toLaunchTimestamp(today);
+  const launchedAtDate = toIsoDate(launchTimestamp) || today;
+  const advancement = computeNextScheduledAction({
+    steps,
+    completedStepNumber,
+    launchedAtDate,
+    workingDays: timing.workingDays,
+    policy: timing.policy,
+  });
+
+  return {
+    row: {
+      ...record,
+      launched_at: launchTimestamp,
+      sequence_step: advancement.sequenceStep,
+      next_action_date: advancement.nextActionDate,
+      sequence_status: advancement.completed ? 'completed' : 'active',
+      last_error: lastError,
+    },
+    autoSkippedSteps: advancement.skippedStepNumbers,
+  };
+};
+
+const getLaunchDecision = ({ sequence, firstStep, today }) => {
+  const timing = resolveWorkingDayConfig(sequence || {});
+  const launchBaseDate = addIsoDays(today, getStepDay(firstStep));
+  const filtered = applyWorkingDaysFilter({
+    isoDate: launchBaseDate,
+    workingDays: timing.workingDays,
+    policy: timing.policy,
+  });
+  return { timing, launchBaseDate, filtered };
+};
+
 const StepIntentSchema = z.object({
   uses_email: z.boolean().default(false),
   uses_mail: z.boolean().default(false),
@@ -85,7 +133,7 @@ const StepIntentSchema = z.object({
   reason: z.string().default(''),
 });
 
-const classifyStepIntent = async ({ db, listDir, step, cache }: any) => {
+const classifyStepIntent = async ({ db, listDir, step, cache, aiConfig = {}, model = '' }: any) => {
   const key = String(step?.id || step?.description || '').trim() || JSON.stringify(step || {});
   if (cache.has(key)) return cache.get(key);
 
@@ -107,7 +155,9 @@ const classifyStepIntent = async ({ db, listDir, step, cache }: any) => {
   try {
     const result = await generateObjectWithTools({
       task: 'sequence-step-intent',
-      model: 'haiku',
+      model,
+      role: 'evaluation',
+      aiConfig,
       schema: StepIntentSchema,
       prompt,
       toolSpec: {},
@@ -117,7 +167,8 @@ const classifyStepIntent = async ({ db, listDir, step, cache }: any) => {
       db,
       listDir,
       stepId: `sequence:step_intent:${step?.id || 'step'}`,
-      model: 'haiku',
+      model: String((result as any)?.model || ''),
+      provider: String((result as any)?.provider || ''),
       usage: result.usage,
     });
     const parsed = StepIntentSchema.parse(result.object);
@@ -148,7 +199,7 @@ const resolveDueStep = ({ record, steps, today }) => {
   return { step: null, stepNumber: next };
 };
 
-const planVisitRoutesIfNeeded = async ({ mcp, db, listDir, config, visitCandidates, today }: any) => {
+const planVisitRoutesIfNeeded = async ({ mcp, db, listDir, config, visitCandidates, today, aiConfig = {} }: any) => {
   const visits = (visitCandidates || []).filter((row) => row);
   if (visits.length === 0) return { routes_created: 0, stops: 0 };
   const toolSpec = config?.channels?.visit?.tool || {};
@@ -169,8 +220,17 @@ const planVisitRoutesIfNeeded = async ({ mcp, db, listDir, config, visitCandidat
     stops: visits,
     toolSpec,
     toolCatalog: readToolCatalog(listDir),
+    aiConfig,
+    model: config?.channels?.visit?.model || '',
   });
-  recordCostEvent({ db, listDir, stepId: 'sequence:plan_route', model: 'sonnet', usage: route.usage });
+  recordCostEvent({
+    db,
+    listDir,
+    stepId: 'sequence:plan_route',
+    model: String((route as any)?.model || ''),
+    provider: String((route as any)?.provider || ''),
+    usage: route.usage,
+  });
 
   const routeId = `route_${today}_${randomUUID().slice(0, 8)}`;
 
@@ -306,11 +366,34 @@ const checkSuppressionGate = ({ intent, record, primaryContact, extra, globalSup
   return { blocked: false, reason: '' };
 };
 
-const evaluateStepCondition = async ({ db, listDir, record, conditionText, stepKey }) => {
+const evaluateStepCondition = async ({ db, listDir, record, conditionText, stepKey, aiConfig = {}, model = '' }) => {
+  const structured = evaluateStructuredCondition({ conditionText, record });
+  if (structured.matched !== null) {
+    return {
+      outcome: structured.matched ? 'pass' : 'skip',
+      reason: structured.reason || '',
+      source: structured.source,
+    };
+  }
+
   const recordId = getRecordRowId(record);
   const row = { ...record, ...parseExtra(record.extra_json) };
-  const llm = await evaluateConditionAction({ conditionText, row, stepOutput: {} });
-  recordCostEvent({ db, listDir, recordId, stepId: `sequence:condition:${stepKey}`, model: 'haiku', usage: llm.usage });
+  const llm = await evaluateConditionAction({
+    conditionText,
+    row,
+    stepOutput: {},
+    aiConfig,
+    model,
+  });
+  recordCostEvent({
+    db,
+    listDir,
+    recordId,
+    stepId: `sequence:condition:${stepKey}`,
+    model: String((llm as any)?.model || ''),
+    provider: String((llm as any)?.provider || ''),
+    usage: llm.usage,
+  });
 
   return {
     outcome: llm.defer ? 'defer' : (llm.passed ? 'pass' : 'skip'),
@@ -319,7 +402,7 @@ const evaluateStepCondition = async ({ db, listDir, record, conditionText, stepK
   };
 };
 
-const applyDeferPolicy = ({ record, step, stepNumber, today }) => {
+const applyDeferPolicy = ({ record, step, stepNumber, today, steps, timing }) => {
   const extra = parseExtra(record.extra_json);
   if (!extra.defer_state) extra.defer_state = {};
   const key = String(step?.id || stepNumber);
@@ -341,11 +424,14 @@ const applyDeferPolicy = ({ record, step, stepNumber, today }) => {
     };
 
     return {
-      ...record,
-      extra_json: extra,
-      next_action_date: addDays(today, 1),
-      sequence_status: 'active',
-      last_error: `Deferred by condition until ${deadline}`,
+      row: {
+        ...record,
+        extra_json: extra,
+        next_action_date: addDays(today, 1),
+        sequence_status: 'active',
+        last_error: `Deferred by condition until ${deadline}`,
+      },
+      autoSkippedSteps: [],
     };
   }
 
@@ -353,51 +439,71 @@ const applyDeferPolicy = ({ record, step, stepNumber, today }) => {
   if (policy === 'fail_record') {
     extra.defer_state[key] = { ...extra.defer_state[key], timed_out_at: today, resolved: 'failed' };
     return {
-      ...record,
-      extra_json: extra,
-      sequence_status: 'blocked',
-      next_action_date: '',
-      last_error: `Deferred condition timed out (${key}).`,
+      row: {
+        ...record,
+        extra_json: extra,
+        sequence_status: 'blocked',
+        next_action_date: '',
+        last_error: `Deferred condition timed out (${key}).`,
+      },
+      autoSkippedSteps: [],
     };
   }
 
   if (policy === 'mark_blocked') {
     extra.defer_state[key] = { ...extra.defer_state[key], timed_out_at: today, resolved: 'blocked' };
     return {
-      ...record,
-      extra_json: extra,
-      sequence_status: 'blocked',
-      next_action_date: '',
-      last_error: `Condition deferred timeout -> blocked (${key}).`,
+      row: {
+        ...record,
+        extra_json: extra,
+        sequence_status: 'blocked',
+        next_action_date: '',
+        last_error: `Condition deferred timeout -> blocked (${key}).`,
+      },
+      autoSkippedSteps: [],
     };
   }
 
   // skip_step default
   extra.defer_state[key] = { ...extra.defer_state[key], timed_out_at: today, resolved: 'skipped' };
+  const advanced = advanceAfterCompletedStep({
+    record,
+    completedStepNumber: stepNumber,
+    steps,
+    timing,
+    today,
+    lastError: `Condition timeout, step skipped (${key}).`,
+  });
   return {
-    ...record,
-    extra_json: extra,
-    sequence_step: stepNumber,
-    next_action_date: addDays(today, 1),
-    sequence_status: 'active',
-    last_error: `Condition timeout, step skipped (${key}).`,
+    row: {
+      ...advanced.row,
+      extra_json: extra,
+    },
+    autoSkippedSteps: advanced.autoSkippedSteps,
   };
 };
 
-export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun = false }) => {
+export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun = false, sample = 0 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
+  assertPhaseModelReferences({ config, phase: 'sequence' });
 
   const sequence = getSequence(config, sequenceName);
   const steps = Array.isArray(sequence?.steps) ? sequence.steps : [];
+  const timing = resolveWorkingDayConfig(sequence);
 
   const db = openListDb({ listDir, readonly: false });
   const globalSuppressionDb = openGlobalSuppressionDb({ readonly: false });
-  const mcp = await getMcpClient();
-  const toolCatalog = readToolCatalog(listDir);
+  const mcp = dryRun ? null : await getMcpClient();
+  const toolCatalog = dryRun ? {} : readToolCatalog(listDir);
 
   const today = todayIsoDate();
-  const records = db.prepare('SELECT * FROM records').all();
+  const sampleLimit = Math.max(0, Number(sample || 0));
+  const records = db.prepare(`
+    SELECT * FROM records
+    ORDER BY updated_at DESC
+    ${sampleLimit > 0 ? `LIMIT ${sampleLimit}` : ''}
+  `).all();
 
   const summary = {
     records: records.length,
@@ -407,6 +513,8 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
     opted_out: 0,
     executed: 0,
     deferred: 0,
+    drafted: 0,
+    awaiting_approval: 0,
     skipped: 0,
     failed: 0,
     routes_created: 0,
@@ -417,6 +525,25 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
   emitActivity({ event: 'phase_start', phase: 'sequence', rows: records.length, steps: steps.length });
 
   try {
+    if (dryRun) {
+      let due = 0;
+      let completed = 0;
+      for (const record of records) {
+        if (record.sequence_status === 'completed' || record.sequence_status === 'opted_out') continue;
+        const { step } = resolveDueStep({ record, steps, today });
+        if (step) due += 1;
+        if (Number(record.sequence_step || 0) >= steps.length && steps.length > 0) completed += 1;
+      }
+      emitActivity({ event: 'phase_complete', phase: 'sequence', processed: 0, skipped: records.length, failed: 0 });
+      return {
+        ...summary,
+        dry_run: true,
+        due_records: due,
+        completed_records: completed,
+        note: 'Dry-run executes no writes and does not dispatch routes/messages.',
+      };
+    }
+
     const stepIntentCache = new Map();
     const visitCandidates = [];
     const pendingVisitExecutions = [];
@@ -434,7 +561,11 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
 
     await runDeliveryPoll({ mcp, db, listDir, config });
 
-    const freshRecords = db.prepare('SELECT * FROM records').all();
+    const freshRecords = db.prepare(`
+      SELECT * FROM records
+      ORDER BY updated_at DESC
+      ${sampleLimit > 0 ? `LIMIT ${sampleLimit}` : ''}
+    `).all();
 
     await mapWithConcurrency<any, void>(freshRecords as any[], async (record) => {
       const recordId = getRecordRowId(record);
@@ -457,6 +588,7 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
         listDir,
         step,
         cache: stepIntentCache,
+        aiConfig: config?.ai || {},
       });
 
       const gate = checkSuppressionGate({
@@ -485,27 +617,31 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
           record,
           conditionText: step.condition,
           stepKey: step.id || stepNumber,
+          aiConfig: config?.ai || {},
         });
 
         if (decision.outcome === 'skip') {
+          const advanced = advanceAfterCompletedStep({
+            record,
+            completedStepNumber: stepNumber,
+            steps,
+            timing,
+            today,
+            lastError: `Condition skipped step: ${decision.reason}`,
+          });
           upsertRecord({
             db,
-            row: {
-              ...record,
-              sequence_step: stepNumber,
-              next_action_date: addDays(today, 1),
-              sequence_status: 'active',
-              last_error: `Condition skipped step: ${decision.reason}`,
-            },
+            row: advanced.row,
           });
-          summary.skipped += 1;
+          summary.skipped += 1 + advanced.autoSkippedSteps.length;
           return;
         }
 
         if (decision.outcome === 'defer') {
-          const deferredRecord = applyDeferPolicy({ record, step, stepNumber, today });
-          upsertRecord({ db, row: deferredRecord });
+          const deferred = applyDeferPolicy({ record, step, stepNumber, today, steps, timing });
+          upsertRecord({ db, row: deferred.row });
           summary.deferred += 1;
+          summary.skipped += deferred.autoSkippedSteps.length;
           return;
         }
       }
@@ -528,6 +664,23 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
       }
 
       const stepDescriptionText = String(step?.description || '').toLowerCase();
+      const templateResolved = resolveStepTemplate({ config, step, record }) || null;
+      const executableStep = templateResolved
+        ? {
+          ...step,
+          description: templateResolved.rendered_description || String(step?.description || ''),
+          config: {
+            ...(step?.config || {}),
+            template_context: {
+              template_id: templateResolved.template_id,
+              template_version: templateResolved.template_version,
+              subject: templateResolved.subject,
+              body: templateResolved.body,
+              variables: templateResolved.variables,
+            },
+          },
+        }
+        : step;
       const channelHint = stepIntent.uses_email
         ? 'email'
         : (stepIntent.uses_mail
@@ -535,6 +688,40 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
           : (stepIntent.uses_phone
             ? ((stepIntent.uses_sms || stepDescriptionText.includes('sms') || stepDescriptionText.includes('text')) ? 'sms' : 'call')
             : 'manual'));
+      let sequenceIntent: 'send' | 'draft' = 'send';
+      if (stepIntent.uses_email && step?.draft_approval_required !== false) {
+        const readyDraft = db.prepare(`
+          SELECT draft_id
+          FROM drafts
+          WHERE row_id = ?
+            AND sequence_name = ?
+            AND step_number = ?
+            AND status = 'ready'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `).get(recordId, sequenceName, stepNumber);
+        const pendingDraft = db.prepare(`
+          SELECT draft_id
+          FROM drafts
+          WHERE row_id = ?
+            AND sequence_name = ?
+            AND step_number = ?
+            AND status = 'pending_approval'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `).get(recordId, sequenceName, stepNumber);
+        if (readyDraft) {
+          sequenceIntent = 'send';
+        } else if (pendingDraft) {
+          summary.awaiting_approval += 1;
+          summary.skipped += 1;
+          upsertRecord({ db, row: { ...record, last_error: 'Awaiting draft approval.' } });
+          return;
+        } else {
+          sequenceIntent = 'draft';
+        }
+      }
+
       const result = await executeChannelStep({
         mcp,
         listDir,
@@ -545,15 +732,20 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
         sequenceName,
         stepNumber,
         step: {
-          ...step,
-          day: getStepDay(step),
+          ...executableStep,
+          day: getStepDay(executableStep),
         },
+        sequence,
+        aiConfig: config?.ai || {},
         dryRun,
+        intent: sequenceIntent,
         channelHint,
       });
 
       if (result.status === 'sent') {
-          summary.executed += 1;
+        if (sequenceIntent === 'draft') summary.drafted += 1;
+        else summary.executed += 1;
+        summary.skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
         emitActivity({ event: 'row_complete', phase: 'sequence', row: record.business_name || recordId, step: step.id || stepNumber });
       } else if (result.status === 'skipped') {
         summary.skipped += 1;
@@ -570,6 +762,7 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
       config,
       visitCandidates,
       today,
+      aiConfig: config?.ai || {},
     });
 
     summary.routes_created = routeSummary.routes_created;
@@ -594,12 +787,15 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
         sequenceName,
         stepNumber: pending.stepNumber,
         step: pending.step,
+        sequence,
+        aiConfig: config?.ai || {},
         dryRun,
         channelHint: pending.channelHint,
       });
 
       if (result.status === 'sent') {
         summary.executed += 1;
+        summary.skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
         emitActivity({
           event: 'row_complete',
           phase: 'sequence',
@@ -648,8 +844,8 @@ export const getSequenceStatus = ({ listDir }) => {
 
     const drafts = db.prepare(`
       SELECT COUNT(*) as count
-      FROM records
-      WHERE email_last_draft_id != '' AND sequence_status IN ('idle', 'active')
+      FROM drafts
+      WHERE status = 'pending_approval'
     `).get();
 
     const replies24h = db.prepare(`
@@ -678,6 +874,7 @@ export const getSequenceStatus = ({ listDir }) => {
 export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 50 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
+  assertPhaseModelReferences({ config, phase: 'sequence' });
 
   const sequence = getSequence(config, sequenceName);
   const firstStep = (sequence.steps || [])[0];
@@ -693,12 +890,13 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
     LIMIT ?
   `).all(Number(limit));
 
-  const summary = { drafted: 0, failed: 0, errors: [] };
+  const summary = { drafted: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
   const launchIntent = await classifyStepIntent({
     db,
     listDir,
     step: firstStep,
     cache: new Map(),
+    aiConfig: config?.ai || {},
   });
   const launchChannelHint = launchIntent.uses_email
     ? 'email'
@@ -706,11 +904,72 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
       ? 'mail'
       : (launchIntent.uses_sms ? 'sms' : (launchIntent.uses_call ? 'call' : (launchIntent.uses_visit ? 'visit' : 'manual'))));
   const launchMode = launchIntent.uses_email ? 'draft' : 'send';
+  const launchToday = todayIsoDate();
 
   try {
     for (const record of records) {
       const recordId = getRecordRowId(record);
       try {
+        if (launchMode !== 'draft') {
+          const launchDecision = getLaunchDecision({ sequence, firstStep, today: launchToday });
+          if ('skip' in launchDecision.filtered) {
+            const advancement = computeNextScheduledAction({
+              steps: sequence.steps || [],
+              completedStepNumber: 1,
+              launchedAtDate: launchDecision.launchBaseDate,
+              workingDays: launchDecision.timing.workingDays,
+              policy: launchDecision.timing.policy,
+            });
+            upsertRecord({
+              db,
+              row: {
+                ...record,
+                sequence_name: sequenceName,
+                sequence_step: advancement.sequenceStep,
+                launched_at: toLaunchTimestamp(launchDecision.launchBaseDate),
+                next_action_date: advancement.nextActionDate,
+                sequence_status: advancement.completed ? 'completed' : 'active',
+                last_error: 'Launch step skipped by non_working_day_policy.',
+              },
+            });
+            summary.skipped += 1 + advancement.skippedStepNumbers.length;
+            continue;
+          }
+
+          if (launchDecision.filtered.date > launchToday) {
+            upsertRecord({
+              db,
+              row: {
+                ...record,
+                sequence_name: sequenceName,
+                next_action_date: launchDecision.filtered.date,
+                sequence_status: 'idle',
+                last_error: `Launch shifted to ${launchDecision.filtered.date} by non_working_day_policy.`,
+              },
+            });
+            summary.scheduled += 1;
+            continue;
+          }
+        }
+
+        const templateResolved = resolveStepTemplate({ config, step: firstStep, record }) || null;
+        const executableStep = templateResolved
+          ? {
+            ...firstStep,
+            description: templateResolved.rendered_description || String(firstStep?.description || ''),
+            config: {
+              ...(firstStep?.config || {}),
+              template_context: {
+                template_id: templateResolved.template_id,
+                template_version: templateResolved.template_version,
+                subject: templateResolved.subject,
+                body: templateResolved.body,
+                variables: templateResolved.variables,
+              },
+            },
+          }
+          : firstStep;
+
         const result = await executeChannelStep({
           mcp,
           listDir,
@@ -721,27 +980,42 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
           sequenceName,
           stepNumber: 1,
           step: {
-            ...firstStep,
-            day: getStepDay(firstStep),
+            ...executableStep,
+            day: getStepDay(executableStep),
             config: {
-              ...(firstStep.config || {}),
+              ...(executableStep.config || {}),
               idempotency: null,
             },
           },
+          sequence,
+          aiConfig: config?.ai || {},
           dryRun: false,
           intent: launchMode,
           channelHint: launchChannelHint,
         });
 
         if (result.status === 'sent') {
-          const latest = db.prepare('SELECT * FROM records WHERE id = ? OR _row_id = ?').get(recordId, recordId);
-          upsertRecord({ db, row: { ...latest, sequence_status: 'idle', sequence_step: 0 } });
+          if (launchMode === 'draft') {
+            const latest = db.prepare('SELECT * FROM records WHERE id = ? OR _row_id = ?').get(recordId, recordId);
+            upsertRecord({
+              db,
+              row: {
+                ...latest,
+                sequence_status: 'idle',
+                sequence_step: 0,
+                next_action_date: '',
+                launched_at: '',
+              },
+            });
+          }
+          summary.skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
           summary.drafted += 1;
         } else {
           summary.failed += 1;
           summary.errors.push({ record_id: recordId, error: result.reason || result.status });
         }
       } catch (error) {
+        if (isBudgetExceededError(error)) throw error;
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: String(error?.message || error) });
       }
@@ -756,6 +1030,7 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
 export const launchSend = async ({ listDir, limit = 50 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
+  assertPhaseModelReferences({ config, phase: 'sequence' });
   const sequence = getSequence(config, 'default');
   const firstStep = (sequence.steps || [])[0];
   if (!firstStep) throw new Error('Default sequence has no step 1 to send.');
@@ -769,6 +1044,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
       listDir,
       step: firstStep,
       cache: new Map(),
+      aiConfig: config?.ai || {},
     });
     const launchChannelHint = launchIntent.uses_email
       ? 'email'
@@ -776,7 +1052,14 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
         ? 'mail'
         : (launchIntent.uses_sms ? 'sms' : (launchIntent.uses_call ? 'call' : (launchIntent.uses_visit ? 'visit' : 'manual'))));
     const launchFilterSql = launchIntent.uses_email
-      ? "email_last_draft_id != '' AND sequence_status = 'idle'"
+      ? `sequence_status = 'idle'
+         AND EXISTS (
+           SELECT 1 FROM drafts d
+           WHERE d.row_id = records._row_id
+             AND d.sequence_name = 'default'
+             AND d.step_number = 1
+             AND d.status = 'ready'
+         )`
       : "sequence_status = 'idle'";
 
     const rows = db.prepare(`
@@ -787,10 +1070,71 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
     `).all(Number(limit));
 
     let sent = 0;
+    let scheduled = 0;
+    let skipped = 0;
     let failed = 0;
     const errorsOut = [];
+    const launchToday = todayIsoDate();
     for (const row of rows) {
       try {
+        const launchDecision = getLaunchDecision({ sequence, firstStep, today: launchToday });
+        if ('skip' in launchDecision.filtered) {
+          const advancement = computeNextScheduledAction({
+            steps: sequence.steps || [],
+            completedStepNumber: 1,
+            launchedAtDate: launchDecision.launchBaseDate,
+            workingDays: launchDecision.timing.workingDays,
+            policy: launchDecision.timing.policy,
+          });
+          upsertRecord({
+            db,
+            row: {
+              ...row,
+              sequence_name: 'default',
+              sequence_step: advancement.sequenceStep,
+              launched_at: toLaunchTimestamp(launchDecision.launchBaseDate),
+              next_action_date: advancement.nextActionDate,
+              sequence_status: advancement.completed ? 'completed' : 'active',
+              last_error: 'Launch step skipped by non_working_day_policy.',
+            },
+          });
+          skipped += 1 + advancement.skippedStepNumbers.length;
+          continue;
+        }
+
+        if (launchDecision.filtered.date > launchToday) {
+          upsertRecord({
+            db,
+            row: {
+              ...row,
+              sequence_name: 'default',
+              next_action_date: launchDecision.filtered.date,
+              sequence_status: 'idle',
+              last_error: `Launch shifted to ${launchDecision.filtered.date} by non_working_day_policy.`,
+            },
+          });
+          scheduled += 1;
+          continue;
+        }
+
+        const templateResolved = resolveStepTemplate({ config, step: firstStep, record: row }) || null;
+        const executableStep = templateResolved
+          ? {
+            ...firstStep,
+            description: templateResolved.rendered_description || String(firstStep?.description || ''),
+            config: {
+              ...(firstStep?.config || {}),
+              template_context: {
+                template_id: templateResolved.template_id,
+                template_version: templateResolved.template_version,
+                subject: templateResolved.subject,
+                body: templateResolved.body,
+                variables: templateResolved.variables,
+              },
+            },
+          }
+          : firstStep;
+
         const result = await executeChannelStep({
           mcp,
           listDir,
@@ -801,9 +1145,11 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
           sequenceName: 'default',
           stepNumber: 1,
           step: {
-            ...firstStep,
-            day: getStepDay(firstStep),
+            ...executableStep,
+            day: getStepDay(executableStep),
           },
+          sequence,
+          aiConfig: config?.ai || {},
           dryRun: false,
           intent: 'send',
           channelHint: launchChannelHint,
@@ -811,17 +1157,19 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
 
         if (result.status === 'sent') {
           sent += 1;
+          skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
         } else {
           failed += 1;
           errorsOut.push({ record_id: getRecordRowId(row), error: result.reason || result.status });
         }
       } catch (error) {
+        if (isBudgetExceededError(error)) throw error;
         failed += 1;
         errorsOut.push({ record_id: getRecordRowId(row), error: String(error?.message || error) });
       }
     }
 
-    return { sent, failed, errors: errorsOut, requested_limit: Number(limit) };
+    return { sent, scheduled, skipped, failed, errors: errorsOut, requested_limit: Number(limit) };
   } finally {
     db.close();
   }
@@ -836,7 +1184,7 @@ export const followupSend = async ({ listDir, limit = 50 }) => {
   };
 };
 
-export const logOutcome = ({ listDir, prospect, action, note = '', transition = '' }) => {
+export const logOutcome = ({ listDir, prospect, action, note = '', transition = '', followUpIn = '' }) => {
   const db = openListDb({ listDir, readonly: false });
   const globalSuppressionDb = openGlobalSuppressionDb({ readonly: false });
   try {
@@ -872,6 +1220,8 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
     const updated = {
       ...row,
       outcome: String(action || ''),
+      disposition_latest: String(action || ''),
+      disposition_follow_up_at: followUpIn ? addDays(new Date().toISOString().slice(0, 10), parseWaitDays(followUpIn)) : String(row.disposition_follow_up_at || ''),
       outcome_notes: [String(row.outcome_notes || ''), `[${new Date().toISOString().slice(0, 10)}] ${action}: ${note}`]
         .filter(Boolean)
         .join('\n'),
@@ -906,7 +1256,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
         channel: 'operator',
         action: 'outcome_logged',
         disposition: String(action || ''),
-        payload: { note, transition },
+        payload: { note, transition, follow_up_in: followUpIn || '' },
         occurred_at: new Date().toISOString(),
       },
     });

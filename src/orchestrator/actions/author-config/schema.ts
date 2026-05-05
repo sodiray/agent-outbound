@@ -1,10 +1,28 @@
 import { z } from 'zod';
 import {
   EnrichStepSchema,
+  ProviderModelSchema,
   SequenceStepSchema,
   SourceFilterSchema,
   SourceSearchSchema,
 } from '../../../schemas/config.js';
+import { NON_WORKING_DAY_POLICY_VALUES, SEQUENCE_WORKING_DAY_VALUES } from '../../lib/working-days.js';
+
+const SequencePatchSchema = z.object({
+  working_days: z.array(z.enum(SEQUENCE_WORKING_DAY_VALUES)).min(1).optional(),
+  non_working_day_policy: z.enum(NON_WORKING_DAY_POLICY_VALUES).optional(),
+}).catchall(z.any()).default({});
+
+const TemplatePatchSchema = z.object({
+  channel_hint: z.string().optional(),
+  versions: z.array(z.object({
+    version: z.coerce.number().int().min(1),
+    subject: z.string().optional(),
+    body: z.string().optional(),
+    variables: z.record(z.any()).optional(),
+    note: z.string().optional(),
+  }).partial()).optional(),
+}).catchall(z.any()).default({});
 
 export const ConfigChangeSchema = z.discriminatedUnion('op', [
   // Add — append to the relevant array
@@ -44,12 +62,26 @@ export const ConfigChangeSchema = z.discriminatedUnion('op', [
     axis: z.enum(['fit', 'trigger']),
     patch: z.object({
       description: z.string().default(''),
-      model: z.enum(['haiku', 'sonnet', 'opus']).default('haiku'),
+      model: ProviderModelSchema.optional(),
     }).partial().default({}),
   }),
   z.object({
     op: z.literal('set_channel'),
     channel: z.enum(['email', 'mail', 'visit', 'sms', 'call']),
+    patch: z.record(z.any()).default({}),
+  }),
+  z.object({
+    op: z.literal('set_sequence'),
+    sequence: z.string().default('default'),
+    patch: SequencePatchSchema,
+  }),
+  z.object({
+    op: z.literal('set_template'),
+    template: z.string(),
+    patch: TemplatePatchSchema,
+  }),
+  z.object({
+    op: z.literal('set_budget'),
     patch: z.record(z.any()).default({}),
   }),
   z.object({ op: z.literal('set_territory'), patch: z.record(z.any()).default({}) }),

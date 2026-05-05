@@ -15,6 +15,8 @@ export const planRouteAction = async ({
   stops,
   toolSpec = {},
   toolCatalog,
+  aiConfig = {},
+  model = '',
 }: {
   mcp: Client;
   routeDate: string;
@@ -22,6 +24,8 @@ export const planRouteAction = async ({
   stops: any[];
   toolSpec?: any;
   toolCatalog?: ToolCatalog;
+  aiConfig?: any;
+  model?: string;
 }) => {
   const hasToolkit = Array.isArray(toolSpec?.toolkits) && toolSpec.toolkits.length > 0;
   const hasTools = Array.isArray(toolSpec?.tools) && toolSpec.tools.length > 0;
@@ -45,7 +49,9 @@ export const planRouteAction = async ({
   const result = await generateObjectWithTools({
     mcp,
     task: 'plan-route',
-    model: 'sonnet',
+    model,
+    role: 'research',
+    aiConfig,
     schema: RoutePlanSchema,
     prompt,
     toolSpec,
@@ -55,5 +61,7 @@ export const planRouteAction = async ({
   return {
     ...RoutePlanSchema.parse(result.object),
     usage: result.usage,
+    model: result.model,
+    provider: result.provider,
   };
 };

@@ -9,6 +9,7 @@ export const getGlobalRoot = () => join(homedir(), '.agent-outbound');
 export const getGlobalEnvPath = () => join(getGlobalRoot(), 'env');
 export const getGlobalSuppressionDbPath = () => join(getGlobalRoot(), 'suppression.db');
 export const getGlobalSettingsPath = () => join(getGlobalRoot(), 'settings.yaml');
+export const getGlobalModelsPath = () => join(getGlobalRoot(), 'models.json');
 
 export const resolveListDir = (listPath) => {
   const raw = String(listPath || '').trim();
@@ -26,6 +27,7 @@ export const getServeDir = (listDir) => join(getInternalDir(listDir), '.serve');
 export const getServePidPath = (listDir) => join(getServeDir(listDir), 'pid');
 export const getServePortPath = (listDir) => join(getServeDir(listDir), 'port');
 export const getLogsDir = (listDir) => join(getInternalDir(listDir), 'logs');
+export const getSnapshotsDir = (listDir) => join(getInternalDir(listDir), 'snapshots');
 export const getSourcingLogPath = (listDir) => join(getLogsDir(listDir), 'sourcing.log');
 export const getComplianceLogPath = (listDir) => join(getLogsDir(listDir), 'compliance.log');
 export const getCrmLogPath = (listDir) => join(getLogsDir(listDir), 'crm.log');
@@ -41,6 +43,7 @@ export const ensureListDirs = (listDir) => {
   mkdirSync(getActivityDir(listDir), { recursive: true });
   mkdirSync(getServeDir(listDir), { recursive: true });
   mkdirSync(getLogsDir(listDir), { recursive: true });
+  mkdirSync(getSnapshotsDir(listDir), { recursive: true });
 };
 
 export const resolveListPath = ({ listDir, filePath, allowRelative = false }) => {
@@ -79,6 +82,13 @@ export const ensureListScaffold = ({ listDir, description = '' }) => {
       '    description: ""',
       '  priority:',
       '    weight: { fit: 0.6, trigger: 0.4 }',
+      '',
+      'ai:',
+      '  default_model: anthropic/claude-sonnet-4-6',
+      '  defaults:',
+      '    evaluation: anthropic/claude-haiku-4-5-20251001',
+      '    copywriting: anthropic/claude-opus-4-6',
+      '    research: anthropic/claude-sonnet-4-6',
       '',
       'sequences:',
       '  default:',

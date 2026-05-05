@@ -9,6 +9,7 @@ Deep reference for the in-process runtime. Read `architecture.md` first for the 
   "dependencies": {
     "ai": "^6.0.0",
     "@ai-sdk/anthropic": "^2.0.0",
+    "@ai-sdk/deepinfra": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "zod": "^3.23.0",
     "better-sqlite3": "^11.0.0",
@@ -16,6 +17,8 @@ Deep reference for the in-process runtime. Read `architecture.md` first for the 
   }
 }
 ```
+
+One AI SDK provider package per supported LLM provider. Adding a new provider is a new dependency plus a module under `src/orchestrator/runtime/providers/`. See `§ Model Providers` below.
 
 `@modelcontextprotocol/sdk` is the stable MCP client used to reach Composio's consumer MCP server. **There is no `@composio/core` or `@composio/vercel` dependency** — those libraries target Composio's developer API, which this tool does not use. `hono` is used only in `serve` mode for the HTTP surface.
 
@@ -60,8 +63,8 @@ One-time operator setup. `init` captures keys, validates them, and reports what'
 ```
 $ agent-outbound init
 
-Step 1 of 2 — Composio
-----------------------
+Step 1 — Composio
+-----------------
 Composio consumer API key: ●●●●●●●●●●●●●●●●   (masked)
 Validating Composio key... ok.
 
@@ -72,13 +75,20 @@ Toolkits currently connected (5):
   - FIRECRAWL
   - GOOGLEMAPS
 
-Step 2 of 2 — Anthropic
------------------------
+Step 2 — LLM providers
+----------------------
+Configure Anthropic? [Y/n] Y
 Anthropic API key: ●●●●●●●●●●●●●●●●
 Validating Anthropic key... ok. (9 models available)
 
+Configure DeepInfra? [Y/n] Y
+DeepInfra API key: ●●●●●●●●●●●●●●●●
+Validating DeepInfra key... ok. (94 models available)
+
 Setup complete.
 ```
+
+The LLM-provider step iterates every registered provider and asks whether to configure it; at least one must be configured. Each key is validated by calling that provider's model-list endpoint (Anthropic: `GET /v1/models`; DeepInfra: `GET /v1/openai/models` with `Authorization: Bearer`) and checking for a 2xx.
 
 ### Non-interactive (flags, for CI or scripted setup)
 
@@ -86,17 +96,18 @@ Setup complete.
 agent-outbound init \
   --composio-api-key <ck_key> \
   --anthropic-api-key <sk_key> \
+  --deepinfra-api-key <di_key> \
   --non-interactive
 ```
 
-Missing keys in non-interactive mode are a hard error.
+A generic `--provider-key <id>=<key>` flag is also accepted (e.g. `--provider-key deepinfra=<di_key>`) so adding a provider doesn't churn the CLI surface. Missing Composio key and missing **every** LLM provider key are hard errors; it's fine to configure only one LLM provider.
 
 ### Flow
 
 1. **Composio key.** Prompt (masked), validate by opening an MCP connection and calling `tools/list`. If the MCP server returns a 401 or transport error, reject with the upstream message.
 2. **Enumerate connected toolkits.** `COMPOSIO_SEARCH_TOOLS` takes structured queries (`queries: [{ use_case: "..." }]`, not strings). Run a spread of domain-relevant use-cases (email, research, CRM, mail, SMS, maps, calendar, etc.) and aggregate the `toolkit_connection_statuses[].toolkit` entries where `has_active_connection === true`. Print as a sanity-check summary so the operator can confirm they're pointed at the right Composio account.
-3. **Anthropic key.** Prompt (masked), validate with `GET https://api.anthropic.com/v1/models`.
-4. **Persist.** Write `COMPOSIO_API_KEY` and `ANTHROPIC_API_KEY` to `~/.agent-outbound/env` (file chmod 600, directory chmod 700). `process.env` overrides the file at runtime.
+3. **LLM provider keys.** For each registered provider in the provider registry, ask whether to configure it. For each "yes", prompt (masked) and validate by calling the provider module's `validateKey`, which hits that provider's model-list endpoint. Require at least one LLM provider.
+4. **Persist.** Write `COMPOSIO_API_KEY` plus whichever of `ANTHROPIC_API_KEY`, `DEEPINFRA_API_KEY`, etc. were captured to `~/.agent-outbound/env` (file chmod 600, directory chmod 700). `process.env` overrides the file at runtime.
 5. **Summary.** Print next-step hints (`list create`, `source`).
 
 Every `init` run prompts fresh and overwrites whatever was saved before — no implicit reuse.
@@ -345,29 +356,61 @@ The `v1` suffix signals a versioning discipline: when the shape changes meaningf
 
 The step config's `columns` mapping declares which schema fields go to which `records` table columns. If a schema field is missing from `columns`, the orchestrator logs a warning and drops it. If a column is declared but not in the schema, config validation fails at load time. If a column doesn't yet exist on the `records` table, the orchestrator runs `ALTER TABLE ADD COLUMN` at step registration time (see `data-schema.md`).
 
-## Model Routing
+## Model Providers
+
+Every LLM-driven step pins a model using a `provider/model` identifier, e.g. `anthropic/claude-sonnet-4-6` or `deepinfra/meta-llama/Meta-Llama-3.1-70B-Instruct`. The provider prefix is required; there is no shorthand.
+
+### Provider interface
+
+Each supported provider lives in `src/orchestrator/runtime/providers/<id>.ts` and exports the same shape:
 
 ```ts
-export const pickModel = (choice: "opus" | "sonnet" | "haiku") => {
-  switch (choice) {
-    case "opus":   return anthropic("claude-opus-4-6");
-    case "sonnet": return anthropic("claude-sonnet-4-6");
-    case "haiku":  return anthropic("claude-haiku-4-5-20251001");
-  }
+export type Provider = {
+  id: string;                                  // 'anthropic', 'deepinfra'
+  envKey: string;                              // 'ANTHROPIC_API_KEY', 'DEEPINFRA_API_KEY'
+  buildModel: (modelId: string) => LanguageModel;      // wraps @ai-sdk/<provider>
+  validateKey: (apiKey: string) => Promise<ValidationResult>;
+  getProviderOptions?: (modelId: string) => ProviderOptions; // e.g. Anthropic cacheControl
+  extractUsdCost: (result: GenerateResult) => number | null; // see § Cost Tracking
+  supportsCacheControl: boolean;
 };
 ```
 
-Defaults are set per-action in the action module; operator can override per-step via `config.model`. Most steps default to `sonnet`. Reply classification, filter/condition evaluation, rubric criterion evaluation default to `haiku`. Email copywriting and outreach drafting default to `opus`.
+`providers/registry.ts` holds the list. Adding a provider = new file + registry entry + new dep on that provider's AI-SDK package.
+
+### Resolving a step's model
+
+```ts
+// aiConfig comes from outbound.yaml's top-level `ai:` block.
+export const resolveModel = (stepModel: string | undefined, role: ActionRole, aiConfig: AiConfig) => {
+  const id = stepModel
+    ?? aiConfig.defaults?.[role]
+    ?? aiConfig.default_model;
+  if (!id) throw new Error('No model resolved and no default configured.');
+  const [providerId, ...rest] = id.split('/');
+  const modelId = rest.join('/');
+  const provider = registry.get(providerId);
+  if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+  if (!getEnv(provider.envKey)) throw new Error(`Step uses ${providerId} but ${provider.envKey} is not set.`);
+  return { provider, modelId, built: provider.buildModel(modelId) };
+};
+```
+
+Action roles (`evaluation`, `research`, `copywriting`) are declared by the action module and consulted when the step config doesn't pin its own `model`. See `architecture.md § Model Routing` for the resolution order.
+
+### Provider-specific behavior in `llm.ts`
+
+The LLM runtime applies `getProviderOptions(modelId)` conditionally — Anthropic's `cacheControl` is not passed when the resolved provider is DeepInfra. The free-form-text JSON fallback for when structured output fails is provider-agnostic and stays unchanged; it matters more for DeepInfra models that are less reliable at strict structured output.
 
 ## Prompt Caching
 
-Anthropic's prompt cache is automatic when the same prefix is passed across calls within a 5-minute TTL. The runtime opportunistically builds prompts so that:
+Applied only when the active provider reports `supportsCacheControl: true`. Today that's Anthropic only. Anthropic's prompt cache is automatic when the same prefix is passed across calls within a 5-minute TTL. The runtime opportunistically builds prompts so that:
 
 - System prompts are stable per action (cacheable)
 - Tool schemas are stable per step (cacheable)
 - Record-specific data goes last, after the cached prefix
 
-For batch work (enriching 500 records through the same step), cache hit rate is ~high and cost drops substantially.
+For batch work against Anthropic (enriching 500 records through the same step), cache hit rate is high and cost drops substantially. DeepInfra runs the same calls without cache savings.
 
 ## Error Handling
 
@@ -379,7 +422,7 @@ For batch work (enriching 500 records through the same step), cache hit rate is 
 | Tool execution | MCP upstream error (provider 4xx/5xx wrapped by Composio) | AI SDK retries automatically within step budget; if still failing, record failure |
 | Connection not active | MCP error from Composio ("no active connection for toolkit X") | Halt channel; tell operator to reconnect in Composio dashboard |
 | Composio auth | MCP connect returns 401 | Halt with message to re-run `agent-outbound init` |
-| Anthropic API | Rate limit, 5xx | Exponential backoff up to N retries, then record failure |
+| LLM provider API | Rate limit, 5xx (Anthropic or DeepInfra) | Exponential backoff up to N retries, then record failure |
 | Step budget exceeded | `stopWhen` hit without final output | Record failure; step budget was too low |
 | Config error | Invalid Zod parse of `outbound.yaml` | Halt; exit 2 with diagnostic |
 
@@ -387,7 +430,7 @@ For batch work (enriching 500 records through the same step), cache hit rate is 
 
 - Tool-call errors: handled inside the AI SDK step loop (automatic)
 - Per-record step errors: recorded on the record; orchestrator continues the batch
-- Transient Anthropic errors: exponential backoff, 3 attempts
+- Transient LLM-provider errors: exponential backoff, 3 attempts
 - Config/auth errors: never retried; surfaced for operator action
 
 ### Idempotency
@@ -486,7 +529,9 @@ Every event carries a timestamp added at emit time.
 
 ## Cost Tracking
 
-Every AI SDK call returns `usage`:
+Tokens are the primary signal and are always recorded. USD is provider-reported and recorded when available. **The tool never maintains its own pricing tables** — if a provider doesn't surface a dollar figure on a given response, the call lands with `usd_cost: 0` and only the tokens contribute to aggregates.
+
+Every AI SDK call returns normalized usage:
 
 ```ts
 {
@@ -497,7 +542,38 @@ Every AI SDK call returns `usage`:
 }
 ```
 
-The orchestrator aggregates these per step, per record, per run. Written to `.outbound/costs.jsonl` as append-only events.
+The orchestrator aggregates these per step, per record, per run. Written to `.outbound/costs.jsonl` as append-only events alongside per-row inserts into the `cost_events` table.
+
+### Where the USD number comes from
+
+Each provider module implements `extractUsdCost(result)`:
+
+- **Anthropic** — the AI SDK's `@ai-sdk/anthropic` populates `result.usage.totalCost` by multiplying token counts by Anthropic's published per-model rates. `extractUsdCost` returns that value.
+- **DeepInfra** — DeepInfra's OpenAI-compatible chat-completion response includes `usage.estimated_cost` (a USD number calculated server-side). The AI SDK doesn't surface this through its normalized `usage`, so `extractUsdCost` reads it from the raw response — first from `result.providerMetadata?.deepinfra?.usage?.estimated_cost`, falling back to parsing `result.response.body.usage.estimated_cost`. Returns `null` if neither path produced a value.
+
+This is the key design decision behind cross-provider cost tracking: we delegate pricing to the provider entirely. No local rate tables to maintain, no drift when providers change prices. When a provider stops reporting cost, tokens still land and dollar-scoped budgets simply don't count that call.
+
+### Recording
+
+```ts
+const { provider } = resolveModel(stepConfig.model, role, aiConfig);
+const usdCost = provider.extractUsdCost(result) ?? 0;
+
+recordCostEvent({
+  db, listDir, recordId, stepId,
+  model: `${provider.id}/${modelId}`,
+  provider: provider.id,
+  usage: {
+    input_tokens: result.usage.inputTokens,
+    output_tokens: result.usage.outputTokens,
+    cache_creation_tokens: result.usage.cachedInputTokens ?? 0,
+    usd_cost: usdCost,
+    tool_calls: /* from step finish callbacks */,
+  },
+});
+```
+
+Budget enforcement (see `lib/costs.ts`) checks both the token totals and the USD totals against the operator's `budgets.llm.*_tokens` and `budgets.llm.*_usd` caps. Token budgets always trip. USD budgets trip only on the subset of calls where a dollar figure was recorded.
 
 Separately, Composio tool-call counts are billed by Composio. The orchestrator counts MCP tool invocations and surfaces them in `agent-outbound stats <list>`.
 
@@ -631,10 +707,13 @@ Action code is deliberately thin — the interesting logic is in the orchestrato
 | Var | Purpose |
 |---|---|
 | `COMPOSIO_API_KEY` | Required. Composio **consumer** API key (`ck_...`) from the operator's Composio dashboard. |
-| `ANTHROPIC_API_KEY` | Required. For the AI SDK's Anthropic provider. |
+| `ANTHROPIC_API_KEY` | Required if any step uses an `anthropic/*` model. |
+| `DEEPINFRA_API_KEY` | Required if any step uses a `deepinfra/*` model. |
 | `COMPOSIO_MCP_URL` | Optional. Override the MCP endpoint. Default `https://connect.composio.dev/mcp`. |
 | `AO_STREAM` | Optional. `json` to output JSON lines on stdout; default is human-formatted. |
-| `AO_DEFAULT_MODEL` | Optional. Overrides the default `sonnet` for steps that don't declare one. |
+| `AO_DEFAULT_MODEL` | Optional. Overrides the config-level `ai.default_model` for steps that don't declare one. Must be a full `provider/model` ID. |
 | `AO_LOG_LEVEL` | Optional. `debug`, `info`, `warn`, `error`. Default `info`. |
+
+At least one LLM-provider key must be set for the tool to do anything useful. A step that references a provider without a configured key fails at resolve time with a clear error ("step X uses `deepinfra/...` but DEEPINFRA_API_KEY is not set").
 
 Env files: `~/.agent-outbound/env` for global settings; `<list>/.env.local` for list-specific overrides.

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { readGlobalEnv } from '../orchestrator/runtime/env.js';
 import { listConnectedToolkits, validateComposioKey } from '../orchestrator/runtime/mcp.js';
 import { validateAnthropicKey } from '../orchestrator/runtime/anthropic.js';
+import { validateDeepInfraKey } from '../orchestrator/runtime/deepinfra.js';
 
 const detectLists = (): string[] => {
   const cwd = process.cwd();
@@ -19,6 +20,7 @@ const checkState = async () => {
   const env = readGlobalEnv();
   const composioKey = String(env.COMPOSIO_API_KEY || process.env.COMPOSIO_API_KEY || '').trim();
   const anthropicKey = String(env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || '').trim();
+  const deepinfraKey = String(env.DEEPINFRA_API_KEY || process.env.DEEPINFRA_API_KEY || '').trim();
 
   const composio = composioKey
     ? await validateComposioKey(composioKey).catch(() => ({ ok: false, toolkits: [] as string[], error: 'validation failed' }))
@@ -27,6 +29,9 @@ const checkState = async () => {
   const anthropic = anthropicKey
     ? await validateAnthropicKey(anthropicKey).catch(() => ({ ok: false, error: 'validation failed' }))
     : { ok: false, error: 'not configured' };
+  const deepinfra = deepinfraKey
+    ? await validateDeepInfraKey(deepinfraKey).catch(() => ({ ok: false, error: 'validation failed' }))
+    : { ok: false, error: 'not configured' };
 
   const toolkits: string[] = composio.ok
     ? await listConnectedToolkits(composioKey).catch(() => [] as string[])
@@ -34,7 +39,16 @@ const checkState = async () => {
 
   const lists = detectLists();
 
-  return { composioKey: Boolean(composioKey), composioValid: Boolean(composio.ok), anthropicKey: Boolean(anthropicKey), anthropicValid: Boolean(anthropic.ok), toolkits, lists };
+  return {
+    composioKey: Boolean(composioKey),
+    composioValid: Boolean(composio.ok),
+    anthropicKey: Boolean(anthropicKey),
+    anthropicValid: Boolean(anthropic.ok),
+    deepinfraKey: Boolean(deepinfraKey),
+    deepinfraValid: Boolean(deepinfra.ok),
+    toolkits,
+    lists,
+  };
 };
 
 export const onboardCommand = async () => {
@@ -49,6 +63,11 @@ export const onboardCommand = async () => {
   const anthropicStatus = state.anthropicValid
     ? '✓ configured and valid'
     : state.anthropicKey
+      ? '⚠ key found but validation failed'
+      : '✗ not configured';
+  const deepinfraStatus = state.deepinfraValid
+    ? '✓ configured and valid'
+    : state.deepinfraKey
       ? '⚠ key found but validation failed'
       : '✗ not configured';
 
@@ -76,6 +95,7 @@ Your job: translate that into config, run the pipeline, and iterate.
 ## Current State
 
 - Anthropic API key: ${anthropicStatus}
+- DeepInfra API key: ${deepinfraStatus}
 - Composio API key: ${composioStatus}
 - Connected toolkits: ${toolkitStatus}
 - Existing lists: ${listStatus}
@@ -89,14 +109,15 @@ Walk the user through these in order. Skip any that are already resolved (see Cu
 
 ### 1. API Keys
 
-Both keys are required before any pipeline work can happen.
+Composio is required. For LLM providers, configure Anthropic, DeepInfra, or both.
 
-**Anthropic API key** — Powers the LLM layer (Claude). Get one from console.anthropic.com.
+**Anthropic API key** — Powers Claude models. Get one from console.anthropic.com.
+**DeepInfra API key** — Powers open-source hosted models. Get one from deepinfra.com.
 **Composio API key** — Connects external tools (Google Maps, Hunter, Firecrawl, etc.). Get one from platform.composio.dev.
 
-Once you have both keys, run:
+Once you have your keys, run:
 \`\`\`
-npx agent-outbound init --composio-api-key KEY --anthropic-api-key KEY --non-interactive
+npx agent-outbound init --composio-api-key KEY --anthropic-api-key KEY --deepinfra-api-key KEY --non-interactive
 \`\`\`
 
 ### 2. Toolkit Connections

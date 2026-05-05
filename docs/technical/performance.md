@@ -113,7 +113,7 @@ Apply the same pattern to:
 ### Constraints
 
 - SQLite writes serialize naturally (WAL mode). The `busy_timeout = 5000ms` pragma handles contention. If this becomes a bottleneck at high concurrency, batch writes after parallel LLM calls complete.
-- Composio and Anthropic rate limits cap effective parallelism. Start with concurrency 3-5 and tune.
+- Composio and LLM-provider rate limits cap effective parallelism. Start with concurrency 3-5 and tune.
 
 ## Priority 3: Dependency DAG for enrichment
 

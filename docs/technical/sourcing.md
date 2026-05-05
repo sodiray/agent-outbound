@@ -50,7 +50,7 @@ For the record counts in a typical list (hundreds to low thousands), in-memory d
 
 #### AI Confirmation
 
-Each candidate pair is sent to a Haiku-class model via structured output. The model sees both full records and returns:
+Each candidate pair is sent to a fast evaluation-tier model (resolved from `ai.defaults.evaluation`) via structured output. The model sees both full records and returns:
 
 ```
 { same: boolean, confidence: number, reasoning: string }
@@ -122,7 +122,7 @@ source:
           address: address
           phone: phone
           website: website
-        model: sonnet
+        model: anthropic/claude-sonnet-4-6
         step_budget: 5
 
   filters:

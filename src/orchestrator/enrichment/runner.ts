@@ -11,6 +11,8 @@ import { getMcpClient } from '../runtime/mcp.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
+import { isBudgetExceededError } from '../runtime/contract.js';
+import { assertPhaseModelReferences } from '../lib/model-validation.js';
 
 const parseExtra = (value) => {
   try {
@@ -334,6 +336,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
   if (errors.length > 0) {
     throw new Error(`Invalid config: ${errors.join('; ')}`);
   }
+  assertPhaseModelReferences({ config, phase: 'enrich' });
 
   const enrichSteps = Array.isArray(config.enrich) ? config.enrich : [];
   const stepIdMatch = (step: any) => {
@@ -469,6 +472,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               description: step?.description || id,
               stepConfig: step?.config || {},
               record: inputRecord,
+              aiConfig: config?.ai || {},
+              role: 'research',
               context: {
                 phase: 'enrichment',
                 step: id,
@@ -491,7 +496,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               listDir,
               recordId,
               stepId: `enrich:${id}`,
-              model: String(step?.config?.model || 'sonnet'),
+              model: String((result as any)?.model || ''),
+              provider: String((result as any)?.provider || ''),
               usage: result.usage,
             });
 
@@ -508,6 +514,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               cacheTtl: String(step?.config?.cache || ''),
             });
           } catch (error) {
+            if (isBudgetExceededError(error)) throw error;
             const detail = String(error?.message || error);
             markStepFailure(recordId, id);
             failures.push({ recordId, rowLabel, error: detail });
@@ -540,6 +547,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             summary.processed += 1;
             emitActivity({ event: 'row_complete', phase: 'enrichment', step: result.id, row: item.rowLabel });
           } catch (error) {
+            if (isBudgetExceededError(error)) throw error;
             const detail = String(error?.message || error);
             markStepFailure(item.recordId, result.id);
             summary.failed += 1;

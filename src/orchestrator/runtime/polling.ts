@@ -10,6 +10,7 @@ import { classifyReplyAction } from '../actions/classify-reply/index.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { emitActivity } from './activity.js';
+import { isBudgetExceededError } from './contract.js';
 
 type PollContext = {
   mcp: Client;
@@ -110,9 +111,10 @@ const findRecordByThreadId = (db: any, threadId: string) => {
 
 const nextStatusFor = (classification: string, explicitStop: boolean) => {
   if (explicitStop) return 'opted_out';
-  if (classification === 'positive') return 'engaged';
+  if (classification === 'unsubscribe') return 'opted_out';
+  if (classification === 'booking_intent' || classification === 'positive_signal' || classification === 'question' || classification === 'objection') return 'engaged';
   if (classification === 'bounce') return 'bounced';
-  if (classification === 'negative') return 'completed';
+  if (classification === 'hard_no') return 'completed';
   return 'active';
 };
 
@@ -164,13 +166,18 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
       const snippet = extractSnippet(message);
       const replyAt = extractOccurredAt(message);
 
-      const classified = await classifyReplyAction({ replyText: snippet });
+      const classified = await classifyReplyAction({
+        replyText: snippet,
+        model: config?.sequences?.default?.reply_check?.model || '',
+        aiConfig: config?.ai || {},
+      });
       recordCostEvent({
         db,
         listDir,
         recordId,
         stepId: 'poll:classify_reply',
-        model: 'haiku',
+        model: String((classified as any)?.model || ''),
+        provider: String((classified as any)?.provider || ''),
         usage: classified.usage,
       });
 
@@ -182,11 +189,12 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
         ...record,
         email_last_reply_at: replyAt,
         email_reply_classification: classification,
+        reply_classification_latest: classification,
         sequence_status: nextStatus,
         next_action_date: nextStatus === 'active' ? record.next_action_date : '',
-        suppressed: explicitStop ? 1 : record.suppressed,
-        suppressed_reason: explicitStop ? 'opt_out' : record.suppressed_reason,
-        suppressed_at: explicitStop ? new Date().toISOString() : record.suppressed_at,
+        suppressed: (explicitStop || classification === 'unsubscribe') ? 1 : record.suppressed,
+        suppressed_reason: (explicitStop || classification === 'unsubscribe') ? 'opt_out' : record.suppressed_reason,
+        suppressed_at: (explicitStop || classification === 'unsubscribe') ? new Date().toISOString() : record.suppressed_at,
       };
       upsertRecord({ db, row: updated });
 
@@ -205,6 +213,7 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
             snippet,
             classifier_reason: classified.reason || '',
             explicit_stop: explicitStop,
+            classification,
           },
           occurred_at: replyAt,
         },
@@ -232,6 +241,7 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
       if (nextStatus === 'engaged') summary.engaged += 1;
       if (nextStatus === 'opted_out') summary.opted_out += 1;
     } catch (error) {
+      if (isBudgetExceededError(error)) throw error;
       summary.errors.push(String((error as any)?.message || error));
     }
   }
@@ -319,6 +329,7 @@ export const runDeliveryPoll = async ({ mcp, listDir, db, config }: Omit<PollCon
 
       summary.refreshed += 1;
     } catch (error) {
+      if (isBudgetExceededError(error)) throw error;
       summary.errors.push(String((error as any)?.message || error));
     }
   }

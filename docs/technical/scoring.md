@@ -51,7 +51,7 @@ The agent call uses the `execute-step` action module with a scoring-specific pro
 - Presents the full enriched record (all columns)
 - Presents the scoring description
 - Asks for a 0–100 integer score and a 2–4 sentence reasoning paragraph
-- Uses Haiku for cost efficiency (scoring runs across every record)
+- Uses an evaluation-tier model by default (scoring runs across every record)
 
 ### Output schema
 
@@ -99,9 +99,9 @@ Every score stores the agent's `reasoning` field. This replaces the old per-crit
 
 ## Model Routing
 
-Scoring uses **Haiku** by default. The scoring prompt is straightforward (read data, apply description, return score + reasoning), and scoring runs across every record in the list — Haiku keeps costs proportional.
+Scoring defaults to the `evaluation` action-role tier (resolved from `ai.defaults.evaluation`, typically a Haiku-class Claude or a small DeepInfra model). The scoring prompt is straightforward (read data, apply description, return score + reasoning), and scoring runs across every record in the list — a cheap evaluation-tier model keeps costs proportional.
 
-The operator can override to Sonnet per list if scoring quality needs to be higher (complex ICP definitions, subtle nuance in trigger signals).
+The operator can override per axis (`score.fit.model`, `score.trigger.model`) or per criterion (`score.fit.criteria[].config.model`) using the full `provider/model` format. See `runtime.md § Model Providers`.
 
 ## Inputs / Outputs
 

@@ -1,10 +1,13 @@
 Classify an inbound reply for sequence-state transitions.
 
 Classes:
-- `positive`: clear buying intent, meeting request, asks for next step.
-- `negative`: declines interest but not necessarily legal opt-out language.
-- `ooo`: out-of-office / temporary unavailability.
-- `auto`: automated response that is not OOO.
+- `booking_intent`: clear buying intent, meeting request, asks for next step.
+- `question`: asks a question that needs an answer.
+- `objection`: raises concerns, pushback, or requirements.
+- `hard_no`: clear refusal.
+- `positive_signal`: warm signal without concrete booking ask.
+- `out_of_office`: temporary auto-response.
+- `unsubscribe`: explicit stop/unsubscribe/remove request.
 - `bounce`: delivery failure / mailer-daemon style reply.
 
 Guidance:

@@ -7,6 +7,8 @@ import { recordCostEvent } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
+import { isBudgetExceededError } from '../runtime/contract.js';
+import { assertPhaseModelReferences } from '../lib/model-validation.js';
 
 const ScoreResultSchema = z.object({
   score: z.coerce.number().min(0).max(100),
@@ -92,7 +94,7 @@ const shouldRescore = ({ db, record, type, description, includeDate }) => {
   return false;
 };
 
-const scoreAxis = async ({ db, listDir, record, axis, description, model }) => {
+const scoreAxis = async ({ db, listDir, record, axis, description, model, aiConfig }) => {
   const recordId = getRecordRowId(record);
   const systemPrompt = [
     `You are scoring outbound leads for axis: ${axis}.`,
@@ -109,7 +111,9 @@ const scoreAxis = async ({ db, listDir, record, axis, description, model }) => {
 
   const result = await generateObjectWithTools({
     task: `score-${axis}`,
-    model: model || 'haiku',
+    model: model || '',
+    role: 'evaluation',
+    aiConfig,
     schema: ScoreResultSchema,
     prompt: userPrompt,
     systemPrompt,
@@ -124,7 +128,8 @@ const scoreAxis = async ({ db, listDir, record, axis, description, model }) => {
     listDir,
     recordId,
     stepId: `score:${axis}`,
-    model: model || 'haiku',
+    model: String((result as any)?.model || ''),
+    provider: String((result as any)?.provider || ''),
     usage: result.usage,
   });
 
@@ -147,15 +152,16 @@ const applyOverride = ({ score, reasoning, override, overrideReason, axis }) => 
   };
 };
 
-export const runScoring = async ({ listDir }) => {
+export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = false }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
+  assertPhaseModelReferences({ config, phase: 'score' });
 
   const scoreConfig = config?.score || {};
   const fitDescription = String(scoreConfig?.fit?.description || '').trim();
   const triggerDescription = String(scoreConfig?.trigger?.description || '').trim();
-  const fitModel = String(scoreConfig?.fit?.model || 'haiku');
-  const triggerModel = String(scoreConfig?.trigger?.model || 'haiku');
+  const fitModel = String(scoreConfig?.fit?.model || '');
+  const triggerModel = String(scoreConfig?.trigger?.model || '');
   const weights = normalizeWeights(
     scoreConfig?.priority?.weight?.fit,
     scoreConfig?.priority?.weight?.trigger
@@ -171,7 +177,13 @@ export const runScoring = async ({ listDir }) => {
       { name: 'trigger_updated_at', type: 'TEXT' },
     ],
   });
-  const records = db.prepare('SELECT * FROM records').all();
+  const whereSql = String(where || '1=1').trim() || '1=1';
+  const records = db.prepare(`
+    SELECT * FROM records
+    WHERE ${whereSql}
+    ORDER BY updated_at DESC
+    ${Number(limit || 0) > 0 ? `LIMIT ${Number(limit || 0)}` : ''}
+  `).all();
 
   const summary = {
     records: records.length,
@@ -184,6 +196,14 @@ export const runScoring = async ({ listDir }) => {
   emitActivity({ event: 'phase_start', phase: 'scoring', rows: records.length });
 
   try {
+    if (dryRun) {
+      emitActivity({ event: 'phase_complete', phase: 'scoring', processed: 0, skipped: records.length, failed: 0 });
+      return {
+        dry_run: true,
+        projected_records: records.length,
+        where: whereSql,
+      };
+    }
     await mapWithConcurrency<any, void>(records as any[], async (record) => {
       const recordId = getRecordRowId(record);
       try {
@@ -208,10 +228,26 @@ export const runScoring = async ({ listDir }) => {
         }
 
         const fitRaw = rescoreFit
-          ? await scoreAxis({ db, listDir, record, axis: 'fit', description: fitDescription, model: fitModel })
+          ? await scoreAxis({
+            db,
+            listDir,
+            record,
+            axis: 'fit',
+            description: fitDescription,
+            model: fitModel,
+            aiConfig: config?.ai || {},
+          })
           : { score: numericOr(record.fit_score, 0), reasoning: String(record.fit_reasoning || '') };
         const triggerRaw = rescoreTrigger
-          ? await scoreAxis({ db, listDir, record, axis: 'trigger', description: triggerDescription, model: triggerModel })
+          ? await scoreAxis({
+            db,
+            listDir,
+            record,
+            axis: 'trigger',
+            description: triggerDescription,
+            model: triggerModel,
+            aiConfig: config?.ai || {},
+          })
           : { score: numericOr(record.trigger_score, 0), reasoning: String(record.trigger_reasoning || '') };
 
         const fit = applyOverride({
@@ -279,6 +315,7 @@ export const runScoring = async ({ listDir }) => {
         summary.scored += 1;
         emitActivity({ event: 'row_complete', phase: 'scoring', row: record.business_name || recordId });
       } catch (error) {
+        if (isBudgetExceededError(error)) throw error;
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: String(error?.message || error) });
         emitActivity({ event: 'error', phase: 'scoring', row: record.business_name || recordId, detail: String(error?.message || error) });

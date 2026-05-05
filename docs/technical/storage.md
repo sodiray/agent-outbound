@@ -52,7 +52,7 @@ The operator runs `agent-outbound` commands from whichever parent directory hold
 
 ```
 ~/.agent-outbound/
-  env                           # COMPOSIO_API_KEY, ANTHROPIC_API_KEY (chmod 600)
+  env                           # COMPOSIO_API_KEY + one or more LLM-provider keys (ANTHROPIC_API_KEY, DEEPINFRA_API_KEY, …) (chmod 600)
   suppression.db                # global suppression (separate SQLite file)
   settings.yaml                 # operator preferences
 ```

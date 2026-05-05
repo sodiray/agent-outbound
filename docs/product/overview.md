@@ -47,6 +47,8 @@ This matters because local SMB outbound is inherently multi-channel and the righ
 
 ## How the Operator Works With It
 
+The tool is a CLI. The operator doesn't run it directly — they talk to an agent (Claude Code or similar) that runs the CLI on their behalf. The operator describes what they want in natural language; the agent chooses commands, runs them, and composes the results back into a useful answer.
+
 Everything runs through `/outbound` inside Claude Code. Examples:
 
 ```
@@ -61,7 +63,15 @@ Everything runs through `/outbound` inside Claude Code. Examples:
 /outbound log Northend Construction — talked to owner John, booked a meeting Thursday 2pm
 ```
 
-The operator doesn't write config by hand. They describe what they want; the tool authors the underlying configuration and executes it.
+The operator doesn't write config by hand. They describe what they want; the agent drives the CLI to author the underlying configuration and execute it.
+
+This framing shapes the tool in three ways:
+
+1. **Execution lives in the tool.** Sourcing, enrichment, scoring, sequencing, route planning, send dispatch — the things that need to actually happen, and happen reliably, are inside Agent-Outbound.
+2. **Narrative and presentation live in the agent.** Briefs, reports, summaries, decisions about what to show the operator and how to phrase it — the agent composes these from the data the tool exposes.
+3. **The tool's job is to surface state the agent can actually reach.** Arbitrary queries, structured exports, record detail, pipeline views, schema introspection, stable outputs, machine-readable errors — the capabilities that let the agent answer questions without bounding off aggregate dashboards.
+
+See [Data Access](./data-access.md) and [Agent Contract](./agent-contract.md) for how the tool exposes itself to the agent.
 
 ## Running Alongside the CRM
 
@@ -83,5 +93,10 @@ See [Compliance](./compliance.md).
 - [Mail](./mail.md), [Visits](./visits.md), [Deliverability](./deliverability.md) — channel-specific behavior (mail tracking, route planning, email deliverability)
 - [CRM](./crm.md), [Compliance](./compliance.md), [Integrations](./integrations.md) — cross-cutting concerns
 - [Operator](./operator.md), [User flows](./user-flows.md), [Watch](./watch.md) — day-to-day use
+- [Data Access](./data-access.md) — the query, export, and schema surface the agent uses to read state
+- [Models](./models.md) — which LLM providers are supported, how to pin a model per step, why this matters
+- [AI Usage](./ai-usage.md) — what the tool tracks for cost (AI only) and what it doesn't
+- [Safety and Preview](./safety-and-preview.md) — dry-run, sample, snapshot, revert, idempotency
+- [Agent Contract](./agent-contract.md) — how the CLI behaves for the wrapping agent (stable outputs, errors, self-description)
 
 For implementation detail, see the sibling `/docs/technical/` folder.

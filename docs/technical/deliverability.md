@@ -56,7 +56,7 @@ enrich:
           type: number
           description: Confidence score from the verifier (0–1)
       cache: 60d
-      model: haiku
+      model: anthropic/claude-haiku-4-5-20251001
 ```
 
 ### Channel gate
@@ -108,11 +108,12 @@ Lag between a reply arriving in Gmail and the sequence advancing equals the poll
 
 ## Reply Classification
 
-`generateObject` call with Haiku:
+`generateObject` call at the evaluation tier (resolved from `ai.defaults.evaluation`):
 
 ```ts
+const { built } = resolveModel(step.config.model, 'evaluation', aiConfig);
 const classification = await generateObject({
-  model: anthropic("claude-haiku-4-5-20251001"),
+  model: built,
   schema: z.object({
     classification: z.enum(["positive", "negative", "ooo", "auto", "bounce"]),
     reason: z.string(),

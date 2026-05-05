@@ -105,6 +105,32 @@ The operator can pin a fit or trigger score on a specific record:
 
 Overrides are annotated with a reason. If the underlying enrichment data changes, the override is cleared and the record is flagged for re-review.
 
+## Calibrating the Scoring Prompt
+
+Scoring quality depends on how well the operator's fit/trigger descriptions capture what actually matters. The operator calibrates over time by looking at the agent's reasoning across many records at once:
+
+> "Pull the fit reasoning for the top 20 and bottom 20 — I want to see what the agent is weighting."
+> "Export everyone who scored above 80 with the scoring reasoning included."
+
+The agent handles this by reading from the list:
+
+```
+agent-outbound query boise-plumbers --sql "
+  SELECT business_name, fit_score, fit_reasoning
+  FROM records_enriched
+  ORDER BY fit_score DESC LIMIT 20
+"
+
+agent-outbound export boise-plumbers \
+  --select "business_name, fit_score, fit_reasoning, trigger_score, trigger_reasoning" \
+  --where "fit_score >= 80" \
+  --to ./exports/top-fits-with-reasoning.csv
+```
+
+If the reasoning shows a pattern the operator disagrees with — the agent weighting something unintended, missing a factor the operator cares about — the operator updates the scoring description. The agent runs `score --sample 5` against the new description first, shows the reasoning on a few records, and re-scores the list once the operator is satisfied.
+
+This is the feedback loop scoring depends on. The agent makes it quick and cheap.
+
 ## When Scoring Runs
 
 - Fit recomputes when a record's enrichment data changes

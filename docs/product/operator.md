@@ -2,9 +2,9 @@
 
 ## Purpose
 
-One command, every morning, that tells the operator exactly what to do today across all active lists and channels. Replies first, visits with a planned route, mail pieces landing, calls to make, follow-up drafts ready to review, low-inventory alerts — everything in one view.
+One question every morning — *"what do I need to do today?"* — and the agent pulls together everything across active lists and channels. Replies first, visits with a planned route, mail pieces landing, calls to make, follow-up drafts ready to review, low-inventory alerts — everything in one view.
 
-The operator's job is to execute; this dashboard is the queue.
+The operator's job is to execute; the dashboard is the queue the agent composes from the tool's state.
 
 ## Usage
 
@@ -142,7 +142,11 @@ Anything that could degrade the operation: low physical collateral, sending inbo
 /outbound show me the history for Beacon Plumbing
 /outbound why is Elite Dental deferred?
 /outbound show me this week's bounces
+/outbound export today's route with enrichment to a CSV so I can skim it on my phone
+/outbound which prospects replied with booking intent this month?
 ```
+
+For these, the agent uses the [data access surface](./data-access.md) — `record show` for full detail on one account, `query` for arbitrary questions across the list, `export` to project data into a file the operator can open or pass along.
 
 ### Pipeline management
 ```
@@ -150,5 +154,38 @@ Anything that could degrade the operation: low physical collateral, sending inbo
 /outbound resume boise-plumbers
 /outbound re-score boise-plumbers
 /outbound re-enrich boise-plumbers --stale-only
+/outbound snapshot the list before we swap the hiring step  # see safety-and-preview.md
 ```
+
+### Draft approval
+
+```
+/outbound show me the drafts waiting for approval
+/outbound approve the top 10 drafts
+/outbound edit the draft for Beacon Plumbing — make it shorter
+/outbound reject the draft for Viking Plumbing, wrong persona
+```
+
+The agent reads the pending-approval queue (`drafts list`), walks drafts through with the operator, applies approvals and edits. See [Sequencing → Draft Approval Queue](./sequencing.md#draft-approval-queue).
+
+### Cost and usage
+
+```
+/outbound how much have I spent on AI for boise-plumbers this week?
+/outbound how many Firecrawl calls has the hiring step made today?
+/outbound what's my projected AI spend for tonight's enrichment run?
+```
+
+The agent reads `ai-usage` and `usage` (see [AI Usage](./ai-usage.md)) and answers with specific numbers. For projected spend on a new run, the agent uses `--sample` before committing.
+
+## What the Agent Does Behind the Scenes
+
+When the operator asks a question, the agent typically:
+
+1. Reads the relevant tool data — `record show`, `query`, `export`, `route show`, etc.
+2. Composes the answer — a brief, a summary, a table, a CSV
+3. Uses safety primitives when appropriate — `--sample` before big runs, snapshots before destructive changes
+4. Relays results in whatever form the operator asked for — chat, email, a file
+
+The operator doesn't need to know the commands. They stay in conversation; the agent drives the tool.
 

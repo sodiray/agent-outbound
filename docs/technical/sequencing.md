@@ -31,7 +31,20 @@ engaged → (operator decides)     replies pause; operator advances manually
 
 ### Timing
 
-`day` is relative to `launched_at` (step 1). `day: 0` is launch day. The orchestrator calculates `next_action_date` from `launched_at` and the step's `day` offset. Weekend/business-hours skew is applied per channel.
+`day` is relative to `launched_at` (step 1). `day: 0` is launch day. The orchestrator calculates `next_action_date` from `launched_at` and the step's `day` offset (calendar days, not business days).
+
+After the raw date is computed, the sequence's **working-days filter** is applied:
+
+- If the scheduled date lands on a day in `sequences.<name>.working_days`, use it as-is.
+- Otherwise apply `non_working_day_policy`:
+  - `shift_forward` (default) → advance `next_action_date` to the next working day.
+  - `skip` → mark the step skipped; advance `sequence_step` without execution.
+
+The filter is applied per-step at scheduling time. Shifting one step does not cascade to later steps — each step's `next_action_date` is computed from `launched_at + day` and filtered independently. This keeps the overall cadence anchored to launch.
+
+Defaults: if `working_days` is unset, all seven days are allowed. If `non_working_day_policy` is unset, `shift_forward` is applied. Day names are lowercase three-letter abbreviations: `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`.
+
+For the product-level description, see `../product/sequencing.md#working-days`.
 
 ## Step Execution
 
@@ -143,6 +156,8 @@ The sequencer assigns records to sequences. Records carry `sequence_name`. Switc
 ```yaml
 sequences:
   default:
+    working_days: [mon, tue, wed, thu, fri, sat]
+    non_working_day_policy: shift_forward
     steps:
       - day: 0
         description: >-

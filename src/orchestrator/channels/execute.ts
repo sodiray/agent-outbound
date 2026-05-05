@@ -1,14 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { buildIdempotencyKey, claimIdempotency, completeIdempotency, failIdempotency } from '../runtime/idempotency.js';
-import { insertChannelEvent, nowTimestamp, upsertRecord } from '../runtime/db.js';
+import { insertChannelEvent, insertDraft, nowTimestamp, upsertRecord, updateDraft } from '../runtime/db.js';
 import { getRecordRowId } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
-
-const nextStepDate = ({ fromDate, dayOffset }) => {
-  const base = new Date(`${fromDate}T00:00:00.000Z`);
-  base.setUTCDate(base.getUTCDate() + Number(dayOffset || 0));
-  return base.toISOString().slice(0, 10);
-};
+import { computeNextScheduledAction, resolveWorkingDayConfig, toIsoDate } from '../lib/working-days.js';
+import { recordCostEvent } from '../lib/costs.js';
+import { isBudgetExceededError } from '../runtime/contract.js';
 
 const inferEventChannel = ({ description, artifacts, outputs, channelHint }) => {
   const hinted = String(channelHint || '').trim().toLowerCase();
@@ -102,6 +99,8 @@ export const executeChannelStep = async ({
   sequenceName,
   stepNumber,
   step,
+  sequence,
+  aiConfig = {},
   dryRun = false,
   intent = 'send',
   channelHint = '',
@@ -126,6 +125,43 @@ export const executeChannelStep = async ({
   }
 
   try {
+    let approvedDraft: any = null;
+    if (!dryRun && intent === 'send' && inferEventChannel({ description: step?.description, artifacts: {}, outputs: {}, channelHint }) === 'email') {
+      approvedDraft = db.prepare(`
+        SELECT *
+        FROM drafts
+        WHERE row_id = ?
+          AND sequence_name = ?
+          AND step_number = ?
+          AND status = 'ready'
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `).get(recordId, String(sequenceName || 'default'), Number(stepNumber || 0));
+      const pending = db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM drafts
+        WHERE row_id = ?
+          AND sequence_name = ?
+          AND step_number = ?
+          AND status = 'pending_approval'
+      `).get(recordId, String(sequenceName || 'default'), Number(stepNumber || 0));
+      if (!approvedDraft && Number(pending?.n || 0) > 0) {
+        return {
+          status: 'skipped',
+          reason: 'Draft pending approval.',
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
+    }
+
+    const preChannelHint = inferEventChannel({
+      description: step?.description,
+      artifacts: {},
+      outputs: {},
+      channelHint,
+    });
+    const llmRole = (intent === 'draft' || preChannelHint === 'email') ? 'copywriting' : 'research';
     const stepResult = dryRun
       ? { outputs: {}, artifacts: {}, summary: 'dry run', defer: false, reason: '' }
       : await executeStepAction({
@@ -140,12 +176,32 @@ export const executeChannelStep = async ({
             sequence_name: sequenceName,
             step_number: stepNumber,
             intent,
+            approved_draft: approvedDraft
+              ? {
+                draft_id: approvedDraft.draft_id,
+                subject: approvedDraft.subject,
+                body: approvedDraft.body,
+              }
+              : null,
           },
           toolCatalog,
+          aiConfig,
+          role: llmRole,
         });
 
     const stepArtifacts = (stepResult?.artifacts || {}) as any;
     const stepOutputs = (stepResult?.outputs || {}) as any;
+    if (!dryRun) {
+      recordCostEvent({
+        db,
+        listDir,
+        recordId,
+        stepId: `sequence:${sequenceName}:${sequenceStepId}`,
+        model: String((stepResult as any)?.model || ''),
+        provider: String((stepResult as any)?.provider || ''),
+        usage: (stepResult as any)?.usage || null,
+      });
+    }
     const eventChannel = inferEventChannel({
       description: step?.description,
       artifacts: stepArtifacts,
@@ -194,8 +250,36 @@ export const executeChannelStep = async ({
       });
     }
 
-    const dayOffset = Number(step?.day ?? 0);
-    const sequenceDate = new Date().toISOString().slice(0, 10);
+    if (!dryRun && intent === 'draft') {
+      const draftId = String(stepArtifacts.draft_id || stepOutputs.draft_id || providerMessageId || '');
+      if (draftId) {
+        const existing = db.prepare('SELECT draft_id FROM drafts WHERE draft_id = ? LIMIT 1').get(draftId);
+        if (!existing) {
+          insertDraft({
+            db,
+            draft: {
+              draft_id: draftId,
+              row_id: recordId,
+              sequence_name: sequenceName,
+              step_number: Number(stepNumber || 0),
+              step_id: sequenceStepId,
+              channel: 'email',
+              status: 'pending_approval',
+              subject: String(stepArtifacts.subject || stepOutputs.subject || ''),
+              body: String(stepArtifacts.body || stepOutputs.body || ''),
+              reason: String(stepResult.reason || ''),
+              artifacts: {
+                summary: stepResult.summary || '',
+                outputs: stepOutputs,
+                artifacts: stepArtifacts,
+              },
+            },
+          });
+        }
+      }
+    }
+
+    const shouldAdvanceSequence = intent !== 'draft';
     const mappedRecord = applyStepOutputs({
       record,
       step,
@@ -208,15 +292,39 @@ export const executeChannelStep = async ({
       intent,
     });
 
+    const launchedAt = shouldAdvanceSequence
+      ? ((stepNumber === 1 && intent !== 'draft') ? now : String(record.launched_at || ''))
+      : String(record.launched_at || '');
+    const launchedAtDate = toIsoDate(launchedAt) || now.slice(0, 10);
+    const timing = resolveWorkingDayConfig(sequence || {});
+    const progression = shouldAdvanceSequence
+      ? computeNextScheduledAction({
+          steps: Array.isArray(sequence?.steps) ? sequence.steps : [],
+          completedStepNumber: Number(stepNumber || 0),
+          launchedAtDate,
+          workingDays: timing.workingDays,
+          policy: timing.policy,
+        })
+      : {
+          sequenceStep: Number(record.sequence_step || 0),
+          nextActionDate: String(record.next_action_date || ''),
+          skippedStepNumbers: [],
+          completed: false,
+        };
+
     const updatedRecord = {
       ...artifactUpdatedRecord,
       sequence_name: sequenceName,
-      sequence_step: stepNumber,
-      sequence_status: 'active',
-      next_action_date: nextStepDate({ fromDate: sequenceDate, dayOffset }),
+      sequence_step: shouldAdvanceSequence ? progression.sequenceStep : Number(record.sequence_step || 0),
+      sequence_status: shouldAdvanceSequence
+        ? (progression.completed ? 'completed' : 'active')
+        : String(record.sequence_status || 'idle'),
+      next_action_date: shouldAdvanceSequence ? progression.nextActionDate : String(record.next_action_date || ''),
       last_outreach_at: now,
-      launched_at: stepNumber === 1 && intent !== 'draft' ? now : record.launched_at,
-      sequence_step_attempts: Number(record.sequence_step_attempts || 0) + 1,
+      launched_at: launchedAt,
+      sequence_step_attempts: shouldAdvanceSequence
+        ? Number(record.sequence_step_attempts || 0) + 1
+        : Number(record.sequence_step_attempts || 0),
     };
 
     if (intent === 'draft' && !updatedRecord.email_last_draft_id && providerMessageId) {
@@ -224,6 +332,31 @@ export const executeChannelStep = async ({
     }
 
     if (!dryRun) upsertRecord({ db, row: updatedRecord });
+
+    if (!dryRun && intent === 'send' && inferEventChannel({ description: step?.description, artifacts: {}, outputs: {}, channelHint }) === 'email') {
+      const readyDraft = db.prepare(`
+        SELECT *
+        FROM drafts
+        WHERE row_id = ?
+          AND sequence_name = ?
+          AND step_number = ?
+          AND status = 'ready'
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `).get(recordId, String(sequenceName || 'default'), Number(stepNumber || 0));
+      if (readyDraft) {
+        updateDraft({ db, draftId: String(readyDraft.draft_id || ''), patch: { status: 'sent' } });
+        db.prepare(`
+          UPDATE drafts
+          SET status = 'superseded', updated_at = ?
+          WHERE row_id = ?
+            AND sequence_name = ?
+            AND step_number = ?
+            AND status IN ('pending_approval', 'ready')
+            AND draft_id != ?
+        `).run(nowTimestamp(), recordId, String(sequenceName || 'default'), Number(stepNumber || 0), String(readyDraft.draft_id || ''));
+      }
+    }
 
     if (idemKey) {
       completeIdempotency({
@@ -240,8 +373,10 @@ export const executeChannelStep = async ({
       provider_id: providerMessageId,
       next_step: Number(stepNumber) + 1,
       deferred: Boolean(stepResult.defer),
+      auto_skipped_steps: progression.skippedStepNumbers,
     };
   } catch (error) {
+    if (isBudgetExceededError(error)) throw error;
     if (idemKey) {
       failIdempotency({
         db,

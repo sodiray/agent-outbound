@@ -82,7 +82,10 @@ const SCHEMA_SQL = `
     email_last_draft_id TEXT DEFAULT '',
     email_last_reply_at TEXT DEFAULT '',
     email_reply_classification TEXT DEFAULT '',
+    reply_classification_latest TEXT DEFAULT '',
     email_thread_id TEXT DEFAULT '',
+    disposition_latest TEXT DEFAULT '',
+    disposition_follow_up_at TEXT DEFAULT '',
     mail_last_piece_id TEXT DEFAULT '',
     mail_last_cost_cents INTEGER DEFAULT 0,
     mail_last_expected_delivery TEXT DEFAULT '',
@@ -241,6 +244,51 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_route_stops_route ON route_stops(route_id, stop_order);
 
+  CREATE TABLE IF NOT EXISTS drafts (
+    draft_id TEXT PRIMARY KEY,
+    row_id TEXT NOT NULL,
+    sequence_name TEXT NOT NULL,
+    step_number INTEGER NOT NULL,
+    step_id TEXT DEFAULT '',
+    channel TEXT DEFAULT 'email',
+    status TEXT NOT NULL DEFAULT 'pending_approval',
+    subject TEXT DEFAULT '',
+    body TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    artifacts_json TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(row_id) REFERENCES records(_row_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_drafts_row ON drafts(row_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS account_timeline (
+    timeline_id TEXT PRIMARY KEY,
+    row_id TEXT NOT NULL,
+    contact_id TEXT DEFAULT '',
+    event_family TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    channel TEXT DEFAULT '',
+    disposition TEXT DEFAULT '',
+    classification TEXT DEFAULT '',
+    notes TEXT DEFAULT '',
+    payload_json TEXT DEFAULT '{}',
+    occurred_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(row_id) REFERENCES records(_row_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_account_timeline_row ON account_timeline(row_id, occurred_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_account_timeline_type ON account_timeline(event_family, event_type, occurred_at DESC);
+
+  CREATE TABLE IF NOT EXISTS saved_views (
+    view_name TEXT PRIMARY KEY,
+    select_sql TEXT NOT NULL,
+    where_sql TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS staleness (
     id TEXT PRIMARY KEY,
     record_id TEXT NOT NULL,
@@ -349,12 +397,191 @@ const ensureSuppressionCompatibility = (db) => {
   try { db.exec("UPDATE suppression SET identifier_type = value_type WHERE (identifier_type IS NULL OR identifier_type = '') AND value_type IS NOT NULL AND value_type != ''"); } catch {}
 };
 
+const ensureRecordCompatibility = (db) => {
+  try { db.exec("ALTER TABLE records ADD COLUMN reply_classification_latest TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN disposition_latest TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN disposition_follow_up_at TEXT DEFAULT ''"); } catch {}
+};
+
+const ensureDataAccessViewsInternal = (db) => {
+  db.exec(`
+    DROP VIEW IF EXISTS records_enriched;
+    CREATE VIEW records_enriched AS
+    SELECT
+      r.*,
+      pc.contact_id AS primary_contact_id,
+      pc.name AS primary_contact_name,
+      pc.full_name AS primary_contact_full_name,
+      pc.title AS primary_contact_title,
+      pc.email AS primary_contact_email,
+      pc.phone AS primary_contact_phone,
+      pc.linkedin_url AS primary_contact_linkedin_url,
+      pc.role AS primary_contact_role
+    FROM records r
+    LEFT JOIN contacts pc ON pc.contact_id = (
+      SELECT c.contact_id
+      FROM contacts c
+      WHERE c.row_id = r._row_id
+      ORDER BY c.is_primary DESC, c.updated_at DESC
+      LIMIT 1
+    );
+
+    DROP VIEW IF EXISTS records_timeline;
+    CREATE VIEW records_timeline AS
+    SELECT
+      ce.event_id AS timeline_id,
+      ce.row_id AS row_id,
+      ce.contact_id AS contact_id,
+      'channel' AS event_family,
+      ce.event_type AS event_type,
+      ce.channel AS channel,
+      ce.disposition AS disposition,
+      CASE
+        WHEN lower(ce.event_type) = 'reply' THEN COALESCE(json_extract(ce.payload_json, '$.classification'), '')
+        ELSE ''
+      END AS classification,
+      ce.notes AS notes,
+      ce.payload_json AS payload_json,
+      ce.occurred_at AS occurred_at
+    FROM channel_events ce
+    UNION ALL
+    SELECT
+      se.event_id AS timeline_id,
+      se.row_id AS row_id,
+      '' AS contact_id,
+      'score' AS event_family,
+      se.axis || '_score_updated' AS event_type,
+      '' AS channel,
+      '' AS disposition,
+      '' AS classification,
+      se.reasoning AS notes,
+      json_object('score', se.score, 'axis', se.axis) AS payload_json,
+      se.computed_at AS occurred_at
+    FROM score_events se
+    UNION ALL
+    SELECT
+      rs.id AS timeline_id,
+      rs.record_id AS row_id,
+      '' AS contact_id,
+      'visit' AS event_family,
+      CASE WHEN rs.disposition != '' THEN 'visit_disposition' ELSE 'visit_scheduled' END AS event_type,
+      'visit' AS channel,
+      rs.disposition AS disposition,
+      '' AS classification,
+      rs.notes AS notes,
+      json_object(
+        'route_id', rs.route_id,
+        'stop_order', rs.stop_order,
+        'scheduled_time', rs.scheduled_time
+      ) AS payload_json,
+      COALESCE(NULLIF(rs.updated_at, ''), rs.created_at) AS occurred_at
+    FROM route_stops rs
+    UNION ALL
+    SELECT
+      cl.id AS timeline_id,
+      cl.record_id AS row_id,
+      '' AS contact_id,
+      'compliance' AS event_family,
+      cl.action AS event_type,
+      '' AS channel,
+      '' AS disposition,
+      '' AS classification,
+      cl.reason AS notes,
+      cl.payload_json AS payload_json,
+      cl.occurred_at AS occurred_at
+    FROM compliance_log cl;
+
+    DROP VIEW IF EXISTS sequence_state;
+    CREATE VIEW sequence_state AS
+    SELECT
+      r._row_id AS row_id,
+      r.business_name,
+      r.sequence_name,
+      r.sequence_status,
+      r.sequence_step,
+      r.sequence_step_attempts,
+      r.next_action_date,
+      r.launched_at,
+      r.email_last_reply_at,
+      COALESCE(NULLIF(r.reply_classification_latest, ''), r.email_reply_classification, '') AS reply_classification_latest,
+      r.disposition_latest,
+      r.suppressed,
+      r.dne_email,
+      r.dnc_phone,
+      r.dnk_visit,
+      (
+        SELECT COUNT(*)
+        FROM drafts d
+        WHERE d.row_id = r._row_id
+          AND d.status = 'pending_approval'
+      ) AS drafts_pending_approval,
+      CASE
+        WHEN r.suppressed = 1 THEN 'suppressed'
+        WHEN r.sequence_status IN ('engaged', 'completed', 'opted_out', 'bounced') THEN r.sequence_status
+        WHEN r.next_action_date = '' THEN 'awaiting_schedule'
+        WHEN date(r.next_action_date) > date('now') THEN 'scheduled'
+        ELSE 'due'
+      END AS gating_state
+    FROM records r;
+
+    DROP VIEW IF EXISTS ai_usage;
+    CREATE VIEW ai_usage AS
+    SELECT
+      ce.id AS usage_id,
+      ce.record_id AS row_id,
+      ce.step_id,
+      ce.model,
+      ce.provider,
+      ce.input_tokens,
+      ce.output_tokens,
+      ce.cache_creation_tokens,
+      ce.cache_read_tokens,
+      ce.usd_cost,
+      ce.occurred_at,
+      date(ce.occurred_at) AS usage_date,
+      COALESCE(json_extract(ce.payload_json, '$.run_id'), '') AS run_id
+    FROM cost_events ce;
+
+    DROP VIEW IF EXISTS tool_usage;
+    CREATE VIEW tool_usage AS
+    SELECT
+      ce.id || ':' || CAST(j.key AS TEXT) AS usage_id,
+      ce.record_id AS row_id,
+      ce.step_id,
+      UPPER(
+        CASE
+          WHEN instr(CAST(j.value AS TEXT), '.') > 0 THEN substr(CAST(j.value AS TEXT), 1, instr(CAST(j.value AS TEXT), '.') - 1)
+          ELSE CAST(j.value AS TEXT)
+        END
+      ) AS toolkit,
+      UPPER(CAST(j.value AS TEXT)) AS tool,
+      1 AS calls,
+      ce.occurred_at,
+      date(ce.occurred_at) AS usage_date,
+      COALESCE(json_extract(ce.payload_json, '$.run_id'), '') AS run_id
+    FROM cost_events ce
+    JOIN json_each(
+      CASE
+        WHEN json_valid(ce.tool_calls) THEN ce.tool_calls
+        ELSE '[]'
+      END
+    ) j
+    WHERE trim(CAST(j.value AS TEXT)) != '';
+  `);
+};
+
+export const ensureDataAccessViews = ({ db }) => {
+  ensureDataAccessViewsInternal(db);
+};
+
 const openDb = ({ dbPath, readonly = false }) => {
   const db = openRawDb({ dbPath, readonly });
   if (!readonly) {
     db.exec(SCHEMA_SQL);
     try { db.exec("ALTER TABLE records ADD COLUMN mail_last_cost_cents INTEGER DEFAULT 0"); } catch {}
+    ensureRecordCompatibility(db);
     ensureSuppressionCompatibility(db);
+    ensureDataAccessViewsInternal(db);
   }
   return db;
 };
@@ -450,7 +677,9 @@ export const insertCostEvent = ({ db, event }) => {
     cache_creation_tokens: Number(event.cache_creation_tokens || 0),
     cache_read_tokens: Number(event.cache_read_tokens || 0),
     tool_calls: Array.isArray(event.tool_calls) ? JSON.stringify(event.tool_calls) : (event.tool_calls || '[]'),
-    usd_cost: Number(event.usd_cost || 0),
+    usd_cost: event.usd_cost === null || event.usd_cost === undefined
+      ? null
+      : Number(event.usd_cost),
     provider: event.provider || '',
     payload_json: safeJson(event.payload),
     occurred_at: event.occurred_at || nowIso(),
@@ -472,6 +701,35 @@ export const insertActivityEvent = ({ db, event }) => {
   });
 };
 
+const insertAccountTimelineEvent = ({ db, event }) => {
+  try {
+    db.prepare(`
+      INSERT INTO account_timeline (
+        timeline_id, row_id, contact_id, event_family, event_type, channel,
+        disposition, classification, notes, payload_json, occurred_at, created_at
+      ) VALUES (
+        @timeline_id, @row_id, @contact_id, @event_family, @event_type, @channel,
+        @disposition, @classification, @notes, @payload_json, @occurred_at, @created_at
+      )
+    `).run({
+      timeline_id: event.timeline_id,
+      row_id: event.row_id,
+      contact_id: event.contact_id || '',
+      event_family: event.event_family,
+      event_type: event.event_type,
+      channel: event.channel || '',
+      disposition: event.disposition || '',
+      classification: event.classification || '',
+      notes: event.notes || '',
+      payload_json: safeJson(event.payload),
+      occurred_at: event.occurred_at || nowIso(),
+      created_at: nowIso(),
+    });
+  } catch {
+    // Timeline writes are additive and should not break the caller path.
+  }
+};
+
 export const insertScoreEvent = ({ db, event }) => {
   db.prepare(`
     INSERT INTO score_events (event_id, row_id, axis, score, reasoning, computed_at)
@@ -483,6 +741,18 @@ export const insertScoreEvent = ({ db, event }) => {
     score: Number(event.score || 0),
     reasoning: String(event.reasoning || ''),
     computed_at: event.computed_at || nowIso(),
+  });
+  insertAccountTimelineEvent({
+    db,
+    event: {
+      timeline_id: event.event_id || event.id,
+      row_id: event.row_id,
+      event_family: 'score',
+      event_type: `${String(event.axis || '').trim()}_score_updated`,
+      notes: String(event.reasoning || ''),
+      payload: { axis: String(event.axis || ''), score: Number(event.score || 0) },
+      occurred_at: event.computed_at || nowIso(),
+    },
   });
 };
 
@@ -514,7 +784,8 @@ export const upsertRecord = ({ db, row }) => {
       'google_place_id', 'parent_row_id', 'latitude', 'longitude', 'workflow_signals',
       'vertical', 'sub_vertical', 'size_tier', 'is_franchise', 'persona',
       'outcome_at', 'outcome_value', 'launched_at', 'sequence_step_attempts',
-      'email_last_reply_at', 'email_reply_classification', 'mail_last_piece_id', 'mail_last_cost_cents', 'mail_last_expected_delivery',
+      'email_last_reply_at', 'email_reply_classification', 'reply_classification_latest', 'disposition_latest', 'disposition_follow_up_at',
+      'mail_last_piece_id', 'mail_last_cost_cents', 'mail_last_expected_delivery',
       'mail_last_delivered_at', 'mail_last_returned_at', 'visit_scheduled_date', 'visit_route_id', 'visit_route_position',
       'sms_last_message_id', 'call_last_disposition', 'suppressed', 'suppressed_reason', 'suppressed_at',
       'do_not_sms',
@@ -547,6 +818,9 @@ export const upsertRecord = ({ db, row }) => {
       mail_last_returned_at: row.mail_last_returned_at || '',
       fit_updated_at: row.fit_updated_at || row.fit_score_updated_at || '',
       trigger_updated_at: row.trigger_updated_at || row.trigger_score_updated_at || '',
+      reply_classification_latest: row.reply_classification_latest || row.email_reply_classification || '',
+      disposition_latest: row.disposition_latest || '',
+      disposition_follow_up_at: row.disposition_follow_up_at || '',
       source: row.source || '',
       source_query: row.source_query || '',
       sourced_at: row.sourced_at || '',
@@ -576,6 +850,7 @@ export const upsertRecord = ({ db, row }) => {
       fit_reasoning, trigger_reasoning,
       sequence_name, sequence_status, sequence_step, next_action_date, last_outreach_at, email_last_message_id,
       email_last_thread_id, email_last_draft_id, email_last_reply_at, email_reply_classification,
+      reply_classification_latest, disposition_latest, disposition_follow_up_at,
       email_thread_id, contact_name, contact_email, contact_title,
       email_verification_status, email_verification_confidence, email_verified_at,
       trigger_score_peak,
@@ -598,6 +873,7 @@ export const upsertRecord = ({ db, row }) => {
       @fit_reasoning, @trigger_reasoning,
       @sequence_name, @sequence_status, @sequence_step, @next_action_date, @last_outreach_at, @email_last_message_id,
       @email_last_thread_id, @email_last_draft_id, @email_last_reply_at, @email_reply_classification,
+      @reply_classification_latest, @disposition_latest, @disposition_follow_up_at,
       @email_thread_id, @contact_name, @contact_email, @contact_title,
       @email_verification_status, @email_verification_confidence, @email_verified_at,
       @trigger_score_peak,
@@ -646,6 +922,9 @@ export const upsertRecord = ({ db, row }) => {
     email_last_draft_id: row.email_last_draft_id || '',
     email_last_reply_at: row.email_last_reply_at || '',
     email_reply_classification: row.email_reply_classification || '',
+    reply_classification_latest: row.reply_classification_latest || row.email_reply_classification || '',
+    disposition_latest: row.disposition_latest || '',
+    disposition_follow_up_at: row.disposition_follow_up_at || '',
     email_thread_id: row.email_thread_id || row.email_last_thread_id || '',
     contact_name: row.contact_name || row.contact_name_primary || '',
     contact_email: row.contact_email || row.email_primary || '',
@@ -806,6 +1085,22 @@ export const insertChannelEvent = ({ db, event }) => {
     occurred_at: event.occurred_at || nowIso(),
     created_at: nowIso(),
   });
+  insertAccountTimelineEvent({
+    db,
+    event: {
+      timeline_id: event.event_id || event.id,
+      row_id: event.row_id || event.record_id,
+      contact_id: event.contact_id || '',
+      event_family: 'channel',
+      event_type: event.event_type || event.action || 'event',
+      channel: event.channel || '',
+      disposition: event.disposition || '',
+      classification: String(event?.payload?.classification || ''),
+      notes: event.notes || '',
+      payload: event.payload || {},
+      occurred_at: event.occurred_at || nowIso(),
+    },
+  });
 };
 
 export const upsertContact = ({ db, contact }) => {
@@ -873,6 +1168,75 @@ export const listContactsByRecord = ({ db, recordId }) =>
 
 export const getPrimaryContact = ({ db, recordId }) =>
   db.prepare('SELECT * FROM contacts WHERE row_id = ? ORDER BY is_primary DESC, updated_at DESC LIMIT 1').get(recordId);
+
+export const insertDraft = ({ db, draft }) => {
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO drafts (
+      draft_id, row_id, sequence_name, step_number, step_id, channel, status,
+      subject, body, reason, artifacts_json, created_at, updated_at
+    ) VALUES (
+      @draft_id, @row_id, @sequence_name, @step_number, @step_id, @channel, @status,
+      @subject, @body, @reason, @artifacts_json, @created_at, @updated_at
+    )
+  `).run({
+    draft_id: String(draft?.draft_id || draft?.id || ''),
+    row_id: String(draft?.row_id || draft?.record_id || ''),
+    sequence_name: String(draft?.sequence_name || 'default'),
+    step_number: Number(draft?.step_number || 0),
+    step_id: String(draft?.step_id || ''),
+    channel: String(draft?.channel || 'email'),
+    status: String(draft?.status || 'pending_approval'),
+    subject: String(draft?.subject || ''),
+    body: String(draft?.body || ''),
+    reason: String(draft?.reason || ''),
+    artifacts_json: safeJson(draft?.artifacts || {}),
+    created_at: String(draft?.created_at || now),
+    updated_at: String(draft?.updated_at || now),
+  });
+};
+
+export const updateDraft = ({ db, draftId, patch }) => {
+  const existing = db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1').get(String(draftId || '').trim());
+  if (!existing) return null;
+  const merged = {
+    ...existing,
+    ...patch,
+    artifacts_json: patch && Object.prototype.hasOwnProperty.call(patch, 'artifacts')
+      ? safeJson((patch as any).artifacts)
+      : existing.artifacts_json,
+    updated_at: nowIso(),
+  };
+  db.prepare(`
+    UPDATE drafts
+    SET status = @status,
+        subject = @subject,
+        body = @body,
+        reason = @reason,
+        artifacts_json = @artifacts_json,
+        updated_at = @updated_at
+    WHERE draft_id = @draft_id
+  `).run({
+    draft_id: existing.draft_id,
+    status: String(merged.status || existing.status || 'pending_approval'),
+    subject: String(merged.subject || ''),
+    body: String(merged.body || ''),
+    reason: String(merged.reason || ''),
+    artifacts_json: String(merged.artifacts_json || '{}'),
+    updated_at: String(merged.updated_at),
+  });
+  return db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1').get(existing.draft_id);
+};
+
+export const listDrafts = ({ db, whereSql = '1=1', params = [], limit = 100, offset = 0 }) =>
+  db.prepare(`
+    SELECT d.*, r.business_name, r.priority_rank
+    FROM drafts d
+    LEFT JOIN records r ON r._row_id = d.row_id
+    WHERE ${whereSql}
+    ORDER BY d.created_at DESC, d.draft_id DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, Number(limit), Number(offset));
 
 export const addSuppression = ({ db, entry }) => {
   db.prepare(`

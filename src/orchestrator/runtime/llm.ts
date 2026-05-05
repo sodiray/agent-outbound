@@ -1,29 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { pickModel } from './models.js';
-import { getEnv } from './env.js';
+import type { ActionRole } from './models.js';
+import { resolveRuntimeModel } from './models.js';
 import { loadTools, type ToolCatalog, type ToolSpec } from './tools.js';
 import { emitLive } from './activity.js';
 
 let aiSdk: any = null;
-let anthropicProvider: any = null;
 
 const ensureAiDeps = async () => {
-  if (aiSdk && anthropicProvider) return;
+  if (aiSdk) return;
   try {
     aiSdk = await import('ai');
-    anthropicProvider = await import('@ai-sdk/anthropic');
   } catch {
-    throw new Error('Missing dependencies for AI SDK (`ai`, `@ai-sdk/anthropic`).');
+    throw new Error('Missing dependency `ai` required for LLM runtime.');
   }
-};
-
-const getAnthropic = () => {
-  const apiKey = String(getEnv('ANTHROPIC_API_KEY') || '').trim();
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY is missing. Set it in ~/.agent-outbound/env or process env.');
-  }
-  return anthropicProvider.createAnthropic({ apiKey });
 };
 
 const normalizeUsage = (usage: any) => ({
@@ -31,7 +21,6 @@ const normalizeUsage = (usage: any) => ({
   output_tokens: Number(usage?.outputTokens || usage?.completionTokens || 0),
   cache_creation_tokens: Number(usage?.cachedInputTokens || 0),
   cache_read_tokens: Number(usage?.cacheReadInputTokens || 0),
-  usd_cost: Number(usage?.totalCost || 0),
 });
 
 const buildStopWhen = (maxSteps: number) => {
@@ -76,7 +65,9 @@ const resolveTools = async (
 export type GenerateObjectWithToolsInput = {
   mcp?: Client;
   task: string;
-  model: string;
+  model?: string;
+  role?: ActionRole;
+  aiConfig?: any;
   schema: any;
   prompt: string;
   systemPrompt?: string;
@@ -112,7 +103,9 @@ const tryParseJsonText = (text: string): unknown => {
 export const generateObjectWithTools = async ({
   mcp,
   task,
-  model,
+  model = '',
+  role = 'research',
+  aiConfig = {},
   schema,
   prompt,
   systemPrompt = '',
@@ -122,8 +115,13 @@ export const generateObjectWithTools = async ({
   maxSteps = 8,
 }: GenerateObjectWithToolsInput) => {
   await ensureAiDeps();
-  const anthropic = getAnthropic();
-  const selectedModel = anthropic(pickModel(model || 'sonnet'));
+  const resolved = await resolveRuntimeModel({
+    model,
+    role,
+    aiConfig,
+    enforceSupported: true,
+  });
+  const selectedModel = resolved.built;
 
   const tools = await resolveTools(mcp, toolSpec, toolCatalog);
   const hasTools = Object.keys(tools).length > 0;
@@ -133,14 +131,12 @@ export const generateObjectWithTools = async ({
   const basePrompt = String(userPrompt || prompt || '').trim();
   const schemaInstruction = `After completing all work, return ONLY a JSON object matching this schema:\n${JSON.stringify(schema, null, 2)}\nNo extra text.`;
   const toolSystem = [system, schemaInstruction].filter(Boolean).join('\n\n');
-  const providerOptions = {
-    anthropic: {
-      cacheControl: {
-        type: 'ephemeral',
-        ttl: '5m',
-      },
-    },
-  };
+  const providerOptions = resolved.provider.supportsCacheControl
+    ? (resolved.providerOptions || {})
+    : {};
+  const withProviderOptions = Object.keys(providerOptions || {}).length > 0
+    ? { providerOptions }
+    : {};
 
   let result: any;
   try {
@@ -152,7 +148,7 @@ export const generateObjectWithTools = async ({
         tools,
         ...(stopWhen ? { stopWhen } : {}),
         onStepFinish,
-        providerOptions,
+        ...withProviderOptions,
       });
     } else {
       try {
@@ -162,7 +158,7 @@ export const generateObjectWithTools = async ({
           prompt: basePrompt,
           output: aiSdk.Output.object({ schema }),
           onStepFinish,
-          providerOptions,
+          ...withProviderOptions,
         });
       } catch (structuredError) {
         // Structured output can fail on complex schemas (e.g., large discriminated unions).
@@ -173,7 +169,7 @@ export const generateObjectWithTools = async ({
           ...(toolSystem ? { system: toolSystem } : {}),
           prompt: fallbackPrompt,
           onStepFinish,
-          providerOptions,
+          ...withProviderOptions,
         });
         // Mark as fallback so the object extraction path below uses text parsing
         result._fallbackTextMode = true;
@@ -183,7 +179,7 @@ export const generateObjectWithTools = async ({
     emitLive({
       event: 'llm_step_error',
       phase: String(task || ''),
-      model: String(pickModel(model || 'sonnet')),
+      model: resolved.modelRef,
       error: String((error as any)?.message || error),
     });
     throw error;
@@ -214,7 +210,7 @@ export const generateObjectWithTools = async ({
           ...(system ? { system } : {}),
           prompt: extractionPrompt,
           output: aiSdk.Output.object({ schema }),
-          providerOptions,
+          ...withProviderOptions,
         });
         object = extraction?.output || extraction?.object || tryParseJsonText(extraction?.text || '');
       }
@@ -230,17 +226,32 @@ export const generateObjectWithTools = async ({
     throw new Error('No object generated: response did not match schema.');
   }
 
+  const usage = {
+    input_tokens: Number(result?.usage?.inputTokens || result?.usage?.promptTokens || 0),
+    output_tokens: Number(result?.usage?.outputTokens || result?.usage?.completionTokens || 0),
+    cache_creation_tokens: Number(result?.usage?.cachedInputTokens || 0),
+    cache_read_tokens: Number(result?.usage?.cacheReadInputTokens || 0),
+    usd_cost: resolved.provider.extractUsdCost(result),
+    tool_calls: Array.isArray(result?.steps)
+      ? result.steps.flatMap((step: any) => Array.isArray(step?.toolCalls)
+        ? step.toolCalls.map((call: any) => String(call?.toolName || '').trim()).filter(Boolean)
+        : [])
+      : [],
+  };
+
   const payload = {
     id: randomUUID(),
     object,
     text: String(result?.text || ''),
-    usage: normalizeUsage(result?.usage || {}),
+    usage,
+    model: resolved.modelRef,
+    provider: resolved.providerId,
     raw: result,
   };
   emitLive({
     event: 'llm_step_complete',
     phase: String(task || ''),
-    model: String(pickModel(model || 'sonnet')),
+    model: resolved.modelRef,
     usage: payload.usage,
   });
   return payload;

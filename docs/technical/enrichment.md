@@ -30,7 +30,7 @@ enrich:
         - website
       cache: 90d
       concurrency: 10
-      model: sonnet
+      model: anthropic/claude-sonnet-4-6
       step_budget: 10
       tool:
         toolkits: [FIRECRAWL, SERPAPI]
@@ -101,7 +101,7 @@ Steps declare `depends_on` as a list of references. Each reference is either a b
 - **Level 0**: steps with no dependencies, or dependencies already present from sourcing
 - **Level N**: steps whose dependencies all appear in levels 0..N-1
 
-Same-level steps run in parallel. Within each step, records run in parallel up to the step's concurrency cap (configurable per step, recommended 3-5 to start — bounded by Composio and Anthropic rate limits).
+Same-level steps run in parallel. Within each step, records run in parallel up to the step's concurrency cap (configurable per step, recommended 3-5 to start — bounded by Composio and LLM-provider rate limits).
 
 If a step fails for a specific record, all steps that transitively depend on it are skipped for that record. Other records are unaffected.
 
