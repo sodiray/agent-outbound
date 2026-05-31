@@ -154,8 +154,20 @@ export const generateObjectWithTools = async ({
         ...withProviderOptions,
       });
     } else {
+      if (resolved.providerId === 'deepinfra' && typeof aiSdk.generateObject === 'function') {
+        try {
+          result = await aiSdk.generateObject({
+            model: selectedModel,
+            ...(system ? { system } : {}),
+            prompt: basePrompt,
+            schema,
+            ...withProviderOptions,
+          });
+        } catch {}
+      }
+
       try {
-        result = await aiSdk.generateText({
+        result = result || await aiSdk.generateText({
           model: selectedModel,
           ...(system ? { system } : {}),
           prompt: basePrompt,

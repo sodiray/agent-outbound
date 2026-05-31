@@ -32,6 +32,44 @@ export const arrayOf = <ItemSchema extends z.ZodTypeAny>(
   return [value];
 }, z.array(schema)).default(def);
 
+const parseJsonString = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+};
+
+export const lenientRecord = <ValueSchema extends z.ZodTypeAny = z.ZodAny>(
+  valueSchema?: ValueSchema,
+  options: { fromArrayKey?: string | string[] } = {},
+) => {
+  const schema = valueSchema || z.any();
+  const keys = Array.isArray(options.fromArrayKey)
+    ? options.fromArrayKey
+    : [options.fromArrayKey].filter(Boolean);
+
+  return z.preprocess((value) => {
+    const parsed = typeof value === 'string' ? parseJsonString(value) : value;
+    if (parsed === null || parsed === undefined) return {};
+    if (typeof parsed === 'string') return {};
+    if (Array.isArray(parsed)) {
+      return Object.fromEntries(parsed.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+        const record = entry as Record<string, unknown>;
+        const key = keys
+          .map((candidate) => String(record[candidate] || '').trim())
+          .find(Boolean);
+        return key ? [[key, record]] : [];
+      }));
+    }
+    if (typeof parsed === 'object') return parsed;
+    return {};
+  }, z.record(schema)).default({});
+};
+
 export const recordWithDefault = (def: Record<string, unknown> = {}) => z.preprocess((value) => {
   if (value === null || value === undefined) return def;
   if (typeof value === 'object' && !Array.isArray(value)) return value;

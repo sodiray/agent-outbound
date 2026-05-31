@@ -57,10 +57,18 @@ const buildDeepInfraModel = async (modelId: string, apiKey: string) => {
   const providerModule = await import(modName);
   if (typeof (providerModule as any).createDeepInfra === 'function') {
     const deepinfra = (providerModule as any).createDeepInfra({ apiKey });
-    return deepinfra(String(modelId || '').trim());
+    const model = deepinfra(String(modelId || '').trim());
+    if ('supportsStructuredOutputs' in model) {
+      model.supportsStructuredOutputs = true;
+    }
+    return model;
   }
   if (typeof (providerModule as any).deepinfra === 'function') {
-    return (providerModule as any).deepinfra(String(modelId || '').trim(), { apiKey });
+    const model = (providerModule as any).deepinfra(String(modelId || '').trim(), { apiKey });
+    if ('supportsStructuredOutputs' in model) {
+      model.supportsStructuredOutputs = true;
+    }
+    return model;
   }
   throw new Error('Missing DeepInfra AI SDK provider. Install @ai-sdk/deepinfra.');
 };
@@ -109,4 +117,3 @@ export const getProviderKey = (providerId: string) => {
   if (!provider) return '';
   return String(getEnv(provider.envKey) || '').trim();
 };
-
