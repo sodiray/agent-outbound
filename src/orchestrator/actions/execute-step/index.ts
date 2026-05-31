@@ -6,7 +6,13 @@ import { generateObjectWithTools } from '../../runtime/llm.js';
 import { readPromptFileIfAny, renderPromptTemplate } from '../shared.js';
 import type { ToolCatalog } from '../../runtime/tools.js';
 import type { ActionRole } from '../../runtime/models.js';
-import { nullableBoolean, nullableString, recordWithDefault } from '../schema-helpers.js';
+import {
+  fuzzyMapDeclaredKeys,
+  nullableBoolean,
+  nullableString,
+  objectFromLooseShape,
+  recordWithDefault,
+} from '../schema-helpers.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
@@ -24,23 +30,155 @@ const buildExecuteStepResultSchema = (outputSchema?: z.ZodTypeAny) => {
   });
 };
 
-const normalizeResultObject = (raw: any, outputSchema?: z.ZodTypeAny) => {
+const getDeclaredOutputKeys = (stepConfig: unknown) => {
+  const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
+  const outputs = config.outputs && typeof config.outputs === 'object' && !Array.isArray(config.outputs)
+    ? config.outputs as Record<string, unknown>
+    : {};
+  const columns = config.columns && typeof config.columns === 'object' && !Array.isArray(config.columns)
+    ? config.columns as Record<string, unknown>
+    : {};
+  const declared = Object.keys(outputs).length > 0 ? outputs : columns;
+  return Object.keys(declared);
+};
+
+const liftOutputObject = (source: Record<string, unknown>) => {
+  const reserved = new Set(['outputs', 'artifacts', 'summary', 'defer', 'reason', 'usage', 'pagination']);
+  const lifted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (!reserved.has(key)) lifted[key] = value;
+  }
+  return lifted;
+};
+
+const normalizeOutputsPayload = (raw: unknown, declaredKeys: string[]) => {
+  const source = objectFromLooseShape(raw);
+  const rawOutputs = Object.prototype.hasOwnProperty.call(source, 'outputs')
+    ? source.outputs
+    : liftOutputObject(source);
+  const outputs = objectFromLooseShape(rawOutputs, declaredKeys);
+  return fuzzyMapDeclaredKeys(outputs, declaredKeys);
+};
+
+const parsePotentialJson = (value: unknown): unknown => {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+};
+
+const collectKeys = (value: unknown, limit = 50): string[] => {
+  const keys = new Set<string>();
+  const visit = (candidate: unknown, depth: number) => {
+    if (keys.size >= limit || depth > 4) return;
+    const parsed = parsePotentialJson(candidate);
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed) visit(entry, depth + 1);
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object') return;
+    for (const [key, nested] of Object.entries(parsed as Record<string, unknown>)) {
+      keys.add(key);
+      visit(nested, depth + 1);
+      if (keys.size >= limit) return;
+    }
+  };
+  visit(value, 0);
+  return [...keys];
+};
+
+const getToolResultData = (rawResult: unknown) => {
+  const raw = rawResult && typeof rawResult === 'object' ? rawResult as Record<string, unknown> : {};
+  const steps = Array.isArray(raw.steps) ? raw.steps : [];
+  return steps.flatMap((step) => {
+    const stepRecord = step && typeof step === 'object' ? step as Record<string, unknown> : {};
+    const toolResults = Array.isArray(stepRecord.toolResults) ? stepRecord.toolResults : [];
+    return toolResults.flatMap((toolResult) => {
+      const resultRecord = toolResult && typeof toolResult === 'object' ? toolResult as Record<string, unknown> : {};
+      const data = resultRecord.output ?? resultRecord.result;
+      return data === null || data === undefined ? [] : [data];
+    });
+  });
+};
+
+const isRealOutputValue = (value: unknown) => {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized !== '' && normalized !== 'unknown';
+  }
+  if (typeof value === 'number') return Number.isFinite(value) && value !== 0;
+  if (typeof value === 'boolean') return value;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+};
+
+const preview = (value: unknown, max = 700) => {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return String(text || '').replace(/\s+/g, ' ').slice(0, max);
+};
+
+const assertNotEmptyToolCaptureFailure = ({
+  declaredKeys,
+  normalizedOutputs,
+  rawModelOutput,
+  rawResult,
+}: {
+  declaredKeys: string[];
+  normalizedOutputs: Record<string, unknown>;
+  rawModelOutput: unknown;
+  rawResult: unknown;
+}) => {
+  if (declaredKeys.length === 0) return;
+  const toolResultData = getToolResultData(rawResult);
+  if (toolResultData.length === 0) return;
+  const hasRealDeclaredOutput = declaredKeys.some((key) => isRealOutputValue(normalizedOutputs[key]));
+  if (hasRealDeclaredOutput) return;
+
+  const toolResultKeys = [...new Set(toolResultData.flatMap((data) => collectKeys(data)))].slice(0, 30);
+  throw new Error(
+    `Tool returned data but no declared outputs captured. `
+    + `raw_model_output=${preview(rawModelOutput)} `
+    + `tool_result_keys=${toolResultKeys.join(', ') || '(none)'}`
+  );
+};
+
+const normalizeResultObject = ({
+  raw,
+  outputSchema,
+  declaredKeys = [],
+  rawResult,
+  rawText = '',
+}: {
+  raw: unknown;
+  outputSchema?: z.ZodTypeAny;
+  declaredKeys?: string[];
+  rawResult?: unknown;
+  rawText?: string;
+}) => {
   const resultSchema = buildExecuteStepResultSchema(outputSchema);
-  const parsed = resultSchema.parse(raw || {});
-  const source = (raw && typeof raw === 'object') ? raw : {};
+  const source = objectFromLooseShape(raw);
+  const normalizedOutputs = normalizeOutputsPayload(raw, declaredKeys);
+  assertNotEmptyToolCaptureFailure({
+    declaredKeys,
+    normalizedOutputs,
+    rawModelOutput: rawText || raw,
+    rawResult,
+  });
+  const rawForParse = {
+    ...source,
+    outputs: normalizedOutputs,
+  };
+  const parsed = resultSchema.parse(rawForParse || {});
 
   let outputs = parsed.outputs || {};
   if (Object.keys(outputs).length === 0) {
-    if (source.outputs && typeof source.outputs === 'object' && !Array.isArray(source.outputs)) {
-      outputs = source.outputs;
-    } else {
-      const reserved = new Set(['outputs', 'artifacts', 'summary', 'defer', 'reason', 'usage', 'pagination']);
-      const lifted: Record<string, any> = {};
-      for (const [key, value] of Object.entries(source)) {
-        if (!reserved.has(key)) lifted[key] = value;
-      }
-      if (Object.keys(lifted).length > 0) outputs = lifted;
-    }
+    outputs = normalizedOutputs;
   }
   if (outputSchema) {
     outputs = outputSchema.parse(outputs);
@@ -53,7 +191,7 @@ const normalizeResultObject = (raw: any, outputSchema?: z.ZodTypeAny) => {
     defer: Boolean(parsed.defer),
     reason: parsed.reason || '',
     pagination: Object.prototype.hasOwnProperty.call(source, 'pagination')
-      ? (source as any).pagination
+      ? source.pagination
       : parsed.pagination,
   };
 };
@@ -119,7 +257,13 @@ export const executeStepAction = async ({
     });
 
     return {
-      ...normalizeResultObject(result.object, outputSchema),
+      ...normalizeResultObject({
+        raw: result.object,
+        outputSchema,
+        declaredKeys: getDeclaredOutputKeys(stepConfig),
+        rawResult: result.raw,
+        rawText: result.text,
+      }),
       usage: result.usage,
       model: result.model,
       provider: result.provider,

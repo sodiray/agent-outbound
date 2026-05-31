@@ -10,6 +10,8 @@ Core rules:
 
 Output contract:
 - Return JSON matching the provided schema.
+- After calling tools, return the final `outputs` as a flat JSON object using exactly the declared output field names from the step config.
+- Do not rename output keys, and do not return outputs as arrays or `{name,value}` pairs.
 - `outputs` should contain only step output fields.
 - `artifacts` may include provider identifiers, raw snippets, and evidence links.
 - `summary` should be concise and operator-readable.

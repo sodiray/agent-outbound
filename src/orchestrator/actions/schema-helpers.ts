@@ -42,6 +42,105 @@ const parseJsonString = (value: string) => {
   }
 };
 
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const parseJsonStringValue = (value: string): unknown => {
+  const parsed = parseJsonString(value);
+  return parsed === undefined ? value : parsed;
+};
+
+const getPairKey = (record: Record<string, unknown>) => {
+  const key = record.name ?? record.key ?? record.field;
+  return typeof key === 'string' && key.trim() ? key.trim() : '';
+};
+
+const getPairValue = (record: Record<string, unknown>) => {
+  if (Object.prototype.hasOwnProperty.call(record, 'value')) return record.value;
+  if (Object.prototype.hasOwnProperty.call(record, 'val')) return record.val;
+  return undefined;
+};
+
+const isPairRecord = (value: unknown): value is Record<string, unknown> =>
+  isPlainRecord(value) && Boolean(getPairKey(value)) && (
+    Object.prototype.hasOwnProperty.call(value, 'value')
+    || Object.prototype.hasOwnProperty.call(value, 'val')
+  );
+
+const singleEntry = (value: unknown): [string, unknown] | null => {
+  if (!isPlainRecord(value)) return null;
+  const entries = Object.entries(value);
+  if (entries.length !== 1) return null;
+  return entries[0];
+};
+
+export const objectFromLooseShape = (
+  raw: unknown,
+  declaredKeys: string[] = [],
+): Record<string, unknown> => {
+  const value = typeof raw === 'string' ? parseJsonStringValue(raw) : raw;
+
+  if (isPlainRecord(value)) return value;
+  if (!Array.isArray(value)) return {};
+
+  if (value.every(isPairRecord)) {
+    return Object.fromEntries(value.map((entry) => [getPairKey(entry), getPairValue(entry)]));
+  }
+
+  if (value.length === 1 && isPlainRecord(value[0])) return value[0];
+
+  const singleKeyEntries = value.map(singleEntry);
+  if (singleKeyEntries.every(Boolean)) {
+    return Object.fromEntries(singleKeyEntries as [string, unknown][]);
+  }
+
+  if (
+    declaredKeys.length > 0
+    && value.length === declaredKeys.length
+    && value.every((entry) => !isPlainRecord(entry) && !Array.isArray(entry))
+  ) {
+    return Object.fromEntries(declaredKeys.map((key, index) => [key, value[index]]));
+  }
+
+  return {};
+};
+
+const normalizeLooseKey = (key: string) => key.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+const aliasKeysForDeclaredKey = (declaredKey: string) => {
+  const normalized = normalizeLooseKey(declaredKey);
+  const aliases: Record<string, string[]> = {
+    estimatedemployees: ['estimatedemployeecount', 'employeecount', 'estimatedemployee'],
+    servicessummary: ['onesentenceservicessummary', 'servicesummary'],
+    hasbrandedvehicles: ['whetherbrandedwrappedcompanyvehiclesappear', 'brandedvehicles', 'wrappedcompanyvehicles'],
+    hascareerspage: ['careerspage', 'hascareers'],
+  };
+  return [normalized, ...(aliases[normalized] || [])];
+};
+
+const looseKeysMatch = (declaredKey: string, candidateKey: string) => {
+  const declaredAliases = aliasKeysForDeclaredKey(declaredKey);
+  const candidate = normalizeLooseKey(candidateKey);
+  return declaredAliases.some((declared) => (
+    declared === candidate || declared.includes(candidate) || candidate.includes(declared)
+  ));
+};
+
+export const fuzzyMapDeclaredKeys = (
+  raw: Record<string, unknown>,
+  declaredKeys: string[],
+): Record<string, unknown> => {
+  const mapped: Record<string, unknown> = { ...raw };
+  for (const declaredKey of declaredKeys) {
+    if (Object.prototype.hasOwnProperty.call(mapped, declaredKey)) continue;
+    const match = Object.entries(raw).find(([candidateKey, value]) => (
+      value !== undefined && looseKeysMatch(declaredKey, candidateKey)
+    ));
+    if (match) mapped[declaredKey] = match[1];
+  }
+  return mapped;
+};
+
 export const lenientRecord = <ValueSchema extends z.ZodTypeAny = z.ZodAny>(
   valueSchema?: ValueSchema,
   options: { fromArrayKey?: string | string[] } = {},
