@@ -23,6 +23,7 @@ const schemaCache = new Map<string, ComposioToolSchema>();
 const toolkitToolsCache = new Map<string, string[]>();
 
 const normalizeSlug = (value: unknown) => String(value || '').trim();
+const normalizeCacheSlug = (value: unknown) => normalizeSlug(value).toUpperCase();
 
 const extractSchemaRecord = (slug: string, item: any): ComposioToolSchema | null => {
   const finalSlug = normalizeSlug(item?.tool_slug || item?.slug || slug);
@@ -120,7 +121,9 @@ export class ComposioProvider implements ToolProvider {
         if (toolSchemas && typeof toolSchemas === 'object' && !Array.isArray(toolSchemas)) {
           for (const [slug, raw] of Object.entries(toolSchemas)) {
             const record = extractSchemaRecord(slug, raw);
-            if (record && !schemaCache.has(record.slug)) schemaCache.set(record.slug, record);
+            if (record && !schemaCache.has(normalizeCacheSlug(record.slug))) {
+              schemaCache.set(normalizeCacheSlug(record.slug), record);
+            }
           }
         }
 
@@ -163,7 +166,7 @@ export class ComposioProvider implements ToolProvider {
     if (toolSchemas && typeof toolSchemas === 'object' && !Array.isArray(toolSchemas)) {
       for (const [slug, raw] of Object.entries(toolSchemas)) {
         const record = extractSchemaRecord(slug, raw);
-        if (record) schemaCache.set(record.slug, record);
+        if (record) schemaCache.set(normalizeCacheSlug(record.slug), record);
       }
     }
 
@@ -189,7 +192,7 @@ export class ComposioProvider implements ToolProvider {
 
   async getSchemas(slugs: string[]): Promise<ProviderToolSchema[]> {
     const deduped = [...new Set(slugs.map(normalizeSlug).filter(Boolean))];
-    const missing = deduped.filter((slug) => !schemaCache.has(slug));
+    const missing = deduped.filter((slug) => !schemaCache.has(normalizeCacheSlug(slug)));
 
     if (missing.length > 0) {
       const mcp = await this.client();
@@ -201,13 +204,13 @@ export class ComposioProvider implements ToolProvider {
       if (schemasByslug && typeof schemasByslug === 'object' && !Array.isArray(schemasByslug)) {
         for (const [slug, raw] of Object.entries(schemasByslug)) {
           const record = extractSchemaRecord(slug, raw);
-          if (record) schemaCache.set(record.slug, record);
+          if (record) schemaCache.set(normalizeCacheSlug(record.slug), record);
         }
       }
     }
 
     return deduped
-      .map((slug) => schemaCache.get(slug))
+      .map((slug) => schemaCache.get(normalizeCacheSlug(slug)))
       .filter((schema): schema is ComposioToolSchema => Boolean(schema))
       .map(toProviderSchema);
   }

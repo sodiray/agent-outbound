@@ -133,10 +133,12 @@ const normalizeLooseAuthorValue = (value: unknown, key = ''): unknown => {
   return effective;
 };
 
-const moveTopLevelOutputsIntoConfig = (value: unknown) => {
+const moveTopLevelStepFieldsIntoConfig = (value: unknown) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const record = value as Record<string, unknown>;
-  if (!Object.prototype.hasOwnProperty.call(record, 'outputs')) return value;
+  const hasOutputs = Object.prototype.hasOwnProperty.call(record, 'outputs');
+  const hasTool = Object.prototype.hasOwnProperty.call(record, 'tool');
+  if (!hasOutputs && !hasTool) return value;
   const config = record.config && typeof record.config === 'object' && !Array.isArray(record.config)
     ? record.config as Record<string, unknown>
     : {};
@@ -144,7 +146,8 @@ const moveTopLevelOutputsIntoConfig = (value: unknown) => {
     ...record,
     config: {
       ...config,
-      outputs: config.outputs ?? record.outputs,
+      ...(hasTool ? { tool: config.tool ?? record.tool } : {}),
+      ...(hasOutputs ? { outputs: config.outputs ?? record.outputs } : {}),
     },
   };
 };
@@ -207,7 +210,7 @@ const SourceFilterPatchSchema = objectWithDefault(z.object({
   config: StepConfigPatchSchema.optional(),
 }).partial());
 
-const EnrichStepPatchSchema = z.preprocess(moveTopLevelOutputsIntoConfig, objectWithDefault(z.object({
+const EnrichStepPatchSchema = z.preprocess(moveTopLevelStepFieldsIntoConfig, objectWithDefault(z.object({
   id: nullableString().optional(),
   description: nullableString().optional(),
   config: StepConfigPatchSchema.optional(),
@@ -225,7 +228,7 @@ const SequenceStepConfigPatchSchema = objectWithDefault(z.object({
   idempotency: IdempotencyPatchSchema.optional(),
 }).partial());
 
-const SequenceStepPatchSchema = z.preprocess(moveTopLevelOutputsIntoConfig, objectWithDefault(z.object({
+const SequenceStepPatchSchema = z.preprocess(moveTopLevelStepFieldsIntoConfig, objectWithDefault(z.object({
   id: nullableString().optional(),
   description: nullableString().optional(),
   template: z.union([nullableString(), arrayOf(nullableString())]).optional(),

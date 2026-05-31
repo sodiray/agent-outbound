@@ -62,6 +62,7 @@ const addToolRef = (refs: ToolRef[], path: string, owner: any) => {
 const normalizeToolSlug = (value: unknown) => String(value || '').trim().toUpperCase();
 const normalizeServer = (value: unknown) => String(value || '').trim().toLowerCase();
 const isComposioServer = (server: string) => !server || server === 'composio';
+const serializeServer = (server: string) => isComposioServer(server) ? '' : server;
 
 const getSchemaSlug = (schema: ProviderToolSchema | ComposioToolSchema) => normalizeToolSlug(schema?.slug);
 
@@ -270,7 +271,7 @@ export const resolveConfigToolCatalog = async ({
     ])];
 
     ref.spec.toolkits = toolkits;
-    ref.spec.server = server;
+    ref.spec.server = serializeServer(server);
     ref.spec.tools = tools;
     if (tools.length > 0) {
       resolvedSpecs += 1;
