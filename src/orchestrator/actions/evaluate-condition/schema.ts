@@ -1,7 +1,8 @@
 import { z } from 'zod';
+import { nullableBoolean, nullableString } from '../schema-helpers.js';
 
 export const ConditionResultSchema = z.object({
-  passed: z.boolean(),
-  defer: z.boolean().default(false),
-  reason: z.string().default(''),
+  passed: nullableBoolean(false),
+  defer: nullableBoolean(false),
+  reason: nullableString(),
 });

@@ -1,10 +1,11 @@
 import { z } from 'zod';
+import { nullableBoolean, nullableString, recordWithDefault } from '../schema-helpers.js';
 
 export const ExecuteStepResultSchema = z.object({
-  outputs: z.record(z.any()).default({}),
-  artifacts: z.record(z.any()).default({}),
-  summary: z.string().default(''),
-  defer: z.boolean().default(false),
-  reason: z.string().default(''),
-  pagination: z.record(z.any()).nullable().optional(),
+  outputs: recordWithDefault(),
+  artifacts: recordWithDefault(),
+  summary: nullableString(),
+  defer: nullableBoolean(false),
+  reason: nullableString(),
+  pagination: recordWithDefault().nullable().optional(),
 });

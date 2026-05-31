@@ -1,16 +1,17 @@
 import { z } from 'zod';
+import { arrayOf, nullableNumber, nullableString } from '../schema-helpers.js';
 
 export const RoutePlanSchema = z.object({
-  route_date: z.string(),
-  total_drive_minutes: z.number().int().nonnegative().default(0),
-  stops: z.array(z.object({
-    record_id: z.string(),
-    stop_order: z.number().int().positive(),
-    scheduled_time: z.string().default(''),
-    drive_minutes_from_prev: z.number().int().nonnegative().default(0),
-    calendar_event_id: z.string().default(''),
-    eta: z.string().default(''),
-    notes: z.string().default(''),
+  route_date: nullableString(),
+  total_drive_minutes: nullableNumber(0, z.number().int().nonnegative()),
+  stops: arrayOf(z.object({
+    record_id: nullableString(),
+    stop_order: nullableNumber(1, z.number().int().positive()),
+    scheduled_time: nullableString(),
+    drive_minutes_from_prev: nullableNumber(0, z.number().int().nonnegative()),
+    calendar_event_id: nullableString(),
+    eta: nullableString(),
+    notes: nullableString(),
   })),
-  summary: z.string().default(''),
+  summary: nullableString(),
 });

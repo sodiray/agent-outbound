@@ -5,6 +5,12 @@ Rules:
 - Keep prompts capability-described, not provider-specific.
 - Model fields must always use full `provider/model-id` format (for example `anthropic/claude-sonnet-4-6`), never shorthand (`haiku|sonnet|opus`).
 - Put concrete tool pinning in `config.tool` (`toolkits`, `tools`).
+- Tool-backed steps may set `tool.server` to the provider name. Omitted or empty `tool.server` means Composio.
+- Use `tool.server` and `tool.tools` from the same `Toolkit catalog.candidate_actions[]` entry. Set `tool.server` to that entry's `server` and set `tool.tools` to that entry's real `slug`.
+- Never put a slug from one server under another server. Treat `(server, slug)` as the tool identity.
+- Use only real tool slugs from `Toolkit catalog.candidate_actions[].slug` for the chosen server when setting `tool.tools`; never invent or paraphrase a tool slug.
+- When setting `args` for a tool-backed step, use only keys listed in that same candidate action's `input_parameters`.
+- If no candidate action matches the requested capability for the chosen server, do not guess. Add a warning explaining the missing tool/capability instead.
 - Preserve existing config; emit only incremental changes.
 - Add concise warnings when required channel/integration setup is missing.
 - Every search, filter, enrichment step, and sequence step MUST have a unique `id` string so it can be modified or removed later.

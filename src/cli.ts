@@ -7,6 +7,7 @@ import {
   DEEPINFRA_RECOMMENDED_MODELS,
   aiUsageCommand,
   authConnectCommand,
+  authLoginCommand,
   authListCommand,
   configAuthorCommand,
   configDiffCommand,
@@ -58,6 +59,10 @@ import {
   listInfoCommand,
   listsCommand,
   logCommand,
+  mcpAddCommand,
+  mcpListCommand,
+  mcpRemoveCommand,
+  mcpTestCommand,
   modelsAddCommand,
   modelsListCommand,
   modelsRefreshCommand,
@@ -72,7 +77,6 @@ import {
   routePlanCommand,
 } from './commands/index.js';
 import { onboardCommand } from './commands/onboard.js';
-import { validateComposioKey } from './orchestrator/runtime/mcp.js';
 import { validateAnthropicKey } from './orchestrator/runtime/anthropic.js';
 import { listDeepInfraModels } from './orchestrator/runtime/deepinfra.js';
 import { startServeMode } from './serve.js';
@@ -98,6 +102,17 @@ const hasFlag = (arr, name) => {
   if (idx < 0) return false;
   arr.splice(idx, 1);
   return true;
+};
+
+const consumeFlags = (arr, name) => {
+  const values = [];
+  for (;;) {
+    const idx = arr.indexOf(name);
+    if (idx < 0) return values;
+    const value = arr[idx + 1] ?? '';
+    arr.splice(idx, 2);
+    values.push(value);
+  }
 };
 
 const toNumber = (value, fallback) => {
@@ -140,11 +155,15 @@ const printHelp = () => {
 `);
   process.stdout.write(`  (global) --idem-key KEY       # idempotency key for mutating commands\n`);
   process.stdout.write(`  onboard                     # agent-consumable setup guide (paste into your AI agent)\n`);
-  process.stdout.write(`  init [--composio-api-key KEY] [--anthropic-api-key KEY] [--deepinfra-api-key KEY] [--non-interactive]\n`);
+  process.stdout.write(`  init [--anthropic-api-key KEY] [--deepinfra-api-key KEY] [--non-interactive]\n`);
   process.stdout.write(`  models [--provider anthropic|deepinfra] [--search TEXT]\n`);
   process.stdout.write(`  models add deepinfra/<model-id>\n`);
   process.stdout.write(`  models remove <provider/model-id>\n`);
   process.stdout.write(`  models refresh\n`);
+  process.stdout.write(`  mcp list <list>\n`);
+  process.stdout.write(`  mcp add <list> --name N --type command --command CMD --args 'a,b,c' [--env K=V ...] [--cwd DIR] [--tools-file path.json]\n`);
+  process.stdout.write(`  mcp remove <list> --name N\n`);
+  process.stdout.write(`  mcp test <list> --name N\n`);
   process.stdout.write(`  list create <list> [--description TEXT]\n`);
   process.stdout.write(`  list info <list>\n`);
   process.stdout.write(`  lists\n`);
@@ -207,6 +226,7 @@ const printHelp = () => {
   process.stdout.write(`  duplicates confirm <list> --row ROW_ID --canonical ROW_ID\n`);
   process.stdout.write(`  duplicates break <list> --row ROW_ID\n`);
   process.stdout.write(`  auth --list\n`);
+  process.stdout.write(`  auth login                 # browser login for Composio OAuth\n`);
   process.stdout.write(`  auth <toolkit>              # prints the Composio dashboard URL for this toolkit\n`);
   process.stdout.write(`  serve <list> [--port N]\n`);
   process.stdout.write(`  reconcile <list> [--stale-minutes N]\n`);
@@ -296,7 +316,6 @@ const run = async () => {
   }
 
   if (command === 'init') {
-    const composioApiKeyFlag = consumeFlag(argv, '--composio-api-key', '');
     const anthropicApiKeyFlag = consumeFlag(argv, '--anthropic-api-key', '');
     const deepinfraApiKeyFlag = consumeFlag(argv, '--deepinfra-api-key', '');
     const nonInteractive = hasFlag(argv, '--non-interactive');
@@ -334,11 +353,6 @@ const run = async () => {
       });
     });
 
-    const requireInteractive = (what: string) => {
-      if (!interactive) {
-        throw new Error(`${what} is required. Pass via flag or run \`agent-outbound init\` in an interactive terminal.`);
-      }
-    };
     const promptText = (label: string) => new Promise<string>((resolve) => {
       const rl = readline.createInterface({
         input: process.stdin,
@@ -361,40 +375,7 @@ const run = async () => {
     say('');
     say('Step 1 of 2 — Composio');
     say('----------------------');
-
-    const existingComposio = String(getEnv('COMPOSIO_API_KEY') || '').trim();
-    let composioApiKey = String(composioApiKeyFlag || existingComposio).trim();
-    if (!composioApiKey) {
-      requireInteractive('Composio API key');
-      while (!composioApiKey) {
-        composioApiKey = await promptSecret('Composio API key');
-        if (!composioApiKey) say('Key is required.');
-      }
-    } else if (!composioApiKeyFlag && existingComposio) {
-      say('Composio API key: (already set)');
-    }
-
-    sayInline('Validating Composio key... ');
-    const composioCheck = await validateComposioKey(composioApiKey);
-    if (!composioCheck.ok) {
-      say('failed.');
-      say(`Error: ${composioCheck.error}`);
-      throw new Error('Composio key validation failed. Check the key and re-run `agent-outbound init`.');
-    }
-    say('ok.');
-
-    const connectedToolkits = composioCheck.toolkits;
-    if (connectedToolkits.length === 0) {
-      say('');
-      say('No connected toolkits found under this API key.');
-      say('Go to https://platform.composio.dev/apps and connect the toolkits you need (Gmail, Hunter, Firecrawl, Google Maps, etc.).');
-    } else {
-      say('');
-      say(`Toolkits currently connected (${connectedToolkits.length}):`);
-      for (const slug of connectedToolkits) {
-        say(`  - ${slug}`);
-      }
-    }
+    say('Composio now uses browser OAuth. After init, run `agent-outbound auth login` to authenticate.');
 
     // Step 2 — LLM providers
     say('');
@@ -504,7 +485,6 @@ const run = async () => {
 
     // Persist and summarize
     const result = await initCommand({
-      composioApiKey,
       anthropicApiKey,
       deepinfraApiKey,
       deepinfraModels: deepinfraSelectedModels,
@@ -519,6 +499,7 @@ const run = async () => {
 
     say('');
     say('Next:');
+    say('  agent-outbound auth login               # authenticate Composio');
     say('  agent-outbound list create <name>       # start a new list');
     say('  agent-outbound source <list> --limit 20 # source your first records');
     say('  agent-outbound --help                   # all commands');
@@ -638,6 +619,48 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown models subcommand: ${sub}`);
+  }
+
+  if (command === 'mcp') {
+    const sub = String(argv.shift() || '').trim();
+    const list = String(argv.shift() || '');
+    setResponseContext({ command: `mcp ${sub}`, list });
+
+    if (sub === 'list') {
+      print(mcpListCommand({ list }));
+      return;
+    }
+    if (sub === 'add') {
+      const name = consumeFlag(argv, '--name', '');
+      const type = consumeFlag(argv, '--type', '');
+      const commandName = consumeFlag(argv, '--command', '');
+      const commandArgs = consumeFlag(argv, '--args', '');
+      const env = consumeFlags(argv, '--env');
+      const cwd = consumeFlag(argv, '--cwd', '');
+      const toolsFile = consumeFlag(argv, '--tools-file', '');
+      print(mcpAddCommand({
+        list,
+        name,
+        type,
+        command: commandName,
+        args: commandArgs,
+        env,
+        cwd,
+        toolsFile,
+      }));
+      return;
+    }
+    if (sub === 'remove') {
+      const name = consumeFlag(argv, '--name', '');
+      print(mcpRemoveCommand({ list, name }));
+      return;
+    }
+    if (sub === 'test') {
+      const name = consumeFlag(argv, '--name', '');
+      print(await mcpTestCommand({ list, name }));
+      return;
+    }
+    throw new Error(`Unknown mcp subcommand: ${sub}`);
   }
 
   if (command === 'describe') {
@@ -1475,6 +1498,12 @@ const run = async () => {
   if (command === 'auth') {
     if (hasFlag(argv, '--list')) {
       print(await authListCommand());
+      return;
+    }
+    const sub = String(argv[0] || '').trim();
+    if (sub === 'login') {
+      argv.shift();
+      print(await authLoginCommand());
       return;
     }
     const toolkit = String(argv.shift() || '').trim();

@@ -36,6 +36,7 @@ export const ProviderModelSchema = z.string().trim().superRefine((value, ctx) =>
 });
 
 export const ToolSpecSchema = z.object({
+  server: z.string().default(''),
   toolkits: z.array(z.string()).default([]),
   tools: z.array(z.string()).default([]),
   search: z.string().default(''),

@@ -1,6 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { getEnv } from './env.js';
+import { ComposioOAuthProvider } from './composio-oauth.js';
 
 const DEFAULT_MCP_URL = 'https://connect.composio.dev/mcp';
 const CLIENT_NAME = 'agent-outbound';
@@ -21,22 +22,13 @@ const NESTED_SESSION_TOOLS = new Set(['COMPOSIO_SEARCH_TOOLS']);
 
 const getMcpUrl = () => String(getEnv('COMPOSIO_MCP_URL') || DEFAULT_MCP_URL).trim() || DEFAULT_MCP_URL;
 
-const requireApiKey = (explicit?: string) => {
-  const key = String(explicit || getEnv('COMPOSIO_API_KEY') || '').trim();
-  if (!key) {
-    throw new Error('COMPOSIO_API_KEY is missing. Run `agent-outbound init` or set it in ~/.agent-outbound/env.');
+export const makeMcpClient = async (): Promise<McpClient> => {
+  const authProvider = new ComposioOAuthProvider();
+  if (!await authProvider.tokens()) {
+    throw new Error('Composio is not authenticated. Run `agent-outbound auth login`.');
   }
-  return key;
-};
-
-export const makeMcpClient = async (explicitApiKey?: string): Promise<McpClient> => {
-  const apiKey = requireApiKey(explicitApiKey);
   const transport = new StreamableHTTPClientTransport(new URL(getMcpUrl()), {
-    requestInit: {
-      headers: {
-        'x-consumer-api-key': apiKey,
-      },
-    },
+    authProvider,
   });
   const client = new Client(
     { name: CLIENT_NAME, version: CLIENT_VERSION },
@@ -208,7 +200,7 @@ const ENUMERATION_QUERIES = [
   { use_case: 'look up public business records and registrations' },
 ];
 
-const enumerateConnectedToolkits = async (mcp: McpClient): Promise<string[]> => {
+export const enumerateConnectedToolkits = async (mcp: McpClient): Promise<string[]> => {
   const seen = new Set<string>();
   const errors: string[] = [];
 
@@ -240,20 +232,9 @@ const enumerateConnectedToolkits = async (mcp: McpClient): Promise<string[]> => 
   return [...seen].sort();
 };
 
-export const listConnectedToolkits = async (apiKey?: string): Promise<string[]> => {
-  const shouldClose = Boolean(apiKey);
-  const client = apiKey ? await makeMcpClient(apiKey) : await getMcpClient();
-  try {
-    return await enumerateConnectedToolkits(client);
-  } finally {
-    if (shouldClose) {
-      try {
-        await client.close();
-      } catch {
-        // ignore
-      }
-    }
-  }
+export const listConnectedToolkits = async (): Promise<string[]> => {
+  const client = await getMcpClient();
+  return enumerateConnectedToolkits(client);
 };
 
 export const assertToolSpecAvailable = async ({
@@ -290,48 +271,6 @@ export const assertToolSpecAvailable = async ({
     `${capability} requires toolkit(s): ${missing.join(', ')} but they are not available in Composio. ` +
     `Reconnect at ${dashboard} or update your config.`,
   );
-};
-
-export type ValidateComposioKeyResult = {
-  ok: boolean;
-  toolkits: string[];
-  error?: string;
-};
-
-const validationFailure = (error: string): ValidateComposioKeyResult => ({
-  ok: false,
-  toolkits: [],
-  error,
-});
-
-export const validateComposioKey = async (apiKey: string): Promise<ValidateComposioKeyResult> => {
-  const key = String(apiKey || '').trim();
-  if (!key) return validationFailure('API key is empty.');
-
-  let client: McpClient;
-  try {
-    client = await makeMcpClient(key);
-  } catch (error) {
-    return validationFailure(`Failed to connect to MCP: ${String((error as any)?.message || error)}`);
-  }
-
-  try {
-    await client.listTools();
-  } catch (error) {
-    await client.close().catch(() => {});
-    return validationFailure(`tools/list rejected: ${String((error as any)?.message || error)}`);
-  }
-
-  let toolkits: string[] = [];
-  try {
-    toolkits = await enumerateConnectedToolkits(client);
-  } catch (error) {
-    await client.close().catch(() => {});
-    return validationFailure(`Connected-toolkit enumeration failed: ${String((error as any)?.message || error)}`);
-  }
-
-  await client.close().catch(() => {});
-  return { ok: true, toolkits };
 };
 
 export const getToolkitDashboardUrl = (toolkit: string) => {

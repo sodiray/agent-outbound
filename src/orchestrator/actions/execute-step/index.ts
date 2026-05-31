@@ -6,18 +6,21 @@ import { generateObjectWithTools } from '../../runtime/llm.js';
 import { readPromptFileIfAny, renderPromptTemplate } from '../shared.js';
 import type { ToolCatalog } from '../../runtime/tools.js';
 import type { ActionRole } from '../../runtime/models.js';
+import { nullableBoolean, nullableString, recordWithDefault } from '../schema-helpers.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
 const buildExecuteStepResultSchema = (outputSchema?: z.ZodTypeAny) => {
   if (!outputSchema) return ExecuteStepResultSchema;
   return z.object({
-    outputs: outputSchema.default({}),
-    artifacts: z.record(z.any()).default({}),
-    summary: z.string().default(''),
-    defer: z.boolean().default(false),
-    reason: z.string().default(''),
-    pagination: z.record(z.any()).nullable().optional(),
+    outputs: z.preprocess((value) => (
+      value === null || value === undefined ? {} : value
+    ), outputSchema).default({}),
+    artifacts: recordWithDefault(),
+    summary: nullableString(),
+    defer: nullableBoolean(false),
+    reason: nullableString(),
+    pagination: recordWithDefault().nullable().optional(),
   });
 };
 
@@ -111,6 +114,7 @@ export const executeStepAction = async ({
       userPrompt,
       toolSpec: stepConfig?.tool || {},
       toolCatalog,
+      listDir,
       maxSteps: Number(stepConfig?.step_budget || 8),
     });
 

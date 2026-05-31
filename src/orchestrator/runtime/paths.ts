@@ -10,6 +10,9 @@ export const getGlobalEnvPath = () => join(getGlobalRoot(), 'env');
 export const getGlobalSuppressionDbPath = () => join(getGlobalRoot(), 'suppression.db');
 export const getGlobalSettingsPath = () => join(getGlobalRoot(), 'settings.yaml');
 export const getGlobalModelsPath = () => join(getGlobalRoot(), 'models.json');
+export const getComposioOAuthClientPath = () => join(getGlobalRoot(), 'composio-oauth-client.json');
+export const getComposioOAuthTokensPath = () => join(getGlobalRoot(), 'composio-oauth-tokens.json');
+export const getComposioOAuthVerifierPath = () => join(getGlobalRoot(), 'composio-oauth-verifier.txt');
 
 export const resolveListDir = (listPath) => {
   const raw = String(listPath || '').trim();

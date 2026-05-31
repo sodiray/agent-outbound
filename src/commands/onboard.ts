@@ -1,7 +1,8 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { readGlobalEnv } from '../orchestrator/runtime/env.js';
-import { listConnectedToolkits, validateComposioKey } from '../orchestrator/runtime/mcp.js';
+import { listConnectedToolkits } from '../orchestrator/runtime/mcp.js';
+import { hasComposioOAuthTokens } from '../orchestrator/runtime/composio-oauth.js';
 import { validateAnthropicKey } from '../orchestrator/runtime/anthropic.js';
 import { validateDeepInfraKey } from '../orchestrator/runtime/deepinfra.js';
 
@@ -18,13 +19,8 @@ const detectLists = (): string[] => {
 
 const checkState = async () => {
   const env = readGlobalEnv();
-  const composioKey = String(env.COMPOSIO_API_KEY || process.env.COMPOSIO_API_KEY || '').trim();
   const anthropicKey = String(env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || '').trim();
   const deepinfraKey = String(env.DEEPINFRA_API_KEY || process.env.DEEPINFRA_API_KEY || '').trim();
-
-  const composio = composioKey
-    ? await validateComposioKey(composioKey).catch(() => ({ ok: false, toolkits: [] as string[], error: 'validation failed' }))
-    : { ok: false, toolkits: [] as string[], error: 'not configured' };
 
   const anthropic = anthropicKey
     ? await validateAnthropicKey(anthropicKey).catch(() => ({ ok: false, error: 'validation failed' }))
@@ -33,15 +29,15 @@ const checkState = async () => {
     ? await validateDeepInfraKey(deepinfraKey).catch(() => ({ ok: false, error: 'validation failed' }))
     : { ok: false, error: 'not configured' };
 
-  const toolkits: string[] = composio.ok
-    ? await listConnectedToolkits(composioKey).catch(() => [] as string[])
+  const composioAuthenticated = await hasComposioOAuthTokens();
+  const toolkits: string[] = composioAuthenticated
+    ? await listConnectedToolkits().catch(() => [] as string[])
     : [];
 
   const lists = detectLists();
 
   return {
-    composioKey: Boolean(composioKey),
-    composioValid: Boolean(composio.ok),
+    composioAuthenticated,
     anthropicKey: Boolean(anthropicKey),
     anthropicValid: Boolean(anthropic.ok),
     deepinfraKey: Boolean(deepinfraKey),
@@ -54,11 +50,9 @@ const checkState = async () => {
 export const onboardCommand = async () => {
   const state = await checkState();
 
-  const composioStatus = state.composioValid
-    ? '✓ configured and valid'
-    : state.composioKey
-      ? '⚠ key found but validation failed'
-      : '✗ not configured';
+  const composioStatus = state.composioAuthenticated
+    ? '✓ authenticated'
+    : '✗ not authenticated';
 
   const anthropicStatus = state.anthropicValid
     ? '✓ configured and valid'
@@ -73,9 +67,9 @@ export const onboardCommand = async () => {
 
   const toolkitStatus = state.toolkits.length > 0
     ? state.toolkits.join(', ')
-    : state.composioValid
+    : state.composioAuthenticated
       ? '(none connected yet)'
-      : '(requires valid Composio key)';
+      : '(requires `agent-outbound auth login`)';
 
   const listStatus = state.lists.length > 0
     ? state.lists.join(', ')
@@ -96,7 +90,7 @@ Your job: translate that into config, run the pipeline, and iterate.
 
 - Anthropic API key: ${anthropicStatus}
 - DeepInfra API key: ${deepinfraStatus}
-- Composio API key: ${composioStatus}
+- Composio OAuth: ${composioStatus}
 - Connected toolkits: ${toolkitStatus}
 - Existing lists: ${listStatus}
 - Working directory: ${process.cwd()}
@@ -107,17 +101,18 @@ Your job: translate that into config, run the pipeline, and iterate.
 
 Walk the user through these in order. Skip any that are already resolved (see Current State above).
 
-### 1. API Keys
+### 1. API Keys and Composio Login
 
-Composio is required. For LLM providers, configure Anthropic, DeepInfra, or both.
+Composio is required. It uses browser OAuth. For LLM providers, configure Anthropic, DeepInfra, or both.
 
 **Anthropic API key** — Powers Claude models. Get one from console.anthropic.com.
 **DeepInfra API key** — Powers open-source hosted models. Get one from deepinfra.com.
-**Composio API key** — Connects external tools (Google Maps, Hunter, Firecrawl, etc.). Get one from platform.composio.dev.
+**Composio OAuth** — Connects Agent Outbound to Composio's MCP endpoint.
 
-Once you have your keys, run:
+Once you have your LLM keys, run:
 \`\`\`
-npx agent-outbound init --composio-api-key KEY --anthropic-api-key KEY --deepinfra-api-key KEY --non-interactive
+npx agent-outbound init --anthropic-api-key KEY --deepinfra-api-key KEY --non-interactive
+npx agent-outbound auth login
 \`\`\`
 
 ### 2. Toolkit Connections

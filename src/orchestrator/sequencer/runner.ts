@@ -222,6 +222,7 @@ const planVisitRoutesIfNeeded = async ({ mcp, db, listDir, config, visitCandidat
     toolCatalog: readToolCatalog(listDir),
     aiConfig,
     model: config?.channels?.visit?.model || '',
+    listDir,
   });
   recordCostEvent({
     db,

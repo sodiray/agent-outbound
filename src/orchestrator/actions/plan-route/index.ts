@@ -17,6 +17,7 @@ export const planRouteAction = async ({
   toolCatalog,
   aiConfig = {},
   model = '',
+  listDir = '',
 }: {
   mcp: Client;
   routeDate: string;
@@ -26,6 +27,7 @@ export const planRouteAction = async ({
   toolCatalog?: ToolCatalog;
   aiConfig?: any;
   model?: string;
+  listDir?: string;
 }) => {
   const hasToolkit = Array.isArray(toolSpec?.toolkits) && toolSpec.toolkits.length > 0;
   const hasTools = Array.isArray(toolSpec?.tools) && toolSpec.tools.length > 0;
@@ -56,6 +58,7 @@ export const planRouteAction = async ({
     prompt,
     toolSpec,
     toolCatalog,
+    listDir,
     maxSteps: 6,
   });
   return {

@@ -36,8 +36,8 @@ import {
   getMcpClient,
   getToolkitDashboardUrl,
   listConnectedToolkits,
-  validateComposioKey,
 } from '../orchestrator/runtime/mcp.js';
+import { hasComposioOAuthTokens, loginComposio } from '../orchestrator/runtime/composio-oauth.js';
 import { listAnthropicModels, validateAnthropicKey } from '../orchestrator/runtime/anthropic.js';
 import { listDeepInfraModels, validateDeepInfraModel } from '../orchestrator/runtime/deepinfra.js';
 import { runCrmSync } from '../orchestrator/crm/runner.js';
@@ -53,6 +53,13 @@ import {
   setProviderModels,
   writeModelsState,
 } from '../orchestrator/runtime/model-store.js';
+
+export {
+  mcpAddCommand,
+  mcpListCommand,
+  mcpRemoveCommand,
+  mcpTestCommand,
+} from './mcp.js';
 
 const listDirsFromCwd = () => {
   const cwd = process.cwd();
@@ -517,18 +524,47 @@ export const sourceCommand = async ({ list, limit = 0, dryRun = false, sample = 
   const autoSnapshot = estimatedTotal >= threshold
     ? snapshotCreateCommand({ list: listDir, label: `auto-before-source-${new Date().toISOString()}` })
     : null;
-  const sourced = await runSourcing({ listDir, limit: Number(limit || 0) });
-  return {
-    ...sourced,
-    auto_snapshot: autoSnapshot,
-  };
+  try {
+    const sourced = await runSourcing({ listDir, limit: Number(limit || 0) });
+    return {
+      status: 'ok',
+      ...sourced,
+      auto_snapshot: autoSnapshot,
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      searches_run: 0,
+      found_total: 0,
+      inserted_total: 0,
+      inserted_ids: [],
+      deduped_total: 0,
+      filtered_out: 0,
+      errors: [String((error as any)?.message || error)],
+      auto_snapshot: autoSnapshot,
+    };
+  }
 };
 
 export const sourceMoreCommand = async ({ list, more = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'source' });
-  return runSourcingMore({ listDir, targetNew: Number(more || 0) });
+  try {
+    return await runSourcingMore({ listDir, targetNew: Number(more || 0) });
+  } catch (error) {
+    return {
+      status: 'error',
+      target_new: Number(more || 0),
+      inserted_total: 0,
+      inserted_ids: [],
+      searches_run: 0,
+      exhausted_searches: [],
+      deduped_total: 0,
+      filtered_out: 0,
+      errors: [String((error as any)?.message || error)],
+    };
+  }
 };
 
 export const removeCommand = ({ list, row = '', where = '', keepTop = 0, sortBy = 'updated_at' }) => {
@@ -967,6 +1003,7 @@ export const routePlanCommand = async ({ list, date = '' }) => {
       toolCatalog: readToolCatalog(listDir),
       aiConfig: config?.ai || {},
       model: config?.channels?.visit?.model || '',
+      listDir,
     });
     recordCostEvent({
       db,
@@ -1151,6 +1188,22 @@ export const authConnectCommand = async ({ toolkit }) => {
   };
 };
 
+export const authLoginCommand = async () => {
+  const result = await loginComposio();
+  if (!result.ok) {
+    return {
+      status: 'error',
+      authenticated: false,
+      error: result.error || 'Composio OAuth login failed.',
+    };
+  }
+  return {
+    status: 'ok',
+    authenticated: true,
+    connected_toolkits: result.toolkits || [],
+  };
+};
+
 const writeEnvUpdates = (updates: Record<string, string>) => {
   const cleaned: Record<string, string> = {};
   for (const [key, value] of Object.entries(updates)) {
@@ -1162,7 +1215,6 @@ const writeEnvUpdates = (updates: Record<string, string>) => {
 };
 
 export const initCommand = async ({
-  composioApiKey = '',
   anthropicApiKey = '',
   deepinfraApiKey = '',
   deepinfraModels = [] as string[],
@@ -1171,20 +1223,19 @@ export const initCommand = async ({
   ensureGlobalDirs();
 
   const updates: Record<string, string> = {};
-  if (composioApiKey) updates.COMPOSIO_API_KEY = composioApiKey;
   if (anthropicApiKey) updates.ANTHROPIC_API_KEY = anthropicApiKey;
   if (deepinfraApiKey) updates.DEEPINFRA_API_KEY = deepinfraApiKey;
 
   const envPath = writeEnvUpdates(updates);
   const env = readGlobalEnv();
 
-  const effectiveComposioKey = String(env.COMPOSIO_API_KEY || '').trim();
   const effectiveAnthropicKey = String(env.ANTHROPIC_API_KEY || '').trim();
   const effectiveDeepinfraKey = String(env.DEEPINFRA_API_KEY || '').trim();
 
-  const composio = effectiveComposioKey
-    ? await validateComposioKey(effectiveComposioKey)
-    : { ok: false, toolkits: [] as string[], error: 'COMPOSIO_API_KEY is not set.' };
+  const composioAuthenticated = await hasComposioOAuthTokens();
+  const composioToolkits = composioAuthenticated
+    ? await listConnectedToolkits().catch(() => [] as string[])
+    : [];
 
   const anthropic = effectiveAnthropicKey
     ? await validateAnthropicKey(effectiveAnthropicKey)
@@ -1224,14 +1275,13 @@ export const initCommand = async ({
   });
 
   return {
-    status: composio.ok && hasValidLlmProvider ? 'ok' : 'incomplete',
+    status: composioAuthenticated && hasValidLlmProvider ? 'ok' : 'incomplete',
     env_path: envPath,
     models_path: writtenModels.path,
     composio: {
-      has_key: Boolean(effectiveComposioKey),
-      valid: Boolean(composio.ok),
-      error: composio.ok ? undefined : composio.error,
-      toolkits: composio.ok ? composio.toolkits : [],
+      authenticated: composioAuthenticated,
+      error: composioAuthenticated ? undefined : 'Run `agent-outbound auth login` to authenticate Composio.',
+      toolkits: composioToolkits,
     },
     anthropic: {
       has_key: Boolean(effectiveAnthropicKey),

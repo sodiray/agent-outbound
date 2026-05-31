@@ -1,7 +1,8 @@
 import { z } from 'zod';
+import { enumWithDefault, nullableString } from '../schema-helpers.js';
 
 export const ClassifyReplyResultSchema = z.object({
-  classification: z.enum([
+  classification: enumWithDefault([
     'booking_intent',
     'question',
     'objection',
@@ -10,6 +11,6 @@ export const ClassifyReplyResultSchema = z.object({
     'out_of_office',
     'unsubscribe',
     'bounce',
-  ]).default('question'),
-  reason: z.string().default(''),
+  ], 'question'),
+  reason: nullableString(),
 });

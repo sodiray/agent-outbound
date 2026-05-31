@@ -20,6 +20,7 @@ import { mapWithConcurrency } from '../lib/concurrency.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
+import { loadTools } from '../runtime/tools.js';
 
 const toSearchRows = async ({
   mcp,
@@ -38,6 +39,24 @@ const toSearchRows = async ({
 }) => {
   const manual = Array.isArray(search?.manual_results) ? search.manual_results : [];
   if (manual.length > 0) return { rows: manual, usage: null, pagination: null, model: '', provider: '' };
+
+  const toolSpec = search?.tool || {};
+  const hasToolSpec = (Array.isArray(toolSpec?.tools) && toolSpec.tools.length > 0)
+    || (Array.isArray(toolSpec?.toolkits) && toolSpec.toolkits.length > 0);
+  if (!hasToolSpec) {
+    throw new Error(`source.search: no tool configured for this search step (id="${String(search?.id || '').trim() || 'source_search'}").`);
+  }
+
+  const resolvedTools = await loadTools(mcp, toolSpec, toolCatalog, { listDir });
+  const resolvedToolSlugs = Object.keys(resolvedTools);
+  if (resolvedToolSlugs.length === 0) {
+    const configuredTools = Array.isArray(toolSpec?.tools) ? toolSpec.tools.join(', ') : '';
+    const configuredToolkits = Array.isArray(toolSpec?.toolkits) ? toolSpec.toolkits.join(', ') : '';
+    throw new Error(
+      `source.search: could not resolve a tool for this search step ` +
+      `(tool="${configuredTools || configuredToolkits || 'unspecified'}"). Check the config's tool slug against connected toolkits.`,
+    );
+  }
 
   const context: any = {
     query: search?.query || '',
@@ -75,6 +94,13 @@ const toSearchRows = async ({
     : Array.isArray(result?.outputs?.results)
       ? result.outputs.results
       : [];
+  if (result?.defer) {
+    throw new Error(`source.search: ${String(result?.reason || 'search step deferred')}`);
+  }
+  const toolCalls = Array.isArray(result?.usage?.tool_calls) ? result.usage.tool_calls : [];
+  if (toolCalls.length === 0) {
+    throw new Error(`source.search: no live tool was called for this search step (id="${String(search?.id || '').trim() || 'source_search'}").`);
+  }
 
   return {
     rows,

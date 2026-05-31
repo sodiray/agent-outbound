@@ -14,12 +14,14 @@ export const syncCrmAction = async ({
   crmConfig = {} as any,
   toolCatalog,
   aiConfig = {},
+  listDir = '',
 }: {
   mcp: Client;
   record: any;
   crmConfig?: any;
   toolCatalog?: ToolCatalog;
   aiConfig?: any;
+  listDir?: string;
 }) => {
   const prompt = renderPromptTemplate({
     template: promptTemplate,
@@ -51,6 +53,7 @@ export const syncCrmAction = async ({
       prompt,
       toolSpec,
       toolCatalog,
+      listDir,
       maxSteps: 8,
     });
 

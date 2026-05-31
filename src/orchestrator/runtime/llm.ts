@@ -54,12 +54,13 @@ const resolveTools = async (
   mcp: Client | undefined,
   toolSpec: ToolSpec | undefined,
   toolCatalog?: ToolCatalog,
+  listDir = '',
 ) => {
   if (!hasPinnedTools(toolSpec)) return {};
   if (!mcp) {
     throw new Error('Tool spec pinned tools but no MCP client was provided to the LLM call.');
   }
-  return loadTools(mcp, toolSpec, toolCatalog);
+  return loadTools(mcp, toolSpec, toolCatalog, { listDir });
 };
 
 export type GenerateObjectWithToolsInput = {
@@ -74,6 +75,7 @@ export type GenerateObjectWithToolsInput = {
   userPrompt?: string;
   toolSpec?: ToolSpec;
   toolCatalog?: ToolCatalog;
+  listDir?: string;
   maxSteps?: number;
 };
 
@@ -112,6 +114,7 @@ export const generateObjectWithTools = async ({
   userPrompt = '',
   toolSpec,
   toolCatalog,
+  listDir = '',
   maxSteps = 8,
 }: GenerateObjectWithToolsInput) => {
   await ensureAiDeps();
@@ -123,7 +126,7 @@ export const generateObjectWithTools = async ({
   });
   const selectedModel = resolved.built;
 
-  const tools = await resolveTools(mcp, toolSpec, toolCatalog);
+  const tools = await resolveTools(mcp, toolSpec, toolCatalog, listDir);
   const hasTools = Object.keys(tools).length > 0;
   const onStepFinish = buildStepCallback({ task });
   const stopWhen = buildStopWhen(maxSteps);
