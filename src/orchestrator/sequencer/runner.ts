@@ -4,6 +4,7 @@ import {
   addSuppression,
   getPrimaryContact,
   hasSuppression,
+  inPlayWhere,
   insertChannelEvent,
   openGlobalSuppressionDb,
   openListDb,
@@ -122,6 +123,14 @@ const getLaunchDecision = ({ sequence, firstStep, today }) => {
   });
   return { timing, launchBaseDate, filtered };
 };
+
+export const collectDueRecords = ({ db, limit = 0 }) => db.prepare(`
+  SELECT * FROM records
+  WHERE ${inPlayWhere()}
+    AND (sequence_status IS NULL OR sequence_status NOT IN ('completed','opted_out'))
+  ORDER BY updated_at DESC
+  ${Number(limit || 0) > 0 ? `LIMIT ${Number(limit || 0)}` : ''}
+`).all();
 
 const StepIntentSchema = z.object({
   uses_email: z.boolean().default(false),
@@ -502,6 +511,7 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
   const sampleLimit = Math.max(0, Number(sample || 0));
   const records = db.prepare(`
     SELECT * FROM records
+    WHERE ${inPlayWhere()}
     ORDER BY updated_at DESC
     ${sampleLimit > 0 ? `LIMIT ${sampleLimit}` : ''}
   `).all();
@@ -562,11 +572,7 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
 
     await runDeliveryPoll({ mcp, db, listDir, config });
 
-    const freshRecords = db.prepare(`
-      SELECT * FROM records
-      ORDER BY updated_at DESC
-      ${sampleLimit > 0 ? `LIMIT ${sampleLimit}` : ''}
-    `).all();
+    const freshRecords = collectDueRecords({ db, limit: sampleLimit });
 
     await mapWithConcurrency<any, void>(freshRecords as any[], async (record) => {
       const recordId = getRecordRowId(record);
@@ -833,6 +839,7 @@ export const getSequenceStatus = ({ listDir }) => {
     const byStatus = db.prepare(`
       SELECT sequence_status as status, COUNT(*) as count
       FROM records
+      WHERE ${inPlayWhere()}
       GROUP BY sequence_status
       ORDER BY count DESC
     `).all();
@@ -840,7 +847,7 @@ export const getSequenceStatus = ({ listDir }) => {
     const dueToday = db.prepare(`
       SELECT COUNT(*) as count
       FROM records
-      WHERE sequence_status = 'active' AND next_action_date != '' AND next_action_date <= ?
+      WHERE ${inPlayWhere()} AND sequence_status = 'active' AND next_action_date != '' AND next_action_date <= ?
     `).get(todayIsoDate());
 
     const drafts = db.prepare(`
@@ -852,12 +859,12 @@ export const getSequenceStatus = ({ listDir }) => {
     const replies24h = db.prepare(`
       SELECT COUNT(*) as count
       FROM records
-      WHERE email_last_reply_at != '' AND email_last_reply_at >= datetime('now', '-1 day')
+      WHERE ${inPlayWhere()} AND email_last_reply_at != '' AND email_last_reply_at >= datetime('now', '-1 day')
     `).get();
     const duplicateReviews = db.prepare(`
       SELECT COUNT(*) as count
       FROM records
-      WHERE duplicate_status = 'needs_review'
+      WHERE ${inPlayWhere()} AND duplicate_status = 'needs_review'
     `).get();
 
     return {
@@ -886,7 +893,7 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
   const toolCatalog = readToolCatalog(listDir);
   const records = db.prepare(`
     SELECT * FROM records
-    WHERE sequence_status = 'idle'
+    WHERE sequence_status = 'idle' AND ${inPlayWhere()}
     ORDER BY priority_rank DESC, updated_at DESC
     LIMIT ?
   `).all(Number(limit));
@@ -1065,7 +1072,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
 
     const rows = db.prepare(`
       SELECT * FROM records
-      WHERE ${launchFilterSql}
+      WHERE ${inPlayWhere()} AND (${launchFilterSql})
       ORDER BY priority_rank DESC, updated_at DESC
       LIMIT ?
     `).all(Number(limit));
@@ -1192,7 +1199,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
     const search = `%${String(prospect || '').toLowerCase()}%`;
     const matches = db.prepare(`
       SELECT * FROM records
-      WHERE lower(business_name) LIKE ? OR lower(id) LIKE ? OR lower(_row_id) LIKE ? OR lower(email_primary) LIKE ?
+      WHERE ${inPlayWhere()} AND (lower(business_name) LIKE ? OR lower(id) LIKE ? OR lower(_row_id) LIKE ? OR lower(email_primary) LIKE ?)
       LIMIT 5
     `).all(search, search, search, search);
 

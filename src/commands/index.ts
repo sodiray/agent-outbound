@@ -8,6 +8,7 @@ import {
   deleteRecord,
   deleteRecordsBatch,
   deleteRecordsKeepTop,
+  inPlayWhere,
   logComplianceEvent,
   openGlobalSuppressionDb,
   openListDb,
@@ -20,7 +21,7 @@ import { validateColumnName, validateWhereSql } from '../orchestrator/lib/sql-sa
 import { recordCostEvent } from '../orchestrator/lib/costs.js';
 import { authorConfigAction } from '../orchestrator/actions/author-config/index.js';
 import { runSourcing, runSourcingMore } from '../orchestrator/sourcing/runner.js';
-import { runEnrichment } from '../orchestrator/enrichment/runner.js';
+import { runPipeline } from '../orchestrator/pipeline/runner.js';
 import { runScoring } from '../orchestrator/scoring/runner.js';
 import {
   followupSend,
@@ -141,10 +142,10 @@ const getBulkSnapshotThreshold = (config: any) => {
 };
 
 const hasDestructiveConfigRemoval = (beforeConfig: any, afterConfig: any) => {
-  const beforeEnrich = new Set((Array.isArray(beforeConfig?.enrich) ? beforeConfig.enrich : []).map((step: any) => String(step?.id || '').trim()).filter(Boolean));
-  const afterEnrich = new Set((Array.isArray(afterConfig?.enrich) ? afterConfig.enrich : []).map((step: any) => String(step?.id || '').trim()).filter(Boolean));
-  for (const id of beforeEnrich) {
-    if (!afterEnrich.has(id)) return true;
+  const beforePipeline = new Set((Array.isArray(beforeConfig?.pipeline) ? beforeConfig.pipeline : []).map((step: any) => String(step?.id || '').trim()).filter(Boolean));
+  const afterPipeline = new Set((Array.isArray(afterConfig?.pipeline) ? afterConfig.pipeline : []).map((step: any) => String(step?.id || '').trim()).filter(Boolean));
+  for (const id of beforePipeline) {
+    if (!afterPipeline.has(id)) return true;
   }
   const beforeSequences = Object.keys(beforeConfig?.sequences || {});
   const afterSequences = Object.keys(afterConfig?.sequences || {});
@@ -420,7 +421,7 @@ export const configAuthorCommand = async ({ list, request, force = false }) => {
     });
   }
   const removalOps = (patch.changes || [])
-    .filter((change: any) => String(change?.op || '') === 'remove_enrich')
+    .filter((change: any) => String(change?.op || '') === 'remove_pipeline_step')
     .map((change: any) => ({ id: String(change?.id || '').trim() }))
     .filter((change: any) => change.id);
 
@@ -637,10 +638,10 @@ export const removeCommand = ({ list, row = '', where = '', keepTop = 0, sortBy 
   }
 };
 
-export const enrichCommand = async ({ list, step = '', where = '', limit = 0, dryRun = false, sample = 0 }) => {
+export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = false, sample = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
-  assertPhaseModelReferences({ config: loaded.config, phase: 'enrich' });
+  assertPhaseModelReferences({ config: loaded.config, phase: 'pipeline' });
   const whereSql = String(where || '').trim();
   const whereCheck = validateWhereSql(whereSql);
   if (!whereCheck.ok) throw new Error(whereCheck.error || 'Invalid --where SQL fragment.');
@@ -649,7 +650,7 @@ export const enrichCommand = async ({ list, step = '', where = '', limit = 0, dr
   const totalCountRow = db.prepare(`
     SELECT COUNT(*) as count
     FROM records
-    WHERE sequence_status != 'opted_out' ${whereSql ? `AND (${whereSql})` : ''}
+    WHERE ${inPlayWhere()} AND sequence_status != 'opted_out' ${whereSql ? `AND (${whereSql})` : ''}
   `).get();
   db.close();
   const totalCount = Number(totalCountRow?.count || 0);
@@ -661,7 +662,6 @@ export const enrichCommand = async ({ list, step = '', where = '', limit = 0, dr
       dry_run: true,
       projected_records: Number(limit || 0) > 0 ? Math.min(Number(limit || 0), totalCount) : totalCount,
       total_records_matching: totalCount,
-      step_filter: step || '',
       where: whereSql || '',
       note: 'Dry-run performs no writes.',
     };
@@ -674,34 +674,30 @@ export const enrichCommand = async ({ list, step = '', where = '', limit = 0, dr
       sampledCount: sampleN,
       totalCount: Math.max(totalCount, sampleN),
       run: async () => {
-        const enrichment = await runEnrichment({
+        const pipeline = await runPipeline({
           listDir,
-          stepId: step,
           where: whereSql,
           limit: sampleN,
         });
         return {
-          enrichment,
+          pipeline,
           scoring: null,
-          note: 'Sample mode runs enrichment on N records and reports projections.',
+          note: 'Sample mode runs pipeline on N records and reports projections.',
         };
       },
     });
   }
 
   const autoSnapshot = totalCount >= threshold
-    ? snapshotCreateCommand({ list: listDir, label: `auto-before-enrich-${new Date().toISOString()}` })
+    ? snapshotCreateCommand({ list: listDir, label: `auto-before-pipeline-${new Date().toISOString()}` })
     : null;
-  const enrichment = await runEnrichment({
+  const pipeline = await runPipeline({
     listDir,
-    stepId: step,
     where: whereSql,
     limit: Number(limit || 0),
   });
-  const scoring = await runScoring({ listDir });
   return {
-    enrichment,
-    scoring,
+    pipeline,
     auto_snapshot: autoSnapshot,
   };
 };
@@ -710,25 +706,25 @@ export const runCommand = async ({ list, more = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'source' });
-  assertPhaseModelReferences({ config: loaded.config, phase: 'enrich' });
+  assertPhaseModelReferences({ config: loaded.config, phase: 'pipeline' });
   assertPhaseModelReferences({ config: loaded.config, phase: 'score' });
 
   const sourceResult: any = Number(more || 0) > 0
     ? await runSourcingMore({ listDir, targetNew: Number(more || 0) })
     : await runSourcing({ listDir, limit: 0 });
 
-  let enrichResult: any = null;
+  let pipelineResult: any = null;
   const newIds = Array.isArray(sourceResult?.inserted_ids) ? sourceResult.inserted_ids : [];
   if (newIds.length > 0) {
     const escaped = newIds.map((id: string) => `'${String(id || '').replace(/'/g, "''")}'`).join(', ');
-    enrichResult = await runEnrichment({ listDir, where: `_row_id IN (${escaped})` });
+    pipelineResult = await runPipeline({ listDir, where: `_row_id IN (${escaped})` });
   }
 
   const scoreResult = await runScoring({ listDir });
 
   return {
     source: sourceResult,
-    enrich: enrichResult,
+    pipeline: pipelineResult,
     score: scoreResult,
   };
 };
@@ -738,7 +734,7 @@ export const scoreCommand = async ({ list, dryRun = false, sample = 0 }) => {
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'score' });
   const db = openListDb({ listDir, readonly: true });
-  const total = db.prepare('SELECT COUNT(*) as count FROM records').get();
+  const total = db.prepare(`SELECT COUNT(*) as count FROM records WHERE ${inPlayWhere()}`).get();
   db.close();
   const totalCount = Number(total?.count || 0);
   const { config } = loaded;
@@ -787,7 +783,7 @@ export const sequenceRunCommand = async ({ list, allLists = false, sequenceName 
   const sampleN = Math.max(0, Number(sample || 0));
   if (sampleN > 0) {
     const db = openListDb({ listDir, readonly: true });
-    const total = db.prepare('SELECT COUNT(*) as count FROM records').get();
+    const total = db.prepare(`SELECT COUNT(*) as count FROM records WHERE ${inPlayWhere()}`).get();
     db.close();
     return withUsageSampling({
       listDir,
@@ -797,7 +793,7 @@ export const sequenceRunCommand = async ({ list, allLists = false, sequenceName 
     });
   }
   const db = openListDb({ listDir, readonly: true });
-  const total = db.prepare('SELECT COUNT(*) as count FROM records').get();
+  const total = db.prepare(`SELECT COUNT(*) as count FROM records WHERE ${inPlayWhere()}`).get();
   db.close();
   const { config } = readConfig(listDir);
   const threshold = getBulkSnapshotThreshold(config || {});
@@ -821,7 +817,7 @@ export const launchDraftCommand = async ({ list, sequenceName = 'default', limit
   const candidate = db.prepare(`
     SELECT COUNT(*) as count
     FROM records
-    WHERE sequence_status = 'idle'
+    WHERE ${inPlayWhere()} AND sequence_status = 'idle'
   `).get();
   db.close();
   const totalCount = Number(candidate?.count || 0);
@@ -975,7 +971,7 @@ export const routePlanCommand = async ({ list, date = '' }) => {
   try {
     const due = db.prepare(`
       SELECT * FROM records
-      WHERE visit_scheduled_date = ? AND sequence_status = 'active'
+      WHERE ${inPlayWhere()} AND visit_scheduled_date = ? AND sequence_status = 'active'
       ORDER BY priority_rank DESC, updated_at DESC
     `).all(routeDate);
 

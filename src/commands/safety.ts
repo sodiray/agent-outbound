@@ -241,10 +241,10 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
   if (!triggerDescription) errors.push('score.trigger.description must be non-empty.');
 
   const outputOwners = new Map<string, string>();
-  const enrichSteps = Array.isArray(config?.enrich) ? config.enrich : [];
+  const enrichSteps = (Array.isArray(config?.pipeline) ? config.pipeline : []).filter((step: any) => String(step?.kind || '') === 'enrich');
   for (const step of enrichSteps) {
     const stepId = String(step?.id || '').trim();
-    const outputs = step?.config?.outputs && typeof step.config.outputs === 'object' ? step.config.outputs : {};
+    const outputs = step?.outputs && typeof step.outputs === 'object' ? step.outputs : {};
     for (const field of Object.keys(outputs)) {
       if (outputOwners.has(field) && outputOwners.get(field) !== stepId) {
         errors.push(`Output collision on "${field}" between steps "${outputOwners.get(field)}" and "${stepId}".`);
@@ -277,7 +277,7 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
 export const recordRevertStepCommand = ({ list, rowId, stepId }: { list: string; rowId: string; stepId: string }) => {
   const listDir = resolveListDir(list);
   const { config } = readConfig(listDir);
-  const step = (Array.isArray(config?.enrich) ? config.enrich : []).find((item: any) => String(item?.id || '').trim() === String(stepId || '').trim());
+  const step: any = (Array.isArray(config?.pipeline) ? config.pipeline : []).find((item: any) => String(item?.id || '').trim() === String(stepId || '').trim() && String(item?.kind || '') === 'enrich');
   if (!step) {
     throw new AgentOutboundError({
       code: 'NOT_FOUND',
@@ -285,9 +285,9 @@ export const recordRevertStepCommand = ({ list, rowId, stepId }: { list: string;
       retryable: false,
     });
   }
-  const outputs = step?.config?.outputs && typeof step.config.outputs === 'object' ? Object.keys(step.config.outputs) : [];
-  const legacyColumns = step?.config?.columns && typeof step.config.columns === 'object'
-    ? Object.values(step.config.columns).map((name) => String(name || '').trim()).filter(Boolean)
+  const outputs = step?.outputs && typeof step.outputs === 'object' ? Object.keys(step.outputs) : [];
+  const legacyColumns = step?.columns && typeof step.columns === 'object'
+    ? Object.values(step.columns).map((name) => String(name || '').trim()).filter(Boolean)
     : [];
   const targetColumns = [...new Set([...outputs, ...legacyColumns])];
   const db = openListDb({ listDir, readonly: false });

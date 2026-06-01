@@ -25,9 +25,28 @@ export const makeRecordId = (row) => {
 
 export const getRecordRowId = (row) => String(row?._row_id || row?.id || makeRecordId(row)).trim();
 
+export const isRecordScalarValue = (value) => (
+  value === null
+    || typeof value === 'string'
+    || typeof value === 'number'
+    || typeof value === 'boolean'
+    || typeof value === 'bigint'
+);
+
+const parseExtraJson = (value) => {
+  if (!value) return {};
+  if (typeof value !== 'string') return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
 export const rowToRecordShape = ({ listName, row }) => {
   const rowId = getRecordRowId(row);
-  return {
+  const base = {
     id: rowId,
     _row_id: rowId,
     business_name: String(row.business_name || row.name || ''),
@@ -43,8 +62,8 @@ export const rowToRecordShape = ({ listName, row }) => {
     parent_row_id: String(row.parent_row_id || ''),
     duplicate_of: String(row.duplicate_of || ''),
     duplicate_status: String(row.duplicate_status || ''),
-    latitude: Number(row.latitude || 0),
-    longitude: Number(row.longitude || 0),
+    latitude: Number(row.latitude || row.lat || 0),
+    longitude: Number(row.longitude || row.lng || 0),
     phone: String(row.phone || ''),
     email_primary: String(row.email_primary || row.email || ''),
     contact_name_primary: String(row.contact_name_primary || row.contact_name || ''),
@@ -90,5 +109,32 @@ export const rowToRecordShape = ({ listName, row }) => {
     extra_json: row.extra_json || {},
     retry_count: Number(row.retry_count || 0),
     last_error: String(row.last_error || ''),
+  };
+  const known = new Set(Object.keys(base));
+  const nonScalarExtra = Object.fromEntries(
+    Object.entries(row || {}).filter(([key, value]) => (
+      /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)
+        && !known.has(key)
+        && key !== 'created_at'
+        && key !== 'updated_at'
+        && !isRecordScalarValue(value)
+    )),
+  );
+  const dynamic = Object.fromEntries(
+    Object.entries(row || {}).filter(([key, value]) => (
+      /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)
+        && !known.has(key)
+        && key !== 'created_at'
+        && key !== 'updated_at'
+        && isRecordScalarValue(value)
+    )),
+  );
+  return {
+    ...base,
+    extra_json: {
+      ...parseExtraJson(base.extra_json),
+      ...nonScalarExtra,
+    },
+    ...dynamic,
   };
 };

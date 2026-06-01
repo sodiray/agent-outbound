@@ -25,8 +25,8 @@ import {
   duplicatesBreakCommand,
   duplicatesConfirmCommand,
   duplicatesListCommand,
-  enrichCommand,
   exportCommand,
+  pipelineCommand,
   pipelineShowCommand,
   queryCommand,
   refreshToolsCommand,
@@ -189,7 +189,7 @@ const printHelp = () => {
   process.stdout.write(`  remove <list> --row ROW_ID\n`);
   process.stdout.write(`  remove <list> --where SQL\n`);
   process.stdout.write(`  remove <list> --keep-top N [--sort-by COLUMN]\n`);
-  process.stdout.write(`  enrich <list> [--step STEP_ID] [--where SQL] [--limit N] [--dry-run] [--sample N]\n`);
+  process.stdout.write(`  pipeline <list> [--where SQL] [--limit N] [--dry-run] [--sample N]\n`);
   process.stdout.write(`  score <list> [--dry-run] [--sample N]\n`);
   process.stdout.write(`  run <list> [--more N]\n`);
   process.stdout.write(`  launch draft <list> [--limit N] [--sequence NAME] [--dry-run] [--sample N]\n`);
@@ -793,9 +793,8 @@ const run = async () => {
     throw new Error(`Unknown record subcommand: ${sub}`);
   }
 
-  if (command === 'pipeline') {
-    const sub = String(argv.shift() || '').trim();
-    if (sub !== 'show') throw new Error(`Unknown pipeline subcommand: ${sub}`);
+  if (command === 'pipeline' && String(argv[0] || '').trim() === 'show') {
+    argv.shift();
     const list = String(argv.shift() || '');
     setResponseContext({ command: 'pipeline show', list });
     const delegated = await callServeAction('pipeline_show', { list }, list);
@@ -1089,22 +1088,21 @@ const run = async () => {
     return;
   }
 
-  if (command === 'enrich') {
+  if (command === 'pipeline') {
     const list = String(argv.shift() || '');
-    const step = consumeFlag(argv, '--step', '');
     const where = consumeFlag(argv, '--where', '');
     const limit = toNumber(consumeFlag(argv, '--limit', '0'), 0);
     const dryRun = hasFlag(argv, '--dry-run');
     const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
-    const delegated = await callServeAction('enrich', {
-      list, step, where, limit, dryRun, sample,
+    const delegated = await callServeAction('pipeline', {
+      list, where, limit, dryRun, sample,
     }, list);
     if (delegated) {
       print(delegated);
       return;
     }
-    print(await enrichCommand({
-      list, step, where, limit, dryRun, sample,
+    print(await pipelineCommand({
+      list, where, limit, dryRun, sample,
     }));
     return;
   }

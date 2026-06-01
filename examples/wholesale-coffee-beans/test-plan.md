@@ -111,7 +111,7 @@ agent-outbound config author coffee-shops --request "I need a filter to weed out
 ```
 
 **Expected:**
-- `source.filters` populated with at least two or three filter entries — franchise exclusion, physical address validation, website required
+- `pipeline` populated with at least two or three filter steps — franchise exclusion, physical address validation, website required
 - Filters have clear conditions and descriptions
 - Status `updated`, written `true`
 

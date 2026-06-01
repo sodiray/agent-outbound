@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { addSuppression, listContactsByRecord, openGlobalSuppressionDb, openListDb, logCrmEvent, upsertRecord } from '../runtime/db.js';
+import { addSuppression, inPlayWhere, listContactsByRecord, openGlobalSuppressionDb, openListDb, logCrmEvent, upsertRecord } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
 import { syncCrmAction } from '../actions/sync-crm/index.js';
 import { recordCostEvent } from '../lib/costs.js';
@@ -63,7 +63,7 @@ export const runCrmSync = async ({ listDir, where = "1=1", limit = 200 }) => {
       capability: 'CRM sync',
     });
 
-    const rows = db.prepare(`SELECT * FROM records WHERE ${where} ORDER BY updated_at DESC LIMIT ?`).all(Number(limit));
+    const rows = db.prepare(`SELECT * FROM records WHERE ${inPlayWhere()} AND (${where}) ORDER BY updated_at DESC LIMIT ?`).all(Number(limit));
     const summary = { total: rows.length, synced: 0, skipped: 0, failed: 0, errors: [] };
 
     for (const record of rows) {

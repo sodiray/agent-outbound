@@ -1,23 +1,26 @@
-import { z } from 'zod';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
 import {
   clearSearchState,
+  ensureRecordColumns,
   getSearchState,
+  listPendingSearchTasks,
   logSourcingEvent,
   openListDb,
   upsertRecord,
   upsertSearchState,
+  upsertSearchTask,
+  updateSearchTaskResult,
 } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
-import { getRecordRowId, makeRecordId, rowToRecordShape, stableHash } from '../lib/record.js';
+import { getRecordRowId, isRecordScalarValue, makeRecordId, rowToRecordShape, stableHash } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
-import { evaluateConditionAction } from '../actions/evaluate-condition/index.js';
 import { emitActivity } from '../runtime/activity.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getMcpClient } from '../runtime/mcp.js';
 import { aiDedupLink, buildIdentityHash, buildIdentityString, getIdentityFields, upsertRecordEmbedding } from './dedup.js';
 import { embed } from '../runtime/embeddings.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
-import { generateObjectWithTools } from '../runtime/llm.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { loadTools } from '../runtime/tools.js';
@@ -121,173 +124,224 @@ const mapSearchRow = ({ row, outputMap }) => {
   return mapped;
 };
 
-const SemanticFilterBatchSchema = z.object({
-  results: z.array(z.object({
-    row_id: z.string(),
-    passed: z.boolean(),
-    reason: z.string().default(''),
-  })).default([]),
+const readJsonFromListDir = (listDir: string, path: string) => {
+  const rawPath = String(path || '').trim();
+  if (!rawPath) throw new Error('source.strategy: missing JSON path.');
+  const resolved = isAbsolute(rawPath) ? rawPath : join(listDir, rawPath);
+  if (!existsSync(resolved)) throw new Error(`source.strategy: JSON file not found: ${resolved}`);
+  return JSON.parse(readFileSync(resolved, 'utf8'));
+};
+
+const asStringArray = (value: any) => (
+  Array.isArray(value)
+    ? value.map((entry) => String(entry || '').trim()).filter(Boolean)
+    : []
+);
+
+const loadKeywords = ({ listDir, strategy }: { listDir: string; strategy: any }) => {
+  if (Array.isArray(strategy?.keywords)) return asStringArray(strategy.keywords);
+  const raw = readJsonFromListDir(listDir, strategy?.keywords_from);
+  if (Array.isArray(raw)) return asStringArray(raw);
+  if (raw && typeof raw === 'object' && Array.isArray(raw.types)) {
+    return raw.types
+      .map((entry: any) => String(entry?.keyword || '').trim())
+      .filter(Boolean);
+  }
+  throw new Error('source.strategy keyword_geo keywords_from must be a string[] or { types: [{ keyword }] }.');
+};
+
+const loadGeos = ({ listDir, strategy }: { listDir: string; strategy: any }) => {
+  if (Array.isArray(strategy?.geos)) return asStringArray(strategy.geos);
+  return asStringArray(readJsonFromListDir(listDir, strategy?.geos_from));
+};
+
+const normalizeTile = (tile: any) => ({
+  lat: Number(tile?.lat),
+  lng: Number(tile?.lng),
+  radius_m: Number(tile?.radius_m),
 });
 
-const chunk = <T>(items: T[], size: number): T[][] => {
-  if (!Array.isArray(items) || items.length === 0) return [];
-  const out: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    out.push(items.slice(i, i + size));
-  }
-  return out;
+const loadTiles = ({ listDir, strategy }: { listDir: string; strategy: any }) => {
+  const raw = Array.isArray(strategy?.tiles)
+    ? strategy.tiles
+    : readJsonFromListDir(listDir, strategy?.tiles_from);
+  if (!Array.isArray(raw)) throw new Error('source.strategy geo_tiles tiles_from must be a JSON array.');
+  return raw.map(normalizeTile).filter((tile) => (
+    Number.isFinite(tile.lat) && Number.isFinite(tile.lng) && Number.isFinite(tile.radius_m)
+  ));
 };
 
-const asNumber = (value: any) => {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : NaN;
-};
+const taskIdFor = ({ kind, params }: { kind: string; params: any }) => (
+  `search_task_${stableHash({ kind, params }).slice(0, 32)}`
+);
 
-const evaluateFieldCheck = ({ row, condition }: { row: any; condition: any }) => {
-  const field = String(condition?.field || '').trim();
-  const operator = String(condition?.operator || '').trim();
-  const target = condition?.value;
-  const actual = field ? row?.[field] : undefined;
-
-  if (!field || !operator) {
-    return { passed: false, reason: 'invalid_field_check_condition' };
-  }
-
-  if (operator === 'is_not_empty') {
-    const passed = !(actual === null || actual === undefined || String(actual).trim() === '');
-    return { passed, reason: passed ? '' : `${field} is empty` };
-  }
-  if (operator === 'is_empty') {
-    const passed = actual === null || actual === undefined || String(actual).trim() === '';
-    return { passed, reason: passed ? '' : `${field} is not empty` };
-  }
-  if (operator === 'contains') {
-    const haystack = Array.isArray(actual)
-      ? actual.map((v) => String(v).toLowerCase()).join(' ')
-      : String(actual || '').toLowerCase();
-    const needle = String(target || '').toLowerCase();
-    const passed = needle ? haystack.includes(needle) : false;
-    return { passed, reason: passed ? '' : `${field} does not contain "${needle}"` };
-  }
-
-  const leftNum = asNumber(actual);
-  const rightNum = asNumber(target);
-  const left = Number.isFinite(leftNum) && Number.isFinite(rightNum) ? leftNum : actual;
-  const right = Number.isFinite(leftNum) && Number.isFinite(rightNum) ? rightNum : target;
-
-  if (operator === 'eq') return { passed: left === right, reason: left === right ? '' : `${field} != expected value` };
-  if (operator === 'neq') return { passed: left !== right, reason: left !== right ? '' : `${field} == unexpected value` };
-  if (operator === 'gt') return { passed: Number(left) > Number(right), reason: Number(left) > Number(right) ? '' : `${field} is not greater than target` };
-  if (operator === 'gte') return { passed: Number(left) >= Number(right), reason: Number(left) >= Number(right) ? '' : `${field} is not greater than or equal to target` };
-  if (operator === 'lt') return { passed: Number(left) < Number(right), reason: Number(left) < Number(right) ? '' : `${field} is not less than target` };
-  if (operator === 'lte') return { passed: Number(left) <= Number(right), reason: Number(left) <= Number(right) ? '' : `${field} is not less than or equal to target` };
-
-  return { passed: false, reason: `unsupported_operator:${operator}` };
-};
-
-const evaluateSemanticFilterBatches = async ({
-  db,
-  listDir,
-  filter,
-  rows,
-  aiConfig,
-  batchSize = 10,
-}: {
-  db: any;
-  listDir: string;
-  filter: any;
-  rows: any[];
-  aiConfig: any;
-  batchSize?: number;
-}) => {
-  const chunks = chunk(rows, Math.max(1, Number(batchSize || 10)));
-  const results = new Map<string, { passed: boolean; reason: string }>();
-  const filterId = String(filter?.id || 'filter');
-  const description = String(filter?.description || '').trim();
-  const conditionText = String(filter?.condition || '').trim();
-
-  for (let i = 0; i < chunks.length; i += 1) {
-    const batch = chunks[i];
-    const systemPrompt = [
-      'Evaluate this sourcing filter condition for each record.',
-      'Return one result per row_id in the provided list.',
-      '',
-      `Filter description: ${description || '(none)'}`,
-      `Filter condition: ${conditionText || '(none)'}`,
-    ].join('\n');
-    const userPrompt = [
-      'Records:',
-      JSON.stringify(batch.map((row) => ({
-        row_id: String(getRecordRowId(row)),
-        record: row,
-      })), null, 2),
-    ].join('\n');
-
-    try {
-      const llm = await generateObjectWithTools({
-        task: `sourcing-filter-batch:${filterId}`,
-        model: filter?.config?.model || '',
-        role: 'evaluation',
-        aiConfig,
-        schema: SemanticFilterBatchSchema,
-        prompt: userPrompt,
-        systemPrompt,
-        userPrompt,
-        toolSpec: {},
-        maxSteps: 2,
-      });
-      recordCostEvent({
-        db,
-        listDir,
-        stepId: `sourcing_filter_batch:${filterId}`,
-        model: String((llm as any)?.model || ''),
-        provider: String((llm as any)?.provider || ''),
-        usage: llm.usage,
-      });
-      const parsed = SemanticFilterBatchSchema.parse(llm.object);
-      for (const item of parsed.results) {
-        const rowId = String(item?.row_id || '').trim();
-        if (!rowId) continue;
-        results.set(rowId, {
-          passed: Boolean(item?.passed),
-          reason: String(item?.reason || ''),
-        });
-      }
-    } catch (error) {
-      for (const row of batch) {
-        const rowId = String(getRecordRowId(row));
-        try {
-          const fallback = await evaluateConditionAction({
-            conditionText,
-            row,
-            stepOutput: row,
-            model: filter?.config?.model || '',
-            aiConfig,
-          });
-          recordCostEvent({
-            db,
-            listDir,
-            recordId: rowId,
-            stepId: `sourcing_filter:${filterId}`,
-            model: String((fallback as any)?.model || ''),
-            provider: String((fallback as any)?.provider || ''),
-            usage: fallback.usage,
-          });
-          results.set(rowId, {
-            passed: Boolean(fallback.passed),
-            reason: String(fallback.reason || ''),
-          });
-        } catch {
-          results.set(rowId, {
-            passed: false,
-            reason: String((error as any)?.message || error),
-          });
+export const expandSourceStrategies = ({ listDir, strategies }: { listDir: string; strategies: any[] }) => {
+  const tasks: any[] = [];
+  for (const strategy of strategies || []) {
+    const kind = String(strategy?.kind || '');
+    if (kind === 'keyword_geo') {
+      const keywords = loadKeywords({ listDir, strategy });
+      const geos = loadGeos({ listDir, strategy });
+      for (const keyword of keywords) {
+        for (const geo of geos) {
+          const query = [keyword, geo].map((part) => String(part || '').trim()).filter(Boolean).join(' ');
+          const params = {
+            strategy_id: strategy?.id || '',
+            tool: strategy?.tool || {},
+            query,
+            keyword,
+            geo,
+            max_results: Number(strategy?.max_results || 100),
+            max_pages: Number(strategy?.max_pages || 1),
+            excluded_types: Array.isArray(strategy?.excluded_types) ? strategy.excluded_types : [],
+            output_map: strategy?.output_map || {},
+          };
+          tasks.push({ id: taskIdFor({ kind, params }), kind, params });
         }
+      }
+      continue;
+    }
+    if (kind === 'geo_tiles') {
+      const tiles = loadTiles({ listDir, strategy });
+      for (const tile of tiles) {
+        const params = {
+          strategy_id: strategy?.id || '',
+          tool: strategy?.tool || {},
+          lat: tile.lat,
+          lng: tile.lng,
+          radius_m: tile.radius_m,
+          rank: strategy?.rank || 'distance',
+          types: Array.isArray(strategy?.types) ? strategy.types : [],
+          excluded_types: Array.isArray(strategy?.excluded_types) ? strategy.excluded_types : [],
+          max_results: Number(strategy?.max_results || 100),
+          output_map: strategy?.output_map || {},
+        };
+        tasks.push({ id: taskIdFor({ kind, params }), kind, params });
       }
     }
   }
+  return tasks;
+};
 
-  return results;
+const valueAtPath = (row: any, path: string) => {
+  const parts = String(path || '').split('.').map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return undefined;
+  return parts.reduce((current, part) => (
+    current === null || current === undefined ? undefined : current?.[part]
+  ), row);
+};
+
+const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record<string, string> }) => {
+  const mapped = { ...row };
+  for (const [targetKey, sourcePath] of Object.entries(outputMap || {})) {
+    const value = valueAtPath(row, sourcePath);
+    if (value !== undefined) mapped[String(targetKey)] = value;
+  }
+  if (!mapped.place_id && row?.placeId) mapped.place_id = row.placeId;
+  if (!mapped.google_place_id && mapped.place_id) mapped.google_place_id = mapped.place_id;
+  if (mapped.lat === undefined && row?.location?.lat !== undefined) mapped.lat = row.location.lat;
+  if (mapped.lng === undefined && row?.location?.lng !== undefined) mapped.lng = row.location.lng;
+  if (mapped.latitude === undefined && mapped.lat !== undefined) mapped.latitude = mapped.lat;
+  if (mapped.longitude === undefined && mapped.lng !== undefined) mapped.longitude = mapped.lng;
+  return mapped;
+};
+
+const extractRowsFromToolResult = (result: any) => {
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result?.results)) return result.results;
+  if (Array.isArray(result?.data?.results)) return result.data.results;
+  if (Array.isArray(result?.items)) return result.items;
+  if (Array.isArray(result?.data)) return result.data;
+  return [];
+};
+
+const executeStrategyTask = async ({
+  mcp,
+  listDir,
+  task,
+  toolCatalog,
+}: {
+  mcp: any;
+  listDir: string;
+  task: any;
+  toolCatalog: any;
+}) => {
+  const params = typeof task?.params === 'string' ? JSON.parse(task.params || '{}') : task.params || {};
+  const toolSpec = params?.tool || {};
+  const resolvedTools = await loadTools(mcp, toolSpec, toolCatalog, { listDir });
+  const toolEntries = Object.entries(resolvedTools);
+  if (toolEntries.length === 0) throw new Error(`source.strategy: no tool resolved for task ${task?.id || ''}.`);
+  const [, toolDef] = toolEntries[0] as [string, any];
+  const args = task.kind === 'geo_tiles'
+    ? {
+      lat: params.lat,
+      lng: params.lng,
+      radius_m: params.radius_m,
+      rank: params.rank || 'distance',
+      types: Array.isArray(params.types) ? params.types.join(',') : params.types,
+      excluded_types: Array.isArray(params.excluded_types) ? params.excluded_types.join(',') : params.excluded_types,
+      max_results: Number(params.max_results || 100),
+    }
+    : {
+      query: params.query || '',
+      max_results: Number(params.max_results || 100),
+      max_pages: Number(params.max_pages || 1),
+      excluded_types: Array.isArray(params.excluded_types) ? params.excluded_types.join(',') : params.excluded_types,
+    };
+  const result = await toolDef.execute(args);
+  return { rows: extractRowsFromToolResult(result), params };
+};
+
+const normalizeDedupKey = (dedupKey: string) => String(dedupKey || 'place_id').trim() || 'place_id';
+
+const dedupValueFor = (row: any, dedupKey: string) => {
+  const key = normalizeDedupKey(dedupKey);
+  if (key === 'place_id') return String(row?.place_id || row?.placeId || row?.google_place_id || '').trim();
+  return String(valueAtPath(row, key) ?? row?.[key] ?? '').trim();
+};
+
+export const dedupRowsByKey = ({
+  rows,
+  dedupKey = 'place_id',
+  seen = new Set<string>(),
+}: {
+  rows: any[];
+  dedupKey?: string;
+  seen?: Set<string>;
+}) => {
+  const unique: any[] = [];
+  let duplicates = 0;
+  for (const row of rows || []) {
+    const value = dedupValueFor(row, dedupKey);
+    if (value && seen.has(value)) {
+      duplicates += 1;
+      continue;
+    }
+    if (value) seen.add(value);
+    unique.push(row);
+  }
+  return { unique, duplicates, seen };
+};
+
+const loadExistingDedupValues = ({ db, dedupKey }: { db: any; dedupKey: string }) => {
+  const key = normalizeDedupKey(dedupKey);
+  const seen = new Set<string>();
+  if (key === 'place_id') {
+    const rows = db.prepare("SELECT google_place_id FROM records WHERE google_place_id != ''").all();
+    for (const row of rows) seen.add(String(row.google_place_id || '').trim());
+    return seen;
+  }
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) return seen;
+  const columns = new Set(db.prepare('PRAGMA table_info(records)').all().map((row: any) => String(row.name || '')));
+  if (!columns.has(key)) return seen;
+  const rows = db.prepare(`SELECT ${key} AS value FROM records WHERE ${key} != ''`).all();
+  for (const row of rows) seen.add(String(row.value || '').trim());
+  return seen;
+};
+
+const strategyStatusFor = ({ kind, totalSeen, maxResults }: { kind: string; totalSeen: number; maxResults: number }) => {
+  if (kind === 'geo_tiles') return totalSeen >= 20 ? 'saturated' : 'done';
+  return totalSeen >= Number(maxResults || 100) ? 'capped' : 'done';
 };
 
 const refreshEmbeddingsAndLinks = async ({
@@ -370,7 +424,6 @@ const refreshEmbeddingsAndLinks = async ({
 const processAndInsertRows = async ({
   db,
   rows,
-  filters,
   identityFields,
   listName,
   listDir,
@@ -379,7 +432,6 @@ const processAndInsertRows = async ({
 }: {
   db: any;
   rows: any[];
-  filters: any[];
   identityFields: string[];
   listName: string;
   listDir: string;
@@ -387,72 +439,21 @@ const processAndInsertRows = async ({
   limit?: number;
 }) => {
   const rowsToProcess = Number(limit || 0) > 0 ? rows.slice(0, Number(limit || 0)) : rows;
-  const filterStateByRow = new Map<string, {
-    passes: boolean;
-    failures: Array<{ id: string; description: string; reason: string }>;
-  }>();
-  for (const row of rowsToProcess) {
-    const id = getRecordRowId(row);
-    filterStateByRow.set(id, { passes: true, failures: [] });
-  }
-
-  for (const filter of filters) {
-    const filterId = String(filter?.id || 'filter');
-    const filterDesc = String(filter?.description || '').trim();
-    const filterType = String(filter?.type || 'semantic').trim().toLowerCase();
-
-    if (filterType === 'field_check') {
-      const condition = (filter?.condition && typeof filter.condition === 'object' && !Array.isArray(filter.condition))
-        ? filter.condition
-        : null;
-      if (!condition) continue;
-      for (const row of rowsToProcess) {
-        const id = getRecordRowId(row);
-        const state = filterStateByRow.get(id);
-        if (!state) continue;
-        const evalResult = evaluateFieldCheck({ row, condition });
-        if (!evalResult.passed) {
-          state.passes = false;
-          state.failures.push({
-            id: filterId,
-            description: filterDesc || JSON.stringify(condition),
-            reason: String(evalResult.reason || 'failed'),
-          });
-        }
-      }
-      continue;
-    }
-
-    const conditionText = typeof filter?.condition === 'string'
-      ? String(filter.condition || '').trim()
-      : String(filterDesc || '').trim();
-    if (!conditionText) continue;
-
-    const semanticResults = await evaluateSemanticFilterBatches({
-      db,
-      listDir,
-      filter: { ...filter, condition: conditionText },
-      rows: rowsToProcess,
-      aiConfig,
-      batchSize: Number((filter as any)?.config?.batch_size || 10),
-    });
-
-    for (const row of rowsToProcess) {
-      const id = getRecordRowId(row);
-      const state = filterStateByRow.get(id);
-      if (!state) continue;
-      const outcome = semanticResults.get(id) || { passed: false, reason: 'no_result' };
-      if (!outcome.passed) {
-        state.passes = false;
-        state.failures.push({
-          id: filterId,
-          description: filterDesc || conditionText,
-          reason: String(outcome.reason || 'failed'),
-        });
-      }
+  const dynamicColumns = new Map<string, { name: string; type: string }>();
+  const existingColumns = new Set(
+    db.prepare('PRAGMA table_info(records)').all().map((column: any) => String(column.name || '')),
+  );
+  for (const row of rowsToProcess || []) {
+    for (const key of Object.keys(row || {})) {
+      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) continue;
+      if (existingColumns.has(key)) continue;
+      if (!isRecordScalarValue(row[key])) continue;
+      if (!dynamicColumns.has(key)) dynamicColumns.set(key, { name: key, type: 'TEXT' });
     }
   }
-
+  if (dynamicColumns.size > 0) {
+    ensureRecordColumns({ db, columns: [...dynamicColumns.values()] });
+  }
   const insertedIds: string[] = [];
   const errors: string[] = [];
   let deduped = 0;
@@ -460,9 +461,6 @@ const processAndInsertRows = async ({
 
   await mapWithConcurrency<any, void>(rowsToProcess as any[], async (row) => {
     const id = getRecordRowId(row);
-    const filterState = filterStateByRow.get(id) || { passes: true, failures: [] };
-    const passes = Boolean(filterState.passes);
-    const filterFailures = filterState.failures || [];
 
     try {
       const shape = rowToRecordShape({
@@ -471,14 +469,10 @@ const processAndInsertRows = async ({
           ...row,
           _row_id: id,
           id,
-          source_filter_result: passes ? 'passed' : 'failed',
-          source_filter_failures: filterFailures.length > 0 ? JSON.stringify(filterFailures) : '',
           sequence_status: 'idle',
           sequence_step: 0,
         },
       });
-
-      if (!passes) filtered += 1;
 
       const dedup = await aiDedupLink({
         db,
@@ -493,7 +487,7 @@ const processAndInsertRows = async ({
       }
 
       upsertRecord({ db, row: shape });
-      if (!dedup.duplicate_of && passes) {
+      if (!dedup.duplicate_of) {
         insertedIds.push(getRecordRowId(shape));
       }
       if (dedup.embedding && dedup.embedding.length > 0) {
@@ -569,16 +563,25 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
 
   const listName = config?.list?.name || 'list';
   const searches = Array.isArray(config?.source?.searches) ? config.source.searches : [];
-  const filters = Array.isArray(config?.source?.filters) ? config.source.filters : [];
+  const strategies = Array.isArray(config?.source?.strategies) ? config.source.strategies : [];
+  const dedupKey = normalizeDedupKey(config?.source?.dedup_key || 'place_id');
+  const maxCalls = config?.source?.budget?.max_calls === undefined
+    ? null
+    : Math.max(0, Number(config.source.budget.max_calls || 0));
   const db = openListDb({ listDir, readonly: false });
   const mcp = await getMcpClient();
   const toolCatalog = readToolCatalog(listDir);
   const identityFields = getIdentityFields(config);
 
-  emitActivity({ event: 'phase_start', phase: 'sourcing', searches: searches.length });
+  emitActivity({ event: 'phase_start', phase: 'sourcing', searches: searches.length, strategies: strategies.length });
 
   const summary: any = {
     searches_run: 0,
+    strategies_expanded: 0,
+    search_tasks_created: 0,
+    search_tasks_run: 0,
+    search_tasks_pending: 0,
+    search_calls_made: 0,
     found_total: 0,
     inserted_total: 0,
     inserted_ids: [],
@@ -634,22 +637,114 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
       emitActivity({ event: 'step_complete', phase: 'sourcing_search', step: stepName, rows: searchResult.rows.length });
     }
 
-    summary.found_total = allRows.length;
-    const processed = await processAndInsertRows({
-      db,
-      rows: allRows,
-      filters,
-      identityFields,
-      listName,
-      listDir,
-      aiConfig: config?.ai || {},
-      limit: Number(limit || 0),
-    });
-    summary.inserted_ids = processed.insertedIds;
-    summary.inserted_total = processed.insertedIds.length;
-    summary.deduped_total = processed.deduped;
-    summary.filtered_out = processed.filtered;
-    summary.errors.push(...processed.errors);
+    if (strategies.length > 0) {
+      const tasks = expandSourceStrategies({ listDir, strategies });
+      summary.strategies_expanded = strategies.length;
+      summary.search_tasks_created = tasks.length;
+      for (const task of tasks) {
+        upsertSearchTask({ db, task });
+      }
+
+      const seenDedupValues = loadExistingDedupValues({ db, dedupKey });
+      const pendingTasks = listPendingSearchTasks({ db });
+      summary.search_tasks_pending = pendingTasks.length;
+      let callsMade = 0;
+
+      for (const task of pendingTasks) {
+        if (maxCalls !== null && callsMade >= maxCalls) break;
+        if (Number(limit || 0) > 0 && Number(summary.inserted_total || 0) >= Number(limit || 0)) break;
+        callsMade += 1;
+        summary.search_calls_made = callsMade;
+        summary.search_tasks_run += 1;
+        emitActivity({ event: 'step_start', phase: 'sourcing_task', step: task.id });
+
+        try {
+          const taskResult = await executeStrategyTask({
+            mcp,
+            listDir,
+            task,
+            toolCatalog,
+          });
+          const rows = Array.isArray(taskResult.rows) ? taskResult.rows : [];
+          const mappedRows = rows.map((row: any) => {
+            const mapped = mapStrategyRow({ row, outputMap: taskResult.params?.output_map || {} });
+            mapped._row_id = mapped._row_id || mapped.id || mapped.place_id || mapped.google_place_id || makeRecordId(mapped);
+            mapped.id = mapped._row_id;
+            return mapped;
+          });
+          const deduped = dedupRowsByKey({ rows: mappedRows, dedupKey, seen: seenDedupValues });
+          summary.found_total += rows.length;
+          summary.deduped_total += deduped.duplicates;
+
+          const hasLimit = Number(limit || 0) > 0;
+          const remaining = hasLimit
+            ? Math.max(0, Number(limit || 0) - Number(summary.inserted_total || 0))
+            : 0;
+          if (hasLimit && remaining <= 0) {
+            break;
+          }
+          const processed = await processAndInsertRows({
+            db,
+            rows: deduped.unique,
+            identityFields,
+            listName,
+            listDir,
+            aiConfig: config?.ai || {},
+            limit: remaining,
+          });
+          summary.inserted_ids.push(...processed.insertedIds);
+          summary.inserted_total += processed.insertedIds.length;
+          summary.deduped_total += processed.deduped;
+          summary.filtered_out += processed.filtered;
+          summary.errors.push(...processed.errors);
+
+          const params = typeof task?.params === 'string' ? JSON.parse(task.params || '{}') : task.params || {};
+          updateSearchTaskResult({
+            db,
+            id: task.id,
+            status: strategyStatusFor({ kind: task.kind, totalSeen: rows.length, maxResults: Number(params?.max_results || 100) }),
+            pagesFetched: task.kind === 'keyword_geo' ? Number(params?.max_pages || 1) : 1,
+            totalSeen: rows.length,
+            newUnique: processed.insertedIds.length,
+          });
+          emitActivity({ event: 'step_complete', phase: 'sourcing_task', step: task.id, rows: rows.length });
+        } catch (error) {
+          const message = String((error as any)?.message || error);
+          summary.errors.push(message);
+          updateSearchTaskResult({
+            db,
+            id: task.id,
+            status: 'error',
+            pagesFetched: 0,
+            totalSeen: 0,
+            newUnique: 0,
+          });
+          emitActivity({ event: 'error', phase: 'sourcing_task', step: task.id, message });
+        }
+      }
+      summary.search_tasks_pending = listPendingSearchTasks({ db }).length;
+    }
+
+    if (allRows.length > 0 && !(Number(limit || 0) > 0 && Number(summary.inserted_total || 0) >= Number(limit || 0))) {
+      summary.found_total += allRows.length;
+      const legacyLimit = Number(limit || 0) > 0
+        ? Math.max(0, Number(limit || 0) - Number(summary.inserted_total || 0))
+        : 0;
+      const processed = await processAndInsertRows({
+        db,
+        rows: allRows,
+        identityFields,
+        listName,
+        listDir,
+        aiConfig: config?.ai || {},
+        limit: legacyLimit,
+      });
+      summary.inserted_ids.push(...processed.insertedIds);
+      summary.inserted_total += processed.insertedIds.length;
+      summary.deduped_total += processed.deduped;
+      summary.filtered_out += processed.filtered;
+      summary.errors.push(...processed.errors);
+    }
 
     logSourcingEvent({ listDir, payload: summary });
     emitActivity({
@@ -694,7 +789,6 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
 
   const listName = config?.list?.name || 'list';
   const searches = Array.isArray(config?.source?.searches) ? config.source.searches : [];
-  const filters = Array.isArray(config?.source?.filters) ? config.source.filters : [];
   const db = openListDb({ listDir, readonly: false });
   const mcp = await getMcpClient();
   const toolCatalog = readToolCatalog(listDir);
@@ -768,7 +862,6 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
         const processed = await processAndInsertRows({
           db,
           rows: mappedRows,
-          filters,
           identityFields,
           listName,
           listDir,

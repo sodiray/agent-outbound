@@ -113,14 +113,9 @@ export const applyConfigChange = (config, change) => {
     return setAtPath(next, 'source.searches', [...arr, change.search]);
   }
 
-  if (op === 'add_filter') {
-    const arr = Array.isArray(next?.source?.filters) ? next.source.filters : [];
-    return setAtPath(next, 'source.filters', [...arr, change.filter]);
-  }
-
-  if (op === 'add_enrich') {
-    const arr = Array.isArray(next?.enrich) ? next.enrich : [];
-    return setAtPath(next, 'enrich', [...arr, change.step]);
+  if (op === 'add_pipeline_step') {
+    const arr = Array.isArray(next?.pipeline) ? next.pipeline : [];
+    return setAtPath(next, 'pipeline', [...arr, change.step]);
   }
 
   if (op === 'add_sequence_step') {
@@ -142,14 +137,9 @@ export const applyConfigChange = (config, change) => {
     return setAtPath(next, 'source.searches', modifyInArray(searches, change.id, change.patch || {}));
   }
 
-  if (op === 'modify_filter') {
-    const filters = Array.isArray(next?.source?.filters) ? next.source.filters : [];
-    return setAtPath(next, 'source.filters', modifyInArray(filters, change.id, change.patch || {}));
-  }
-
-  if (op === 'modify_enrich') {
-    const steps = Array.isArray(next?.enrich) ? next.enrich : [];
-    return setAtPath(next, 'enrich', modifyInArray(steps, change.id, change.patch || {}));
+  if (op === 'modify_pipeline_step') {
+    const steps = Array.isArray(next?.pipeline) ? next.pipeline : [];
+    return setAtPath(next, 'pipeline', modifyInArray(steps, change.id, change.patch || {}));
   }
 
   if (op === 'modify_sequence_step') {
@@ -165,14 +155,9 @@ export const applyConfigChange = (config, change) => {
     return setAtPath(next, 'source.searches', removeFromArray(searches, change.id));
   }
 
-  if (op === 'remove_filter') {
-    const filters = Array.isArray(next?.source?.filters) ? next.source.filters : [];
-    return setAtPath(next, 'source.filters', removeFromArray(filters, change.id));
-  }
-
-  if (op === 'remove_enrich') {
-    const steps = Array.isArray(next?.enrich) ? next.enrich : [];
-    return setAtPath(next, 'enrich', removeFromArray(steps, change.id));
+  if (op === 'remove_pipeline_step') {
+    const steps = Array.isArray(next?.pipeline) ? next.pipeline : [];
+    return setAtPath(next, 'pipeline', removeFromArray(steps, change.id));
   }
 
   if (op === 'remove_sequence_step') {
@@ -231,7 +216,7 @@ export const applyConfigChanges = (config, changes = []) => {
 
 export const getDependentsOfStep = (config: any, stepId: string) => {
   const targetId = String(stepId || '').trim();
-  const steps = Array.isArray(config?.enrich) ? config.enrich : [];
+  const steps = Array.isArray(config?.pipeline) ? config.pipeline : [];
   const dependents: Array<{ stepId: string; description: string; dependencyRef: string }> = [];
   for (const step of steps) {
     const id = String(step?.id || '').trim();

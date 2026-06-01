@@ -140,7 +140,7 @@ The orchestrator validates structure via Zod. Tool references resolve at action 
 ## Inputs / Outputs
 
 **Inputs:**
-- `outbound.yaml` → `source.searches` and `source.filters`
+- `outbound.yaml` → `source.searches`, `source.strategies`, and ordered `pipeline` filters
 - Canonical store (optional on first run)
 
 **Outputs:**

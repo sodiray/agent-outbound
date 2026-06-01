@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ensureRecordColumns, openListDb, upsertContact, upsertRecord, nowTimestamp } from '../runtime/db.js';
+import { ensureRecordColumns, inPlayWhere, openListDb, upsertContact, upsertRecord, nowTimestamp } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
 import { stableHash } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
@@ -179,6 +179,13 @@ const coerceForSqlite = (value: any, type: OutputDef['type']): string | number |
   return String(value);
 };
 
+const outputOutcomeFor = ({ outputs, expectedOutputs }: { outputs: any; expectedOutputs: Record<string, any> }) => {
+  const expectedNames = Object.keys(expectedOutputs || {});
+  if (expectedNames.length === 0) return 'ok';
+  const hasAnyValue = expectedNames.some((name) => !isBlank(outputs?.[name]));
+  return hasAnyValue ? 'ok' : 'empty';
+};
+
 const applyOutputs = ({ step, outputs }) => {
   const patch: Record<string, any> = {};
   const declaredOutputs = getDeclaredOutputs(step?.config || {});
@@ -235,6 +242,154 @@ const resolveStepId = (step: any, index: number) => {
   const id = String(step?.id || step?.config?.id || '').trim();
   if (id) return id;
   return `enrich_step_${index + 1}`;
+};
+
+export const executeEnrichmentStepOnRecords = async ({
+  db,
+  listDir,
+  config,
+  mcp,
+  toolCatalog,
+  step,
+  rows,
+  stepId = '',
+}: {
+  db: any;
+  listDir: string;
+  config: any;
+  mcp: any;
+  toolCatalog: any;
+  step: any;
+  rows: any[];
+  stepId?: string;
+}) => {
+  const id = String(stepId || step?.id || '').trim() || 'enrich';
+  const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+  const declaredOutputs = getDeclaredOutputs(stepConfig || {});
+  const legacyColumns = getLegacyColumns(stepConfig || {});
+  const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
+  const concurrency = Number(stepConfig?.concurrency || 3);
+  const targetColumns = getTargetColumnsForStepConfig(stepConfig || {});
+  const statusColumn = `${id}__status`;
+  if (targetColumns.length > 0 || statusColumn) {
+    ensureRecordColumns({
+      db,
+      columns: [
+        ...targetColumns,
+        { name: statusColumn, type: 'TEXT' },
+      ],
+    });
+  }
+
+  const summary = {
+    processed: 0,
+    skipped_fresh: 0,
+    failed: 0,
+    errors: [] as Array<{ record_id: string; error: string }>,
+    record_ids: [] as string[],
+  };
+
+  await mapWithConcurrency<any, void>((rows || []) as any[], async (record) => {
+    const recordId = getRecordRowId(record);
+    const rowLabel = String(record?.business_name || recordId);
+    const depHash = stableHash({ depValues: {}, config: stepConfig || {} });
+    const cached = readStaleness({ db, recordId, stepId: id });
+
+    if (!isStale({ cached, depHash })) {
+      summary.skipped_fresh += 1;
+      return;
+    }
+
+    const runAttempt = async (attempt: number) => {
+      const inputRecord = mergedRecordForEnrichment({ db, record });
+      const result = await executeStepAction({
+        mcp,
+        listDir,
+        stepId: id,
+        description: step?.description || id,
+        stepConfig,
+        record: inputRecord,
+        aiConfig: config?.ai || {},
+        role: 'research',
+        context: {
+          phase: 'pipeline',
+          step: id,
+          linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
+        },
+        outputSchema: outputZod,
+        toolCatalog,
+      });
+
+      const expectedOutputs = Object.keys(declaredOutputs).length > 0
+        ? declaredOutputs
+        : legacyColumns;
+      const outputs = result.outputs || {};
+      const outcome = outputOutcomeFor({ outputs, expectedOutputs });
+
+      if (outcome === 'ok') outputZod.parse(outputs);
+      recordCostEvent({
+        db,
+        listDir,
+        recordId,
+        stepId: `pipeline_enrich:${id}`,
+        model: String((result as any)?.model || ''),
+        provider: String((result as any)?.provider || ''),
+        usage: result.usage,
+      });
+
+      const patch = applyOutputs({
+        step: { ...step, config: stepConfig, __list_dir: listDir },
+        outputs,
+      });
+      patch[statusColumn] = outcome;
+      const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+      const merged = { ...currentRow, ...patch };
+      upsertRecord({ db, row: merged });
+      upsertPrimaryContactIfPresent({ db, record: merged });
+      writeStaleness({
+        db,
+        recordId,
+        stepId: id,
+        depHash,
+        cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
+        cacheTtl: String(stepConfig?.cache || ''),
+      });
+      summary.processed += 1;
+      summary.record_ids.push(recordId);
+      emitActivity({ event: 'row_complete', phase: 'pipeline', step: id, row: rowLabel, outcome });
+      return { outcome, attempt };
+    };
+
+    try {
+      await runAttempt(1);
+    } catch (error) {
+      if (isBudgetExceededError(error)) throw error;
+      const firstDetail = String((error as any)?.message || error);
+      emitActivity({ event: 'row_retry', phase: 'pipeline', step: id, row: rowLabel, detail: firstDetail });
+      try {
+        await runAttempt(2);
+        return;
+      } catch (retryError) {
+        if (isBudgetExceededError(retryError)) throw retryError;
+        const detail = String((retryError as any)?.message || retryError);
+        summary.failed += 1;
+        summary.errors.push({ record_id: recordId, error: detail });
+        upsertRecord({
+          db,
+          row: {
+            ...record,
+            [statusColumn]: 'failed',
+            retry_count: Number(record.retry_count || 0) + 1,
+            last_error: detail,
+          },
+        });
+        summary.record_ids.push(recordId);
+        emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail, retried: true });
+      }
+    }
+  }, concurrency);
+
+  return summary;
 };
 
 type EnrichmentStepNode = {
@@ -336,9 +491,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
   if (errors.length > 0) {
     throw new Error(`Invalid config: ${errors.join('; ')}`);
   }
-  assertPhaseModelReferences({ config, phase: 'enrich' });
+  assertPhaseModelReferences({ config, phase: 'pipeline' });
 
-  const enrichSteps = Array.isArray(config.enrich) ? config.enrich : [];
+  const enrichSteps = (Array.isArray(config.pipeline) ? config.pipeline : []).filter((step: any) => step?.kind === 'enrich');
   const stepIdMatch = (step: any) => {
     const topId = String(step?.id || '').trim();
     const configId = String(step?.config?.id || '').trim();
@@ -354,7 +509,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
   const whereSql = String(where || '').trim();
   const limitN = Number(limit || 0);
   const params: any[] = [];
-  let rowsSql = "SELECT * FROM records WHERE sequence_status != 'opted_out'";
+  let rowsSql = `SELECT * FROM records WHERE sequence_status != 'opted_out' AND ${inPlayWhere()}`;
   if (whereSql) rowsSql += ` AND (${whereSql})`;
   rowsSql += ' ORDER BY updated_at DESC';
   if (limitN > 0) {

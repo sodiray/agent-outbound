@@ -146,8 +146,8 @@ const resolveProjectionExpression = ({ token, config }: { token: string; config:
   const dotParts = normalized.split('.');
   if (dotParts.length === 2) {
     const [stepId, fieldName] = dotParts;
-    const enrich = Array.isArray(config?.enrich) ? config.enrich : [];
-    const matched = enrich.find((step: any) => String(step?.id || '').trim() === stepId);
+    const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
+    const matched = pipeline.find((step: any) => String(step?.id || '').trim() === stepId && String(step?.kind || '') === 'enrich');
     if (matched && fieldName) {
       return `${fieldName} AS ${stepId}_${fieldName}`;
     }
@@ -157,10 +157,10 @@ const resolveProjectionExpression = ({ token, config }: { token: string; config:
 
 const extractConfiguredColumnDescriptions = (config: any) => {
   const descriptions: Record<string, string> = {};
-  const enrich = Array.isArray(config?.enrich) ? config.enrich : [];
-  for (const step of enrich) {
+  const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
+  for (const step of pipeline.filter((item: any) => String(item?.kind || '') === 'enrich')) {
     const stepId = String(step?.id || '').trim();
-    const outputs = step?.config?.outputs && typeof step.config.outputs === 'object' ? step.config.outputs : {};
+    const outputs = step?.outputs && typeof step.outputs === 'object' ? step.outputs : {};
     for (const [field, def] of Object.entries(outputs)) {
       const description = String((def as any)?.description || '').trim();
       if (!description) continue;

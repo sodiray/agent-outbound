@@ -32,6 +32,7 @@ export const getServePortPath = (listDir) => join(getServeDir(listDir), 'port');
 export const getLogsDir = (listDir) => join(getInternalDir(listDir), 'logs');
 export const getSnapshotsDir = (listDir) => join(getInternalDir(listDir), 'snapshots');
 export const getSourcingLogPath = (listDir) => join(getLogsDir(listDir), 'sourcing.log');
+export const getPipelineLogPath = (listDir) => join(getLogsDir(listDir), 'pipeline.log');
 export const getComplianceLogPath = (listDir) => join(getLogsDir(listDir), 'compliance.log');
 export const getCrmLogPath = (listDir) => join(getLogsDir(listDir), 'crm.log');
 export const getCostsLogPath = (listDir) => join(getLogsDir(listDir), 'costs.jsonl');
@@ -74,9 +75,8 @@ export const ensureListScaffold = ({ listDir, description = '' }) => {
       'source:',
       '  identity: [business_name, address]',
       '  searches: []',
-      '  filters: []',
       '',
-      'enrich: []',
+      'pipeline: []',
       '',
       'score:',
       '  fit:',

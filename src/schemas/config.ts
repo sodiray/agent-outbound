@@ -77,12 +77,14 @@ export const StepConfigSchema = z.object({
   idempotency: IdempotencySchema.optional(),
 }).partial().default({});
 
+const SourceMaxResultsSchema = z.coerce.number().int().min(1).max(5000).default(100);
+
 export const SourceSearchSchema = z.object({
   id: z.string().default(''),
   description: z.string().default(''),
   query: z.string().default(''),
   model: ProviderModelSchema.optional(),
-  max_results: z.coerce.number().int().min(1).max(5000).default(100),
+  max_results: SourceMaxResultsSchema,
   tool: ToolSpecSchema.optional(),
   args: z.record(z.any()).default({}),
   output_map: z.record(z.string()).default({}),
@@ -90,26 +92,120 @@ export const SourceSearchSchema = z.object({
   manual_results: z.array(z.record(z.any())).default([]),
 }).partial().default({});
 
+const SourceStrategyBaseSchema = z.object({
+  id: z.string().default(''),
+  description: z.string().default(''),
+  tool: ToolSpecSchema,
+  max_results: SourceMaxResultsSchema,
+  output_map: z.record(z.string()).default({}),
+}).partial();
+
+const exactlyOneOf = (left: string, right: string, label: string) => (value: any, ctx: z.RefinementCtx) => {
+  const hasLeft = value?.[left] !== undefined;
+  const hasRight = value?.[right] !== undefined;
+  if (hasLeft === hasRight) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `${label} must include exactly one of ${left} or ${right}.`,
+      path: [left],
+    });
+  }
+};
+
+const KeywordGeoStrategySchema = SourceStrategyBaseSchema.extend({
+  kind: z.literal('keyword_geo'),
+  keywords: z.array(z.string()).optional(),
+  keywords_from: z.string().optional(),
+  geos: z.array(z.string()).optional(),
+  geos_from: z.string().optional(),
+  excluded_types: z.array(z.string()).default([]),
+  max_pages: z.coerce.number().int().min(1).max(3).default(1),
+});
+
+const GeoTileSchema = z.object({
+  lat: z.coerce.number(),
+  lng: z.coerce.number(),
+  radius_m: z.coerce.number().positive(),
+});
+
+const GeoTilesStrategySchema = SourceStrategyBaseSchema.extend({
+  kind: z.literal('geo_tiles'),
+  tiles: z.array(GeoTileSchema).optional(),
+  tiles_from: z.string().optional(),
+  rank: z.enum(['distance', 'popularity']).default('distance'),
+  types: z.array(z.string()).default([]),
+  excluded_types: z.array(z.string()).default([]),
+});
+
+export const StrategySchema = z.discriminatedUnion('kind', [
+  KeywordGeoStrategySchema,
+  GeoTilesStrategySchema,
+]).superRefine((value, ctx) => {
+  if (value.kind === 'keyword_geo') {
+    exactlyOneOf('keywords', 'keywords_from', 'keyword_geo')(value, ctx);
+    exactlyOneOf('geos', 'geos_from', 'keyword_geo')(value, ctx);
+  }
+  if (value.kind === 'geo_tiles') {
+    exactlyOneOf('tiles', 'tiles_from', 'geo_tiles')(value, ctx);
+  }
+});
+
+const SourceBudgetSchema = z.object({
+  max_calls: z.coerce.number().int().min(0).optional(),
+}).partial().default({});
+
 const FieldCheckConditionSchema = z.object({
   field: z.string(),
-  operator: z.enum(['is_not_empty', 'is_empty', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains']),
+  operator: z.enum(['is_not_empty', 'is_empty', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'in', 'not_in']),
   value: z.any().optional(),
 });
 
-export const SourceFilterSchema = z.preprocess((value) => {
-  if (!value || typeof value !== 'object') return value;
-  const next: any = { ...(value as any) };
-  if (!next.type && next.condition && typeof next.condition === 'object' && !Array.isArray(next.condition)) {
-    next.type = 'field_check';
-  }
-  return next;
-}, z.object({
+const PipelineFilterStepSchema = z.object({
+  kind: z.literal('filter'),
   id: z.string().default(''),
   description: z.string().default(''),
   type: z.enum(['field_check', 'semantic']).default('semantic'),
-  condition: z.union([z.string(), FieldCheckConditionSchema]).default(''),
-  config: StepConfigSchema.default({}),
-}).partial().default({}));
+  match: z.enum(['any', 'all']).default('all'),
+  conditions: z.array(FieldCheckConditionSchema).default([]),
+  on_fail: z.enum(['drop', 'flag']).default('drop'),
+  model: ProviderModelSchema.optional(),
+  condition: z.string().default(''),
+}).partial({ description: true, match: true, conditions: true, on_fail: true, model: true, condition: true });
+
+const PipelineEnrichmentStepSchema = z.object({
+  kind: z.literal('enrich'),
+  id: z.string().default(''),
+  description: z.string().default(''),
+  model: ProviderModelSchema.optional(),
+  step_budget: z.coerce.number().int().min(1).max(40).default(8),
+  concurrency: z.coerce.number().int().min(1).max(200).default(10),
+  cache: z.string().default(''),
+  tool: ToolSpecSchema.optional(),
+  args: z.record(z.any()).default({}),
+  outputs: z.record(EnrichmentOutputDefSchema).default({}),
+  columns: z.record(z.string()).optional(),
+  prompt_file: z.string().default(''),
+  prompt_args: z.record(z.any()).default({}),
+  idempotency: IdempotencySchema.optional(),
+}).partial({
+  description: true,
+  model: true,
+  step_budget: true,
+  concurrency: true,
+  cache: true,
+  tool: true,
+  args: true,
+  outputs: true,
+  columns: true,
+  prompt_file: true,
+  prompt_args: true,
+  idempotency: true,
+});
+
+export const PipelineStepSchema = z.discriminatedUnion('kind', [
+  PipelineEnrichmentStepSchema,
+  PipelineFilterStepSchema,
+]);
 
 export const SequenceStepSchema = z.preprocess((value) => {
   if (!value || typeof value !== 'object') return value;
@@ -166,12 +262,6 @@ const ScoreAxisSchema = z.object({
   description: z.string().default(''),
   model: ProviderModelSchema.optional(),
   criteria: z.array(ScoringCriterionSchema).default([]),
-}).partial().default({});
-
-export const EnrichStepSchema = z.object({
-  id: z.string().default(''),
-  description: z.string().default(''),
-  config: StepConfigSchema.default({}),
 }).partial().default({});
 
 const PrioritySchema = z.object({
@@ -304,9 +394,11 @@ export const ConfigSchema = z.object({
   source: z.object({
     identity: z.array(z.string()).default([]),
     searches: z.array(SourceSearchSchema).default([]),
-    filters: z.array(SourceFilterSchema).default([]),
+    strategies: z.array(StrategySchema).default([]),
+    dedup_key: z.string().default('place_id'),
+    budget: SourceBudgetSchema.default({}),
   }).partial().default({}),
-  enrich: z.array(EnrichStepSchema).default([]),
+  pipeline: z.array(PipelineStepSchema).default([]),
   score: z.object({
     fit: ScoreAxisSchema.default({}),
     trigger: ScoreAxisSchema.default({}),

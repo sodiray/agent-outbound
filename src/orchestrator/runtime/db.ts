@@ -8,6 +8,7 @@ import {
   getCrmLogPath,
   getDbPath,
   getGlobalSuppressionDbPath,
+  getPipelineLogPath,
   getSourcingLogPath,
 } from './paths.js';
 
@@ -50,6 +51,9 @@ const SCHEMA_SQL = `
     duplicate_status TEXT DEFAULT '',
     source_filter_result TEXT DEFAULT '',
     source_filter_failures TEXT DEFAULT '',
+    disqualified_at TEXT DEFAULT '',
+    disqualified_gate TEXT DEFAULT '',
+    disqualify_reason TEXT DEFAULT '',
     phone TEXT DEFAULT '',
     email_primary TEXT DEFAULT '',
     contact_name_primary TEXT DEFAULT '',
@@ -200,6 +204,18 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_score_events_row ON score_events(row_id, computed_at DESC);
 
+  CREATE TABLE IF NOT EXISTS pipeline_events (
+    event_id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    passed INTEGER NOT NULL,
+    reason TEXT DEFAULT '',
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY(record_id) REFERENCES records(_row_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_pipeline_events_record ON pipeline_events(record_id, occurred_at DESC);
+
   CREATE TABLE IF NOT EXISTS suppression (
     entry_id TEXT PRIMARY KEY,
     id TEXT DEFAULT '',
@@ -315,6 +331,18 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_search_state_search ON search_state(search_id);
 
+  CREATE TABLE IF NOT EXISTS search_tasks (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    params TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    pages_fetched INTEGER DEFAULT 0,
+    total_seen INTEGER DEFAULT 0,
+    new_unique INTEGER DEFAULT 0,
+    last_run_at TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_search_tasks_status ON search_tasks(status);
+
   CREATE TABLE IF NOT EXISTS idempotency (
     id TEXT PRIMARY KEY,
     idem_key TEXT NOT NULL,
@@ -401,6 +429,9 @@ const ensureRecordCompatibility = (db) => {
   try { db.exec("ALTER TABLE records ADD COLUMN reply_classification_latest TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN disposition_latest TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN disposition_follow_up_at TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN disqualified_at TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN disqualified_gate TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN disqualify_reason TEXT DEFAULT ''"); } catch {}
 };
 
 const ensureDataAccessViewsInternal = (db) => {
@@ -579,6 +610,10 @@ const openDb = ({ dbPath, readonly = false }) => {
   if (!readonly) {
     db.exec(SCHEMA_SQL);
     try { db.exec("ALTER TABLE records ADD COLUMN mail_last_cost_cents INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN pages_fetched INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN total_seen INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN new_unique INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_run_at TEXT DEFAULT ''"); } catch {}
     ensureRecordCompatibility(db);
     ensureSuppressionCompatibility(db);
     ensureDataAccessViewsInternal(db);
@@ -644,6 +679,10 @@ const appendJsonLine = (path, payload) => {
 
 export const logSourcingEvent = ({ listDir, payload }) => {
   appendJsonLine(getSourcingLogPath(listDir), { at: nowIso(), ...payload });
+};
+
+export const logPipelineEvent = ({ listDir, payload }) => {
+  appendJsonLine(getPipelineLogPath(listDir), { at: nowIso(), ...payload });
 };
 
 export const logComplianceEvent = ({ listDir, payload }) => {
@@ -756,10 +795,46 @@ export const insertScoreEvent = ({ db, event }) => {
   });
 };
 
+export const insertPipelineEvent = ({ db, event }) => {
+  db.prepare(`
+    INSERT INTO pipeline_events (event_id, record_id, step_id, kind, passed, reason, occurred_at)
+    VALUES (@event_id, @record_id, @step_id, @kind, @passed, @reason, @occurred_at)
+  `).run({
+    event_id: event.event_id || event.id,
+    record_id: event.record_id || event.row_id,
+    step_id: String(event.step_id || ''),
+    kind: String(event.kind || ''),
+    passed: event.passed ? 1 : 0,
+    reason: String(event.reason || ''),
+    occurred_at: event.occurred_at || nowIso(),
+  });
+};
+
+export const inPlayWhere = (alias = '') => {
+  const prefix = String(alias || '').trim();
+  const disqualifiedCol = prefix ? `${prefix}.disqualified_at` : 'disqualified_at';
+  const suppressedCol = prefix ? `${prefix}.suppressed` : 'suppressed';
+  return `((${disqualifiedCol} IS NULL OR ${disqualifiedCol} = '') AND (${suppressedCol} IS NULL OR ${suppressedCol} = 0))`;
+};
+
 const getTableColumns = (db, table) => {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
   return new Set(cols.map((c) => c.name));
 };
+
+const scoreValueForWrite = (value) => {
+  if (value === null) return null;
+  const num = Number(value || 0);
+  return Number.isFinite(num) ? num : null;
+};
+
+const isDynamicRecordValue = (value) => (
+  value === null
+    || typeof value === 'string'
+    || typeof value === 'number'
+    || typeof value === 'boolean'
+    || typeof value === 'bigint'
+);
 
 export const upsertRecord = ({ db, row }) => {
   const rowId = String(row._row_id || row.id || '').trim();
@@ -781,6 +856,7 @@ export const upsertRecord = ({ db, row }) => {
       'fit_updated_at', 'trigger_updated_at',
       'fit_score_updated_at', 'trigger_score_updated_at', 'source', 'source_query', 'sourced_at',
       'duplicate_of', 'duplicate_status', 'source_filter_result', 'source_filter_failures',
+      'disqualified_at', 'disqualified_gate', 'disqualify_reason',
       'google_place_id', 'parent_row_id', 'latitude', 'longitude', 'workflow_signals',
       'vertical', 'sub_vertical', 'size_tier', 'is_franchise', 'persona',
       'outcome_at', 'outcome_value', 'launched_at', 'sequence_step_attempts',
@@ -794,7 +870,13 @@ export const upsertRecord = ({ db, row }) => {
       'outcome', 'outcome_notes', 'extra_json', 'retry_count', 'last_error',
     ];
     const tableCols = getTableColumns(db, 'records');
-    const dynamicFields = Object.keys(row).filter((k) => tableCols.has(k) && !knownFields.includes(k) && k !== 'id' && k !== 'updated_at');
+    const dynamicFields = Object.keys(row).filter((k) => (
+      tableCols.has(k)
+        && !knownFields.includes(k)
+        && k !== 'id'
+        && k !== 'updated_at'
+        && isDynamicRecordValue(row[k])
+    ));
     const fields = [...knownFields, ...dynamicFields];
 
     const setSql = fields.map((field) => `${field} = @${field}`).join(', ');
@@ -812,6 +894,8 @@ export const upsertRecord = ({ db, row }) => {
       email_verification_status: row.email_verification_status || '',
       email_verification_confidence: Number(row.email_verification_confidence || 0),
       email_verified_at: row.email_verified_at || '',
+      fit_score: scoreValueForWrite(row.fit_score),
+      trigger_score: scoreValueForWrite(row.trigger_score),
       fit_reasoning: row.fit_reasoning || '',
       trigger_reasoning: row.trigger_reasoning || '',
       mail_last_cost_cents: Number(row.mail_last_cost_cents || 0),
@@ -828,6 +912,9 @@ export const upsertRecord = ({ db, row }) => {
       duplicate_status: row.duplicate_status || '',
       source_filter_result: row.source_filter_result || '',
       source_filter_failures: row.source_filter_failures || '',
+      disqualified_at: row.disqualified_at || '',
+      disqualified_gate: row.disqualified_gate || '',
+      disqualify_reason: row.disqualify_reason || '',
       workflow_signals: typeof row.workflow_signals === 'string' ? row.workflow_signals : safeJson(row.workflow_signals),
       suppressed: row.suppressed ? 1 : 0,
       do_not_sms: row.do_not_sms ? 1 : 0,
@@ -841,6 +928,35 @@ export const upsertRecord = ({ db, row }) => {
     });
     return;
   }
+
+  const tableCols = getTableColumns(db, 'records');
+  const knownInsertFields = new Set([
+    '_row_id', '_created_at', '_updated_at', 'id', 'business_name', 'address', 'city', 'state', 'zip',
+    'postal_code', 'country', 'website', 'domain', 'phone', 'email_primary', 'contact_name_primary',
+    'contact_title_primary', 'fit_score', 'trigger_score', 'priority_rank', 'fit_reasoning', 'trigger_reasoning',
+    'sequence_name', 'sequence_status', 'sequence_step', 'next_action_date', 'last_outreach_at',
+    'email_last_message_id', 'email_last_thread_id', 'email_last_draft_id', 'email_last_reply_at',
+    'email_reply_classification', 'reply_classification_latest', 'disposition_latest', 'disposition_follow_up_at',
+    'email_thread_id', 'contact_name', 'contact_email', 'contact_title', 'email_verification_status',
+    'email_verification_confidence', 'email_verified_at', 'trigger_score_peak', 'fit_updated_at',
+    'trigger_updated_at', 'fit_score_updated_at', 'trigger_score_updated_at', 'source', 'source_query',
+    'sourced_at', 'duplicate_of', 'duplicate_status', 'source_filter_result', 'source_filter_failures',
+    'disqualified_at', 'disqualified_gate', 'disqualify_reason', 'google_place_id', 'parent_row_id',
+    'latitude', 'longitude', 'workflow_signals', 'vertical', 'sub_vertical', 'size_tier', 'is_franchise',
+    'persona', 'outcome_at', 'outcome_value', 'launched_at', 'sequence_step_attempts', 'mail_last_piece_id',
+    'mail_last_cost_cents', 'mail_last_expected_delivery', 'mail_last_delivered_at', 'mail_last_returned_at',
+    'visit_scheduled_date', 'visit_route_id', 'visit_route_position', 'sms_last_message_id',
+    'call_last_disposition', 'suppressed', 'suppressed_reason', 'suppressed_at', 'do_not_sms',
+    'dne_email', 'dnc_phone', 'dnk_visit', 'crm_company_id', 'crm_person_id', 'crm_deal_id',
+    'crm_last_synced_at', 'crm_sync_hash', 'outcome', 'outcome_notes', 'extra_json', 'retry_count',
+    'last_error', 'created_at', 'updated_at',
+  ]);
+  const dynamicFields = Object.keys(row).filter((key) => (
+    tableCols.has(key)
+      && !knownInsertFields.has(key)
+      && key !== 'updated_at'
+      && isDynamicRecordValue(row[key])
+  ));
 
   db.prepare(`
     INSERT INTO records (
@@ -857,6 +973,7 @@ export const upsertRecord = ({ db, row }) => {
       fit_updated_at, trigger_updated_at,
       fit_score_updated_at, trigger_score_updated_at,
       source, source_query, sourced_at, duplicate_of, duplicate_status, source_filter_result, source_filter_failures,
+      disqualified_at, disqualified_gate, disqualify_reason,
       google_place_id, parent_row_id, latitude, longitude,
       workflow_signals, vertical, sub_vertical, size_tier, is_franchise, persona,
       outcome_at, outcome_value, launched_at, sequence_step_attempts,
@@ -880,6 +997,7 @@ export const upsertRecord = ({ db, row }) => {
       @fit_updated_at, @trigger_updated_at,
       @fit_score_updated_at, @trigger_score_updated_at,
       @source, @source_query, @sourced_at, @duplicate_of, @duplicate_status, @source_filter_result, @source_filter_failures,
+      @disqualified_at, @disqualified_gate, @disqualify_reason,
       @google_place_id, @parent_row_id, @latitude, @longitude,
       @workflow_signals, @vertical, @sub_vertical, @size_tier, @is_franchise, @persona,
       @outcome_at, @outcome_value, @launched_at, @sequence_step_attempts,
@@ -907,8 +1025,8 @@ export const upsertRecord = ({ db, row }) => {
     email_primary: row.email_primary || '',
     contact_name_primary: row.contact_name_primary || '',
     contact_title_primary: row.contact_title_primary || '',
-    fit_score: Number(row.fit_score || 0),
-    trigger_score: Number(row.trigger_score || 0),
+    fit_score: scoreValueForWrite(row.fit_score),
+    trigger_score: scoreValueForWrite(row.trigger_score),
     fit_reasoning: row.fit_reasoning || '',
     trigger_reasoning: row.trigger_reasoning || '',
     priority_rank: Number(row.priority_rank || 0),
@@ -944,6 +1062,9 @@ export const upsertRecord = ({ db, row }) => {
     duplicate_status: row.duplicate_status || '',
     source_filter_result: row.source_filter_result || '',
     source_filter_failures: row.source_filter_failures || '',
+    disqualified_at: row.disqualified_at || '',
+    disqualified_gate: row.disqualified_gate || '',
+    disqualify_reason: row.disqualify_reason || '',
     google_place_id: row.google_place_id || '',
     parent_row_id: row.parent_row_id || '',
     latitude: Number(row.latitude || 0),
@@ -989,6 +1110,15 @@ export const upsertRecord = ({ db, row }) => {
     created_at: row.created_at || timestamp,
     updated_at: timestamp,
   });
+
+  if (dynamicFields.length > 0) {
+    const setSql = dynamicFields.map((field) => `${field} = @${field}`).join(', ');
+    db.prepare(`UPDATE records SET ${setSql}, updated_at = @updated_at WHERE _row_id = @_row_id_current`).run({
+      ...row,
+      _row_id_current: rowId,
+      updated_at: timestamp,
+    });
+  }
 };
 
 export const listRecords = ({ db, whereSql = '1=1', params = [], limit = 1000, orderBy = 'updated_at DESC' }) =>
@@ -1355,6 +1485,54 @@ export const upsertSearchState = ({
 
 export const clearSearchState = ({ db, searchId }) => {
   db.prepare('DELETE FROM search_state WHERE search_id = ?').run(String(searchId || '').trim());
+};
+
+export const upsertSearchTask = ({ db, task }) => {
+  db.prepare(`
+    INSERT INTO search_tasks (
+      id, kind, params, status, pages_fetched, total_seen, new_unique, last_run_at
+    ) VALUES (
+      @id, @kind, @params, 'pending', 0, 0, 0, ''
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      kind = excluded.kind,
+      params = excluded.params
+  `).run({
+    id: String(task?.id || ''),
+    kind: String(task?.kind || ''),
+    params: typeof task?.params === 'string' ? task.params : safeJson(task?.params || {}),
+  });
+};
+
+export const listPendingSearchTasks = ({ db }) => (
+  db.prepare("SELECT * FROM search_tasks WHERE status = 'pending' ORDER BY id").all()
+);
+
+export const updateSearchTaskResult = ({
+  db,
+  id,
+  status,
+  pagesFetched = 0,
+  totalSeen = 0,
+  newUnique = 0,
+  lastRunAt = nowIso(),
+}) => {
+  db.prepare(`
+    UPDATE search_tasks
+    SET status = @status,
+        pages_fetched = @pages_fetched,
+        total_seen = @total_seen,
+        new_unique = @new_unique,
+        last_run_at = @last_run_at
+    WHERE id = @id
+  `).run({
+    id: String(id || ''),
+    status: String(status || 'done'),
+    pages_fetched: Number(pagesFetched || 0),
+    total_seen: Number(totalSeen || 0),
+    new_unique: Number(newUnique || 0),
+    last_run_at: String(lastRunAt || nowIso()),
+  });
 };
 
 export const nowTimestamp = nowIso;

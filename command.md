@@ -8,7 +8,7 @@ Instruction: `$ARGUMENTS`
 
 - One list = one directory containing `outbound.yaml` and `.outbound/` state.
 - Canonical DB is SQLite at `<list>/.outbound/prospects.db`.
-- Main phases: source -> enrich -> score -> sequence.
+- Main phases: source -> pipeline -> score -> sequence.
 - Action modules execute through the orchestrator (`author-config`, `execute-step`, `evaluate-condition`, `plan-route`, `detect-replies`, `classify-reply`, `sync-crm`).
 
 ## Primary Commands
@@ -20,7 +20,7 @@ Instruction: `$ARGUMENTS`
 - `agent-outbound config update <list> [--file FILE | --yaml TEXT]`
 - `agent-outbound config author <list> --request TEXT`
 - `agent-outbound source <list> [--limit N]`
-- `agent-outbound enrich <list> [--step STEP_ID]`
+- `agent-outbound pipeline <list> [--where SQL] [--limit N]`
 - `agent-outbound score <list>`
 - `agent-outbound launch draft <list> [--limit N] [--sequence NAME]`
 - `agent-outbound launch send <list> [--limit N]`

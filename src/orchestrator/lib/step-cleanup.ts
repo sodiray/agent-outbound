@@ -125,16 +125,16 @@ export const cleanupRemovedStep = ({
     };
   }
 
-  const beforeEnrich = Array.isArray(configBefore?.enrich) ? configBefore.enrich : [];
-  const afterEnrich = Array.isArray(configAfter?.enrich) ? configAfter.enrich : [];
+  const beforeEnrich = (Array.isArray(configBefore?.pipeline) ? configBefore.pipeline : []).filter((step: any) => String(step?.kind || '') === 'enrich');
+  const afterEnrich = (Array.isArray(configAfter?.pipeline) ? configAfter.pipeline : []).filter((step: any) => String(step?.kind || '') === 'enrich');
   const targetStep = beforeEnrich.find((step: any) => String(step?.id || '').trim() === id);
-  const stepColumns = getTargetColumnsForStepConfig(targetStep?.config || {}).map((column) => column.name);
+  const stepColumns = getTargetColumnsForStepConfig(targetStep || {}).map((column) => column.name);
 
   const otherColumns = new Set<string>();
   for (const step of afterEnrich) {
     const stepKey = String(step?.id || '').trim();
     if (!stepKey) continue;
-    for (const column of getTargetColumnsForStepConfig(step?.config || {})) {
+    for (const column of getTargetColumnsForStepConfig(step || {})) {
       otherColumns.add(column.name);
     }
   }

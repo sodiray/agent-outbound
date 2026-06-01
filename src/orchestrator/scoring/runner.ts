@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
-import { ensureRecordColumns, insertScoreEvent, openListDb, upsertRecord } from '../runtime/db.js';
+import { ensureRecordColumns, inPlayWhere, insertScoreEvent, openListDb, upsertRecord } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
 import { emitActivity } from '../runtime/activity.js';
 import { recordCostEvent } from '../lib/costs.js';
@@ -11,7 +11,7 @@ import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 
 const ScoreResultSchema = z.object({
-  score: z.coerce.number().min(0).max(100),
+  score: z.coerce.number().refine((value) => Number.isFinite(value), 'score must be a finite number').pipe(z.number().min(0).max(100)),
   reasoning: z.string().default(''),
 });
 
@@ -109,37 +109,51 @@ const scoreAxis = async ({ db, listDir, record, axis, description, model, aiConf
     JSON.stringify({ ...record, ...parseExtra(record.extra_json) }, null, 2),
   ].join('\n');
 
-  const result = await generateObjectWithTools({
-    task: `score-${axis}`,
-    model: model || '',
-    role: 'evaluation',
-    aiConfig,
-    schema: ScoreResultSchema,
-    prompt: userPrompt,
-    systemPrompt,
-    userPrompt,
-    toolSpec: {},
-    maxSteps: 2,
-  });
+  const runAttempt = async () => {
+    const result = await generateObjectWithTools({
+      task: `score-${axis}`,
+      model: model || '',
+      role: 'evaluation',
+      aiConfig,
+      schema: ScoreResultSchema,
+      prompt: userPrompt,
+      systemPrompt,
+      userPrompt,
+      toolSpec: {},
+      maxSteps: 2,
+    });
 
-  const parsed = ScoreResultSchema.parse(result.object);
-  recordCostEvent({
-    db,
-    listDir,
-    recordId,
-    stepId: `score:${axis}`,
-    model: String((result as any)?.model || ''),
-    provider: String((result as any)?.provider || ''),
-    usage: result.usage,
-  });
+    const parsed = ScoreResultSchema.parse(result.object);
+    recordCostEvent({
+      db,
+      listDir,
+      recordId,
+      stepId: `score:${axis}`,
+      model: String((result as any)?.model || ''),
+      provider: String((result as any)?.provider || ''),
+      usage: result.usage,
+    });
 
-  return {
-    score: Math.max(0, Math.min(100, Math.round(Number(parsed.score || 0)))),
-    reasoning: String(parsed.reasoning || ''),
+    return {
+      score: Math.max(0, Math.min(100, Math.round(Number(parsed.score)))),
+      reasoning: String(parsed.reasoning || ''),
+    };
   };
+
+  try {
+    return await runAttempt();
+  } catch (error) {
+    emitActivity({ event: 'warning', phase: 'scoring', row: record.business_name || recordId, detail: `Retrying ${axis} score after invalid response: ${String((error as any)?.message || error)}` });
+    try {
+      return await runAttempt();
+    } catch (retryError) {
+      throw new Error(`invalid_${axis}_score_after_retry:${String((retryError as any)?.message || retryError)}`);
+    }
+  }
 };
 
 const applyOverride = ({ score, reasoning, override, overrideReason, axis }) => {
+  if (score === null) return { score, reasoning };
   const value = Number(override);
   if (!Number.isFinite(value)) return { score, reasoning };
   const reason = String(overrideReason || '').trim();
@@ -175,12 +189,14 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
       { name: 'trigger_reasoning', type: 'TEXT' },
       { name: 'fit_updated_at', type: 'TEXT' },
       { name: 'trigger_updated_at', type: 'TEXT' },
+      { name: 'fit_scoring_error', type: 'TEXT' },
+      { name: 'trigger_scoring_error', type: 'TEXT' },
     ],
   });
   const whereSql = String(where || '1=1').trim() || '1=1';
   const records = db.prepare(`
     SELECT * FROM records
-    WHERE ${whereSql}
+    WHERE ${inPlayWhere()} AND (${whereSql})
     ORDER BY updated_at DESC
     ${Number(limit || 0) > 0 ? `LIMIT ${Number(limit || 0)}` : ''}
   `).all();
@@ -236,8 +252,12 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
             description: fitDescription,
             model: fitModel,
             aiConfig: config?.ai || {},
-          })
-          : { score: numericOr(record.fit_score, 0), reasoning: String(record.fit_reasoning || '') };
+          }).then((value) => ({ ...value, error: '' })).catch((error) => ({
+            score: null,
+            reasoning: '',
+            error: String((error as any)?.message || error),
+          }))
+          : { score: record.fit_score === null ? null : numericOr(record.fit_score, 0), reasoning: String(record.fit_reasoning || ''), error: String(record.fit_scoring_error || '') };
         const triggerRaw = rescoreTrigger
           ? await scoreAxis({
             db,
@@ -247,8 +267,12 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
             description: triggerDescription,
             model: triggerModel,
             aiConfig: config?.ai || {},
-          })
-          : { score: numericOr(record.trigger_score, 0), reasoning: String(record.trigger_reasoning || '') };
+          }).then((value) => ({ ...value, error: '' })).catch((error) => ({
+            score: null,
+            reasoning: '',
+            error: String((error as any)?.message || error),
+          }))
+          : { score: record.trigger_score === null ? null : numericOr(record.trigger_score, 0), reasoning: String(record.trigger_reasoning || ''), error: String(record.trigger_scoring_error || '') };
 
         const fit = applyOverride({
           score: fitRaw.score,
@@ -275,43 +299,50 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
           ...record,
           fit_score: numericOr(fit.score, 0),
           fit_reasoning: fit.reasoning,
-          trigger_score: numericOr(trigger.score, 0),
+          fit_scoring_error: fitRaw.error,
+          trigger_score: trigger.score === null ? null : numericOr(trigger.score, 0),
           trigger_reasoning: trigger.reasoning,
+          trigger_scoring_error: triggerRaw.error,
           trigger_score_peak: triggerPeak,
           fit_updated_at: updatedAt,
           trigger_updated_at: updatedAt,
           fit_score_updated_at: updatedAt,
           trigger_score_updated_at: updatedAt,
           priority_rank: computePriority({
-            fitScore: fit.score,
-            triggerScore: trigger.score,
+            fitScore: fit.score === null ? null : fit.score,
+            triggerScore: trigger.score === null ? null : trigger.score,
             weights,
           }),
         };
+        updated.fit_score = fit.score === null ? null : numericOr(fit.score, 0);
 
         upsertRecord({ db, row: updated });
-        insertScoreEvent({
-          db,
-          event: {
-            event_id: randomUUID(),
-            row_id: recordId,
-            axis: 'fit',
-            score: Number(updated.fit_score || 0),
-            reasoning: String(updated.fit_reasoning || ''),
-            computed_at: updatedAt,
-          },
-        });
-        insertScoreEvent({
-          db,
-          event: {
-            event_id: randomUUID(),
-            row_id: recordId,
-            axis: 'trigger',
-            score: Number(updated.trigger_score || 0),
-            reasoning: String(updated.trigger_reasoning || ''),
-            computed_at: updatedAt,
-          },
-        });
+        if (updated.fit_score !== null) {
+          insertScoreEvent({
+            db,
+            event: {
+              event_id: randomUUID(),
+              row_id: recordId,
+              axis: 'fit',
+              score: Number(updated.fit_score || 0),
+              reasoning: String(updated.fit_reasoning || ''),
+              computed_at: updatedAt,
+            },
+          });
+        }
+        if (updated.trigger_score !== null) {
+          insertScoreEvent({
+            db,
+            event: {
+              event_id: randomUUID(),
+              row_id: recordId,
+              axis: 'trigger',
+              score: Number(updated.trigger_score || 0),
+              reasoning: String(updated.trigger_reasoning || ''),
+              computed_at: updatedAt,
+            },
+          });
+        }
         summary.scored += 1;
         emitActivity({ event: 'row_complete', phase: 'scoring', row: record.business_name || recordId });
       } catch (error) {

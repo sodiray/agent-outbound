@@ -50,11 +50,9 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
   for (const [index, search] of asArray(config?.source?.searches).entries()) {
     addExplicitRef(refs, `source.searches[${index}].model`, search?.model, 'research');
   }
-  for (const [index, filter] of asArray(config?.source?.filters).entries()) {
-    addExplicitRef(refs, `source.filters[${index}].config.model`, filter?.config?.model, 'evaluation');
-  }
-  for (const [index, step] of asArray(config?.enrich).entries()) {
-    addExplicitRef(refs, `enrich[${index}].config.model`, step?.config?.model, 'research');
+  for (const [index, step] of asArray(config?.pipeline).entries()) {
+    const kind = String(step?.kind || '');
+    addExplicitRef(refs, `pipeline[${index}].model`, step?.model, kind === 'filter' ? 'evaluation' : 'research');
   }
   addExplicitRef(refs, 'score.fit.model', config?.score?.fit?.model, 'evaluation');
   addExplicitRef(refs, 'score.trigger.model', config?.score?.trigger?.model, 'evaluation');
@@ -74,22 +72,20 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
   return refs;
 };
 
-const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source' | 'enrich' | 'score' | 'sequence' | 'crm' }) => {
+const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source' | 'pipeline' | 'score' | 'sequence' | 'crm' }) => {
   const refs: ModelRef[] = [];
   const aiConfig = config?.ai || {};
   if (phase === 'source') {
     for (const [index, search] of asArray(config?.source?.searches).entries()) {
       addResolvedRef(refs, `source.searches[${index}]`, search?.model, 'research', aiConfig);
     }
-    for (const [index, filter] of asArray(config?.source?.filters).entries()) {
-      addResolvedRef(refs, `source.filters[${index}]`, filter?.config?.model, 'evaluation', aiConfig);
-    }
     addResolvedRef(refs, 'source.dedup', '', 'evaluation', aiConfig);
     return refs;
   }
-  if (phase === 'enrich') {
-    for (const [index, step] of asArray(config?.enrich).entries()) {
-      addResolvedRef(refs, `enrich[${index}]`, step?.config?.model, 'research', aiConfig);
+  if (phase === 'pipeline') {
+    for (const [index, step] of asArray(config?.pipeline).entries()) {
+      const kind = String(step?.kind || '');
+      addResolvedRef(refs, `pipeline[${index}]`, step?.model, kind === 'filter' ? 'evaluation' : 'research', aiConfig);
     }
     return refs;
   }
@@ -173,7 +169,7 @@ export const assertPhaseModelReferences = ({
   phase,
 }: {
   config: any;
-  phase: 'source' | 'enrich' | 'score' | 'sequence' | 'crm';
+  phase: 'source' | 'pipeline' | 'score' | 'sequence' | 'crm';
 }) => {
   const refs = dedupeRefs(collectPhaseModelRefs({ config: config || {}, phase }));
   for (const ref of refs) {

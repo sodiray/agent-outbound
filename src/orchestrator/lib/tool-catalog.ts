@@ -168,18 +168,12 @@ export const collectConfigToolRefs = (config: any): ToolRef[] => {
     addToolRef(refs, `source.searches[${i}].tool`, searches[i]);
   }
 
-  const filters = Array.isArray(config?.source?.filters) ? config.source.filters : [];
-  for (let i = 0; i < filters.length; i += 1) {
-    const filter = ensureObject(filters[i]);
-    filter.config = ensureObject(filter.config);
-    addToolRef(refs, `source.filters[${i}].config.tool`, filter.config);
-  }
-
-  const enrich = Array.isArray(config?.enrich) ? config.enrich : [];
-  for (let i = 0; i < enrich.length; i += 1) {
-    const step = ensureObject(enrich[i]);
-    step.config = ensureObject(step.config);
-    addToolRef(refs, `enrich[${i}].config.tool`, step.config);
+  const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
+  for (let i = 0; i < pipeline.length; i += 1) {
+    const step = ensureObject(pipeline[i]);
+    if (String(step?.kind || '') === 'enrich') {
+      addToolRef(refs, `pipeline[${i}].tool`, step);
+    }
   }
 
   const sequences = ensureObject(config?.sequences);

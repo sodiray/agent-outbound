@@ -207,7 +207,7 @@ Ask the user what makes someone a perfect fit and what signals urgency. Feed tha
 
 ### Daily workflow
 \`\`\`
-npx agent-outbound run <list> --more 20     # Get 20 more prospects, enrich, score
+npx agent-outbound run <list> --more 20     # Get 20 more prospects, run pipeline, score
 npx agent-outbound list info <list>          # Check status and score distribution
 npx agent-outbound dashboard                 # Activity summary across lists
 \`\`\`
@@ -216,9 +216,9 @@ npx agent-outbound dashboard                 # Activity summary across lists
 \`\`\`
 npx agent-outbound source <list>             # Run all configured searches
 npx agent-outbound source <list> --more N    # Paginate for N new (deduplicated) records
-npx agent-outbound enrich <list>             # Run all enrichment steps
-npx agent-outbound enrich <list> --step website-scrape --limit 5    # Target specific step/records
-npx agent-outbound enrich <list> --where "fit_score > 70"           # Enrich only high-fit records
+npx agent-outbound pipeline <list>           # Run ordered enrichment/filter steps
+npx agent-outbound pipeline <list> --limit 5 # Run on a small sample
+npx agent-outbound pipeline <list> --where "fit_score > 70"         # Run only high-fit records
 npx agent-outbound score <list>              # Score/rank all records
 \`\`\`
 

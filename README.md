@@ -174,28 +174,22 @@ npx agent-outbound remove <list> --keep-top 100 --sort-by fit_score
 
 SQL injection protection is built in — dangerous statements (DROP, DELETE, INSERT, UPDATE, ALTER, CREATE) are rejected.
 
-### Enrichment
+### Pipeline
 
-Enrichment runs your configured steps against records, adding data columns (emails, website content, social media, job postings, etc.).
+Pipeline runs ordered enrichment and filter steps against in-play records.
 
 ```bash
-# Enrich all records through all configured steps
-npx agent-outbound enrich <list>
+# Run all ordered pipeline steps
+npx agent-outbound pipeline <list>
 
-# Run only a specific step
-npx agent-outbound enrich <list> --step website-scrape
+# Run only records matching a condition
+npx agent-outbound pipeline <list> --where "fit_score > 70"
 
-# Enrich only records matching a condition
-npx agent-outbound enrich <list> --where "fit_score > 70"
-
-# Enrich at most N records
-npx agent-outbound enrich <list> --limit 10
-
-# Combine: enrich top prospects through a specific step
-npx agent-outbound enrich <list> --step email-lookup --where "fit_score > 80" --limit 5
+# Run at most N records
+npx agent-outbound pipeline <list> --limit 10
 ```
 
-Enrichment automatically re-scores all records after completing, so priority ranks stay current with new data.
+Run scoring separately after the pipeline when you want fresh priority ranks.
 
 ### Scoring
 
