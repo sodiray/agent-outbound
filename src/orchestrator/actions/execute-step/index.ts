@@ -60,6 +60,9 @@ const normalizeOutputsPayload = (raw: unknown, declaredKeys: string[]) => {
   return fuzzyMapDeclaredKeys(outputs, declaredKeys);
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
 const parsePotentialJson = (value: unknown): unknown => {
   if (typeof value !== 'string') return value;
   const trimmed = value.trim();
@@ -89,6 +92,29 @@ const collectKeys = (value: unknown, limit = 50): string[] => {
   };
   visit(value, 0);
   return [...keys];
+};
+
+const hasOwnDefinedDeclaredOutput = (
+  source: unknown,
+  declaredKeys: string[],
+) => {
+  if (!isRecord(source)) return false;
+  return declaredKeys.some((key) => (
+    Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined
+  ));
+};
+
+const rawModelOutputHasDeclaredKey = (
+  rawModelOutput: unknown,
+  declaredKeys: string[],
+) => {
+  const parsed = parsePotentialJson(rawModelOutput);
+  if (!isRecord(parsed)) return false;
+  if (hasOwnDefinedDeclaredOutput(parsed, declaredKeys)) return true;
+  if (!Object.prototype.hasOwnProperty.call(parsed, 'outputs')) return false;
+
+  const parsedOutputs = parsePotentialJson(parsed.outputs);
+  return hasOwnDefinedDeclaredOutput(parsedOutputs, declaredKeys);
 };
 
 const getToolResultData = (rawResult: unknown) => {
@@ -139,6 +165,7 @@ const assertNotEmptyToolCaptureFailure = ({
   if (toolResultData.length === 0) return;
   const hasRealDeclaredOutput = declaredKeys.some((key) => isRealOutputValue(normalizedOutputs[key]));
   if (hasRealDeclaredOutput) return;
+  if (rawModelOutputHasDeclaredKey(rawModelOutput, declaredKeys)) return;
 
   const toolResultKeys = [...new Set(toolResultData.flatMap((data) => collectKeys(data)))].slice(0, 30);
   throw new Error(

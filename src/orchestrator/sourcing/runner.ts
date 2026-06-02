@@ -161,6 +161,27 @@ const normalizeTile = (tile: any) => ({
   radius_m: Number(tile?.radius_m),
 });
 
+const GOOGLE_PLACES_FIELD_MASK = [
+  'places.id',
+  'places.displayName',
+  'places.formattedAddress',
+  'places.nationalPhoneNumber',
+  'places.websiteUri',
+  'places.businessStatus',
+  'places.userRatingCount',
+  'places.googleMapsUri',
+  'places.location',
+  'places.types',
+  'places.primaryType',
+].join(',');
+
+const isGoogleMapsNearbyTask = ({ toolSpec }: { toolSpec: any }) => {
+  const server = String(toolSpec?.server || '').trim().toLowerCase();
+  const tools = Array.isArray(toolSpec?.tools) ? toolSpec.tools : [];
+  const hasNearbyTool = tools.some((tool: any) => String(tool || '').trim().toUpperCase() === 'MAPS_NEARBY_SEARCH');
+  return hasNearbyTool && (server === 'googlemaps' || server === 'maps');
+};
+
 const loadTiles = ({ listDir, strategy }: { listDir: string; strategy: any }) => {
   const raw = Array.isArray(strategy?.tiles)
     ? strategy.tiles
@@ -237,10 +258,20 @@ const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record<string
     const value = valueAtPath(row, sourcePath);
     if (value !== undefined) mapped[String(targetKey)] = value;
   }
+  if (mapped.business_name === undefined && row?.displayName?.text !== undefined) mapped.business_name = row.displayName.text;
+  if (mapped.address === undefined && row?.formattedAddress !== undefined) mapped.address = row.formattedAddress;
+  if (mapped.phone === undefined && row?.nationalPhoneNumber !== undefined) mapped.phone = row.nationalPhoneNumber;
+  if (mapped.website === undefined && row?.websiteUri !== undefined) mapped.website = row.websiteUri;
+  if (mapped.business_status === undefined && row?.businessStatus !== undefined) mapped.business_status = row.businessStatus;
+  if (mapped.user_rating_count === undefined && row?.userRatingCount !== undefined) mapped.user_rating_count = row.userRatingCount;
+  if (mapped.primary_type === undefined && row?.primaryType !== undefined) mapped.primary_type = row.primaryType;
   if (!mapped.place_id && row?.placeId) mapped.place_id = row.placeId;
+  if (!mapped.place_id && row?.id) mapped.place_id = row.id;
   if (!mapped.google_place_id && mapped.place_id) mapped.google_place_id = mapped.place_id;
   if (mapped.lat === undefined && row?.location?.lat !== undefined) mapped.lat = row.location.lat;
   if (mapped.lng === undefined && row?.location?.lng !== undefined) mapped.lng = row.location.lng;
+  if (mapped.lat === undefined && row?.location?.latitude !== undefined) mapped.lat = row.location.latitude;
+  if (mapped.lng === undefined && row?.location?.longitude !== undefined) mapped.lng = row.location.longitude;
   if (mapped.latitude === undefined && mapped.lat !== undefined) mapped.latitude = mapped.lat;
   if (mapped.longitude === undefined && mapped.lng !== undefined) mapped.longitude = mapped.lng;
   return mapped;
@@ -248,7 +279,15 @@ const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record<string
 
 const extractRowsFromToolResult = (result: any) => {
   if (Array.isArray(result)) return result;
-  if (Array.isArray(result?.results)) return result.results;
+  if (Array.isArray(result?.results)) {
+    const rawPlaces = Array.isArray(result?.raw?.places) ? result.raw.places : [];
+    if (rawPlaces.length === 0) return result.results;
+    const rawById = new Map(rawPlaces.map((place: any) => [String(place?.id || '').trim(), place]));
+    return result.results.map((row: any) => {
+      const raw = rawById.get(String(row?.placeId || row?.place_id || row?.id || '').trim()) as any;
+      return raw ? { ...raw, ...row } : row;
+    });
+  }
   if (Array.isArray(result?.data?.results)) return result.data.results;
   if (Array.isArray(result?.items)) return result.items;
   if (Array.isArray(result?.data)) return result.data;
@@ -272,6 +311,7 @@ const executeStrategyTask = async ({
   const toolEntries = Object.entries(resolvedTools);
   if (toolEntries.length === 0) throw new Error(`source.strategy: no tool resolved for task ${task?.id || ''}.`);
   const [, toolDef] = toolEntries[0] as [string, any];
+  const googleMapsNearby = task.kind === 'geo_tiles' && isGoogleMapsNearbyTask({ toolSpec });
   const args = task.kind === 'geo_tiles'
     ? {
       lat: params.lat,
@@ -281,6 +321,11 @@ const executeStrategyTask = async ({
       types: Array.isArray(params.types) ? params.types.join(',') : params.types,
       excluded_types: Array.isArray(params.excluded_types) ? params.excluded_types.join(',') : params.excluded_types,
       max_results: Number(params.max_results || 100),
+      ...(googleMapsNearby ? {
+        field_mask: GOOGLE_PLACES_FIELD_MASK,
+        fields: GOOGLE_PLACES_FIELD_MASK,
+        raw: true,
+      } : {}),
     }
     : {
       query: params.query || '',

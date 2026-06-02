@@ -1,6 +1,7 @@
 import { getEnv } from './env.js';
 import { listAnthropicModels } from './anthropic.js';
 import { listDeepInfraModels } from './deepinfra.js';
+import { listXaiModels } from './xai.js';
 
 type ProviderValidateResult = {
   ok: boolean;
@@ -73,6 +74,19 @@ const buildDeepInfraModel = async (modelId: string, apiKey: string) => {
   throw new Error('Missing DeepInfra AI SDK provider. Install @ai-sdk/deepinfra.');
 };
 
+const buildXaiModel = async (modelId: string, apiKey: string) => {
+  const modName = '@ai-sdk/xai';
+  const providerModule: unknown = await import(modName);
+  const createXai = (providerModule as {
+    createXai?: (settings: { apiKey: string }) => (modelId: string) => unknown;
+  }).createXai;
+  if (typeof createXai === 'function') {
+    const xai = createXai({ apiKey });
+    return xai(String(modelId || '').trim());
+  }
+  throw new Error('Failed to initialize xAI provider from @ai-sdk/xai.');
+};
+
 export const PROVIDERS: RuntimeProvider[] = [
   {
     id: 'anthropic',
@@ -101,6 +115,14 @@ export const PROVIDERS: RuntimeProvider[] = [
       ?? parseDeepInfraUsdFromResponseBody(result?.response?.body)
       ?? parseDeepInfraUsdFromResponseBody(result?.rawResponse?.body)
     ),
+  },
+  {
+    id: 'xai',
+    envKey: 'XAI_API_KEY',
+    supportsCacheControl: false,
+    validateKey: async (apiKey: string) => listXaiModels(apiKey),
+    buildModel: buildXaiModel,
+    extractUsdCost: () => null,
   },
 ];
 

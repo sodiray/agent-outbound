@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { Writable } from 'node:stream';
 import {
@@ -80,7 +81,7 @@ import { onboardCommand } from './commands/onboard.js';
 import { validateAnthropicKey } from './orchestrator/runtime/anthropic.js';
 import { listDeepInfraModels } from './orchestrator/runtime/deepinfra.js';
 import { startServeMode } from './serve.js';
-import { getServePidPath, getServePortPath, resolveListDir } from './orchestrator/runtime/paths.js';
+import { getDbPath, getServePidPath, getServePortPath, resolveListDir } from './orchestrator/runtime/paths.js';
 import { getEnv } from './orchestrator/runtime/env.js';
 import { failureEnvelope, successEnvelope, toStructuredError } from './orchestrator/runtime/contract.js';
 
@@ -190,7 +191,7 @@ const printHelp = () => {
   process.stdout.write(`  remove <list> --where SQL\n`);
   process.stdout.write(`  remove <list> --keep-top N [--sort-by COLUMN]\n`);
   process.stdout.write(`  pipeline <list> [--where SQL] [--limit N] [--dry-run] [--sample N]\n`);
-  process.stdout.write(`  score <list> [--dry-run] [--sample N]\n`);
+  process.stdout.write(`  score <list> [--dry-run] [--sample N] [--force]\n`);
   process.stdout.write(`  run <list> [--more N]\n`);
   process.stdout.write(`  launch draft <list> [--limit N] [--sequence NAME] [--dry-run] [--sample N]\n`);
   process.stdout.write(`  launch send <list> [--limit N] [--dry-run] [--sample N]\n`);
@@ -1110,13 +1111,14 @@ const run = async () => {
   if (command === 'score') {
     const list = String(argv.shift() || '');
     const dryRun = hasFlag(argv, '--dry-run');
+    const force = hasFlag(argv, '--force');
     const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
-    const delegated = await callServeAction('score', { list, dryRun, sample }, list);
+    const delegated = await callServeAction('score', { list, dryRun, sample, force }, list);
     if (delegated) {
       print(delegated);
       return;
     }
-    print(await scoreCommand({ list, dryRun, sample }));
+    print(await scoreCommand({ list, dryRun, sample, force }));
     return;
   }
 
@@ -1515,6 +1517,41 @@ const run = async () => {
     const port = toNumber(consumeFlag(argv, '--port', '49391'), 49391);
     startServeMode({ list, port });
     process.stdout.write(`serve mode started on port ${port}\n`);
+    return;
+  }
+
+  if (command === 'view') {
+    const list = String(argv.shift() || '.');
+    const port = toNumber(consumeFlag(argv, '--port', '7788'), 7788);
+    const noOpen = hasFlag(argv, '--no-open');
+    const build = hasFlag(argv, '--build');
+    const listDir = resolveListDir(list);
+    const dbPath = getDbPath(listDir);
+    if (!existsSync(dbPath)) throw new Error(`List DB does not exist: ${dbPath}`);
+
+    const uiDir = join(process.cwd(), 'src/viz/ui');
+    const uiIndex = join(uiDir, 'dist/index.html');
+    const runUiCommand = (name: string, commandName: string, commandArgs: string[]) => new Promise<void>((resolveCommand, rejectCommand) => {
+      const child = spawn(commandName, commandArgs, { cwd: uiDir, stdio: 'inherit' });
+      child.on('error', rejectCommand);
+      child.on('exit', (code) => {
+        if (code === 0) {
+          resolveCommand();
+          return;
+        }
+        rejectCommand(new Error(`${name} failed with exit code ${code}`));
+      });
+    });
+    if (build || !existsSync(uiIndex)) {
+      if (!existsSync(uiDir)) throw new Error(`Viz UI project does not exist: ${uiDir}`);
+      if (!existsSync(join(uiDir, 'node_modules'))) {
+        await runUiCommand('npm install', 'npm', ['install', '--no-audit', '--no-fund']);
+      }
+      await runUiCommand('npm run build', 'npm', ['run', 'build']);
+    }
+
+    const { startViewServer } = await import('./viz/server.js');
+    await startViewServer({ listDir, port, open: !noOpen });
     return;
   }
 

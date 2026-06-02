@@ -52,6 +52,22 @@ const stderrTail = (stderr: string) => {
   return trimmed.length > 4000 ? trimmed.slice(-4000) : trimmed;
 };
 
+const appendOptionalFlag = (argv: string[], flag: string, value: unknown) => {
+  if (value === null || value === undefined || String(value).trim() === '') return argv;
+  if (argv.includes(flag)) return argv;
+  const jsonIndex = argv.lastIndexOf('--json');
+  const extra = [flag, stringifyArgValue(value)];
+  if (jsonIndex < 0) return [...argv, ...extra];
+  return [...argv.slice(0, jsonIndex), ...extra, ...argv.slice(jsonIndex)];
+};
+
+const appendOptionalBooleanFlag = (argv: string[], flag: string, value: unknown) => {
+  if (!value || argv.includes(flag)) return argv;
+  const jsonIndex = argv.lastIndexOf('--json');
+  if (jsonIndex < 0) return [...argv, flag];
+  return [...argv.slice(0, jsonIndex), flag, ...argv.slice(jsonIndex)];
+};
+
 export class CommandProvider implements ToolProvider {
   id: string;
   private server: CommandServerDef;
@@ -92,7 +108,12 @@ export class CommandProvider implements ToolProvider {
       throw new Error(`Provider "${this.id}" does not declare tool "${slug}".`);
     }
 
-    const invokeArgv = renderCommandArgv(toolDef.invoke.argv || [], args || {});
+    const renderedArgv = renderCommandArgv(toolDef.invoke.argv || [], args || {});
+    const invokeArgv = appendOptionalBooleanFlag(
+      appendOptionalFlag(renderedArgv, '--fields', args?.fields),
+      '--raw',
+      args?.raw,
+    );
     const argv = [...(this.server.args || []), ...invokeArgv];
     const output = await new Promise<{ stdout: string; stderr: string; code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       const child = spawn(this.server.command, argv, {

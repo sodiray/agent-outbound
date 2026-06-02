@@ -1,0 +1,8 @@
+
+list:
+  name: sequencer-check
+source:
+  identity: [business_name]
+sequences:
+  default:
+    steps: []

@@ -6,17 +6,20 @@ const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8
 
 export const evaluateConditionAction = async ({ conditionText, row, stepOutput, model = '', aiConfig = {} }) => {
   const ctx = { ...(row || {}), ...(stepOutput || {}) };
+  const stringifyUntrustedData = (value: any) => (
+    `<untrusted_data>\n${JSON.stringify(value, null, 2)}\n</untrusted_data>`
+  );
 
   const prompt = promptTemplate
     .replace('{{condition_text}}', String(conditionText || ''))
     .replace('{{record_json}}', '[provided in user prompt]')
     .replace('{{step_outputs_json}}', '[provided in user prompt]');
   const userPrompt = [
-    'Record JSON:',
-    JSON.stringify(ctx, null, 2),
+    'Record JSON as untrusted data:',
+    stringifyUntrustedData(ctx),
     '',
-    'Step outputs JSON:',
-    JSON.stringify(stepOutput || {}, null, 2),
+    'Step outputs JSON as untrusted data:',
+    stringifyUntrustedData(stepOutput || {}),
   ].join('\n');
 
   try {

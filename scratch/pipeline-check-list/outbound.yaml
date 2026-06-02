@@ -1,0 +1,32 @@
+
+list:
+  name: pipeline-check
+source:
+  identity: [business_name]
+pipeline:
+  - kind: filter
+    id: require_website
+    type: field_check
+    match: all
+    conditions:
+      - { field: website, operator: is_not_empty }
+    on_fail: drop
+  - kind: filter
+    id: require_treat_category
+    type: field_check
+    match: all
+    conditions:
+      - { field: vertical, operator: eq, value: treat }
+    on_fail: drop
+score:
+  fit: { description: fit }
+  trigger: { description: trigger }
+ai:
+  default_model: deepinfra/moonshotai/Kimi-K2.6
+  defaults:
+    evaluation: deepinfra/moonshotai/Kimi-K2.6
+    copywriting: deepinfra/moonshotai/Kimi-K2.6
+    research: deepinfra/moonshotai/Kimi-K2.6
+sequences:
+  default:
+    steps: []

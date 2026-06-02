@@ -84,6 +84,15 @@
   dependencies:
     json-schema "^0.4.0"
 
+"@ai-sdk/xai@^2.0.73":
+  version "2.0.73"
+  resolved "https://registry.yarnpkg.com/@ai-sdk/xai/-/xai-2.0.73.tgz#7459b4ea7dbb69fb3fdffe303959405d1275da94"
+  integrity sha512-U+/rdtqgDcloNSX7TIdRjYQooVydYdauQvLSP74oQcnE5N0/DD81yi+RvQXYYq47dDIn2H4exgr7XkBm4x1yDw==
+  dependencies:
+    "@ai-sdk/openai-compatible" "1.0.39"
+    "@ai-sdk/provider" "2.0.3"
+    "@ai-sdk/provider-utils" "3.0.25"
+
 "@hono/node-server@^1.13.8":
   version "1.19.12"
   resolved "https://registry.npmjs.org/@hono/node-server/-/node-server-1.19.12.tgz"

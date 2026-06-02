@@ -156,17 +156,22 @@ const SourceBudgetSchema = z.object({
 
 const FieldCheckConditionSchema = z.object({
   field: z.string(),
-  operator: z.enum(['is_not_empty', 'is_empty', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'in', 'not_in']),
+  operator: z.enum(['is_not_empty', 'is_empty', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'matches', 'not_matches', 'in', 'not_in']),
   value: z.any().optional(),
 });
+
+const FieldCheckPredicateSchema = z.object({
+  match: z.enum(['any', 'all']).default('all'),
+  conditions: z.array(FieldCheckConditionSchema).default([]),
+}).partial({ match: true, conditions: true });
 
 const PipelineFilterStepSchema = z.object({
   kind: z.literal('filter'),
   id: z.string().default(''),
   description: z.string().default(''),
   type: z.enum(['field_check', 'semantic']).default('semantic'),
-  match: z.enum(['any', 'all']).default('all'),
-  conditions: z.array(FieldCheckConditionSchema).default([]),
+  match: FieldCheckPredicateSchema.shape.match,
+  conditions: FieldCheckPredicateSchema.shape.conditions,
   on_fail: z.enum(['drop', 'flag']).default('drop'),
   model: ProviderModelSchema.optional(),
   condition: z.string().default(''),
@@ -184,6 +189,7 @@ const PipelineEnrichmentStepSchema = z.object({
   args: z.record(z.any()).default({}),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(),
+  when: FieldCheckPredicateSchema.optional(),
   prompt_file: z.string().default(''),
   prompt_args: z.record(z.any()).default({}),
   idempotency: IdempotencySchema.optional(),
@@ -197,6 +203,7 @@ const PipelineEnrichmentStepSchema = z.object({
   args: true,
   outputs: true,
   columns: true,
+  when: true,
   prompt_file: true,
   prompt_args: true,
   idempotency: true,

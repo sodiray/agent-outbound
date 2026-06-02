@@ -41,6 +41,7 @@ import {
 import { hasComposioOAuthTokens, loginComposio } from '../orchestrator/runtime/composio-oauth.js';
 import { listAnthropicModels, validateAnthropicKey } from '../orchestrator/runtime/anthropic.js';
 import { listDeepInfraModels, validateDeepInfraModel } from '../orchestrator/runtime/deepinfra.js';
+import { listXaiModels } from '../orchestrator/runtime/xai.js';
 import { runCrmSync } from '../orchestrator/crm/runner.js';
 import { getEnv, readGlobalEnv, writeGlobalEnv } from '../orchestrator/runtime/env.js';
 import { planRouteAction } from '../orchestrator/actions/plan-route/index.js';
@@ -82,9 +83,11 @@ export const DEEPINFRA_RECOMMENDED_MODELS = [
 const applyProviderModels = ({
   anthropicModels = [],
   deepinfraModels = [],
+  xaiModels = [],
 }: {
   anthropicModels?: string[];
   deepinfraModels?: string[];
+  xaiModels?: string[];
 }) => {
   let state = readModelsState();
   state = setProviderModels({
@@ -96,6 +99,11 @@ const applyProviderModels = ({
     state,
     providerId: 'deepinfra',
     models: deepinfraModels,
+  });
+  state = setProviderModels({
+    state,
+    providerId: 'xai',
+    models: xaiModels,
   });
   return writeModelsState(state);
 };
@@ -246,6 +254,7 @@ export const modelsAddCommand = async ({ model = '' }) => {
   const written = applyProviderModels({
     anthropicModels: state.providers?.anthropic?.models || [],
     deepinfraModels: [...current],
+    xaiModels: state.providers?.xai?.models || [],
   });
   return {
     status: 'added',
@@ -288,8 +297,9 @@ export const modelsRefreshCommand = async ({
 } = {}) => {
   const anthropicKey = String(getEnv('ANTHROPIC_API_KEY') || '').trim();
   const deepinfraKey = String(getEnv('DEEPINFRA_API_KEY') || '').trim();
-  if (!anthropicKey && !deepinfraKey) {
-    throw new Error('At least one provider key is required. Configure Anthropic and/or DeepInfra in `agent-outbound init`.');
+  const xaiKey = String(getEnv('XAI_API_KEY') || '').trim();
+  if (!anthropicKey && !deepinfraKey && !xaiKey) {
+    throw new Error('At least one provider key is required. Configure Anthropic, DeepInfra, and/or xAI in `agent-outbound init`.');
   }
 
   const current = readModelsState();
@@ -298,6 +308,12 @@ export const modelsRefreshCommand = async ({
     : { ok: false, error: 'not configured', models: [] as string[] };
   if (anthropicKey && !anthroList.ok) {
     throw new Error(`Anthropic refresh failed: ${anthroList.error}`);
+  }
+  const xaiList = xaiKey
+    ? await listXaiModels(xaiKey)
+    : { ok: false, error: 'not configured', models: [] as string[] };
+  if (xaiKey && !xaiList.ok) {
+    throw new Error(`xAI refresh failed: ${xaiList.error}`);
   }
 
   let deepinfraSelected: string[] = [];
@@ -326,6 +342,7 @@ export const modelsRefreshCommand = async ({
   const written = applyProviderModels({
     anthropicModels: anthropicKey ? (anthroList.models || []) : (current.providers?.anthropic?.models || []),
     deepinfraModels: deepinfraKey ? deepinfraSelected : (current.providers?.deepinfra?.models || []),
+    xaiModels: xaiKey ? (xaiList.models || []) : (current.providers?.xai?.models || []),
   });
 
   return {
@@ -339,6 +356,10 @@ export const modelsRefreshCommand = async ({
       deepinfra: {
         configured: Boolean(deepinfraKey),
         model_count: written.state.providers?.deepinfra?.models?.length || 0,
+      },
+      xai: {
+        configured: Boolean(xaiKey),
+        model_count: written.state.providers?.xai?.models?.length || 0,
       },
     },
   };
@@ -729,7 +750,7 @@ export const runCommand = async ({ list, more = 0 }) => {
   };
 };
 
-export const scoreCommand = async ({ list, dryRun = false, sample = 0 }) => {
+export const scoreCommand = async ({ list, dryRun = false, sample = 0, force = false }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'score' });
@@ -741,7 +762,7 @@ export const scoreCommand = async ({ list, dryRun = false, sample = 0 }) => {
   const threshold = getBulkSnapshotThreshold(config || {});
 
   if (dryRun) {
-    return runScoring({ listDir, dryRun: true });
+    return runScoring({ listDir, dryRun: true, force });
   }
   const sampleN = Math.max(0, Number(sample || 0));
   if (sampleN > 0) {
@@ -749,13 +770,13 @@ export const scoreCommand = async ({ list, dryRun = false, sample = 0 }) => {
       listDir,
       sampledCount: sampleN,
       totalCount: Math.max(totalCount, sampleN),
-      run: () => runScoring({ listDir, limit: sampleN }),
+      run: () => runScoring({ listDir, limit: sampleN, force }),
     });
   }
   const autoSnapshot = totalCount >= threshold
     ? snapshotCreateCommand({ list: listDir, label: `auto-before-score-${new Date().toISOString()}` })
     : null;
-  const scored = await runScoring({ listDir });
+  const scored = await runScoring({ listDir, force });
   return {
     ...scored,
     auto_snapshot: autoSnapshot,
@@ -1227,6 +1248,7 @@ export const initCommand = async ({
 
   const effectiveAnthropicKey = String(env.ANTHROPIC_API_KEY || '').trim();
   const effectiveDeepinfraKey = String(env.DEEPINFRA_API_KEY || '').trim();
+  const effectiveXaiKey = String(env.XAI_API_KEY || '').trim();
 
   const composioAuthenticated = await hasComposioOAuthTokens();
   const composioToolkits = composioAuthenticated
@@ -1239,10 +1261,13 @@ export const initCommand = async ({
   const deepinfra = effectiveDeepinfraKey
     ? await listDeepInfraModels(effectiveDeepinfraKey)
     : { ok: false, error: 'DEEPINFRA_API_KEY is not set.', models: [] as string[] };
+  const xai = effectiveXaiKey
+    ? await listXaiModels(effectiveXaiKey)
+    : { ok: false, error: 'XAI_API_KEY is not set.', models: [] as string[] };
 
-  const hasValidLlmProvider = Boolean(anthropic.ok || deepinfra.ok);
+  const hasValidLlmProvider = Boolean(anthropic.ok || deepinfra.ok || xai.ok);
   if (!hasValidLlmProvider) {
-    throw new Error('At least one LLM provider key must be configured and valid (Anthropic and/or DeepInfra).');
+    throw new Error('At least one LLM provider key must be configured and valid (Anthropic, DeepInfra, and/or xAI).');
   }
 
   const currentModels = readModelsState();
@@ -1268,6 +1293,7 @@ export const initCommand = async ({
   const writtenModels = applyProviderModels({
     anthropicModels: anthropic.ok ? (anthropic.models || []) : (currentModels.providers?.anthropic?.models || []),
     deepinfraModels: deepinfra.ok ? selectedDeepinfraModels : (currentModels.providers?.deepinfra?.models || []),
+    xaiModels: xai.ok ? (xai.models || []) : (currentModels.providers?.xai?.models || []),
   });
 
   return {
@@ -1290,6 +1316,12 @@ export const initCommand = async ({
       valid: Boolean(deepinfra.ok),
       error: deepinfra.ok ? undefined : deepinfra.error,
       model_count: selectedDeepinfraModels.length,
+    },
+    xai: {
+      has_key: Boolean(effectiveXaiKey),
+      valid: Boolean(xai.ok),
+      error: xai.ok ? undefined : xai.error,
+      model_count: xai.ok ? (xai.models || []).length : 0,
     },
   };
 };

@@ -13,6 +13,7 @@ import { readToolCatalog } from '../lib/tool-catalog.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
+import { evaluateFieldCheckGroup } from '../lib/conditions.js';
 
 const parseExtra = (value) => {
   try {
@@ -186,6 +187,23 @@ const outputOutcomeFor = ({ outputs, expectedOutputs }: { outputs: any; expected
   return hasAnyValue ? 'ok' : 'empty';
 };
 
+const whenPredicateForStep = ({ step, stepConfig }: { step: any; stepConfig: any }) => (
+  stepConfig?.when && typeof stepConfig.when === 'object'
+    ? stepConfig.when
+    : step?.when && typeof step.when === 'object'
+      ? step.when
+      : null
+);
+
+const shouldRunForRecord = ({ record, predicate }: { record: any; predicate: any }) => {
+  if (!predicate) return { passed: true, reason: '' };
+  return evaluateFieldCheckGroup({
+    row: record,
+    conditions: Array.isArray(predicate?.conditions) ? predicate.conditions : [],
+    match: predicate?.match || 'all',
+  });
+};
+
 const applyOutputs = ({ step, outputs }) => {
   const patch: Record<string, any> = {};
   const declaredOutputs = getDeclaredOutputs(step?.config || {});
@@ -271,6 +289,7 @@ export const executeEnrichmentStepOnRecords = async ({
   const concurrency = Number(stepConfig?.concurrency || 3);
   const targetColumns = getTargetColumnsForStepConfig(stepConfig || {});
   const statusColumn = `${id}__status`;
+  const whenPredicate = whenPredicateForStep({ step, stepConfig });
   if (targetColumns.length > 0 || statusColumn) {
     ensureRecordColumns({
       db,
@@ -284,6 +303,7 @@ export const executeEnrichmentStepOnRecords = async ({
   const summary = {
     processed: 0,
     skipped_fresh: 0,
+    skipped_when: 0,
     failed: 0,
     errors: [] as Array<{ record_id: string; error: string }>,
     record_ids: [] as string[],
@@ -292,6 +312,21 @@ export const executeEnrichmentStepOnRecords = async ({
   await mapWithConcurrency<any, void>((rows || []) as any[], async (record) => {
     const recordId = getRecordRowId(record);
     const rowLabel = String(record?.business_name || recordId);
+    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate });
+    if (!whenOutcome.passed) {
+      upsertRecord({
+        db,
+        row: {
+          ...record,
+          [statusColumn]: 'skipped',
+        },
+      });
+      summary.skipped_when += 1;
+      summary.record_ids.push(recordId);
+      emitActivity({ event: 'row_skipped', phase: 'pipeline', step: id, row: rowLabel, reason: String(whenOutcome.reason || 'when_not_matched') });
+      return;
+    }
+
     const depHash = stableHash({ depValues: {}, config: stepConfig || {} });
     const cached = readStaleness({ db, recordId, stepId: id });
 
@@ -530,6 +565,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
     processed: 0,
     skipped_fresh: 0,
     skipped_upstream: 0,
+    skipped_when: 0,
     failed: 0,
     errors: [],
   };
@@ -577,9 +613,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
         const concurrency = Number(step?.config?.concurrency || 3);
         const targetColumns = getTargetColumnsForStepConfig(step?.config || {});
-        if (targetColumns.length > 0) {
-          ensureRecordColumns({ db, columns: targetColumns });
-        }
+        const statusColumn = `${id}__status`;
+        const whenPredicate = whenPredicateForStep({ step, stepConfig: step?.config || {} });
+        ensureRecordColumns({ db, columns: [...targetColumns, { name: statusColumn, type: 'TEXT' }] });
 
         emitActivity({ event: 'step_start', phase: 'enrichment', step: id, rows: recordState.size });
 
@@ -590,6 +626,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           depHash: string;
           cacheTtlSeconds: number;
           cacheTtl: string;
+          skippedWhen?: boolean;
         }> = [];
         const failures: Array<{ recordId: string; rowLabel: string; error: string }> = [];
         const snapshot = [...recordState.values()];
@@ -601,6 +638,21 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           if (hasFailedAncestor(recordId, id)) {
             summary.skipped_upstream += 1;
             emitActivity({ event: 'row_skipped', phase: 'enrichment', step: id, row: rowLabel, reason: 'upstream_failed' });
+            return;
+          }
+
+          const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate });
+          if (!whenOutcome.passed) {
+            patches.push({
+              recordId,
+              rowLabel,
+              patch: { [statusColumn]: 'skipped' },
+              depHash: '',
+              cacheTtlSeconds: 0,
+              cacheTtl: '',
+              skippedWhen: true,
+            });
+            emitActivity({ event: 'row_skipped', phase: 'enrichment', step: id, row: rowLabel, reason: String(whenOutcome.reason || 'when_not_matched') });
             return;
           }
 
@@ -660,6 +712,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               step: { ...step, __list_dir: listDir },
               outputs: result.outputs || {},
             });
+            patch[statusColumn] = 'ok';
             patches.push({
               recordId,
               rowLabel,
@@ -667,6 +720,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               depHash,
               cacheTtlSeconds: ttlToSeconds(step?.config?.cache),
               cacheTtl: String(step?.config?.cache || ''),
+              skippedWhen: false,
             });
           } catch (error) {
             if (isBudgetExceededError(error)) throw error;
@@ -690,17 +744,23 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             const merged = { ...currentRow, ...item.patch };
             upsertRecord({ db, row: merged });
             upsertPrimaryContactIfPresent({ db, record: merged });
-            writeStaleness({
-              db,
-              recordId: item.recordId,
-              stepId: result.id,
-              depHash: item.depHash,
-              cacheTtlSeconds: item.cacheTtlSeconds,
-              cacheTtl: item.cacheTtl,
-            });
+            if (!item.skippedWhen) {
+              writeStaleness({
+                db,
+                recordId: item.recordId,
+                stepId: result.id,
+                depHash: item.depHash,
+                cacheTtlSeconds: item.cacheTtlSeconds,
+                cacheTtl: item.cacheTtl,
+              });
+            }
             recordState.set(item.recordId, merged);
-            summary.processed += 1;
-            emitActivity({ event: 'row_complete', phase: 'enrichment', step: result.id, row: item.rowLabel });
+            if (item.skippedWhen) {
+              summary.skipped_when += 1;
+            } else {
+              summary.processed += 1;
+              emitActivity({ event: 'row_complete', phase: 'enrichment', step: result.id, row: item.rowLabel });
+            }
           } catch (error) {
             if (isBudgetExceededError(error)) throw error;
             const detail = String(error?.message || error);
