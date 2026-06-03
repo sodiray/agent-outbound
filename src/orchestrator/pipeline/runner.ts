@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { hasPassedStep, inPlayWhere, insertPipelineEvent, isRecordCommitted, logPipelineEvent, openListDb, upsertRecord } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
 import { emitActivity } from '../runtime/activity.js';
+import { beginRun, tickProgress, endRun, heartbeat } from '../runtime/progress.js';
 import { getRecordRowId } from '../lib/record.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { getMcpClient } from '../runtime/mcp.js';
@@ -188,16 +189,20 @@ export const runPipeline = async ({ listDir, where = '', limit = 0, dryRun = fal
       return simulatePipeline({ db, steps, baseRows: readInPlayRows({ db, where, limit }), force, reapply });
     }
 
+    const runId = beginRun(db, { phase: 'pipeline', target: steps.length, message: `Filtering ${recordsIn} records` });
+
     for (let index = 0; index < steps.length; index += 1) {
       const step = steps[index];
       const stepId = pipelineStepId(step, index);
       const kind = String(step?.kind || '');
       const rows = readInPlayRows({ db, where, limit });
       emitActivity({ event: 'step_start', phase: 'pipeline', step: stepId, kind, rows: rows.length });
+      tickProgress(db, runId, { stepIndex: index, stepTotal: steps.length, activeStep: stepId, done: 0, target: rows.length, message: `${kind} · ${stepId}` });
 
       if (kind === 'enrich') {
         if (!mcp) mcp = await getMcpClient();
         if (!toolCatalog) toolCatalog = readToolCatalog(listDir);
+        const enrichHeartbeat = setInterval(() => heartbeat(db, runId), 3000);
         const result = await executeEnrichmentStepOnRecords({
           db,
           listDir,
@@ -208,7 +213,8 @@ export const runPipeline = async ({ listDir, where = '', limit = 0, dryRun = fal
           rows,
           stepId,
           force,
-        });
+        }).finally(() => clearInterval(enrichHeartbeat));
+        tickProgress(db, runId, { done: result.processed, target: rows.length });
         summary.processed += result.processed;
         summary.failed += result.failed;
         summary.errors.push(...result.errors.map((error) => ({ step: stepId, ...error })));
@@ -248,6 +254,7 @@ export const runPipeline = async ({ listDir, where = '', limit = 0, dryRun = fal
         : (rows as any[]).filter((record) => !hasPassedStep({ db, recordId: getRecordRowId(record), stepId }));
       const skippedPassed = rows.length - evalRows.length;
       summary.skipped_passed += skippedPassed;
+      tickProgress(db, runId, { target: evalRows.length });
 
       if (filterType === 'field_check') {
         await mapWithConcurrency<any, void>(evalRows as any[], async (record) => {
@@ -258,7 +265,9 @@ export const runPipeline = async ({ listDir, where = '', limit = 0, dryRun = fal
           });
           outcomes.set(getRecordRowId(record), outcome);
         }, Number(step?.concurrency || 10));
+        tickProgress(db, runId, { done: evalRows.length });
       } else {
+        const semanticHeartbeat = setInterval(() => heartbeat(db, runId), 3000);
         const semantic = await evaluateSemanticFilterBatches({
           db,
           listDir,
@@ -266,8 +275,9 @@ export const runPipeline = async ({ listDir, where = '', limit = 0, dryRun = fal
           rows: evalRows,
           aiConfig: config?.ai || {},
           batchSize: Number(step?.batch_size || 10),
-        });
+        }).finally(() => clearInterval(semanticHeartbeat));
         for (const [recordId, outcome] of semantic.entries()) outcomes.set(recordId, outcome);
+        tickProgress(db, runId, { done: evalRows.length });
       }
 
       let dropped = 0;
@@ -310,6 +320,7 @@ export const runPipeline = async ({ listDir, where = '', limit = 0, dryRun = fal
     };
     logPipelineEvent({ listDir, payload: funnel });
     emitActivity({ event: 'phase_complete', phase: 'pipeline', ...funnel });
+    endRun(db, runId, { status: 'done', message: `Pipeline complete · ${summary.survivors} survivors` });
     return summary;
   } finally {
     db.close();

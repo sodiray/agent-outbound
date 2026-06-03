@@ -7,6 +7,24 @@ type RecordsParams = {
   filters: ActiveFilter[];
 };
 
+export type ProgressRun = {
+  run_id: string;
+  phase: string;
+  active_step: string;
+  message: string;
+  step_index: number;
+  step_total: number;
+  target_count: number;
+  done_count: number;
+  status: string;
+  error: string;
+  started_at: string;
+  updated_at: string;
+  age_ms: number | null;
+};
+
+export type ProgressResponse = { run: ProgressRun | null };
+
 const getJson = async <T,>(path: string): Promise<T> => {
   const response = await fetch(path);
   if (!response.ok) {
@@ -16,6 +34,8 @@ const getJson = async <T,>(path: string): Promise<T> => {
 };
 
 export const fetchMeta = () => getJson<MetaResponse>('/api/meta');
+
+export const fetchProgress = () => getJson<ProgressResponse>('/api/progress');
 
 export const fetchRecords = ({ sort, dir, q, filters }: RecordsParams) => {
   const params = new URLSearchParams();

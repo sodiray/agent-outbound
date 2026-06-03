@@ -216,6 +216,22 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_pipeline_events_record ON pipeline_events(record_id, occurred_at DESC);
 
+  CREATE TABLE IF NOT EXISTS run_state (
+    run_id TEXT PRIMARY KEY,
+    phase TEXT NOT NULL,
+    active_step TEXT DEFAULT '',
+    message TEXT DEFAULT '',
+    target_count INTEGER DEFAULT 0,
+    done_count INTEGER DEFAULT 0,
+    step_index INTEGER DEFAULT 0,
+    step_total INTEGER DEFAULT 0,
+    status TEXT NOT NULL,        -- 'running' | 'done' | 'error'
+    error TEXT DEFAULT '',
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_run_state_updated ON run_state(updated_at DESC);
+
   CREATE TABLE IF NOT EXISTS suppression (
     entry_id TEXT PRIMARY KEY,
     id TEXT DEFAULT '',
@@ -645,6 +661,8 @@ const openDb = ({ dbPath, readonly = false }) => {
   if (!readonly) {
     db.exec(SCHEMA_SQL);
     try { db.exec("ALTER TABLE records ADD COLUMN mail_last_cost_cents INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE run_state ADD COLUMN step_index INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE run_state ADD COLUMN step_total INTEGER DEFAULT 0"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN pages_fetched INTEGER DEFAULT 0"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN total_seen INTEGER DEFAULT 0"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN new_unique INTEGER DEFAULT 0"); } catch {}

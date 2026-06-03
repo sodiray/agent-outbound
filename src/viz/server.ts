@@ -4,9 +4,10 @@ import { relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
+import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { buildMeta, getRecordDetail, queryRecords } from './data.js';
+import { buildMeta, getCounts, getProgress, getRecordDetail, queryRecords } from './data.js';
 
 const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 const uiDistDir = resolve(moduleDir, 'ui/dist');
@@ -85,6 +86,37 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
     } catch (error) {
       return c.json({ error: String(error?.message || error) }, 500);
     }
+  });
+
+  app.get('/api/progress', (c) => {
+    try {
+      return c.json(getProgress(listDir));
+    } catch (error) {
+      return c.json({ error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.get('/api/stream', (c) => {
+    return streamSSE(c, async (stream) => {
+      const send = async () => {
+        const payload = (() => {
+          try {
+            return { progress: getProgress(listDir).run, counts: getCounts(listDir) };
+          } catch (error) {
+            return { progress: null, counts: null, error: String((error as any)?.message || error) };
+          }
+        })();
+        await stream.writeSSE({ event: 'tick', data: JSON.stringify(payload) });
+      };
+      await send();
+      const aborted = { current: false };
+      stream.onAbort(() => { aborted.current = true; });
+      while (!aborted.current) {
+        await stream.sleep(1000);
+        if (aborted.current) break;
+        await send();
+      }
+    });
   });
 
   if (hasBuiltUi) {

@@ -16,6 +16,7 @@ import { readConfig } from '../lib/config.js';
 import { getRecordRowId, isRecordScalarValue, makeRecordId, rowToRecordShape, stableHash } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
 import { emitActivity } from '../runtime/activity.js';
+import { beginRun, tickProgress, endRun, heartbeat } from '../runtime/progress.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getMcpClient } from '../runtime/mcp.js';
 import { aiDedupLink, buildIdentityHash, buildIdentityString, getIdentityFields, upsertRecordEmbedding } from './dedup.js';
@@ -635,6 +636,9 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
     errors: [],
   };
 
+  const sourceTarget = (Array.isArray(searches) ? searches : []).reduce((sum: number, search: any) => sum + Number(search?.max_results || 0), 0);
+  const runId = beginRun(db, { phase: 'sourcing', target: sourceTarget, message: 'Sourcing started' });
+
   try {
     await refreshEmbeddingsAndLinks({ db, listDir, identityFields, aiConfig: config?.ai || {} });
 
@@ -642,6 +646,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
     for (const search of searches) {
       const stepName = search?.id || search?.description || 'search';
       emitActivity({ event: 'step_start', phase: 'sourcing_search', step: stepName });
+      tickProgress(db, runId, { activeStep: stepName, message: `Searching: ${stepName}`, done: summary.inserted_total });
       summary.searches_run += 1;
       const searchResult = await toSearchRows({
         mcp,
@@ -693,6 +698,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
       const seenDedupValues = loadExistingDedupValues({ db, dedupKey });
       const pendingTasks = listPendingSearchTasks({ db });
       summary.search_tasks_pending = pendingTasks.length;
+      tickProgress(db, runId, { stepTotal: pendingTasks.length, done: summary.inserted_total });
       let callsMade = 0;
 
       for (const task of pendingTasks) {
@@ -702,14 +708,16 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
         summary.search_calls_made = callsMade;
         summary.search_tasks_run += 1;
         emitActivity({ event: 'step_start', phase: 'sourcing_task', step: task.id });
+        tickProgress(db, runId, { stepIndex: summary.search_tasks_run, stepTotal: pendingTasks.length, activeStep: String(task.id), message: `Sourcing tile ${summary.search_tasks_run}/${pendingTasks.length}`, done: summary.inserted_total });
 
         try {
+          const taskHeartbeat = setInterval(() => heartbeat(db, runId), 3000);
           const taskResult = await executeStrategyTask({
             mcp,
             listDir,
             task,
             toolCatalog,
-          });
+          }).finally(() => clearInterval(taskHeartbeat));
           const rows = Array.isArray(taskResult.rows) ? taskResult.rows : [];
           const mappedRows = rows.map((row: any) => {
             const mapped = mapStrategyRow({ row, outputMap: taskResult.params?.output_map || {} });
@@ -739,6 +747,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
           });
           summary.inserted_ids.push(...processed.insertedIds);
           summary.inserted_total += processed.insertedIds.length;
+          tickProgress(db, runId, { done: summary.inserted_total });
           summary.deduped_total += processed.deduped;
           summary.filtered_out += processed.filtered;
           summary.errors.push(...processed.errors);
@@ -786,6 +795,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
       });
       summary.inserted_ids.push(...processed.insertedIds);
       summary.inserted_total += processed.insertedIds.length;
+      tickProgress(db, runId, { done: summary.inserted_total });
       summary.deduped_total += processed.deduped;
       summary.filtered_out += processed.filtered;
       summary.errors.push(...processed.errors);
@@ -800,10 +810,12 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
       filtered_out: summary.filtered_out,
       deduped_total: summary.deduped_total,
     });
+    endRun(db, runId, { status: 'done', message: `Sourced ${summary.inserted_total} records` });
     return summary;
   } catch (error) {
     summary.errors.push(String((error as any)?.message || error));
     emitActivity({ event: 'error', phase: 'sourcing', message: String((error as any)?.message || error) });
+    endRun(db, runId, { status: 'error', error: String((error as any)?.message || error) });
     throw error;
   } finally {
     db.close();
@@ -855,6 +867,8 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
 
   emitActivity({ event: 'phase_start', phase: 'sourcing_more', target_new: target, searches: searches.length });
 
+  const runId = beginRun(db, { phase: 'sourcing', target, message: `Sourcing ${target} additional leads` });
+
   try {
     await refreshEmbeddingsAndLinks({ db, listDir, identityFields, aiConfig: config?.ai || {} });
 
@@ -862,6 +876,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
       if (summary.inserted_total >= target) break;
       summary.searches_run += 1;
       const searchId = stableSearchId(search);
+      tickProgress(db, runId, { activeStep: String(searchId), message: `Searching: ${searchId}`, done: summary.inserted_total });
       const configHash = searchConfigHash(search);
       const stored = getSearchState({ db, searchId });
       if (stored && String(stored.config_hash || '') !== configHash) {
@@ -916,6 +931,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
 
         summary.inserted_ids.push(...processed.insertedIds);
         summary.inserted_total += processed.insertedIds.length;
+        tickProgress(db, runId, { done: summary.inserted_total });
         summary.deduped_total += processed.deduped;
         summary.filtered_out += processed.filtered;
         summary.errors.push(...processed.errors);
@@ -954,10 +970,12 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
       inserted_total: summary.inserted_total,
       exhausted_searches: summary.exhausted_searches,
     });
+    endRun(db, runId, { status: 'done', message: `Sourced ${summary.inserted_total} new leads` });
     return summary;
   } catch (error) {
     summary.errors.push(String((error as any)?.message || error));
     emitActivity({ event: 'error', phase: 'sourcing_more', message: String((error as any)?.message || error) });
+    endRun(db, runId, { status: 'error', error: String((error as any)?.message || error) });
     throw error;
   } finally {
     db.close();

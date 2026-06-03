@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode, RefObject } from 'react';
 import { createPortal } from 'react-dom';
-import { fetchMeta, fetchRecordDetail, fetchRecords } from './api.js';
+import { fetchMeta, fetchProgress, fetchRecordDetail, fetchRecords } from './api.js';
+import type { ProgressRun } from './api.js';
 import type {
   ActiveFilter,
   ColumnMeta,
@@ -72,6 +73,8 @@ const sortableColumns = (meta: MetaResponse | null) => (meta?.columns || []).fil
 const activeFilterKey = (filter: ActiveFilter) => filter.key;
 const POPOVER_GAP = 8;
 const POPOVER_MARGIN = 12;
+const POLL_INTERVAL_MS = 2000;
+const PROGRESS_POLL_INTERVAL_MS = 1500;
 
 const displayDate = (value: unknown) => {
   const raw = String(value || '');
@@ -168,7 +171,14 @@ const FloatingPopover = ({
   );
 };
 
-const ScoreBar = ({ value }: { value: unknown }) => {
+const ScoreBar = ({ value, unscored = false }: { value: unknown; unscored?: boolean }) => {
+  if (unscored) {
+    return (
+      <span className="score-cell is-unscored" title="Not yet scored">
+        <span className="score-cell__value">––</span>
+      </span>
+    );
+  }
   const score = Math.max(0, Math.min(100, numberValue(value)));
   return (
     <span className="score-cell">
@@ -194,6 +204,27 @@ const BooleanValue = ({ value }: { value: unknown }) => <span className="boolean
 
 const SCORE_BAR_KEYS = new Set(['fit_score', 'trigger_score', 'priority_rank']);
 const isScoreBarColumn = (column: ColumnMeta) => column.group === 'score' && SCORE_BAR_KEYS.has(column.key);
+
+// A score column is "unscored" (vs. a real 0) when scoring never ran for it —
+// detected via the matching *_updated_at timestamp being empty.
+const SCORE_UPDATED_KEY: Record<string, string> = {
+  fit_score: 'fit_updated_at',
+  trigger_score: 'trigger_updated_at',
+};
+const isUnscored = (record: RecordRow, key: string) => {
+  const updatedKey = SCORE_UPDATED_KEY[key];
+  if (!updatedKey) return false;
+  return !String(record[updatedKey] ?? '').trim();
+};
+
+// Lifecycle rank for the "state" sort: kept (scored) → in progress → unscored → dropped.
+// In-progress is live client state, so this can only be computed on the client.
+const stateRank = (record: RecordRow, inProgressRowIds: Set<string>) => {
+  if (isDropped(record)) return 3;
+  if (inProgressRowIds.has(rowId(record))) return 1;
+  if (!isUnscored(record, 'fit_score')) return 0;
+  return 2;
+};
 const isWebsiteColumn = (column: ColumnMeta) => column.key === 'website' || column.key === 'websiteUri';
 
 const hostnameOf = (raw: string) => {
@@ -227,7 +258,7 @@ const ValueCell = ({ column, record }: { column: ColumnMeta; record: RecordRow }
   if (column.type === 'verdict') return <VerdictChip verdict={(value as string) || null} />;
   if (column.type === 'status') return <StatusChip status={value || 'n/a'} />;
   if (column.type === 'boolean') return <BooleanValue value={value} />;
-  if (column.type === 'number') return isScoreBarColumn(column) ? <ScoreBar value={value} /> : <NumberCell value={value} />;
+  if (column.type === 'number') return isScoreBarColumn(column) ? <ScoreBar value={value} unscored={isUnscored(record, column.key)} /> : <NumberCell value={value} />;
   return <span className="cell-text">{textValue(value)}</span>;
 };
 
@@ -259,6 +290,7 @@ const OutcomeIcon = ({ record }: { record: RecordRow }) => {
 
 const FitFrozenCell = ({ record }: { record: RecordRow }) => {
   if (isDropped(record)) return <span className="fit-frozen is-empty">—</span>;
+  if (isUnscored(record, 'fit_score')) return <span className="fit-frozen is-unscored" title="Not yet scored">––</span>;
   const score = numberValue(record.fit_score);
   return <span className="fit-frozen">{Number.isInteger(score) ? score : score.toFixed(0)}</span>;
 };
@@ -311,11 +343,21 @@ const filterOptions = (filter: FilterMeta) => {
 const FilterBuilder = ({
   meta,
   filters,
+  showingDropped,
+  showInProgress,
+  inProgressCount,
   onApply,
+  onToggleDropped,
+  onToggleInProgress,
 }: {
   meta: MetaResponse;
   filters: ActiveFilter[];
+  showingDropped: boolean;
+  showInProgress: boolean;
+  inProgressCount: number;
   onApply: (filter: ActiveFilter) => void;
+  onToggleDropped: () => void;
+  onToggleInProgress: () => void;
 }) => {
   const [open, setOpen] = useState(false);
   const [selectedKey, setSelectedKey] = useState('');
@@ -359,6 +401,15 @@ const FilterBuilder = ({
       {open ? (
       <FloatingPopover anchorRef={controlRef} className="filter-builder__menu popover-menu" panelRef={panelRef}>
         <div className="filter-builder__fields">
+          <div className="filter-group">
+            <span>Defaults</span>
+            <button className={showingDropped ? 'is-active' : ''} type="button" onClick={onToggleDropped}>
+              {showingDropped ? 'Hide dropped' : 'Show dropped'}
+            </button>
+            <button className={showInProgress ? 'is-active' : ''} type="button" onClick={onToggleInProgress}>
+              {showInProgress ? `Showing in progress (${inProgressCount})` : `Only in progress (${inProgressCount})`}
+            </button>
+          </div>
           {Object.entries(groupedFilters).map(([group, groupFilters]) => (
             <div key={group} className="filter-group">
               <span>{group}</span>
@@ -420,9 +471,22 @@ const SortControl = ({
     <button className="popover-trigger" type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)}>Sort</button>
     {open ? (
     <FloatingPopover anchorRef={controlRef} className="sort-control__menu popover-menu" panelRef={panelRef}>
+      <div className="sort-presets">
+        <span>Presets</span>
+        <button className={sort === 'state' ? 'is-active' : ''} type="button" onClick={() => { onSort('state'); onDir('desc'); }}>
+          State
+        </button>
+        <button className={sort === 'priority_rank' && dir === 'desc' ? 'is-active' : ''} type="button" onClick={() => { onSort('priority_rank'); onDir('desc'); }}>
+          Highest score
+        </button>
+        <button className={sort === '_created_at' && dir === 'desc' ? 'is-active' : ''} type="button" onClick={() => { onSort('_created_at'); onDir('desc'); }}>
+          Newest
+        </button>
+      </div>
       <label>
         <span>Field</span>
         <select value={sort} onChange={(event) => onSort(event.target.value)}>
+          <option value="state">State (lifecycle)</option>
           {sortableColumns(meta).map((column) => (
             <option value={column.key} key={column.key}>{column.label}</option>
           ))}
@@ -449,6 +513,8 @@ const TableView = ({
   dir,
   onSort,
   onOpen,
+  activeStep,
+  inProgressRowIds,
 }: {
   meta: MetaResponse;
   records: RecordRow[];
@@ -457,6 +523,8 @@ const TableView = ({
   dir: SortDir;
   onSort: (key: string) => void;
   onOpen: (id: string) => void;
+  activeStep: string;
+  inProgressRowIds: Set<string>;
 }) => {
   const nameColumn = visibleColumns.find((column) => column.locked && (column.key === 'business_name' || column.key === 'name')) || null;
   const nameKey = nameColumn?.key || 'business_name';
@@ -497,13 +565,17 @@ const TableView = ({
       <tbody>
         {records.map((record) => (
           <tr key={rowId(record)} className={isDropped(record) ? 'is-disqualified' : ''} onClick={() => onOpen(rowId(record))}>
-            <td className="col-outcome"><OutcomeIcon record={record} /></td>
+            <td className="col-outcome">
+              {inProgressRowIds.has(rowId(record)) ? <span className="ao-spinner" aria-label="Processing" role="img" /> : <OutcomeIcon record={record} />}
+            </td>
             <td className="col-fit"><FitFrozenCell record={record} /></td>
             <td className="col-name">
               <span className="cell-name">{textValue(identityValue(record, ['business_name', 'name']))}</span>
             </td>
             {scrollColumns.map((column) => (
-              <td key={column.key}><ValueCell column={column} record={record} /></td>
+              <td key={column.key}>
+                {inProgressRowIds.has(rowId(record)) && column.step_id && column.step_id === activeStep ? <span className="ao-skeleton" aria-hidden="true" /> : <ValueCell column={column} record={record} />}
+              </td>
             ))}
           </tr>
         ))}
@@ -588,7 +660,7 @@ const metadataChips = (step: RecordDetailStep) => [
   step.cost?.occurred_at ? displayDate(step.cost.occurred_at) : '',
 ].filter((value) => value && value !== 'n/a');
 
-const StepCard = ({ step, isTerminal }: { step: RecordDetailStep; isTerminal: boolean }) => {
+const StepCard = ({ step, isTerminal, isInProgress }: { step: RecordDetailStep; isTerminal: boolean; isInProgress: boolean }) => {
   const notReached = humanStatus(step.status) === 'not reached';
   const chips = metadataChips(step);
   return (
@@ -600,7 +672,14 @@ const StepCard = ({ step, isTerminal }: { step: RecordDetailStep; isTerminal: bo
       </div>
       <div className="step-card__badges">
         <span className="chip">{labelFor(step.kind)}</span>
-        <StatusChip status={step.status} label={step.kind === 'source' && humanStatus(step.status) === 'done' ? 'Sourced' : undefined} />
+        {isInProgress ? (
+          <>
+            <span className="ao-spinner" aria-label="In progress" role="img" />
+            <small>In progress</small>
+          </>
+        ) : (
+          <StatusChip status={step.status} label={step.kind === 'source' && humanStatus(step.status) === 'done' ? 'Sourced' : undefined} />
+        )}
         {!notReached && stepTime(step) ? <span className="step-time">{displayDate(stepTime(step))}</span> : null}
       </div>
     </div>
@@ -610,8 +689,9 @@ const StepCard = ({ step, isTerminal }: { step: RecordDetailStep; isTerminal: bo
       {chips.map((chip) => <span key={chip}>{chip}</span>)}
     </div>
     ) : null}
-    {!notReached ? <p>{decisionText(step)}</p> : null}
-    {!notReached && Object.keys(step.outputs || {}).length > 0 ? (
+    {!notReached && isInProgress ? <span className="ao-skeleton" aria-hidden="true" /> : null}
+    {!notReached && !isInProgress ? <p>{decisionText(step)}</p> : null}
+    {!notReached && !isInProgress && Object.keys(step.outputs || {}).length > 0 ? (
       <div className="outputs">
         {Object.entries(step.outputs).map(([key, value]) => (
           <div key={key}>
@@ -629,9 +709,13 @@ const StepCard = ({ step, isTerminal }: { step: RecordDetailStep; isTerminal: bo
 const StepsTimeline = ({
   detail,
   statusFilter,
+  activeStep,
+  recordInProgress,
 }: {
   detail: RecordDetail;
   statusFilter: string;
+  activeStep: string;
+  recordInProgress: boolean;
 }) => {
   const terminalStepId = droppedAt(detail.record);
   const terminalIndex = detail.steps.findIndex((step) => step.id === terminalStepId || humanStatus(step.status) === 'failed' || humanStatus(step.status) === 'dropped');
@@ -644,10 +728,11 @@ const StepsTimeline = ({
         const originalIndex = detail.steps.findIndex((candidate) => candidate.id === step.id);
         const notReached = humanStatus(step.status) === 'not reached' || (terminalIndex >= 0 && originalIndex > terminalIndex);
         const status = notReached ? 'not reached' : step.status;
+        const isInProgress = recordInProgress && step.id === activeStep && activeStep !== '';
         return (
           <div className="timeline-node" key={step.id}>
             <span className={`timeline-dot ${STATUS_CLASS[humanStatus(status)] ?? 'is-ghost'}`} />
-            <StepCard step={notReached ? { ...step, status: 'not_reached' } : step} isTerminal={terminalIndex === originalIndex} />
+            <StepCard step={notReached ? { ...step, status: 'not_reached' } : step} isTerminal={terminalIndex === originalIndex} isInProgress={isInProgress} />
           </div>
         );
       })}
@@ -673,9 +758,13 @@ const StepsTimeline = ({
 const DetailPanel = ({
   rowIdValue,
   onClose,
+  activeStep,
+  recordInProgress,
 }: {
   rowIdValue: string | null;
   onClose: () => void;
+  activeStep: string;
+  recordInProgress: boolean;
 }) => {
   const [detail, setDetail] = useState<RecordDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -688,6 +777,17 @@ const DetailPanel = ({
     fetchRecordDetail(rowIdValue)
       .then(setDetail)
       .finally(() => setLoading(false));
+  }, [rowIdValue]);
+
+  useEffect(() => {
+    if (!rowIdValue) return undefined;
+    const refreshDetail = () => {
+      fetchRecordDetail(rowIdValue)
+        .then(setDetail)
+        .catch(() => undefined);
+    };
+    const intervalId = window.setInterval(refreshDetail, 1500);
+    return () => window.clearInterval(intervalId);
   }, [rowIdValue]);
 
   useEffect(() => {
@@ -704,7 +804,7 @@ const DetailPanel = ({
     <div className={`drawer-root ${rowIdValue ? 'is-open' : ''}`} aria-hidden={!rowIdValue}>
       <button className="scrim" type="button" aria-label="Close detail panel" onClick={onClose} />
       <aside className="detail-panel" aria-label="Record detail">
-        <button className="close-button" type="button" onClick={onClose}>Close</button>
+        <button className="close-button" type="button" onClick={onClose} aria-label="Close">×</button>
         {loading ? <div className="drawer-loading">Loading detail...</div> : null}
         {detail && record ? (
           <>
@@ -733,7 +833,7 @@ const DetailPanel = ({
                   </button>
                 ))}
               </div>
-              <StepsTimeline detail={detail} statusFilter={statusFilter} />
+              <StepsTimeline detail={detail} statusFilter={statusFilter} activeStep={activeStep} recordInProgress={recordInProgress} />
             </section>
           </>
         ) : null}
@@ -742,17 +842,35 @@ const DetailPanel = ({
   );
 };
 
+const PROGRESS_PHASE_LABELS: Record<string, string> = {
+  pipeline: 'Filtering',
+  scoring: 'Scoring',
+  sourcing: 'Sourcing',
+};
+
 export const App = () => {
   const [meta, setMeta] = useState<MetaResponse | null>(null);
   const [records, setRecords] = useState<RecordRow[]>([]);
   const [total, setTotal] = useState(0);
   const [filters, setFilters] = useState<ActiveFilter[]>([]);
   const [q, setQ] = useState('');
-  const [sort, setSort] = useState('priority_rank');
+  const [sort, setSort] = useState('state');
   const [dir, setDir] = useState<SortDir>('desc');
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [isDocumentHidden, setIsDocumentHidden] = useState(() => document.visibilityState === 'hidden');
+  const [progress, setProgress] = useState<ProgressRun | null>(null);
+  const [sseConnected, setSseConnected] = useState(false);
+  const [showInProgress, setShowInProgress] = useState(false);
+
+  const markUpdated = useCallback(() => {
+    const updatedAt = Date.now();
+    setLastUpdatedAt(updatedAt);
+    setNow(updatedAt);
+  }, []);
 
   useEffect(() => {
     fetchMeta()
@@ -768,9 +886,82 @@ export const App = () => {
       .then((response) => {
         setRecords(response.records);
         setTotal(response.total);
+        markUpdated();
       })
       .catch((nextError: Error) => setError(nextError.message));
-  }, [sort, dir, q, filters]);
+  }, [sort, dir, q, filters, markUpdated]);
+
+  const pollLiveData = useCallback(() => {
+    Promise.all([fetchRecords({ sort, dir, q, filters }), fetchMeta()])
+      .then(([response, nextMeta]) => {
+        setRecords(response.records);
+        setTotal(response.total);
+        setMeta(nextMeta);
+        markUpdated();
+      })
+      .catch(() => undefined);
+  }, [sort, dir, q, filters, markUpdated]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      const nextIsDocumentHidden = document.visibilityState === 'hidden';
+      setIsDocumentHidden(nextIsDocumentHidden);
+      if (!nextIsDocumentHidden) pollLiveData();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [pollLiveData]);
+
+  useEffect(() => {
+    if (isDocumentHidden) return undefined;
+    const intervalId = window.setInterval(pollLiveData, POLL_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [isDocumentHidden, pollLiveData]);
+
+  useEffect(() => {
+    const source = new EventSource('/api/stream');
+    source.addEventListener('open', () => setSseConnected(true));
+    source.addEventListener('tick', (event) => {
+      try {
+        const parsed = JSON.parse((event as MessageEvent).data) as {
+          progress: ProgressRun | null;
+          counts: MetaResponse['counts'] | null;
+        };
+        setProgress(parsed.progress ?? null);
+        const counts = parsed.counts;
+        if (counts) {
+          setMeta((current) => (current ? { ...current, counts } : current));
+        }
+      } catch {
+        return undefined;
+      }
+    });
+    source.addEventListener('error', () => setSseConnected(false));
+    return () => {
+      source.close();
+      setSseConnected(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isDocumentHidden) return undefined;
+    if (sseConnected) return undefined;
+    fetchProgress()
+      .then((response) => setProgress(response.run))
+      .catch(() => undefined);
+    const intervalId = window.setInterval(() => {
+      fetchProgress()
+        .then((response) => setProgress(response.run))
+        .catch(() => undefined);
+    }, PROGRESS_POLL_INTERVAL_MS);
+    return () => window.clearInterval(intervalId);
+  }, [isDocumentHidden, sseConnected]);
+
+  useEffect(() => {
+    if (isDocumentHidden) return undefined;
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isDocumentHidden]);
 
   const setFilter = useCallback((next: ActiveFilter | null) => {
     setFilters((current) => {
@@ -800,11 +991,45 @@ export const App = () => {
     [meta?.columns, visibleKeys],
   );
 
-  const activePreset = sort === '_created_at' && dir === 'desc' ? 'newest' : sort === 'priority_rank' && dir === 'desc' ? 'score' : '';
   const onHeaderSort = (key: string) => {
     setSort(key);
     setDir(sort === key && dir === 'desc' ? 'asc' : 'desc');
   };
+  const secondsSinceLastUpdate = lastUpdatedAt ? Math.max(0, Math.floor((now - lastUpdatedAt) / 1000)) : 0;
+  const runActive = Boolean(progress && progress.status === 'running' && (progress.age_ms === null || progress.age_ms < 8000));
+  const activeStep = runActive && progress && progress.phase === 'pipeline' ? progress.active_step : '';
+  const pipelineStepIds = useMemo(
+    () => (meta?.steps || []).filter((step) => step.kind === 'filter' || step.kind === 'enrich').map((step) => step.id),
+    [meta?.steps],
+  );
+  const activeIndex = activeStep ? pipelineStepIds.indexOf(activeStep) : -1;
+  const inProgressRowIds = useMemo(
+    () => new Set((activeIndex >= 0 ? records : []).filter((record) => !isDropped(record) && pipelineStepIds.indexOf(String(record.__furthest_step || '')) < activeIndex).map((record) => rowId(record))),
+    [records, activeIndex, pipelineStepIds],
+  );
+  const inProgressCount = inProgressRowIds.size;
+  const displayedRecords = useMemo(() => {
+    const base = showInProgress ? records.filter((record) => inProgressRowIds.has(rowId(record))) : records;
+    if (sort !== 'state') return base;
+    // Server can't order by lifecycle state, so sort it here. dir flips the order
+    // (default desc = kept first); ties break by fit_score, highest first.
+    const flip = dir === 'asc' ? -1 : 1;
+    return [...base].sort((a, b) => {
+      const rankDelta = stateRank(a, inProgressRowIds) - stateRank(b, inProgressRowIds);
+      if (rankDelta !== 0) return rankDelta * flip;
+      return numberValue(b.fit_score) - numberValue(a.fit_score);
+    });
+  }, [records, showInProgress, inProgressRowIds, sort, dir]);
+  const runPhaseLabel = progress ? (PROGRESS_PHASE_LABELS[progress.phase] ?? labelFor(progress.phase)) : '';
+  const liveStatusLabel = isDocumentHidden ? 'Paused' : runActive ? `${runPhaseLabel} running` : `Idle · updated ${secondsSinceLastUpdate}s ago`;
+  const runDetailText = !progress ? 'No active run'
+    : progress.phase === 'pipeline' && progress.step_total > 0
+      ? `Step ${progress.step_index + 1}/${progress.step_total}: ${labelFor(progress.active_step)} · ${progress.done_count}/${progress.target_count} records`
+    : progress.phase === 'sourcing' && progress.step_total > 0
+      ? `Tile ${progress.step_index}/${progress.step_total} · ${progress.done_count} found`
+    : progress.status === 'running'
+      ? (progress.message || 'Working…')
+    : 'No active run';
 
   if (!meta) {
     return <main className="app-shell"><div className="loading">{error || 'Loading outbound records...'}</div></main>;
@@ -821,38 +1046,40 @@ export const App = () => {
           <span>Total <strong>{meta.counts.total}</strong></span>
           <span>Scored <strong>{meta.counts.qualified}</strong></span>
           <span>Dropped <strong>{meta.counts.disqualified}</strong></span>
+          <span className="live-pill" tabIndex={0}>
+            <span className={`live-dot ${runActive ? 'is-active' : ''}`} aria-hidden="true" />
+            {liveStatusLabel}
+            <span className="live-pill__card" role="status">
+              <strong>{runActive ? `${runPhaseLabel} running` : (progress && progress.status === 'done' ? `${runPhaseLabel} complete` : 'Idle')}</strong>
+              <span>{runDetailText}</span>
+            </span>
+          </span>
         </div>
       </header>
       <section className="toolbar">
         <div className="preset-row">
-          <button className={activePreset === 'score' ? 'is-active' : ''} type="button" onClick={() => { setSort('priority_rank'); setDir('desc'); }}>
-            Highest score
-          </button>
-          <button className={activePreset === 'newest' ? 'is-active' : ''} type="button" onClick={() => { setSort('_created_at'); setDir('desc'); }}>
-            Newest
-          </button>
-          <button className={showingDropped ? 'is-active' : ''} type="button" onClick={toggleDropped}>
-            {showingDropped ? 'Dropped shown' : 'Dropped hidden'}
-          </button>
           <label className="search-box">
             <span>Search</span>
             <input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Name, address, website" />
           </label>
-          <FilterBuilder meta={meta} filters={filters} onApply={setFilter} />
-          <SortControl meta={meta} sort={sort} dir={dir} onSort={setSort} onDir={setDir} />
-          <ColumnPicker
-            meta={meta}
-            visible={visibleKeys}
-            onToggle={(key) => setVisibleKeys((current) => {
-              const next = new Set(current);
-              if (next.has(key)) {
-                next.delete(key);
+          <span className="match-count">{showInProgress ? `${inProgressCount} in progress` : `${total} matching`}</span>
+          <div className="toolbar-actions">
+            <FilterBuilder meta={meta} filters={filters} showingDropped={showingDropped} showInProgress={showInProgress} inProgressCount={inProgressCount} onApply={setFilter} onToggleDropped={toggleDropped} onToggleInProgress={() => setShowInProgress((value) => !value)} />
+            <SortControl meta={meta} sort={sort} dir={dir} onSort={setSort} onDir={setDir} />
+            <ColumnPicker
+              meta={meta}
+              visible={visibleKeys}
+              onToggle={(key) => setVisibleKeys((current) => {
+                const next = new Set(current);
+                if (next.has(key)) {
+                  next.delete(key);
+                  return next;
+                }
+                next.add(key);
                 return next;
-              }
-              next.add(key);
-              return next;
-            })}
-          />
+              })}
+            />
+          </div>
         </div>
         <div className="chips-row">
           {filters.map((filter) => (
@@ -861,12 +1088,11 @@ export const App = () => {
             </button>
           ))}
           {filters.length > 0 ? <button className="text-button" type="button" onClick={clearFilters}>Clear all</button> : null}
-          <span>{total} matching</span>
         </div>
       </section>
       {error ? <div className="error-banner">{error}</div> : null}
-      <TableView meta={meta} records={records} visibleColumns={visibleColumns} sort={sort} dir={dir} onSort={onHeaderSort} onOpen={setSelectedRowId} />
-      <DetailPanel rowIdValue={selectedRowId} onClose={() => setSelectedRowId(null)} />
+      <TableView meta={meta} records={displayedRecords} visibleColumns={visibleColumns} sort={sort} dir={dir} onSort={onHeaderSort} onOpen={setSelectedRowId} activeStep={activeStep} inProgressRowIds={inProgressRowIds} />
+      <DetailPanel rowIdValue={selectedRowId} onClose={() => setSelectedRowId(null)} activeStep={activeStep} recordInProgress={selectedRowId ? inProgressRowIds.has(selectedRowId) : false} />
     </main>
   );
 };

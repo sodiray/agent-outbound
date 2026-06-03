@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { ensureRecordColumns, inPlayWhere, insertScoreEvent, openListDb, upsertRecord } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
 import { emitActivity } from '../runtime/activity.js';
+import { beginRun, tickProgress, endRun } from '../runtime/progress.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
@@ -369,6 +370,7 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
         where: whereSql,
       };
     }
+    const runId = beginRun(db, { phase: 'scoring', target: records.length, message: `Scoring ${records.length} records` });
     await mapWithConcurrency<any, void>(records as any[], async (record) => {
       const recordId = getRecordRowId(record);
       try {
@@ -500,6 +502,7 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
         }
         summary.scored += 1;
         emitActivity({ event: 'row_complete', phase: 'scoring', row: record.business_name || recordId });
+        tickProgress(db, runId, { done: summary.scored + summary.skipped_unchanged + summary.failed, message: `Scored ${record.business_name || recordId}` });
       } catch (error) {
         if (isBudgetExceededError(error)) throw error;
         summary.failed += 1;
@@ -509,6 +512,7 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
     }, 3);
 
     emitActivity({ event: 'phase_complete', phase: 'scoring', processed: summary.scored, skipped: summary.skipped_unchanged, failed: summary.failed });
+    endRun(db, runId, { status: 'done', message: `Scored ${summary.scored} records` });
     return summary;
   } finally {
     db.close();

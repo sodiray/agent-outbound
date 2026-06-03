@@ -305,9 +305,26 @@ const formatConditionValue = (value: any) => {
   if (value === undefined || value === null || value === '') return '';
   return String(value);
 };
+const OPERATOR_PHRASES: Record<string, string> = {
+  gte: '≥',
+  lte: '≤',
+  gt: '>',
+  lt: '<',
+  eq: 'is',
+  neq: 'is not',
+  in: 'is one of',
+  not_in: 'is not one of',
+  contains: 'contains',
+  matches: 'matches',
+  not_matches: 'must not match',
+  is_empty: 'is empty',
+  is_not_empty: 'is present',
+};
 const summarizeFieldCheckCondition = (condition: any) => {
-  const field = String(condition?.field || '').trim();
-  const operator = String(condition?.operator || '').trim().replaceAll('_', ' ');
+  const field = labelFor(String(condition?.field || '').trim());
+  const rawOp = String(condition?.operator || '').trim();
+  const operator = OPERATOR_PHRASES[rawOp] || rawOp.replaceAll('_', ' ');
+  if (rawOp === 'is_empty' || rawOp === 'is_not_empty') return `${field} ${operator}`.trim();
   const value = formatConditionValue(condition?.value);
   return [field, operator, value].filter(Boolean).join(' ');
 };
@@ -530,7 +547,27 @@ export const queryRecords = (listDir: string, params: any = {}) => {
           ...Object.fromEntries(criteria.trigger.map((id) => [criterionKey(id), triggerVerdicts.get(id) || ''])),
         };
       });
-    return { total, records };
+    const pipelineStepIds = (Array.isArray(config?.pipeline) ? config.pipeline : []).map((step: any) => String(step?.id || '')).filter(Boolean);
+    const stepOrder = new Map(pipelineStepIds.map((id, i) => [id, i]));
+    const rowIds = records.map((record: any) => String(record._row_id)).filter(Boolean);
+    const events = tableExists(db, 'pipeline_events') && rowIds.length > 0
+      ? normalizedRows(db.prepare(`SELECT record_id, step_id FROM pipeline_events WHERE record_id IN (${rowIds.map(() => '?').join(',')})`).all(...rowIds))
+      : [];
+    const furthestState = events.reduce((state: any, ev: any) => {
+      const rid = String(ev.record_id || '');
+      const sid = String(ev.step_id || '');
+      const rank = stepOrder.has(sid) ? (stepOrder.get(sid) as number) : -1;
+      if (rank < 0) return state;
+      if (!state.furthestRank.has(rid) || rank > (state.furthestRank.get(rid) as number)) {
+        state.furthestRank.set(rid, rank);
+        state.furthestByRow.set(rid, sid);
+      }
+      return state;
+    }, { furthestByRow: new Map<string, string>(), furthestRank: new Map<string, number>() });
+    return {
+      total,
+      records: records.map((record: any) => ({ ...record, __furthest_step: furthestState.furthestByRow.get(String(record._row_id)) || '' })),
+    };
   } finally {
     db.close();
   }
@@ -657,6 +694,48 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
       })),
     ].filter(Boolean).sort((a: any, b: any) => String(a.at || '').localeCompare(String(b.at || '')));
     return { record, steps, score, timeline };
+  } finally {
+    db.close();
+  }
+};
+
+export const getProgress = (listDir: string) => {
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    if (!tableExists(db, 'run_state')) return { run: null };
+    const row: any = db.prepare('SELECT * FROM run_state ORDER BY updated_at DESC LIMIT 1').get();
+    if (!row) return { run: null };
+    const updatedAtMs = Date.parse(String(row.updated_at || ''));
+    return {
+      run: {
+        run_id: String(row.run_id || ''),
+        phase: String(row.phase || ''),
+        active_step: String(row.active_step || ''),
+        message: String(row.message || ''),
+        target_count: Number(row.target_count || 0),
+        done_count: Number(row.done_count || 0),
+        step_index: Number(row.step_index || 0),
+        step_total: Number(row.step_total || 0),
+        status: String(row.status || ''),
+        error: String(row.error || ''),
+        started_at: String(row.started_at || ''),
+        updated_at: String(row.updated_at || ''),
+        age_ms: Number.isFinite(updatedAtMs) ? Math.max(0, Date.now() - updatedAtMs) : null,
+      },
+    };
+  } finally {
+    db.close();
+  }
+};
+
+export const getCounts = (listDir: string) => {
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    const total = Number(db.prepare('SELECT COUNT(*) AS count FROM records').get()?.count || 0);
+    const qualified = hasTableColumn(db, 'records', 'disqualified_at')
+      ? Number(db.prepare("SELECT COUNT(*) AS count FROM records WHERE COALESCE(disqualified_at, '') = ''").get()?.count || 0)
+      : total;
+    return { total, qualified, disqualified: total - qualified };
   } finally {
     db.close();
   }

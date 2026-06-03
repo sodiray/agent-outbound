@@ -3,6 +3,7 @@
   --ink: #e8ebf2;
   --muted: #8b93a7;
   --yellow: #f5d547;
+  --amber: #f5a524;
   --green: #3ecf6f;
   --red: rgba(255, 102, 102, 0.9);
   --surface: rgba(8, 10, 16, 0.72);
@@ -164,7 +165,7 @@ h2 {
 .chips-row {
   display: flex;
   flex-wrap: wrap;
-  align-items: end;
+  align-items: center;
   gap: 0.75rem;
 }
 
@@ -176,7 +177,8 @@ h2 {
 
 .preset-row button.is-active,
 .status-filters button.is-active,
-.filter-group button.is-active {
+.filter-group button.is-active,
+.sort-presets button.is-active {
   border-color: rgba(245, 213, 71, 0.55);
   background: rgba(245, 213, 71, 0.12);
   color: var(--yellow);
@@ -195,7 +197,13 @@ h2 {
 
 .search-box {
   min-width: min(24rem, 100%);
+  max-width: 24rem;
   flex: 1;
+}
+
+.search-box input {
+  width: 100%;
+  max-width: 22rem;
 }
 
 input,
@@ -268,7 +276,8 @@ select:focus {
 .filter-builder__fields,
 .filter-builder__control,
 .sort-control__menu,
-.filter-group {
+.filter-group,
+.sort-presets {
   display: grid;
   gap: 0.55rem;
 }
@@ -291,6 +300,7 @@ select:focus {
 }
 
 .filter-group > span,
+.sort-presets > span,
 .sort-control__menu label > span {
   color: var(--muted);
   font-size: 0.68rem;
@@ -298,7 +308,8 @@ select:focus {
   text-transform: uppercase;
 }
 
-.filter-group button {
+.filter-group button,
+.sort-presets button {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -308,7 +319,8 @@ select:focus {
   transition: border-color 0.45s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.45s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.filter-group button:hover {
+.filter-group button:hover,
+.sort-presets button:hover {
   border-color: rgba(185, 193, 201, 0.18);
   background: rgba(232, 235, 242, 0.045);
 }
@@ -540,6 +552,13 @@ tbody tr.is-disqualified .score-bar span {
   background: linear-gradient(90deg, var(--green), var(--yellow));
 }
 
+/* Unscored: scoring never ran — show amber dashes, not a misleading 0. */
+.score-cell.is-unscored .score-cell__value {
+  color: var(--amber);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
 /* Frozen leading columns: outcome icon + business name. The rest scroll. */
 .col-outcome {
   position: sticky;
@@ -600,6 +619,11 @@ tbody tr:hover td.col-name {
   color: var(--muted);
   font-weight: 400;
   opacity: 0.5;
+}
+
+.fit-frozen.is-unscored {
+  color: var(--amber);
+  letter-spacing: 0.05em;
 }
 
 .col-outcome__dot {
@@ -683,7 +707,7 @@ tbody tr:hover td.col-name {
 .drawer-root {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: 1100;
   pointer-events: none;
 }
 
@@ -711,7 +735,7 @@ tbody tr:hover td.col-name {
   width: min(40rem, 100vw);
   height: 100%;
   overflow-y: auto;
-  padding: 1.25rem;
+  padding: 0.6rem 1.25rem 1.25rem;
   border-radius: 0;
   background: rgba(8, 10, 16, 0.98);
   transform: translateX(102%);
@@ -723,22 +747,27 @@ tbody tr:hover td.col-name {
 }
 
 .close-button {
-  position: sticky;
-  top: 0;
-  z-index: 4;
+  position: static;
   float: right;
-  border: 1px solid var(--border);
-  border-radius: 9999px;
-  background: rgba(232, 235, 242, 0.04);
+  border: none;
+  background: transparent;
   color: var(--muted);
-  padding: 0.45rem 0.75rem;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0.15rem 0.25rem;
+  margin: 0;
+  cursor: pointer;
+}
+
+.close-button:hover {
+  color: var(--text, #e8ebf2);
 }
 
 .detail-header {
   clear: both;
   justify-content: space-between;
   gap: 1rem;
-  padding: 2rem 0 1.25rem;
+  padding: 0.5rem 0 1rem;
   border-bottom: 1px solid rgba(185, 193, 201, 0.12);
 }
 
@@ -970,6 +999,7 @@ tbody tr:hover td.col-name {
   .sort-control,
   .column-picker {
     min-width: 100%;
+    max-width: 100%;
   }
 
   .criterion,
@@ -984,4 +1014,80 @@ tbody tr:hover td.col-name {
     right: auto;
     width: min(100%, 90vw);
   }
+
+  .toolbar-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+}
+
+@keyframes ao-spin { to { transform: rotate(360deg); } }
+.ao-spinner {
+  display: inline-block; width: 13px; height: 13px;
+  border: 2px solid rgba(120,120,120,0.25); border-top-color: #22c55e;
+  border-radius: 50%; animation: ao-spin 0.7s linear infinite;
+  vertical-align: middle;
+}
+@keyframes ao-shimmer { 0% { background-position: -180px 0; } 100% { background-position: 180px 0; } }
+.ao-skeleton {
+  display: inline-block; width: 100%; min-width: 48px; height: 12px; border-radius: 4px;
+  background: linear-gradient(90deg, rgba(148,163,184,0.12) 25%, rgba(148,163,184,0.30) 37%, rgba(148,163,184,0.12) 63%);
+  background-size: 360px 100%; animation: ao-shimmer 1.2s ease-in-out infinite;
+}
+
+.live-pill { position: relative; display: inline-flex; align-items: center; gap: 0.4rem; cursor: default; }
+.live-dot { width: 0.5rem; height: 0.5rem; border-radius: 9999px; background: #94a3b8; display: inline-block; }
+.live-dot.is-active { background: #22c55e; animation: ao-pulse 1.4s ease-out infinite; }
+@keyframes ao-pulse { 0% { box-shadow: 0 0 0 0 rgba(34,197,94,0.55);} 70% { box-shadow: 0 0 0 6px rgba(34,197,94,0);} 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0);} }
+.live-pill__card { position: absolute; top: calc(100% + 8px); right: 0; min-width: 16rem; padding: 0.6rem 0.75rem; border-radius: 0.5rem; background: rgba(15,18,26,0.98); border: 1px solid var(--border); box-shadow: 0 12px 30px rgba(0,0,0,0.45); display: none; flex-direction: column; gap: 0.25rem; z-index: 1200; font-weight: 400; }
+.live-pill__card strong { font-size: 0.85rem; }
+.live-pill__card span { color: var(--muted); font-size: 0.8rem; }
+.live-pill:hover .live-pill__card, .live-pill:focus-within .live-pill__card { display: flex; }
+.match-count { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
+.toolbar-actions { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+
+.stats .live-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  min-height: 0;
+  border: 0;
+  border-radius: 9999px;
+  background: #94a3b8;
+  padding: 0;
+}
+
+.stats .live-dot.is-active {
+  background: #22c55e;
+}
+
+.stats .live-pill__card {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 16rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(15,18,26,0.98);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.45);
+  display: none;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 0.25rem;
+  z-index: 1200;
+  font-weight: 400;
+}
+
+.stats .live-pill__card span {
+  display: block;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.stats .live-pill:hover .live-pill__card,
+.stats .live-pill:focus-within .live-pill__card {
+  display: flex;
 }
