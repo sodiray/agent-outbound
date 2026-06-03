@@ -175,13 +175,17 @@ const PipelineFilterStepSchema = z.object({
   on_fail: z.enum(['drop', 'flag']).default('drop'),
   model: ProviderModelSchema.optional(),
   condition: z.string().default(''),
-}).partial({ description: true, match: true, conditions: true, on_fail: true, model: true, condition: true });
+  // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
+  reasoning: z.boolean().optional(),
+}).partial({ description: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
 
 const PipelineEnrichmentStepSchema = z.object({
   kind: z.literal('enrich'),
   id: z.string().default(''),
   description: z.string().default(''),
   model: ProviderModelSchema.optional(),
+  // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
+  reasoning: z.boolean().optional(),
   step_budget: z.coerce.number().int().min(1).max(40).default(8),
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
   cache: z.string().default(''),

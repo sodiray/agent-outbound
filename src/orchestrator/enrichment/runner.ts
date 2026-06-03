@@ -86,7 +86,7 @@ const ttlToSeconds = (ttl) => {
 // columns, when, cache TTL) must NOT invalidate already-computed enrichment. An
 // explicit `cache_key` overrides everything, giving authors deterministic control
 // over when a step is forced to recompute.
-const MATERIAL_ENRICH_FIELDS = ['tool', 'args', 'outputs', 'model', 'prompt_file', 'prompt_args', 'depends_on'] as const;
+const MATERIAL_ENRICH_FIELDS = ['tool', 'args', 'outputs', 'model', 'reasoning', 'prompt_file', 'prompt_args', 'depends_on'] as const;
 
 export const materialEnrichConfig = (stepConfig: any): Record<string, any> => {
   const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};

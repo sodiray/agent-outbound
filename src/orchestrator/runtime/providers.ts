@@ -15,7 +15,7 @@ export type RuntimeProvider = {
   supportsCacheControl: boolean;
   validateKey: (apiKey: string) => Promise<ProviderValidateResult>;
   buildModel: (modelId: string, apiKey: string) => Promise<any>;
-  getProviderOptions?: (modelId: string) => Record<string, any>;
+  getProviderOptions?: (modelId: string, opts?: { reasoning?: boolean }) => Record<string, any>;
   extractUsdCost: (result: any) => number | null;
 };
 
@@ -74,13 +74,17 @@ const buildDeepInfraModel = async (modelId: string, apiKey: string) => {
   throw new Error('Missing DeepInfra AI SDK provider. Install @ai-sdk/deepinfra.');
 };
 
-const getDeepInfraProviderOptions = (modelId: string) => {
+const getDeepInfraProviderOptions = (modelId: string, opts?: { reasoning?: boolean }) => {
   const normalized = String(modelId || '').trim().toLowerCase();
+  // Kimi K2.6 is a reasoning model: thinking is opt-in per step. When reasoning is
+  // off (the default), disable chain-of-thought so simple gates/enrichments stay
+  // fast and cheap; turn it on only for steps that genuinely need deliberation
+  // (e.g. drafting outreach copy).
   if (normalized === 'moonshotai/kimi-k2.6') {
     return {
-      deepinfra: {
-        thinking: { type: 'enabled' },
-      },
+      deepinfra: opts?.reasoning
+        ? { thinking: { type: 'enabled' } }
+        : { reasoning_effort: 'none' },
     };
   }
   return {};

@@ -273,6 +273,7 @@ export const executeStepAction = async ({
       model: stepConfig?.model,
       role,
       aiConfig,
+      reasoning: stepConfig?.reasoning === true,
       schema: buildExecuteStepResultSchema(outputSchema),
       prompt: userPrompt,
       systemPrompt,

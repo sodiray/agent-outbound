@@ -102,11 +102,13 @@ export const resolveRuntimeModel = async ({
   role = 'research',
   aiConfig = {},
   enforceSupported = true,
+  reasoning = false,
 }: {
   model?: string;
   role?: ActionRole;
   aiConfig?: any;
   enforceSupported?: boolean;
+  reasoning?: boolean;
 }) => {
   const resolved = resolveConfiguredModelRef({ model, role, aiConfig });
   const parsed = parseProviderModel(resolved.modelRef);
@@ -142,7 +144,7 @@ export const resolveRuntimeModel = async ({
     modelRef: parsed.modelRef,
     resolvedFrom: resolved.source,
     built,
-    providerOptions: provider.getProviderOptions ? provider.getProviderOptions(parsed.modelId) : {},
+    providerOptions: provider.getProviderOptions ? provider.getProviderOptions(parsed.modelId, { reasoning }) : {},
   };
 };
 
