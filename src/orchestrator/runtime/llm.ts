@@ -9,6 +9,55 @@ let aiSdk: any = null;
 
 const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
 
+// A single provider call must never hang the pipeline. Abort after a bound so the
+// call can be retried on a fresh connection (a stalled socket is the usual cause),
+// and so the caller's catch path (e.g. per-record fallback) can take over.
+const llmTimeoutMs = () => {
+  const raw = Number(process.env.AO_LLM_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 120_000;
+};
+// How many times to retry a call that *hangs* (times out). Non-timeout errors are
+// not retried here — they propagate to the caller's own fallback.
+const timeoutRetries = () => {
+  const raw = Number(process.env.AO_LLM_TIMEOUT_RETRIES);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 2;
+};
+// Bound provider-internal (HTTP-level) retries so a flaky call can't silently multiply latency.
+const MAX_RETRIES = 1;
+
+const isTimeoutError = (error: any): boolean => {
+  const name = String(error?.name || '');
+  const message = String(error?.message || error || '').toLowerCase();
+  return name === 'TimeoutError'
+    || name === 'AbortError'
+    || message.includes('timeout')
+    || message.includes('aborted');
+};
+
+// Run a provider call with a fresh per-attempt timeout, retrying only on hangs.
+// Each attempt gets its own AbortSignal so a retry opens a clean connection.
+const callWithTimeoutRetry = async (
+  task: string,
+  makeCall: (signal: AbortSignal) => Promise<any>,
+): Promise<any> => {
+  const attempt = async (remaining: number): Promise<any> => {
+    try {
+      return await makeCall(AbortSignal.timeout(llmTimeoutMs()));
+    } catch (error) {
+      if (remaining > 0 && isTimeoutError(error)) {
+        if (process.env.AO_DEBUG_LLM) {
+          console.error('[AO_DEBUG_LLM] llm call timed out; retrying', JSON.stringify({
+            task, remaining, timeoutMs: llmTimeoutMs(),
+          }));
+        }
+        return attempt(remaining - 1);
+      }
+      throw error;
+    }
+  };
+  return attempt(timeoutRetries());
+};
+
 const ensureAiDeps = async () => {
   if (aiSdk) return;
   try {
@@ -79,6 +128,7 @@ export type GenerateObjectWithToolsInput = {
   toolCatalog?: ToolCatalog;
   listDir?: string;
   maxSteps?: number;
+  reasoning?: boolean;
 };
 
 const tryParseJsonSlice = (text: string): unknown => {
@@ -222,6 +272,15 @@ const describeZodType = (schema: any): string => {
   if (typeName === 'ZodObject') return describeSchema(schema);
   if (typeName === 'ZodOptional') return `${describeZodType(schema?._def?.innerType)} (optional)`;
   if (typeName === 'ZodNullable') return `${describeZodType(schema?._def?.innerType)} or null`;
+  // ZodDefault / ZodCatch / ZodEffects wrap an inner type; describe what's inside,
+  // otherwise the schema instruction leaks meaningless words like "default" to the model.
+  if (typeName === 'ZodDefault' || typeName === 'ZodCatch') return describeZodType(schema?._def?.innerType);
+  if (typeName === 'ZodEffects') return describeZodType(schema?._def?.schema);
+  if (typeName === 'ZodEnum') {
+    const values = Array.isArray(schema?._def?.values) ? schema._def.values : [];
+    return values.length ? `one of ${values.map((v: any) => JSON.stringify(v)).join(' | ')}` : 'string';
+  }
+  if (typeName === 'ZodLiteral') return JSON.stringify(schema?._def?.value);
   return typeName ? typeName.replace(/^Zod/, '').toLowerCase() : 'value';
 };
 
@@ -268,6 +327,7 @@ export const generateObjectWithTools = async ({
   toolCatalog,
   listDir = '',
   maxSteps = 8,
+  reasoning = false,
 }: GenerateObjectWithToolsInput) => {
   await ensureAiDeps();
   const resolved = await resolveRuntimeModel({
@@ -275,6 +335,7 @@ export const generateObjectWithTools = async ({
     role,
     aiConfig,
     enforceSupported: true,
+    reasoning,
   });
   const selectedModel = resolved.built;
 
@@ -299,7 +360,7 @@ export const generateObjectWithTools = async ({
   let result: any;
   try {
     if (hasTools) {
-      result = await aiSdk.generateText({
+      result = await callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
         model: selectedModel,
         ...(toolSystem ? { system: toolSystem } : {}),
         prompt: basePrompt,
@@ -307,19 +368,23 @@ export const generateObjectWithTools = async ({
         tools,
         ...(stopWhen ? { stopWhen } : {}),
         onStepFinish,
+        abortSignal: signal,
+        maxRetries: MAX_RETRIES,
         ...withProviderOptions,
-      });
+      }));
     } else {
       if (!preferPlainTextObject && resolved.providerId === 'deepinfra' && typeof aiSdk.generateObject === 'function') {
         try {
-          const generated = await aiSdk.generateObject({
+          const generated = await callWithTimeoutRetry(task, (signal) => aiSdk.generateObject({
             model: selectedModel,
             ...(system ? { system } : {}),
             prompt: basePrompt,
             schema,
             maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            abortSignal: signal,
+            maxRetries: MAX_RETRIES,
             ...withProviderOptions,
-          });
+          }));
           const object = extractValidatedObject(schema, generated);
           if (object) {
             generated._validatedObject = object;
@@ -330,15 +395,17 @@ export const generateObjectWithTools = async ({
 
       try {
         if (!result && !preferPlainTextObject) {
-          const structured = await aiSdk.generateText({
+          const structured = await callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
             model: selectedModel,
             ...(system ? { system } : {}),
             prompt: basePrompt,
             maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
             output: aiSdk.Output.object({ schema }),
             onStepFinish,
+            abortSignal: signal,
+            maxRetries: MAX_RETRIES,
             ...withProviderOptions,
-          });
+          }));
           const object = extractValidatedObject(schema, structured);
           if (!object) {
             throw new Error('Structured output did not match schema.');
@@ -351,14 +418,16 @@ export const generateObjectWithTools = async ({
         // Fall back to free-form text generation with manual JSON parsing.
       }
       if (!result) {
-        result = await aiSdk.generateText({
+        result = await callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
           model: selectedModel,
           ...(toolSystem ? { system: toolSystem } : {}),
           prompt: basePrompt,
           maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
           onStepFinish,
+          abortSignal: signal,
+          maxRetries: MAX_RETRIES,
           ...withProviderOptions,
-        });
+        }));
         result._fallbackTextMode = true;
       }
     }
@@ -392,14 +461,16 @@ export const generateObjectWithTools = async ({
       if (toolResults.length > 0) {
         const resultsJson = JSON.stringify(toolResults.map(r => ({ tool: r.tool, data: r.data })), null, 2).slice(0, 30000);
         const extractionPrompt = `You previously called tools and received these results:\n\n${resultsJson}\n\nOriginal task: ${basePrompt.slice(0, 2000)}\n\nNow respond with a JSON object matching this schema:\n${schemaDescription}\n\nReturn ONLY the JSON object, no other text.`;
-        const extraction = await aiSdk.generateText({
+        const extraction = await callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
           model: selectedModel,
           ...(system ? { system } : {}),
           prompt: extractionPrompt,
           maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
           output: aiSdk.Output.object({ schema }),
+          abortSignal: signal,
+          maxRetries: MAX_RETRIES,
           ...withProviderOptions,
-        });
+        }));
         object = extractValidatedObject(schema, extraction);
       }
     }
@@ -411,6 +482,20 @@ export const generateObjectWithTools = async ({
   }
 
   if (!object) {
+    if (process.env.AO_DEBUG_LLM) {
+      const rawText = extractAssistantText(result);
+      console.error('[AO_DEBUG_LLM] parse failure', JSON.stringify({
+        task,
+        model: resolved.modelRef,
+        provider: resolved.providerId,
+        hasTools,
+        preferPlainTextObject,
+        fallbackTextMode: Boolean(result?._fallbackTextMode),
+        schema: schemaDescription,
+        rawTextLength: rawText.length,
+        rawText: rawText.slice(0, 4000),
+      }, null, 2));
+    }
     throw new Error('No object generated: response did not match schema.');
   }
 
