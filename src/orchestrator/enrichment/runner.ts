@@ -81,13 +81,49 @@ const ttlToSeconds = (ttl) => {
   return amount * 86400;
 };
 
-const isStale = ({ cached, depHash }) => {
-  if (!cached) return true;
-  if (String(cached.dep_hash || '') !== String(depHash || '')) return true;
+// Only fields that materially affect the enrichment OUTPUT participate in the
+// staleness hash. Cosmetic edits (description, concurrency, step_budget, id,
+// columns, when, cache TTL) must NOT invalidate already-computed enrichment. An
+// explicit `cache_key` overrides everything, giving authors deterministic control
+// over when a step is forced to recompute.
+const MATERIAL_ENRICH_FIELDS = ['tool', 'args', 'outputs', 'model', 'prompt_file', 'prompt_args', 'depends_on'] as const;
+
+export const materialEnrichConfig = (stepConfig: any): Record<string, any> => {
+  const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};
+  const cacheKey = String(cfg.cache_key || '').trim();
+  if (cacheKey) return { cache_key: cacheKey };
+  // Build deterministically (sorted keys) so serialization order can't shift the hash.
+  const material: Record<string, any> = {};
+  for (const field of [...MATERIAL_ENRICH_FIELDS].sort()) {
+    if (Object.prototype.hasOwnProperty.call(cfg, field) && cfg[field] !== undefined) {
+      material[field] = cfg[field];
+    }
+  }
+  return material;
+};
+
+// The material staleness hash actually written/compared, plus the legacy
+// whole-config hash so caches written before material-hashing remain valid
+// (no one-time re-enrichment storm on upgrade).
+export const enrichDepHash = (stepConfig: any, depValues: Record<string, any> = {}) =>
+  stableHash({ depValues, config: materialEnrichConfig(stepConfig) });
+const legacyEnrichDepHash = (stepConfig: any, depValues: Record<string, any> = {}) =>
+  stableHash({ depValues, config: stepConfig || {} });
+
+// A record is FRESH for an enrich step when: not forced, a staleness row exists,
+// its hash matches the material (or legacy) hash, AND it is within TTL. A step
+// with NO configured TTL (cache_ttl_seconds <= 0) caches FOREVER — so an
+// unchanged step is never redundantly re-run. TTL is opt-in periodic refresh.
+const isEnrichFresh = ({ cached, stepConfig, depValues = {}, force = false }: { cached: any; stepConfig: any; depValues?: Record<string, any>; force?: boolean }): boolean => {
+  if (force || !cached) return false;
+  const material = enrichDepHash(stepConfig, depValues);
+  const legacy = legacyEnrichDepHash(stepConfig, depValues);
+  const matched = String(cached.dep_hash || '') === material || String(cached.dep_hash || '') === legacy;
+  if (!matched) return false;
   const ttl = Number(cached.cache_ttl_seconds || 0);
-  if (ttl <= 0) return true;
+  if (ttl <= 0) return true; // no TTL configured = cache forever
   const updatedAt = new Date(String(cached.updated_at || 0)).getTime();
-  return (Date.now() - updatedAt) / 1000 > ttl;
+  return (Date.now() - updatedAt) / 1000 <= ttl;
 };
 
 const normalizeOutputType = (raw: any): 'string' | 'number' | 'integer' | 'boolean' => {
@@ -268,6 +304,25 @@ const resolveStepId = (step: any, index: number) => {
   return `enrich_step_${index + 1}`;
 };
 
+// Non-writing count of what a pipeline enrich step WOULD do on the given rows:
+// how many would actually re-run vs be skipped (fresh cache or `when` mismatch).
+// Mirrors the per-record staleness logic in executeEnrichmentStepOnRecords so the
+// dry-run impact preview is accurate. (Pipeline enrich uses empty depValues.)
+export const countEnrichWorkForStep = ({ db, step, stepId = '', rows = [], force = false }: { db: any; step: any; stepId?: string; rows?: any[]; force?: boolean }) => {
+  const id = String(stepId || step?.id || '').trim() || 'enrich';
+  const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+  const whenPredicate = whenPredicateForStep({ step, stepConfig });
+  const result = { would_enrich: 0, skip_fresh: 0, skip_when: 0 };
+  for (const record of rows || []) {
+    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate });
+    if (!whenOutcome.passed) { result.skip_when += 1; continue; }
+    const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
+    if (isEnrichFresh({ cached, stepConfig, depValues: {}, force })) { result.skip_fresh += 1; continue; }
+    result.would_enrich += 1;
+  }
+  return result;
+};
+
 export const executeEnrichmentStepOnRecords = async ({
   db,
   listDir,
@@ -277,6 +332,7 @@ export const executeEnrichmentStepOnRecords = async ({
   step,
   rows,
   stepId = '',
+  force = false,
 }: {
   db: any;
   listDir: string;
@@ -286,6 +342,7 @@ export const executeEnrichmentStepOnRecords = async ({
   step: any;
   rows: any[];
   stepId?: string;
+  force?: boolean;
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
@@ -333,10 +390,10 @@ export const executeEnrichmentStepOnRecords = async ({
       return;
     }
 
-    const depHash = stableHash({ depValues: {}, config: stepConfig || {} });
+    const depHash = enrichDepHash(stepConfig, {});
     const cached = readStaleness({ db, recordId, stepId: id });
 
-    if (!isStale({ cached, depHash })) {
+    if (isEnrichFresh({ cached, stepConfig, depValues: {}, force })) {
       summary.skipped_fresh += 1;
       return;
     }
@@ -527,7 +584,7 @@ const buildEnrichmentDag = (steps: any[]): {
   return { levels, ancestors };
 };
 
-export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 0 }) => {
+export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 0, force = false }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) {
     throw new Error(`Invalid config: ${errors.join('; ')}`);
@@ -668,10 +725,10 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           for (const dep of dependsOn) {
             depValues[dep] = dependencyValueForRecord({ dep, record, extra });
           }
-          const depHash = stableHash({ depValues, config: step?.config || {} });
+          const depHash = enrichDepHash(step?.config || {}, depValues);
           const cached = readStaleness({ db, recordId, stepId: id });
 
-          if (!isStale({ cached, depHash })) {
+          if (isEnrichFresh({ cached, stepConfig: step?.config || {}, depValues, force })) {
             summary.skipped_fresh += 1;
             return;
           }

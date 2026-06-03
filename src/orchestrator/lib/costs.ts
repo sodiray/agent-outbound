@@ -216,6 +216,21 @@ const enforceToolBudgets = ({ db, listDir, toolCalls }: { db: any; listDir: stri
   }
 };
 
+// Average historical per-record cost for a step, used to estimate the cost of a
+// re-run in the dry-run impact preview. Returns 0 when there is no cost history.
+export const avgStepCostUsd = ({ db, stepId }: { db: any; stepId: string }): number => {
+  const matcher = String(stepId || '').trim();
+  if (!matcher) return 0;
+  const row = db.prepare(`
+    SELECT AVG(usd_cost) AS avg_usd
+    FROM cost_events
+    WHERE (step_id = ? OR step_id LIKE ?)
+      AND usd_cost IS NOT NULL
+      AND usd_cost > 0
+  `).get(matcher, `%${matcher}%`);
+  return Number(row?.avg_usd || 0);
+};
+
 export const recordCostEvent = ({ db, listDir, recordId = '', stepId, model = '', usage = null, provider = 'anthropic' }) => {
   if (!usage) return;
   const inputTokens = Number(usage?.input_tokens || 0);

@@ -185,6 +185,10 @@ const PipelineEnrichmentStepSchema = z.object({
   step_budget: z.coerce.number().int().min(1).max(40).default(8),
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
   cache: z.string().default(''),
+  // Explicit staleness override: bump this string to force a recompute; otherwise
+  // the staleness hash is derived from the step's material fields only, so cosmetic
+  // edits (description, concurrency, etc.) never re-run already-enriched records.
+  cache_key: z.string().default(''),
   tool: ToolSpecSchema.optional(),
   args: z.record(z.any()).default({}),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
@@ -199,6 +203,7 @@ const PipelineEnrichmentStepSchema = z.object({
   step_budget: true,
   concurrency: true,
   cache: true,
+  cache_key: true,
   tool: true,
   args: true,
   outputs: true,

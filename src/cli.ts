@@ -1094,16 +1094,18 @@ const run = async () => {
     const where = consumeFlag(argv, '--where', '');
     const limit = toNumber(consumeFlag(argv, '--limit', '0'), 0);
     const dryRun = hasFlag(argv, '--dry-run');
+    const force = hasFlag(argv, '--force');
+    const reapply = hasFlag(argv, '--reapply');
     const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
     const delegated = await callServeAction('pipeline', {
-      list, where, limit, dryRun, sample,
+      list, where, limit, dryRun, sample, force, reapply,
     }, list);
     if (delegated) {
       print(delegated);
       return;
     }
     print(await pipelineCommand({
-      list, where, limit, dryRun, sample,
+      list, where, limit, dryRun, sample, force, reapply,
     }));
     return;
   }

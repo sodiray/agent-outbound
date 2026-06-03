@@ -432,6 +432,41 @@ const ensureRecordCompatibility = (db) => {
   try { db.exec("ALTER TABLE records ADD COLUMN disqualified_at TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN disqualified_gate TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN disqualify_reason TEXT DEFAULT ''"); } catch {}
+  // Soft-drop / review queue: a committed record a filter would now drop is flagged
+  // for review instead of being disqualified, so we never destroy in-flight outreach.
+  try { db.exec("ALTER TABLE records ADD COLUMN needs_review INTEGER DEFAULT 0"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN review_reason TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN review_flagged_at TEXT DEFAULT ''"); } catch {}
+  // Idempotent filters: fast lookup of "has this record already passed this step?".
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_pipeline_events_record_step ON pipeline_events(record_id, step_id)"); } catch {}
+};
+
+// The "commit line": a record is committed (outreach has begun / work invested)
+// once it has been launched or has left the idle state. Committed records may be
+// flagged for review by a filter, but never hard-dropped.
+const COMMITTED_SEQUENCE_STATES = new Set(['active', 'engaged', 'blocked', 'completed', 'opted_out', 'bounced']);
+
+export const isRecordCommitted = (record: any): boolean => {
+  if (!record) return false;
+  if (String(record.launched_at || '').trim() !== '') return true;
+  return COMMITTED_SEQUENCE_STATES.has(String(record.sequence_status || '').trim());
+};
+
+// SQL fragment matching committed records (mirrors isRecordCommitted for counting/queries).
+export const committedWhere = (alias = ''): string => {
+  const prefix = String(alias || '').trim();
+  const launchedCol = prefix ? `${prefix}.launched_at` : 'launched_at';
+  const statusCol = prefix ? `${prefix}.sequence_status` : 'sequence_status';
+  const states = [...COMMITTED_SEQUENCE_STATES].map((s) => `'${s}'`).join(', ');
+  return `((${launchedCol} IS NOT NULL AND TRIM(${launchedCol}) != '') OR ${statusCol} IN (${states}))`;
+};
+
+// True when this record already passed this pipeline step (used to skip idempotent filters).
+export const hasPassedStep = ({ db, recordId, stepId }: { db: any; recordId: string; stepId: string }): boolean => {
+  const row = db
+    .prepare('SELECT 1 FROM pipeline_events WHERE record_id = ? AND step_id = ? AND passed = 1 LIMIT 1')
+    .get(recordId, stepId);
+  return Boolean(row);
 };
 
 const ensureDataAccessViewsInternal = (db) => {

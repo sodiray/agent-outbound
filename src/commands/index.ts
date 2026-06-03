@@ -659,7 +659,7 @@ export const removeCommand = ({ list, row = '', where = '', keepTop = 0, sortBy 
   }
 };
 
-export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = false, sample = 0 }) => {
+export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = false, sample = 0, force = false, reapply = false }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'pipeline' });
@@ -679,12 +679,21 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
   const threshold = getBulkSnapshotThreshold(config || {});
 
   if (dryRun) {
+    // Impact preview: simulate the run (no writes) and report blast radius —
+    // re-enrich counts + estimated cost, would-drop counts incl. committed
+    // records that would be review-flagged rather than dropped.
+    const impact = await runPipeline({
+      listDir,
+      where: whereSql,
+      limit: Number(limit || 0),
+      dryRun: true,
+      force,
+      reapply,
+    });
     return {
-      dry_run: true,
-      projected_records: Number(limit || 0) > 0 ? Math.min(Number(limit || 0), totalCount) : totalCount,
+      ...impact,
       total_records_matching: totalCount,
       where: whereSql || '',
-      note: 'Dry-run performs no writes.',
     };
   }
 
@@ -716,6 +725,8 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
     listDir,
     where: whereSql,
     limit: Number(limit || 0),
+    force,
+    reapply,
   });
   return {
     pipeline,
