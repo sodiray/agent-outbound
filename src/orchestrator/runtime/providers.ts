@@ -74,6 +74,18 @@ const buildDeepInfraModel = async (modelId: string, apiKey: string) => {
   throw new Error('Missing DeepInfra AI SDK provider. Install @ai-sdk/deepinfra.');
 };
 
+const getDeepInfraProviderOptions = (modelId: string) => {
+  const normalized = String(modelId || '').trim().toLowerCase();
+  if (normalized === 'moonshotai/kimi-k2.6') {
+    return {
+      deepinfra: {
+        thinking: { type: 'enabled' },
+      },
+    };
+  }
+  return {};
+};
+
 const buildXaiModel = async (modelId: string, apiKey: string) => {
   const modName = '@ai-sdk/xai';
   const providerModule: unknown = await import(modName);
@@ -110,6 +122,7 @@ export const PROVIDERS: RuntimeProvider[] = [
     supportsCacheControl: false,
     validateKey: async (apiKey: string) => listDeepInfraModels(apiKey),
     buildModel: buildDeepInfraModel,
+    getProviderOptions: getDeepInfraProviderOptions,
     extractUsdCost: (result: any) => (
       parseUsd(result?.providerMetadata?.deepinfra?.usage?.estimated_cost)
       ?? parseDeepInfraUsdFromResponseBody(result?.response?.body)

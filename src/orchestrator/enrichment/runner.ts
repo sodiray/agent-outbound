@@ -14,6 +14,7 @@ import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { evaluateFieldCheckGroup } from '../lib/conditions.js';
+import { nullableBoolean, nullableNumber, nullableString } from '../actions/schema-helpers.js';
 
 const parseExtra = (value) => {
   try {
@@ -124,25 +125,30 @@ const getLegacyColumns = (stepConfig: any): Record<string, string> => {
     : {};
 };
 
-const buildOutputZodSchema = (outputs: Record<string, OutputDef>, legacyColumns: Record<string, string>) => {
+const nullableEnum = (values: [string, ...string[]]) => z.preprocess((value) => {
+  if (value === null || value === undefined || value === '') return null;
+  return value;
+}, z.enum(values).nullable()).default(null);
+
+export const buildOutputZodSchema = (outputs: Record<string, OutputDef>, legacyColumns: Record<string, string>) => {
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const [key, def] of Object.entries(outputs)) {
     if (def.enum?.length) {
       const enumValues = def.enum.map((v) => String(v));
       if (enumValues.length >= 1) {
-        shape[key] = z.enum(enumValues as [string, ...string[]]).describe(def.description);
+        shape[key] = nullableEnum(enumValues as [string, ...string[]]).describe(def.description);
       }
       continue;
     }
 
     if (def.type === 'boolean') {
-      shape[key] = z.boolean().describe(def.description);
+      shape[key] = nullableBoolean(false).describe(def.description);
     } else if (def.type === 'integer') {
-      shape[key] = z.number().int().describe(def.description);
+      shape[key] = nullableNumber(null, z.number().int().nullable()).describe(def.description);
     } else if (def.type === 'number') {
-      shape[key] = z.number().describe(def.description);
+      shape[key] = nullableNumber(null, z.number().nullable()).describe(def.description);
     } else {
-      shape[key] = z.string().describe(def.description);
+      shape[key] = nullableString().describe(def.description);
     }
   }
 
@@ -159,7 +165,7 @@ const buildOutputZodSchema = (outputs: Record<string, OutputDef>, legacyColumns:
 };
 
 const coerceForSqlite = (value: any, type: OutputDef['type']): string | number | null => {
-  if (value === null || value === undefined) return type === 'string' ? '' : 0;
+  if (value === null || value === undefined) return type === 'string' ? '' : type === 'boolean' ? 0 : null;
   if (type === 'boolean') return value ? 1 : 0;
   if (type === 'integer') {
     const parsed = Number(value);

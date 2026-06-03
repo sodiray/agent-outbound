@@ -17,7 +17,7 @@ export const nullableBoolean = (def = false) => z.preprocess((value) => {
   return value;
 }, z.boolean()).default(def);
 
-export const nullableNumber = (def = 0, schema: z.ZodNumber = z.number()) => z.preprocess((value) => {
+export const nullableNumber = (def: number | null = 0, schema: z.ZodTypeAny = z.number()) => z.preprocess((value) => {
   if (value === null || value === undefined || value === '') return def;
   if (typeof value === 'string') return Number(value);
   return value;
