@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module';
-import { appendFileSync, existsSync } from 'node:fs';
+import { appendFileSync, copyFileSync, existsSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   ensureGlobalDirs,
   ensureListDirs,
@@ -411,18 +413,32 @@ const SCHEMA_SQL = `
 
 const nowIso = () => new Date().toISOString();
 
-const applyPragmas = (db) => {
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = NORMAL');
+const applyPragmas = (db, { readonly = false } = {}) => {
+  if (!readonly) {
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+  }
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
 };
 
 const openRawDb = ({ dbPath, readonly = false }) => {
   const Driver = ensureDriver();
-  const db = new Driver(dbPath, { readonly, fileMustExist: readonly });
-  applyPragmas(db);
-  return db;
+  const openVerified = (path) => {
+    const db = new Driver(path, { readonly, fileMustExist: readonly });
+    applyPragmas(db, { readonly });
+    if (readonly) db.pragma('schema_version');
+    return db;
+  };
+  try {
+    return openVerified(dbPath);
+  } catch (error) {
+    if (!readonly || !String((error as Error)?.message || error).includes('unable to open database file')) throw error;
+    const tempDir = mkdtempSync(join(tmpdir(), 'agent-outbound-readonly-db-'));
+    const tempPath = join(tempDir, 'prospects.db');
+    copyFileSync(dbPath, tempPath);
+    return openVerified(tempPath);
+  }
 };
 
 const ensureSuppressionCompatibility = (db) => {

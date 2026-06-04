@@ -10,6 +10,7 @@ import { listConnectedToolkits } from '../orchestrator/runtime/mcp.js';
 import { getDbPath, getSnapshotsDir, resolveListDir } from '../orchestrator/runtime/paths.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { assertConfigModelReferences } from '../orchestrator/lib/model-validation.js';
+import { normalizeConfig } from '../schemas/config.js';
 
 type SnapshotManifest = {
   id: string;
@@ -223,11 +224,11 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
     ? (() => {
       const raw = readFileSync(filePath, 'utf8');
       const parsed = yaml.load(raw) || {};
-      return { config: parsed, errors: [] as string[] };
+      return normalizeConfig(parsed, { listDir });
     })()
     : readConfig(listDir);
   const errors = [...(Array.isArray(loaded?.errors) ? loaded.errors : [])];
-  const warnings: string[] = [];
+  const warnings: string[] = [...(Array.isArray(loaded?.warnings) ? loaded.warnings : [])];
   const config = loaded?.config || {};
   try {
     assertConfigModelReferences(config);

@@ -2,6 +2,12 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { normalizeConfig } from '../../schemas/config.js';
+export {
+  inferPipelineEdges,
+  mergeInferredPipelineDependencies,
+  pipelineDependencyDiff,
+  validatePipelineGraph,
+} from './pipeline-graph.js';
 
 export const getConfigPath = (listDir) => join(listDir, 'outbound.yaml');
 
@@ -13,18 +19,20 @@ export const readConfig = (listDir) => {
       raw: {},
       config: normalizeConfig({}).config,
       errors: [],
+      warnings: [],
     };
   }
 
   try {
     const rawText = readFileSync(path, 'utf8');
     const raw = yaml.load(rawText) || {};
-    const normalized = normalizeConfig(raw);
+    const normalized = normalizeConfig(raw, { listDir });
     return {
       path,
       raw,
       config: normalized.config,
-      errors: normalized.error ? [normalized.error] : [],
+      errors: Array.isArray(normalized.errors) ? normalized.errors : (normalized.error ? [normalized.error] : []),
+      warnings: Array.isArray(normalized.warnings) ? normalized.warnings : [],
     };
   } catch (error) {
     return {
@@ -38,12 +46,14 @@ export const readConfig = (listDir) => {
 
 export const writeConfig = (listDir, config) => {
   const path = getConfigPath(listDir);
-  const normalized = normalizeConfig(config || {});
-  if (normalized.error) {
+  const normalized = normalizeConfig(config || {}, { listDir });
+  const normalizedErrors = Array.isArray(normalized.errors) ? normalized.errors : (normalized.error ? [normalized.error] : []);
+  if (normalizedErrors.length > 0) {
     const current = readConfig(listDir);
     return {
       path,
-      errors: [normalized.error],
+      errors: normalizedErrors,
+      warnings: Array.isArray(normalized.warnings) ? normalized.warnings : [],
       config: current.config,
       written: false,
     };
@@ -57,6 +67,7 @@ export const writeConfig = (listDir, config) => {
   return {
     path,
     errors: [],
+    warnings: Array.isArray(normalized.warnings) ? normalized.warnings : [],
     config: normalized.config,
     written: true,
   };
@@ -221,7 +232,10 @@ export const getDependentsOfStep = (config: any, stepId: string) => {
   for (const step of steps) {
     const id = String(step?.id || '').trim();
     if (!id || id === targetId) continue;
-    const dependsOn = Array.isArray(step?.config?.depends_on) ? step.config.depends_on : [];
+    const dependsOn = [
+      ...(Array.isArray(step?.depends_on) ? step.depends_on : []),
+      ...(Array.isArray(step?.runs_after) ? step.runs_after : []),
+    ];
     for (const dep of dependsOn) {
       const depText = String(dep || '').trim();
       if (depText === targetId || depText.startsWith(`${targetId}.`)) {

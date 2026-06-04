@@ -12,6 +12,7 @@ import {
   authListCommand,
   configAuthorCommand,
   configDiffCommand,
+  configInferDepsCommand,
   configReadCommand,
   configUpdateCommand,
   configValidateCommand,
@@ -185,12 +186,13 @@ const printHelp = () => {
   process.stdout.write(`  config validate <list> [--file FILE]\n`);
   process.stdout.write(`  config diff <list> [--file FILE | --from-snapshot SNAPSHOT_ID]\n`);
   process.stdout.write(`  config author <list> --request TEXT [--force]\n`);
+  process.stdout.write(`  config infer-deps <list> [--write]\n`);
   process.stdout.write(`  refresh-tools <list>\n`);
   process.stdout.write(`  source <list> [--limit N] [--more N] [--dry-run] [--sample N]\n`);
   process.stdout.write(`  remove <list> --row ROW_ID\n`);
   process.stdout.write(`  remove <list> --where SQL\n`);
   process.stdout.write(`  remove <list> --keep-top N [--sort-by COLUMN]\n`);
-  process.stdout.write(`  pipeline <list> [--where SQL] [--limit N] [--dry-run] [--sample N]\n`);
+  process.stdout.write(`  pipeline <list> [--where SQL] [--limit N] [--dry-run] [--sample N] [--concurrency N]\n`);
   process.stdout.write(`  score <list> [--dry-run] [--sample N] [--force]\n`);
   process.stdout.write(`  run <list> [--more N]\n`);
   process.stdout.write(`  launch draft <list> [--limit N] [--sequence NAME] [--dry-run] [--sample N]\n`);
@@ -1005,6 +1007,13 @@ const run = async () => {
       return;
     }
 
+    if (sub === 'infer-deps') {
+      const write = hasFlag(argv, '--write');
+      setResponseContext({ command: 'config infer-deps', list });
+      print(configInferDepsCommand({ list, write }));
+      return;
+    }
+
     if (sub === 'validate') {
       const filePath = consumeFlag(argv, '--file', '');
       setResponseContext({ command: 'config validate', list });
@@ -1097,15 +1106,16 @@ const run = async () => {
     const force = hasFlag(argv, '--force');
     const reapply = hasFlag(argv, '--reapply');
     const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
+    const concurrency = toNumber(consumeFlag(argv, '--concurrency', '0'), 0);
     const delegated = await callServeAction('pipeline', {
-      list, where, limit, dryRun, sample, force, reapply,
+      list, where, limit, dryRun, sample, force, reapply, concurrency,
     }, list);
     if (delegated) {
       print(delegated);
       return;
     }
     print(await pipelineCommand({
-      list, where, limit, dryRun, sample, force, reapply,
+      list, where, limit, dryRun, sample, force, reapply, concurrency,
     }));
     return;
   }

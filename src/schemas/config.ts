@@ -4,6 +4,7 @@ import {
   normalizeWorkingDayToken,
   SEQUENCE_WORKING_DAY_VALUES,
 } from '../orchestrator/lib/working-days.js';
+import { validatePipelineGraph } from '../orchestrator/lib/pipeline-graph.js';
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 
 export const ProviderModelSchema = z.string().trim().superRefine((value, ctx) => {
@@ -169,6 +170,8 @@ const PipelineFilterStepSchema = z.object({
   kind: z.literal('filter'),
   id: z.string().default(''),
   description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
   type: z.enum(['field_check', 'semantic']).default('semantic'),
   match: FieldCheckPredicateSchema.shape.match,
   conditions: FieldCheckPredicateSchema.shape.conditions,
@@ -177,12 +180,14 @@ const PipelineFilterStepSchema = z.object({
   condition: z.string().default(''),
   // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
   reasoning: z.boolean().optional(),
-}).partial({ description: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
+}).partial({ description: true, depends_on: true, runs_after: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
 
 const PipelineEnrichmentStepSchema = z.object({
   kind: z.literal('enrich'),
   id: z.string().default(''),
   description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
   model: ProviderModelSchema.optional(),
   // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
   reasoning: z.boolean().optional(),
@@ -203,6 +208,8 @@ const PipelineEnrichmentStepSchema = z.object({
   idempotency: IdempotencySchema.optional(),
 }).partial({
   description: true,
+  depends_on: true,
+  runs_after: true,
   model: true,
   step_budget: true,
   concurrency: true,
@@ -429,11 +436,13 @@ export const ConfigSchema = z.object({
   crm: CrmSchema.optional(),
 }).partial().default({});
 
-export const normalizeConfig = (value) => {
+export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
   const parsed = ConfigSchema.safeParse(value || {});
   if (!parsed.success) {
     return {
       error: parsed.error.message,
+      errors: [parsed.error.message],
+      warnings: [],
       config: ConfigSchema.parse({}),
     };
   }
@@ -456,9 +465,7 @@ export const normalizeConfig = (value) => {
     };
   }
 
-  return {
-    error: '',
-    config: {
+  const config = {
       ...parsed.data,
       ai: {
         ...(parsed.data?.ai || {}),
@@ -467,6 +474,13 @@ export const normalizeConfig = (value) => {
         },
       },
       sequences: withSequenceDefaults,
-    },
+    };
+  const graph = validatePipelineGraph(config, options);
+
+  return {
+    error: graph.errors.join('\n'),
+    errors: graph.errors,
+    warnings: graph.warnings,
+    config,
   };
 };

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { copyFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { randomUUID } from 'node:crypto';
@@ -14,14 +14,21 @@ import {
   openListDb,
   upsertRecord,
 } from '../orchestrator/runtime/db.js';
-import { readConfig, writeConfig, getConfigPath, deepMergeConfig } from '../orchestrator/lib/config.js';
+import {
+  mergeInferredPipelineDependencies,
+  pipelineDependencyDiff,
+  readConfig,
+  writeConfig,
+  getConfigPath,
+  deepMergeConfig,
+} from '../orchestrator/lib/config.js';
 import { readToolCatalog, resolveConfigToolCatalog } from '../orchestrator/lib/tool-catalog.js';
 import { cleanupRemovedStep } from '../orchestrator/lib/step-cleanup.js';
 import { validateColumnName, validateWhereSql } from '../orchestrator/lib/sql-safety.js';
 import { recordCostEvent } from '../orchestrator/lib/costs.js';
 import { authorConfigAction } from '../orchestrator/actions/author-config/index.js';
 import { runSourcing, runSourcingMore } from '../orchestrator/sourcing/runner.js';
-import { runPipeline } from '../orchestrator/pipeline/runner.js';
+import { runPipelineDataflow } from '../orchestrator/pipeline/dataflow.js';
 import { runScoring } from '../orchestrator/scoring/runner.js';
 import {
   followupSend,
@@ -394,6 +401,36 @@ export const configUpdateCommand = ({ list, yamlText = '', object = null }) => {
   return { status: result.written ? 'updated' : 'validation_failed', ...result, auto_snapshot: snapshot };
 };
 
+export const configInferDepsCommand = ({ list, write = false }) => {
+  const listDir = resolveListDir(list);
+  const current = readConfig(listDir);
+  const diff = pipelineDependencyDiff(current.config, { listDir });
+  if (!write) {
+    return {
+      status: 'preview',
+      path: getConfigPath(listDir),
+      dependencies: diff,
+      errors: current.errors || [],
+      warnings: current.warnings || [],
+      written: false,
+    };
+  }
+
+  const backupPath = `${getConfigPath(listDir)}.bak`;
+  copyFileSync(getConfigPath(listDir), backupPath);
+  const next = mergeInferredPipelineDependencies(current.config, { listDir });
+  const written = writeConfig(listDir, next);
+  return {
+    status: written.written ? 'updated' : 'validation_failed',
+    path: written.path,
+    backup_path: backupPath,
+    dependencies: diff,
+    errors: written.errors,
+    warnings: written.warnings,
+    written: written.written,
+  };
+};
+
 export const configAuthorCommand = async ({ list, request, force = false }) => {
   const listDir = resolveListDir(list);
   const current = readConfig(listDir);
@@ -659,7 +696,7 @@ export const removeCommand = ({ list, row = '', where = '', keepTop = 0, sortBy 
   }
 };
 
-export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = false, sample = 0, force = false, reapply = false }) => {
+export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = false, sample = 0, force = false, reapply = false, concurrency = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'pipeline' });
@@ -682,13 +719,14 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
     // Impact preview: simulate the run (no writes) and report blast radius —
     // re-enrich counts + estimated cost, would-drop counts incl. committed
     // records that would be review-flagged rather than dropped.
-    const impact = await runPipeline({
+    const impact = await runPipelineDataflow({
       listDir,
       where: whereSql,
       limit: Number(limit || 0),
       dryRun: true,
       force,
       reapply,
+      concurrency: Number(concurrency || 0) || undefined,
     });
     return {
       ...impact,
@@ -704,10 +742,11 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
       sampledCount: sampleN,
       totalCount: Math.max(totalCount, sampleN),
       run: async () => {
-        const pipeline = await runPipeline({
+        const pipeline = await runPipelineDataflow({
           listDir,
           where: whereSql,
           limit: sampleN,
+          concurrency: Number(concurrency || 0) || undefined,
         });
         return {
           pipeline,
@@ -721,12 +760,13 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
   const autoSnapshot = totalCount >= threshold
     ? snapshotCreateCommand({ list: listDir, label: `auto-before-pipeline-${new Date().toISOString()}` })
     : null;
-  const pipeline = await runPipeline({
+  const pipeline = await runPipelineDataflow({
     listDir,
     where: whereSql,
     limit: Number(limit || 0),
     force,
     reapply,
+    concurrency: Number(concurrency || 0) || undefined,
   });
   return {
     pipeline,
@@ -745,12 +785,12 @@ export const runCommand = async ({ list, more = 0 }) => {
     ? await runSourcingMore({ listDir, targetNew: Number(more || 0) })
     : await runSourcing({ listDir, limit: 0 });
 
-  let pipelineResult: any = null;
   const newIds = Array.isArray(sourceResult?.inserted_ids) ? sourceResult.inserted_ids : [];
-  if (newIds.length > 0) {
+  const pipelineResult = await (async () => {
+    if (newIds.length === 0) return null;
     const escaped = newIds.map((id: string) => `'${String(id || '').replace(/'/g, "''")}'`).join(', ');
-    pipelineResult = await runPipeline({ listDir, where: `_row_id IN (${escaped})` });
-  }
+    return runPipelineDataflow({ listDir, where: `_row_id IN (${escaped})` });
+  })();
 
   const scoreResult = await runScoring({ listDir });
 

@@ -49,6 +49,10 @@ Important:
 - To modify an item, use the matching `modify_*` op with the item's `id`. Do NOT invent new op names.
 - `set_identity` replaces the entire array — include all desired values, not just additions.
 - Scoring is agent-driven: update via `set_score_axis` with natural-language `description` (not criteria arrays).
+- Pipeline dependencies are computed after your changes. Do NOT hand-wire `depends_on`.
+- If a pipeline step needs a rare non-data ordering constraint, use `runs_after`; data dependencies still come from the post-pass.
+- Be honest and complete about enrichment `outputs`; each produced field must be declared.
+- When any semantic filter or enrichment prompt refers to an upstream produced field, reference it as a token (`{field}` or `${field}`), not freehand prose. This is how the dependency graph is derived.
 
 Shape requirements:
 - `list.territory.home_base` is a single string (example: `"Boise, ID"`).

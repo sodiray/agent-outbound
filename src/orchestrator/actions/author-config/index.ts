@@ -5,7 +5,12 @@ import { generateObjectWithTools } from '../../runtime/llm.js';
 import { normalizeConfig } from '../../../schemas/config.js';
 import { nowTimestamp } from '../../runtime/db.js';
 import { renderPromptTemplate } from '../shared.js';
-import { applyConfigChanges, validateStepRemoval } from '../../lib/config.js';
+import {
+  applyConfigChanges,
+  mergeInferredPipelineDependencies,
+  pipelineDependencyDiff,
+  validateStepRemoval,
+} from '../../lib/config.js';
 import { resolveConfigToolCatalog } from '../../lib/tool-catalog.js';
 import { readProviderRegistry, type ServerDef } from '../../lib/provider-registry.js';
 import { listConnectedToolkits } from '../../runtime/mcp.js';
@@ -221,13 +226,18 @@ export const authorConfigAction = async ({
         provider: result.provider,
       };
     }
-    const normalized = normalizeConfig(resolved.config);
+    const dependencyConfig = mergeInferredPipelineDependencies(resolved.config, { listDir });
+    const dependencyDiff = pipelineDependencyDiff(dependencyConfig, { listDir });
+    const dependencyNotes = dependencyDiff.map((entry) => (
+      `[pipeline_dependencies] ${entry.id}: depends_on=[${entry.computed.join(', ')}]`
+    ));
+    const normalized = normalizeConfig(dependencyConfig, { listDir });
     if (normalized.error) {
       return {
         replace: null,
         changes: effectiveChanges,
-        warnings: [...parsed.warnings, ...resolutionWarnings, normalized.error],
-        notes: parsed.notes,
+        warnings: [...parsed.warnings, ...resolutionWarnings, ...(normalized.errors || [normalized.error])],
+        notes: [...parsed.notes, ...dependencyNotes],
         tool_resolution: resolved.stats,
         usage: result.usage,
         model: result.model,
@@ -237,8 +247,8 @@ export const authorConfigAction = async ({
     return {
       replace: normalized.config,
       changes: effectiveChanges,
-      warnings: [...parsed.warnings, ...resolutionWarnings],
-      notes: parsed.notes,
+      warnings: [...parsed.warnings, ...resolutionWarnings, ...(normalized.warnings || [])],
+      notes: [...parsed.notes, ...dependencyNotes],
       tool_resolution: resolved.stats,
       usage: result.usage,
       model: result.model,
