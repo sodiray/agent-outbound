@@ -5,6 +5,7 @@ import { getRecordRowId } from '../lib/record.js';
 export type StepExecutionOutcome = {
   passed: boolean;
   reason: string;
+  errored?: boolean;
 };
 
 export type StepExecutionContext = {
@@ -32,9 +33,10 @@ const textValue = (value: unknown, fallback = '') => {
   return text;
 };
 
-const outcomeFor = (value: { passed?: unknown; reason?: unknown }): StepExecutionOutcome => ({
+const outcomeFor = (value: { passed?: unknown; reason?: unknown; errored?: unknown }): StepExecutionOutcome => ({
   passed: Boolean(value.passed),
   reason: String(value.reason || ''),
+  errored: Boolean(value.errored),
 });
 
 const executeFieldCheckBatch = async (step: PipelineStepLike, rows: Array<Record<string, unknown>>) => {
@@ -51,6 +53,7 @@ const executeFieldCheckBatch = async (step: PipelineStepLike, rows: Array<Record
       outcomes.set(recordId, {
         passed: false,
         reason: String((error as Error)?.message || error),
+        errored: true,
       });
     }
   });
@@ -103,7 +106,7 @@ const executeEnrichBatch = async (
     const recordId = getRecordRowId(row);
     const failure = failures.get(recordId);
     outcomes.set(recordId, failure
-      ? { passed: false, reason: failure }
+      ? { passed: false, reason: failure, errored: true }
       : { passed: true, reason: '' });
   });
   return outcomes;

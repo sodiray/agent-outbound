@@ -199,7 +199,7 @@ export const evaluateSemanticFilterBatches = async ({
   batchSize?: number;
 }) => {
   const chunks = chunk(rows, Math.max(1, Number(batchSize || 10)));
-  const results = new Map<string, { passed: boolean; reason: string }>();
+  const results = new Map<string, { passed: boolean; reason: string; errored?: boolean }>();
   const filterId = String(filter?.id || 'filter');
   const description = String(filter?.description || '').trim();
   const conditionText = String(filter?.condition || '').trim();
@@ -230,9 +230,10 @@ export const evaluateSemanticFilterBatches = async ({
         results.set(rowId, {
           passed: Boolean(fallback.passed),
           reason: String(fallback.reason || ''),
+          errored: Boolean((fallback as any)?.errored),
         });
-      } catch {
-        results.set(rowId, { passed: false, reason: cause });
+      } catch (error) {
+        results.set(rowId, { passed: false, reason: String((error as Error)?.message || cause), errored: true });
       }
     }
   };
@@ -278,7 +279,7 @@ export const evaluateSemanticFilterBatches = async ({
         usage: llm.usage,
       });
       const parsed = SemanticFilterBatchSchema.parse(llm.object);
-      const batchResults = new Map<string, { passed: boolean; reason: string }>();
+      const batchResults = new Map<string, { passed: boolean; reason: string; errored?: boolean }>();
       for (const item of parsed.results) {
         const rowId = String(item?.row_id || '').trim();
         if (!rowId) continue;

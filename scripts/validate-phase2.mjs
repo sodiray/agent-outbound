@@ -145,6 +145,46 @@ const drop = await runScenario({
 });
 assert.equal(drop.events.includes('start:dropme:downstream'), false);
 
+const errorIsolationEvents = [];
+const errorIsolationEventsWritten = [];
+const errorIsolationSummary = { errored: 0, dropped: 0 };
+const errorIsolationAttempts = {};
+await runDataflowCore({
+  records: [record('infra_error'), record('genuine_fail'), record('genuine_pass')],
+  steps: [
+    step({ id: 'semantic_drop_gate', tier: 1, cost: 1, dropGate: true }),
+    step({ id: 'downstream_enrich', kind: 'enrich', tier: 2, cost: 10 }),
+  ],
+  concurrency: 3,
+  loadStep: async (selected, row) => {
+    const key = `${row._row_id}:${selected.id}`;
+    errorIsolationAttempts[key] = Number(errorIsolationAttempts[key] || 0) + 1;
+    assert.equal(errorIsolationAttempts[key], 1, `${key} retried within the same run`);
+    errorIsolationEvents.push(`start:${key}`);
+    if (key === 'infra_error:semantic_drop_gate') return { passed: false, reason: 'HTTP 402', errored: true };
+    if (key === 'genuine_fail:semantic_drop_gate') return { passed: false, reason: 'not a fit' };
+    return { passed: true, reason: '' };
+  },
+  onStepOutcome: async (recordState, selected, outcome) => {
+    const recordId = recordState.record._row_id;
+    if (outcome.errored) {
+      errorIsolationSummary.errored += 1;
+      errorIsolationEvents.push(`error:${recordId}:${selected.id}`);
+      return { resolved: false, errored: true };
+    }
+    errorIsolationEventsWritten.push(`event:${recordId}:${selected.id}:${outcome.passed ? 'pass' : 'fail'}`);
+    errorIsolationEvents.push(`persist:${recordId}:${selected.id}`);
+    if (selected.dropGate && !outcome.passed) errorIsolationSummary.dropped += 1;
+    return { dropped: selected.dropGate && !outcome.passed };
+  },
+});
+assert.equal(errorIsolationSummary.errored, 1);
+assert.equal(errorIsolationSummary.dropped, 1);
+assert.equal(errorIsolationEvents.includes('start:infra_error:downstream_enrich'), false);
+assert.equal(errorIsolationEvents.includes('start:genuine_fail:downstream_enrich'), false);
+assert.equal(errorIsolationEvents.includes('start:genuine_pass:downstream_enrich'), true);
+assert.equal(errorIsolationEventsWritten.some((event) => event.includes('infra_error')), false);
+
 const capped = await runScenario({
   records: [record('c1'), record('c2'), record('c3'), record('c4'), record('c5')],
   steps: [step({ id: 'cap_step' })],
@@ -160,6 +200,7 @@ const summary = {
   post_cheap_survivor_events: postCheapSurvivors.events,
   early_completion_order: early.result.completed_order,
   drop_events: drop.events,
+  error_isolation_events: errorIsolationEvents,
   max_active_advancers: capped.result.max_active_advancers,
 };
 

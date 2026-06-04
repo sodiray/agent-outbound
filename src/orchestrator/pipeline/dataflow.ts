@@ -37,6 +37,7 @@ type RecordState = {
   record: DataflowRecord;
   resolved: Set<string>;
   pending: Set<string>;
+  errored: Set<string>;
   status: { dropped: boolean };
 };
 
@@ -58,7 +59,7 @@ type DataflowCoreOptions = {
   concurrency: number;
   initialResolvedByRecord?: Map<string, Set<string>>;
   isApplicable?: (recordState: RecordState, step: DataflowStep) => boolean;
-  onStepOutcome: (recordState: RecordState, step: DataflowStep, outcome: StepExecutionOutcome) => Promise<{ record?: DataflowRecord; dropped?: boolean; resolved?: boolean }>;
+  onStepOutcome: (recordState: RecordState, step: DataflowStep, outcome: StepExecutionOutcome) => Promise<{ record?: DataflowRecord; dropped?: boolean; resolved?: boolean; errored?: boolean }>;
   loadStep: (step: DataflowStep, record: DataflowRecord, inFlight: () => number) => Promise<StepExecutionOutcome>;
 };
 
@@ -102,9 +103,11 @@ const compareCost = (a: DataflowStep, b: DataflowStep) => (
 
 const defaultApplicable = (recordState: RecordState, step: DataflowStep) => (
   !recordState.status.dropped
+  && recordState.errored.size === 0
   && step.executable
   && !recordState.resolved.has(step.id)
   && !recordState.pending.has(step.id)
+  && !recordState.errored.has(step.id)
 );
 
 const dataReady = (recordState: RecordState, step: DataflowStep, applicable: (recordState: RecordState, step: DataflowStep) => boolean) => (
@@ -199,6 +202,7 @@ export const runDataflowCore = async ({
   };
   const resolvedByRecord = new Map<string, Set<string>>();
   const pendingByRecord = new Map<string, Set<string>>();
+  const erroredByRecord = new Map<string, Set<string>>();
   const statusByRecord = new Map<string, { dropped: boolean }>();
   const sharedSet = (sets: Map<string, Set<string>>, id: string, initial?: Set<string>) => {
     const existing = sets.get(id);
@@ -218,6 +222,7 @@ export const runDataflowCore = async ({
     record,
     resolved: sharedSet(resolvedByRecord, getRecordRowId(record), initialResolvedByRecord.get(getRecordRowId(record))),
     pending: sharedSet(pendingByRecord, getRecordRowId(record)),
+    errored: sharedSet(erroredByRecord, getRecordRowId(record)),
     status: sharedStatus(getRecordRowId(record)),
   }));
   const advance = async (recordState: RecordState): Promise<void> => {
@@ -233,6 +238,7 @@ export const runDataflowCore = async ({
     const outcomePromise = await withAdvancePermitImmediate(state, concurrency, () => loadStep(selected, recordState.record, () => state.activeAdvancers));
     const persisted = await withAdvancePermit(state, concurrency, async () => onStepOutcome(recordState, selected, outcomePromise));
     recordState.pending.delete(selected.id);
+    if (persisted.errored) recordState.errored.add(selected.id);
     recordState.record = persisted.record || recordState.record;
     if (persisted.resolved !== false) recordState.resolved.add(selected.id);
     recordState.status.dropped = Boolean(recordState.status.dropped || persisted.dropped);
@@ -376,6 +382,7 @@ export const runPipelineDataflow = async ({
       steps: rawSteps.length,
       processed: 0,
       failed: 0,
+      errored: 0,
       review_flagged: 0,
       skipped_passed: 0,
       errors: unsupportedStepErrors(steps) as any[],
@@ -401,7 +408,7 @@ export const runPipelineDataflow = async ({
         windowMs: 25,
         inFlight,
         executor: async (batchRows) => executeStepBatch(await contextFor(step), step.step, step.id, batchRows),
-        fallback: async (_record, cause) => ({ passed: false, reason: String((cause as Error)?.message || cause || 'batch_failed') }),
+        fallback: async (_record, cause) => ({ passed: false, errored: true, reason: String((cause as Error)?.message || cause || 'batch_failed') }),
       });
       loaders.set(step.id, loader);
       return loader;
@@ -422,6 +429,15 @@ export const runPipelineDataflow = async ({
         const recordId = getRecordRowId(recordState.record);
         const now = new Date().toISOString();
         if (step.kind === 'enrich') {
+          if (outcome.errored) {
+            summary.failed += 1;
+            summary.errored += 1;
+            summary.errors.push({ step: step.id, record_id: recordId, error: String(outcome.reason || 'failed'), errored: true });
+            progressState.done += 1;
+            tickProgress(db, runId, { done: progressState.done, target: rows.length });
+            emitActivity({ event: 'error', phase: 'pipeline', step: step.id, row: recordId, detail: String(outcome.reason || 'failed'), errored: true });
+            return { record: refreshRecord({ db, record: recordState.record }), resolved: false, errored: true };
+          }
           insertPipelineEvent({
             db,
             event: {
@@ -441,6 +457,16 @@ export const runPipelineDataflow = async ({
           tickProgress(db, runId, { done: progressState.done, target: rows.length });
           emitActivity({ event: 'step_complete', phase: 'pipeline', step: step.id, kind: step.kind, processed: outcome.passed ? 1 : 0, failed: outcome.passed ? 0 : 1 });
           return { record: refreshRecord({ db, record: recordState.record }) };
+        }
+
+        if (outcome.errored) {
+          summary.failed += 1;
+          summary.errored += 1;
+          summary.errors.push({ step: step.id, record_id: recordId, error: String(outcome.reason || 'failed'), errored: true });
+          progressState.done += 1;
+          tickProgress(db, runId, { done: progressState.done, target: rows.length });
+          emitActivity({ event: 'error', phase: 'pipeline', step: step.id, row: recordId, detail: String(outcome.reason || 'failed'), errored: true });
+          return { record: refreshRecord({ db, record: recordState.record }), resolved: false, errored: true };
         }
 
         const reason = outcome.passed ? '' : (String(outcome.reason || '').trim() || 'failed');
@@ -488,7 +514,15 @@ export const runPipelineDataflow = async ({
     };
     logPipelineEvent({ listDir, payload: funnel });
     emitActivity({ event: 'phase_complete', phase: 'pipeline', ...funnel, engine: 'dataflow' });
-    endRun(db, runId, { status: 'done', message: `Pipeline complete · ${summary.survivors} survivors` });
+    if (summary.errored > 0) {
+      console.warn(`Pipeline completed with ${summary.errored} evaluation/execution errors; errored records remain in play for retry.`);
+    }
+    endRun(db, runId, {
+      status: summary.errored > 0 ? 'error' : 'done',
+      message: summary.errored > 0
+        ? `Pipeline incomplete · ${summary.errored} errored records need retry`
+        : `Pipeline complete · ${summary.survivors} survivors`,
+    });
     return summary;
   } catch (error) {
     throw error;

@@ -44,6 +44,7 @@ export const evaluateConditionAction = async ({ conditionText, row, stepOutput, 
   } catch (error) {
     return {
       passed: false,
+      errored: true,
       defer: false,
       reason: `Condition evaluation failed: ${String(error?.message || error)}`,
       usage: null,
