@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { getEnv } from './env.js';
 import { ComposioOAuthProvider } from './composio-oauth.js';
+import { formatErrorMessage } from '../lib/error-format.js';
 
 const DEFAULT_MCP_URL = 'https://connect.composio.dev/mcp';
 const CLIENT_NAME = 'agent-outbound';
@@ -111,7 +112,9 @@ const injectSession = (mcp: McpClient, name: string, args: Record<string, unknow
 };
 
 export const callMetaTool = async (mcp: McpClient, name: string, args: Record<string, unknown> = {}) => {
-  const result = await mcp.callTool({ name, arguments: injectSession(mcp, name, args) });
+  const result = await mcp.callTool({ name, arguments: injectSession(mcp, name, args) }).catch((error) => {
+    throw new Error(`${name}: ${formatErrorMessage(error)}`);
+  });
   const isError = Boolean((result as any)?.isError);
   const structured = (result as any)?.structuredContent;
   const text = extractText(result);
@@ -120,7 +123,7 @@ export const callMetaTool = async (mcp: McpClient, name: string, args: Record<st
   // JSON-RPC-level error from the transport.
   if (isError) {
     const message = parsed && typeof parsed === 'object' && 'error' in (parsed as any)
-      ? String((parsed as any).error)
+      ? formatErrorMessage((parsed as any).error)
       : text || `MCP tool "${name}" returned an error.`;
     throw new Error(`${name}: ${message}`);
   }
@@ -136,7 +139,7 @@ export const callMetaTool = async (mcp: McpClient, name: string, args: Record<st
     const hasBatchedResults = Array.isArray((parsed as any)?.data?.results);
     if ((successful === false || errorField) && !hasBatchedResults) {
       const message = errorField
-        ? String(errorField)
+        ? formatErrorMessage(errorField)
         : `${name} returned successful=false`;
       throw new Error(`${name}: ${message}`);
     }

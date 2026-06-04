@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { CommandServerDef, CommandToolDef } from '../../lib/provider-registry.js';
 import { expandRegistryEnv } from '../../lib/provider-registry.js';
 import type { ProviderToolSchema, ToolProvider } from './types.js';
+import { formatErrorMessage } from '../../lib/error-format.js';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
@@ -132,7 +133,7 @@ export class CommandProvider implements ToolProvider {
       child.stderr.on('data', (chunk) => stderr.push(Buffer.from(chunk)));
       child.on('error', (error) => {
         clearTimeout(timer);
-        reject(error);
+        reject(new Error(`Command provider "${this.id}" tool "${slug}" failed to start: ${formatErrorMessage(error)}`));
       });
       child.on('close', (code, signal) => {
         clearTimeout(timer);
@@ -153,7 +154,8 @@ export class CommandProvider implements ToolProvider {
       try {
         return JSON.parse(output.stdout);
       } catch (error) {
-        throw new Error(`Command provider "${this.id}" tool "${slug}" did not return valid JSON on stdout: ${(error as Error).message}`);
+        const tail = stderrTail(output.stderr);
+        throw new Error(`Command provider "${this.id}" tool "${slug}" did not return valid JSON on stdout: ${formatErrorMessage(error)}.${tail ? ` stderr: ${tail}` : ''}`);
       }
     }
     throw new Error(`Command provider "${this.id}" tool "${slug}" has unsupported result mode "${String((toolDef.invoke as any).result || '')}".`);

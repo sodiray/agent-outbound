@@ -13,6 +13,7 @@ import {
   objectFromLooseShape,
   recordWithDefault,
 } from '../schema-helpers.js';
+import { formatErrorMessage } from '../../lib/error-format.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
@@ -236,7 +237,7 @@ export const executeStepAction = async ({
   aiConfig = {},
   role = 'research',
 }: {
-  mcp: Client;
+  mcp?: Client | null;
   listDir: string;
   stepId: string;
   description?: string;
@@ -297,7 +298,7 @@ export const executeStepAction = async ({
       provider: result.provider,
     };
   } catch (error) {
-    const detail = String((error as any)?.message || error);
+    const detail = formatErrorMessage(error);
     throw new Error(`execute-step failed (${stepId || 'step'}): ${detail}`);
   }
 };

@@ -57,6 +57,8 @@ export type ProviderRegistryFile = z.infer<typeof ProviderRegistryFileSchema>;
 
 export const getProviderRegistryPath = (listDir: string) => join(listDir, 'mcp.json');
 
+const normalizeServerName = (value: unknown) => String(value || '').trim().toLowerCase();
+
 const formatZodIssues = (issues: z.ZodIssue[]) =>
   issues.map((issue) => {
     const path = issue.path.length > 0 ? issue.path.join('.') : '<root>';
@@ -81,6 +83,19 @@ export const readProviderRegistry = (listDir: string): ProviderRegistryFile => {
   }
   return parsed.data;
 };
+
+export const registryServerEntry = (listDir: string, serverName: unknown) => {
+  const normalized = normalizeServerName(serverName);
+  if (!normalized) return null;
+  const mcpServers = readProviderRegistry(listDir).mcpServers;
+  const name = Object.keys(mcpServers).find((candidate) => candidate.toLowerCase() === normalized) || '';
+  if (!name) return null;
+  return { name, server: mcpServers[name] };
+};
+
+export const isCommandServerProvider = (listDir: string, serverName: unknown) => (
+  registryServerEntry(listDir, serverName)?.server?.type === 'command'
+);
 
 export const expandRegistryEnv = (serverName: string, env: Record<string, string> = {}) => {
   const expanded: Record<string, string> = {};

@@ -4,6 +4,7 @@ import type { ActionRole } from './models.js';
 import { resolveRuntimeModel } from './models.js';
 import { loadTools, type ToolCatalog, type ToolSpec } from './tools.js';
 import { emitLive } from './activity.js';
+import { formatErrorMessage } from '../lib/error-format.js';
 
 let aiSdk: any = null;
 
@@ -108,9 +109,6 @@ const resolveTools = async (
   listDir = '',
 ) => {
   if (!hasPinnedTools(toolSpec)) return {};
-  if (!mcp) {
-    throw new Error('Tool spec pinned tools but no MCP client was provided to the LLM call.');
-  }
   return loadTools(mcp, toolSpec, toolCatalog, { listDir });
 };
 
@@ -432,11 +430,12 @@ export const generateObjectWithTools = async ({
       }
     }
   } catch (error) {
+    const detail = formatErrorMessage(error);
     emitLive({
       event: 'llm_step_error',
       phase: String(task || ''),
       model: resolved.modelRef,
-      error: String((error as any)?.message || error),
+      error: detail,
     });
     throw error;
   }

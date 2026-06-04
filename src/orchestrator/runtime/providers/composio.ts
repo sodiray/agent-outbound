@@ -8,6 +8,7 @@ import {
   listConnectedToolkits,
 } from '../mcp.js';
 import type { ProviderToolSchema, ToolProvider } from './types.js';
+import { formatErrorMessage } from '../../lib/error-format.js';
 
 export type ComposioToolSchema = {
   slug: string;
@@ -67,11 +68,11 @@ const unwrapExecuteResult = (result: any) => {
 
   const first = results[0];
   if (first?.error && !first?.response) {
-    throw new Error(String(first.error));
+    throw new Error(formatErrorMessage(first.error));
   }
   const response = first?.response;
   if (response?.successful === false) {
-    throw new Error(String(response?.error || 'tool execution failed'));
+    throw new Error(formatErrorMessage(response?.error, 'tool execution failed'));
   }
   return response?.data ?? response ?? first;
 };

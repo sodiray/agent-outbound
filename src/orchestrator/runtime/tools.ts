@@ -3,6 +3,8 @@ import { jsonSchema, tool, type Tool } from 'ai';
 import { ComposioProvider, type ComposioToolSchema } from './providers/composio.js';
 import { getDefaultProvider, getProvider } from './providers/registry.js';
 import type { ProviderToolSchema, ToolProvider } from './providers/types.js';
+import { isCommandServerProvider } from '../lib/provider-registry.js';
+import { formatErrorMessage } from '../lib/error-format.js';
 
 export type ToolSpec = {
   server?: string;
@@ -21,6 +23,10 @@ export type { ComposioToolSchema };
 
 const normalizeSlug = (value: unknown) => String(value || '').trim();
 const normalizeServer = (value: unknown) => String(value || '').trim().toLowerCase();
+const hasPinnedTools = (spec?: ToolSpec) => (
+  (Array.isArray(spec?.tools) && spec.tools.length > 0)
+  || (Array.isArray(spec?.toolkits) && spec.toolkits.length > 0)
+);
 export const getToolCatalogKey = (server: string | undefined, slug: string) => {
   const normalizedServer = normalizeServer(server);
   const normalizedSlug = normalizeSlug(slug).toUpperCase();
@@ -118,7 +124,11 @@ const loadToolsWithProvider = async (
       description: schema.description || `Tool action: ${schema.slug}`,
       inputSchema: jsonSchema(rawInputSchema),
       execute: async (args: unknown) => {
-        return provider.executeTool(schema.slug, (args || {}) as Record<string, unknown>);
+        try {
+          return await provider.executeTool(schema.slug, (args || {}) as Record<string, unknown>);
+        } catch (error) {
+          throw new Error(`${provider.id}:${schema.slug}: ${formatErrorMessage(error)}`);
+        }
       },
     });
   }
@@ -127,17 +137,29 @@ const loadToolsWithProvider = async (
 };
 
 export const loadTools = async (
-  mcp: Client,
+  mcp: Client | undefined,
   spec: ToolSpec = {},
   catalog?: ToolCatalog,
   options: { listDir?: string } = {},
 ): Promise<Record<string, Tool>> => {
   const server = normalizeServer(spec?.server);
-  const provider = server
+  const listDir = String(options.listDir || '').trim();
+  const isLocalCommand = server && isCommandServerProvider(listDir, server);
+  const provider = isLocalCommand || (server && server !== 'composio')
     ? getProvider(server, { listDir: options.listDir })
     : composioProviderFor(mcp);
   return loadToolsWithProvider(provider, spec, catalog);
 };
+
+export const toolSpecUsesLocalCommandServer = (
+  spec: ToolSpec | undefined,
+  options: { listDir?: string } = {},
+) => isCommandServerProvider(String(options.listDir || '').trim(), spec?.server);
+
+export const toolSpecNeedsMcp = (
+  spec: ToolSpec | undefined,
+  options: { listDir?: string } = {},
+) => hasPinnedTools(spec) && !toolSpecUsesLocalCommandServer(spec, options);
 
 export const loadToolsForProvider = async (
   provider: ToolProvider,

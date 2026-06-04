@@ -7,11 +7,13 @@ import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { countEnrichWorkForStep } from '../enrichment/runner.js';
 import { getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
+import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
 import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb } from '../runtime/db.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
+import { toolSpecNeedsMcp } from '../runtime/tools.js';
 import {
   pipelineStepId,
   readInPlayRows,
@@ -319,7 +321,7 @@ const makeApplicable = ({ db, force }: { db: any; force: boolean }) => (recordSt
 const createLazyExecutionContext = ({ db, listDir, config, force }: { db: any; listDir: string; config: any; force: boolean }) => {
   const state: { mcp: any; toolCatalog: any } = { mcp: null, toolCatalog: null };
   return async (step: DataflowStep) => {
-    if (step.kind === 'enrich' && !state.mcp) state.mcp = await getMcpClient();
+    if (step.kind === 'enrich' && toolSpecNeedsMcp(step.step?.tool, { listDir }) && !state.mcp) state.mcp = await getMcpClient();
     if (step.kind === 'enrich' && !state.toolCatalog) state.toolCatalog = readToolCatalog(listDir);
     return {
       db,
@@ -408,7 +410,7 @@ export const runPipelineDataflow = async ({
         windowMs: 25,
         inFlight,
         executor: async (batchRows) => executeStepBatch(await contextFor(step), step.step, step.id, batchRows),
-        fallback: async (_record, cause) => ({ passed: false, errored: true, reason: String((cause as Error)?.message || cause || 'batch_failed') }),
+        fallback: async (_record, cause) => ({ passed: false, errored: true, reason: formatErrorMessage(cause, 'batch_failed') }),
         onFlush: async (info) => {
           emitActivity({ event: 'batch_flush', phase: 'pipeline', step: step.id, size: info.size, reason: info.reason, wait_ms: info.wait_ms, exec_ms: info.exec_ms });
           db.prepare(`

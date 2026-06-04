@@ -1,6 +1,6 @@
 import { ComposioProvider } from './composio.js';
 import { CommandProvider } from './command.js';
-import { readProviderRegistry } from '../../lib/provider-registry.js';
+import { registryServerEntry } from '../../lib/provider-registry.js';
 import type { ToolProvider } from './types.js';
 
 type ProviderLookupOptions = {
@@ -22,12 +22,12 @@ export class ProviderRegistry {
     const cached = this.providersByList.get(listDir)?.get(normalized);
     if (cached) return cached;
 
-    const mcpServers = readProviderRegistry(listDir).mcpServers;
-    const registryName = Object.keys(mcpServers).find((name) => name.toLowerCase() === normalized) || normalized;
-    const server = mcpServers[registryName];
-    if (!server) {
+    const entry = registryServerEntry(listDir, normalized);
+    if (!entry) {
       throw new Error(`Unknown tool provider "${id}" in ${listDir}/mcp.json.`);
     }
+    const registryName = entry.name;
+    const server = entry.server;
     if (server.type === 'stdio' || server.type === 'http') {
       throw new Error(`Tool provider "${id}" uses type "${server.type}", which is not implemented until P3.`);
     }

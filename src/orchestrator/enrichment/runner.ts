@@ -15,6 +15,8 @@ import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { evaluateFieldCheckGroup } from '../lib/conditions.js';
 import { nullableBoolean, nullableNumber, nullableString } from '../actions/schema-helpers.js';
+import { formatErrorMessage } from '../lib/error-format.js';
+import { toolSpecNeedsMcp } from '../runtime/tools.js';
 
 const parseExtra = (value) => {
   try {
@@ -462,14 +464,14 @@ export const executeEnrichmentStepOnRecords = async ({
       await runAttempt(1);
     } catch (error) {
       if (isBudgetExceededError(error)) throw error;
-      const firstDetail = String((error as any)?.message || error);
+      const firstDetail = formatErrorMessage(error);
       emitActivity({ event: 'row_retry', phase: 'pipeline', step: id, row: rowLabel, detail: firstDetail });
       try {
         await runAttempt(2);
         return;
       } catch (retryError) {
         if (isBudgetExceededError(retryError)) throw retryError;
-        const detail = String((retryError as any)?.message || retryError);
+        const detail = formatErrorMessage(retryError);
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: detail });
         upsertRecord({
@@ -619,7 +621,12 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
   for (const row of rows) {
     recordState.set(getRecordRowId(row), row);
   }
-  const mcp = await getMcpClient();
+  const mcpState: { client: any } = { client: null };
+  const mcpForStep = async (stepConfig: any) => {
+    if (!toolSpecNeedsMcp(stepConfig?.tool, { listDir })) return null;
+    if (!mcpState.client) mcpState.client = await getMcpClient();
+    return mcpState.client;
+  };
   const toolCatalog = readToolCatalog(listDir);
 
   const summary = {
@@ -735,12 +742,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
 
           try {
             const inputRecord = mergedRecordForEnrichment({ db, record });
+            const stepConfig = step?.config || {};
             const result = await executeStepAction({
-              mcp,
+              mcp: await mcpForStep(stepConfig),
               listDir,
               stepId: id,
               description: step?.description || id,
-              stepConfig: step?.config || {},
+              stepConfig,
               record: inputRecord,
               aiConfig: config?.ai || {},
               role: 'research',
@@ -787,7 +795,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             });
           } catch (error) {
             if (isBudgetExceededError(error)) throw error;
-            const detail = String(error?.message || error);
+            const detail = formatErrorMessage(error);
             markStepFailure(recordId, id);
             failures.push({ recordId, rowLabel, error: detail });
             emitActivity({ event: 'error', phase: 'enrichment', step: id, row: rowLabel, detail });
@@ -826,7 +834,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             }
           } catch (error) {
             if (isBudgetExceededError(error)) throw error;
-            const detail = String(error?.message || error);
+            const detail = formatErrorMessage(error);
             markStepFailure(item.recordId, result.id);
             summary.failed += 1;
             summary.errors.push({ step: result.id, record_id: item.recordId, error: detail });
