@@ -84,7 +84,10 @@ const displayDate = (value: unknown) => {
   return Number.isNaN(date.getTime()) ? raw : date.toLocaleString();
 };
 
-const latestEventTime = (events: RecordDetailStep['events']) => events.map((event) => event.occurred_at).filter(Boolean).sort().at(-1) || '';
+const latestEventTime = (events: RecordDetailStep['events']) => {
+  const safeEvents = Array.isArray(events) ? events : [];
+  return safeEvents.map((event) => event.occurred_at).filter(Boolean).sort().at(-1) || '';
+};
 const stepTime = (step: RecordDetailStep) => step.cost?.occurred_at || latestEventTime(step.events);
 
 const formatCost = (value: unknown) => {
@@ -592,10 +595,12 @@ const criterionPoints = (criterion: ScoreCriterion) => (Number.isFinite(Number(c
 
 const CriteriaBreakdown = ({ detail }: { detail: RecordDetail }) => {
   const score = detail.score;
-  const points = score.criteria.map(criterionPoints);
-  const hasScoredCriteria = score.criteria.some((criterion) => criterion.verdict !== null && criterion.verdict !== undefined);
+  const criteria = Array.isArray(score?.criteria) ? score.criteria : [];
+  const points = criteria.map(criterionPoints);
+  const hasScoredCriteria = criteria.some((criterion) => criterion.verdict !== null && criterion.verdict !== undefined);
   const sum = points.reduce((total, point) => total + point, 0);
-  const scoreTotal = hasScoredCriteria ? sum : numberValue(score.value);
+  const scoreTotal = hasScoredCriteria ? sum : numberValue(score?.value);
+  const reasoning = score?.reasoning || '';
 
   return (
     <div className="score-card">
@@ -603,10 +608,10 @@ const CriteriaBreakdown = ({ detail }: { detail: RecordDetail }) => {
         <span>Score</span>
         <ScoreBar value={scoreTotal} />
       </div>
-      {score.reasoning ? <p>{score.reasoning}</p> : <p className="muted">This lead has not been scored yet.</p>}
-      {score.criteria.length > 0 ? (
+      {reasoning ? <p>{reasoning}</p> : <p className="muted">This lead has not been scored yet.</p>}
+      {criteria.length > 0 ? (
         <div className="criteria-list">
-          {score.criteria.map((criterion) => {
+          {criteria.map((criterion) => {
             const notScored = criterion.verdict === null || criterion.verdict === undefined;
             return (
               <div key={criterion.id} className={`criterion ${notScored ? 'is-not-scored' : ''}`}>
@@ -623,7 +628,7 @@ const CriteriaBreakdown = ({ detail }: { detail: RecordDetail }) => {
           })}
         </div>
       ) : null}
-      {score.criteria.length > 0 ? (
+      {criteria.length > 0 ? (
         <div className="score-math">{hasScoredCriteria ? `${points.join(' + ')} = ${sum}` : 'Not scored · definition weights shown'}</div>
       ) : null}
     </div>
@@ -632,11 +637,12 @@ const CriteriaBreakdown = ({ detail }: { detail: RecordDetail }) => {
 
 const ScoreSection = ({ detail }: { detail: RecordDetail }) => {
   const droppedByFloor = String(detail.record.disqualified_gate || '') === 'score_minimum';
+  const minimum = numberValue(detail.score?.minimum);
   return (
     <section className="detail-section">
       <div className="section-title">Score</div>
       <CriteriaBreakdown detail={detail} />
-      {detail.score.minimum > 0 ? <div className="blend-line">Minimum to qualify: {detail.score.minimum}</div> : null}
+      {minimum > 0 ? <div className="blend-line">Minimum to qualify: {minimum}</div> : null}
       {droppedByFloor ? (
         <div className="override-note override-note--drop">
           <span className="override-note__label">Dropped · below minimum score</span>
@@ -765,14 +771,18 @@ const StepsTimeline = ({
   recordInProgress: boolean;
 }) => {
   const terminalStepId = droppedAt(detail.record);
-  const terminalIndex = detail.steps.findIndex((step) => step.id === terminalStepId || humanStatus(step.status) === 'failed' || humanStatus(step.status) === 'dropped');
-  const filteredSteps = detail.steps.filter((step) => statusFilter === 'all' || statusKey(step.status) === statusKey(statusFilter));
+  const steps = Array.isArray(detail.steps) ? detail.steps : [];
+  const score = detail.score;
+  const scoreValue = numberValue(score?.value);
+  const scoreReasoning = score?.reasoning || '';
+  const terminalIndex = steps.findIndex((step) => step.id === terminalStepId || humanStatus(step.status) === 'failed' || humanStatus(step.status) === 'dropped');
+  const filteredSteps = steps.filter((step) => statusFilter === 'all' || statusKey(step.status) === statusKey(statusFilter));
   const scored = !isDropped(detail.record);
 
   return (
     <div className="steps-timeline">
       {filteredSteps.map((step) => {
-        const originalIndex = detail.steps.findIndex((candidate) => candidate.id === step.id);
+        const originalIndex = steps.findIndex((candidate) => candidate.id === step.id);
         const notReached = humanStatus(step.status) === 'not reached' || (terminalIndex >= 0 && originalIndex > terminalIndex);
         const status = notReached ? 'not reached' : step.status;
         const isInProgress = recordInProgress && step.id === activeStep && activeStep !== '';
@@ -794,7 +804,7 @@ const StepsTimeline = ({
               </div>
               <StatusChip status="ok" />
             </div>
-            <p>Score {Number(detail.score.value || 0).toFixed(0)}{detail.score.reasoning ? ` · ${detail.score.reasoning}` : ''}</p>
+            <p>Score {scoreValue.toFixed(0)}{scoreReasoning ? ` · ${scoreReasoning}` : ''}</p>
           </article>
         </div>
       ) : null}
@@ -846,6 +856,10 @@ const DetailPanel = ({
   }, [onClose]);
 
   const record = detail?.record;
+  const score = detail?.score;
+  const scoreValue = numberValue(score?.value);
+  const scoreMinimum = numberValue(score?.minimum);
+  const overrides = Array.isArray(detail?.overrides) ? detail.overrides : [];
 
   return (
     <div className={`drawer-root ${rowIdValue ? 'is-open' : ''}`} aria-hidden={!rowIdValue}>
@@ -866,12 +880,12 @@ const DetailPanel = ({
                 </div>
               </div>
               <div className="hero-score">
-                <span>{Number(detail.score.value || 0).toFixed(0)}</span>
-                <small>Score{detail.score.minimum > 0 ? ` · min ${detail.score.minimum}` : ''}</small>
+                <span>{scoreValue.toFixed(0)}</span>
+                <small>Score{scoreMinimum > 0 ? ` · min ${scoreMinimum}` : ''}</small>
               </div>
             </header>
             <ScoreSection detail={detail} />
-            <OverridesSection overrides={detail.overrides || []} />
+            <OverridesSection overrides={overrides} />
             <section className="detail-section">
               <div className="section-title">Steps</div>
               <div className="status-filters">
