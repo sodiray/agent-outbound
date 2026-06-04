@@ -8,7 +8,9 @@ import {
   deleteRecord,
   deleteRecordsBatch,
   deleteRecordsKeepTop,
+  getRecordById,
   inPlayWhere,
+  listActiveOverrides,
   logComplianceEvent,
   openGlobalSuppressionDb,
   openListDb,
@@ -857,6 +859,9 @@ const renderPipelineReport = (report: any) => {
       return `${entry.record_id || '(unknown)'} @ ${entry.step_id || '(unknown)'}${attempts}: ${entry.error || ''}`;
     })
     : ['(none)'];
+  const overrideLines = Array.isArray(report.overrides) && report.overrides.length > 0
+    ? report.overrides.map((entry: any) => `${String(entry.kind || '').toUpperCase()} ${entry.scope} · ${entry.business_name} (${entry.row_id}): ${entry.reason}`)
+    : ['(none)'];
   return [
     'RUN OVERVIEW',
     `status: ${report.overview.status}`,
@@ -880,6 +885,9 @@ const renderPipelineReport = (report: any) => {
     '',
     'ERRORED RECORDS',
     ...erroredLines,
+    '',
+    'OVERRIDES (active)',
+    ...overrideLines,
     '',
     'TOTALS',
     `llm_calls: ${report.totals.llm_calls}`,
@@ -989,8 +997,19 @@ export const pipelineReportCommand = ({ list, run = 'latest' }) => {
       usd_cost: Number(costEvents.reduce((sum: number, cost: any) => sum + Number(cost.usd_cost || 0), 0).toFixed(6)),
       wall_clock: durationText(runEndMs - runStartMs),
     };
+    const activeOverrides = listActiveOverrides({ db }).map((row: any) => {
+      const record = getRecordById({ db, id: String(row.record_id) });
+      return {
+        kind: String(row.kind || ''),
+        scope: String(row.step_id || '').trim() ? `gate:${row.step_id}` : (String(row.kind) === 'keep' ? 'all_gates' : 'manual'),
+        row_id: String(row.record_id || ''),
+        business_name: record ? String(record.business_name || record.name || '') : '(deleted record)',
+        reason: String(row.reason || ''),
+      };
+    });
     const report = {
       run_id: String(runRow.run_id || ''),
+      overrides: activeOverrides,
       overview: {
         status: String(runRow.status || ''),
         started_at: startedAt,
@@ -1816,6 +1835,14 @@ export {
   snapshotListCommand,
   snapshotRestoreCommand,
 } from './safety.js';
+
+export {
+  overrideKeepCommand,
+  overrideDropCommand,
+  overrideClearCommand,
+  overrideListCommand,
+  overrideShowCommand,
+} from './overrides.js';
 
 export {
   draftsApproveCommand,

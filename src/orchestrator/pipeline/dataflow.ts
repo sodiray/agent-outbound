@@ -10,7 +10,7 @@ import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
-import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb } from '../runtime/db.js';
+import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileOverrides } from '../runtime/db.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
 import { toolSpecNeedsMcp } from '../runtime/tools.js';
@@ -285,19 +285,24 @@ const enrichWork = ({ db, step, stepId, record, force }: { db: any; step: any; s
   countEnrichWorkForStep({ db, step, stepId, rows: [record], force })
 );
 
+type KeepDirective = { keepAll: boolean; keepSteps: Set<string> };
+
 const initializeResolved = ({
   db,
   rows,
   steps,
   force,
   reapply,
+  overridesByRecord = new Map<string, KeepDirective>(),
 }: {
   db: any;
   rows: DataflowRecord[];
   steps: DataflowStep[];
   force: boolean;
   reapply: boolean;
+  overridesByRecord?: Map<string, KeepDirective>;
 }) => {
+  const dropGateIds = steps.filter((entry) => entry.dropGate).map((entry) => entry.id);
   const passed = readPassedPipelineEvents({ db, recordIds: rows.map((row) => getRecordRowId(row)) });
   return new Map(rows.map((row) => {
     const recordId = getRecordRowId(row);
@@ -307,6 +312,13 @@ const initializeResolved = ({
       if (step.kind !== 'filter') return true;
       return !reapply;
     }));
+    // Force-resolve gates the human has chosen to keep this record past, even under
+    // --reapply (which otherwise re-evaluates passed filters). The gate never runs.
+    const keep = overridesByRecord.get(recordId);
+    if (keep) {
+      const kept = keep.keepAll ? dropGateIds : dropGateIds.filter((id) => keep.keepSteps.has(id));
+      kept.forEach((id) => initial.add(id));
+    }
     steps
       .filter((entry) => entry.kind === 'enrich' && !initial.has(entry.id))
       .forEach((entry) => {
@@ -373,8 +385,12 @@ export const runPipelineDataflow = async ({
   const db = openListDb({ listDir, readonly: dryRun });
   try {
     const steps = buildSteps({ db, steps: rawSteps });
+    // Honor human decision overrides before selecting the in-play set: drops are
+    // re-disqualified (excluded), keeps are un-disqualified (re-included).
+    if (!dryRun) reconcileOverrides({ db });
     const rows = readInPlayRows({ db, where, limit });
     if (dryRun) return simulatePipeline({ db, steps: rawSteps, baseRows: rows, force, reapply });
+    const overridesByRecord = overridesByRecordMap({ db });
 
     const largestBatch = largestBatchSize(steps);
     const globalConcurrency = Math.max(1, Math.floor(Number(concurrency || Math.max(10, largestBatch))));
@@ -395,7 +411,7 @@ export const runPipelineDataflow = async ({
       skipped_passed: 0,
       errors: unsupportedStepErrors(steps) as any[],
     };
-    const resolvedByRecord = initializeResolved({ db, rows, steps, force, reapply });
+    const resolvedByRecord = initializeResolved({ db, rows, steps, force, reapply, overridesByRecord });
     summary.skipped_passed = rows.reduce((total, row) => total + steps.filter((step) => (
       step.kind === 'filter'
       && resolvedByRecord.get(getRecordRowId(row))?.has(step.id)
@@ -494,7 +510,14 @@ export const runPipelineDataflow = async ({
           return { record: refreshRecord({ db, record: recordState.record }), resolved: false, errored: true };
         }
 
-        const reason = outcome.passed ? '' : (String(outcome.reason || '').trim() || 'failed');
+        // A human "keep" override on a failing drop gate converts the verdict to a
+        // pass (audited), so the record is never dropped here.
+        const keep = overridesByRecord.get(recordId);
+        const keptHere = step.dropGate && !outcome.passed && Boolean(keep && (keep.keepAll || keep.keepSteps.has(step.id)));
+        const effectivePassed = outcome.passed || keptHere;
+        const reason = effectivePassed
+          ? (keptHere ? `override: kept (auto-verdict was: ${String(outcome.reason || '').trim() || 'failed'})` : '')
+          : (String(outcome.reason || '').trim() || 'failed');
         insertPipelineEvent({
           db,
           event: {
@@ -502,12 +525,12 @@ export const runPipelineDataflow = async ({
             record_id: recordId,
             step_id: step.id,
             kind: step.kind,
-            passed: outcome.passed,
+            passed: effectivePassed,
             reason,
             occurred_at: now,
           },
         });
-        const action = outcome.passed
+        const action = effectivePassed
           ? ''
           : writeFilterFailure({
             db,

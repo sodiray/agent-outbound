@@ -30,6 +30,11 @@ import {
   exportCommand,
   pipelineCommand,
   pipelineReportCommand,
+  overrideKeepCommand,
+  overrideDropCommand,
+  overrideClearCommand,
+  overrideListCommand,
+  overrideShowCommand,
   pipelineShowCommand,
   queryCommand,
   refreshToolsCommand,
@@ -176,6 +181,11 @@ const printHelp = () => {
   process.stdout.write(`  export <list> --to FILE --select "col1,col2" [--where SQL] [--format csv|jsonl|parquet]\n`);
   process.stdout.write(`  views save <list> --name NAME --select "col1,col2" [--where SQL]\n`);
   process.stdout.write(`  record show <list> <row_id> [--include enrichment,scores,events,contacts,sequence,drafts,ai-usage]\n`);
+  process.stdout.write(`  override keep <list> <record> [--step STEP_ID | --all-gates] --reason TEXT   # bypass a gate that dropped a lead\n`);
+  process.stdout.write(`  override drop <list> <record> --reason TEXT                                 # manually disqualify a lead\n`);
+  process.stdout.write(`  override clear <list> <record> [--step STEP_ID]                             # remove human overrides on a lead\n`);
+  process.stdout.write(`  override list <list>                                                        # active keep/drop overrides\n`);
+  process.stdout.write(`  override show <list> <record>                                               # decision history for one lead\n`);
   process.stdout.write(`  pipeline show <list> [--format json|summary]\n`);
   process.stdout.write(`  pipeline report <list> [--json] [--run latest]\n`);
   process.stdout.write(`  route show <list> --date YYYY-MM-DD [--include enrichment,contacts,prior-touches]\n`);
@@ -740,6 +750,51 @@ const run = async () => {
     }
     print(viewsSaveCommand({ list, name, select, where }));
     return;
+  }
+
+  if (command === 'override') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'keep') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const allGates = hasFlag(argv, '--all-gates');
+      const step = consumeFlag(argv, '--step', '');
+      const reason = consumeFlag(argv, '--reason', '');
+      setResponseContext({ command: 'override keep', list });
+      print(overrideKeepCommand({ list, ref, step, allGates, reason }));
+      return;
+    }
+    if (sub === 'drop') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const reason = consumeFlag(argv, '--reason', '');
+      setResponseContext({ command: 'override drop', list });
+      print(overrideDropCommand({ list, ref, reason }));
+      return;
+    }
+    if (sub === 'clear') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const hasStep = argv.indexOf('--step') >= 0;
+      const step = consumeFlag(argv, '--step', '');
+      setResponseContext({ command: 'override clear', list });
+      print(overrideClearCommand({ list, ref, step: hasStep ? step : null }));
+      return;
+    }
+    if (sub === 'list') {
+      const list = String(argv.shift() || '');
+      setResponseContext({ command: 'override list', list });
+      print(overrideListCommand({ list }));
+      return;
+    }
+    if (sub === 'show') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      setResponseContext({ command: 'override show', list });
+      print(overrideShowCommand({ list, ref }));
+      return;
+    }
+    throw new Error(`Unknown override subcommand: ${sub}`);
   }
 
   if (command === 'record') {

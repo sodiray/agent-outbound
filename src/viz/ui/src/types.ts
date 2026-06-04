@@ -66,6 +66,28 @@ export type RecordsResponse = {
   records: RecordRow[];
 };
 
+export type OverrideKind = 'keep' | 'drop';
+
+export type OverrideRecord = {
+  id: string;
+  kind: OverrideKind;
+  step_id: string;
+  scope: string;
+  reason: string;
+  created_at: string;
+  created_by: string;
+  cleared_at: string;
+  active: boolean;
+};
+
+export type StepOverride = {
+  kind: OverrideKind;
+  scope: string;
+  reason: string;
+  created_at: string;
+  created_by: string;
+};
+
 export type RecordDetailStep = {
   id: string;
   kind: string;
@@ -73,6 +95,7 @@ export type RecordDetailStep = {
   status: StepStatus;
   tool: { server: string | null; tools: string[] };
   reasoning: string;
+  override?: StepOverride | null;
   condition_summary?: string;
   outputs: Record<string, RecordValue>;
   events: Array<{ passed?: boolean; reason?: string; occurred_at?: string }>;
@@ -108,7 +131,8 @@ export type RecordDetail = {
     };
     events: Array<{ axis: string; score: number; reasoning: string; computed_at: string }>;
   };
-  timeline: Array<{ kind: string; label: string; detail: string; at: string }>;
+  timeline: Array<{ kind: string; label: string; detail: string; at: string; cleared?: boolean }>;
+  overrides: OverrideRecord[];
 };
 
 export type SortDir = 'asc' | 'desc';

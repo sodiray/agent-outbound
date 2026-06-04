@@ -292,6 +292,9 @@ const PrioritySchema = z.object({
     fit: z.coerce.number().min(0).max(1).default(0.6),
     trigger: z.coerce.number().min(0).max(1).default(0.4),
   }).partial().default({}),
+  // Leads whose priority score falls below this threshold are dropped at scoring time
+  // (gate "score_minimum"). 0 / unset disables the floor.
+  minimum: z.coerce.number().min(0).max(100).default(0),
 }).partial().default({});
 
 const SuppressionSchema = z.object({

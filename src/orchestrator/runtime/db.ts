@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, copyFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -240,6 +241,20 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_errored_events_run ON errored_events(run_id, occurred_at DESC);
   CREATE INDEX IF NOT EXISTS idx_errored_events_step ON errored_events(step_id, occurred_at DESC);
+
+  CREATE TABLE IF NOT EXISTS overrides (
+    id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    step_id TEXT DEFAULT '',
+    reason TEXT NOT NULL,
+    created_by TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    cleared_at TEXT DEFAULT '',
+    cleared_by TEXT DEFAULT '',
+    FOREIGN KEY(record_id) REFERENCES records(_row_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_overrides_record ON overrides(record_id, cleared_at);
 
   CREATE TABLE IF NOT EXISTS run_state (
     run_id TEXT PRIMARY KEY,
@@ -1217,6 +1232,119 @@ export const listRecords = ({ db, whereSql = '1=1', params = [], limit = 1000, o
   db.prepare(`SELECT * FROM records WHERE ${whereSql} ORDER BY ${orderBy} LIMIT ?`).all(...params, Number(limit));
 
 export const getRecordById = ({ db, id }) => db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ?').get(id, id);
+
+// Resolve a human-typed reference (id or business name) to exactly one record.
+// Match order: exact _row_id/id, then exact business_name (case-insensitive), then
+// business_name substring. Ambiguous matches throw with the candidate names so the
+// caller can disambiguate; no match throws NOT_FOUND-style.
+export const resolveRecordRef = ({ db, ref }) => {
+  const needle = String(ref || '').trim();
+  if (!needle) throw new Error('A record reference (id or business name) is required.');
+  const exact = getRecordById({ db, id: needle });
+  if (exact) return exact;
+  const byNameExact = db.prepare('SELECT * FROM records WHERE LOWER(business_name) = LOWER(?)').all(needle);
+  if (byNameExact.length === 1) return byNameExact[0];
+  if (byNameExact.length > 1) {
+    throw new Error(`Ambiguous record "${needle}" — ${byNameExact.length} exact name matches. Use the row id. Candidates: ${byNameExact.map((r) => `${r.business_name} (${r._row_id})`).join('; ')}`);
+  }
+  const byNameLike = db.prepare("SELECT * FROM records WHERE business_name LIKE '%' || ? || '%' COLLATE NOCASE").all(needle);
+  if (byNameLike.length === 1) return byNameLike[0];
+  if (byNameLike.length > 1) {
+    throw new Error(`Ambiguous record "${needle}" — ${byNameLike.length} name matches. Use the row id. Candidates: ${byNameLike.slice(0, 12).map((r) => `${r.business_name} (${r._row_id})`).join('; ')}`);
+  }
+  throw new Error(`No record found matching "${needle}".`);
+};
+
+// --- Decision overrides -----------------------------------------------------
+// Overrides are first-class human directives that supersede the pipeline's
+// automated keep/drop verdict for a record. They are the source of truth for
+// human intent; record state is reconciled to honor them on every run.
+
+export const OVERRIDE_GATE = '__override__';
+
+export const insertOverride = ({ db, recordId, kind, stepId = '', reason, createdBy = '' }) => {
+  const id = `ovr_${randomUUID().slice(0, 12)}`;
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO overrides (id, record_id, kind, step_id, reason, created_by, created_at, cleared_at, cleared_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, '', '')
+  `).run(id, String(recordId), String(kind), String(stepId || ''), String(reason || ''), String(createdBy || ''), now);
+  return { id, record_id: String(recordId), kind: String(kind), step_id: String(stepId || ''), reason: String(reason || ''), created_at: now };
+};
+
+export const listOverridesForRecord = ({ db, recordId, includeCleared = false }) => {
+  const sql = includeCleared
+    ? 'SELECT * FROM overrides WHERE record_id = ? ORDER BY created_at DESC'
+    : "SELECT * FROM overrides WHERE record_id = ? AND (cleared_at IS NULL OR cleared_at = '') ORDER BY created_at DESC";
+  return db.prepare(sql).all(String(recordId));
+};
+
+export const listActiveOverrides = ({ db }) =>
+  db.prepare("SELECT * FROM overrides WHERE cleared_at IS NULL OR cleared_at = '' ORDER BY created_at DESC").all();
+
+export const clearOverrides = ({ db, recordId, stepId = null, clearedBy = '' }) => {
+  const now = nowIso();
+  const active = listOverridesForRecord({ db, recordId });
+  const matched = active.filter((o) => stepId === null || String(o.step_id || '') === String(stepId || ''));
+  const update = db.prepare("UPDATE overrides SET cleared_at = ?, cleared_by = ? WHERE id = ?");
+  matched.forEach((o) => update.run(now, String(clearedBy || ''), o.id));
+  return matched;
+};
+
+// Build per-record keep directives for the dataflow scheduler.
+export const overridesByRecordMap = ({ db }) => {
+  const rows = listActiveOverrides({ db });
+  return rows.reduce((map, row) => {
+    if (String(row.kind) !== 'keep') return map;
+    const recordId = String(row.record_id);
+    const existing = map.get(recordId) || { keepAll: false, keepSteps: new Set() };
+    const stepId = String(row.step_id || '').trim();
+    const next = stepId
+      ? { keepAll: existing.keepAll, keepSteps: new Set([...existing.keepSteps, stepId]) }
+      : { keepAll: true, keepSteps: existing.keepSteps };
+    map.set(recordId, next);
+    return map;
+  }, new Map());
+};
+
+// Reconcile record state to honor every active override. Idempotent; safe to run
+// at the start of every pipeline run and at override-create time. This is what
+// makes overrides survive --reapply and full resets.
+export const reconcileOverrides = ({ db }) => {
+  const rows = listActiveOverrides({ db });
+  const now = nowIso();
+  const summary = { drops_applied: 0, keeps_restored: 0 };
+  rows.forEach((row) => {
+    const record = getRecordById({ db, id: String(row.record_id) });
+    if (!record) return;
+    if (String(row.kind) === 'drop') {
+      const alreadyDropped = String(record.disqualified_at || '').trim() !== '';
+      if (alreadyDropped && String(record.disqualified_gate || '') === OVERRIDE_GATE) return;
+      db.prepare(`
+        UPDATE records SET disqualified_at = ?, disqualified_gate = ?, disqualify_reason = ?,
+          needs_review = 0, review_reason = '', review_flagged_at = '', updated_at = ?
+        WHERE _row_id = ?
+      `).run(now, OVERRIDE_GATE, `override: ${String(row.reason || '')}`, now, String(record._row_id));
+      summary.drops_applied += 1;
+      return;
+    }
+    if (String(row.kind) === 'keep') {
+      const disqualifiedBy = String(record.disqualified_gate || '');
+      const stepId = String(row.step_id || '').trim();
+      const coversGate = stepId === '' || disqualifiedBy === stepId || disqualifiedBy === OVERRIDE_GATE;
+      const isDisqualified = String(record.disqualified_at || '').trim() !== '';
+      if (isDisqualified && coversGate) {
+        db.prepare(`
+          UPDATE records SET disqualified_at = '', disqualified_gate = '', disqualify_reason = '',
+            needs_review = 0, review_reason = '', review_flagged_at = '', updated_at = ?
+          WHERE _row_id = ?
+        `).run(now, String(record._row_id));
+        summary.keeps_restored += 1;
+      }
+    }
+  });
+  return summary;
+};
 
 export const deleteRecord = ({ db, id }) => {
   db.prepare(`

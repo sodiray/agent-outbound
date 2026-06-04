@@ -8,6 +8,7 @@ import type {
   ColumnMeta,
   FilterMeta,
   MetaResponse,
+  OverrideRecord,
   RecordDetail,
   RecordDetailStep,
   RecordRow,
@@ -23,6 +24,7 @@ const STATUS_CLASS: Record<string, string> = {
   ok: 'is-green',
   skipped: 'is-muted',
   flagged: 'is-yellow',
+  kept: 'is-blue',
   failed: 'is-red',
   dropped: 'is-red',
   not_reached: 'is-ghost',
@@ -625,13 +627,22 @@ const CriteriaBreakdown = ({ axis, detail }: { axis: ScoreAxisName; detail: Reco
   );
 };
 
-const ScoreSection = ({ detail }: { detail: RecordDetail }) => (
-  <section className="detail-section">
-    <div className="section-title">Score</div>
-    {(['fit', 'trigger'] as const).map((axis) => <CriteriaBreakdown axis={axis} detail={detail} key={axis} />)}
-    <div className="blend-line">{detail.score.priority.computation}</div>
-  </section>
-);
+const ScoreSection = ({ detail }: { detail: RecordDetail }) => {
+  const droppedByFloor = String(detail.record.disqualified_gate || '') === 'score_minimum';
+  return (
+    <section className="detail-section">
+      <div className="section-title">Score</div>
+      {(['fit', 'trigger'] as const).map((axis) => <CriteriaBreakdown axis={axis} detail={detail} key={axis} />)}
+      <div className="blend-line">{detail.score.priority.computation}</div>
+      {droppedByFloor ? (
+        <div className="override-note override-note--drop">
+          <span className="override-note__label">Dropped · below minimum score</span>
+          <p>{String(detail.record.disqualify_reason || '')}</p>
+        </div>
+      ) : null}
+    </section>
+  );
+};
 
 const OutputValue = ({ value }: { value: unknown }) => {
   if (value === null || value === undefined || value === '') return <span className="muted">—</span>;
@@ -659,6 +670,30 @@ const metadataChips = (step: RecordDetailStep) => [
   step.cost ? formatCost(step.cost.usd_cost) : '',
   step.cost?.occurred_at ? displayDate(step.cost.occurred_at) : '',
 ].filter((value) => value && value !== 'n/a');
+
+const OverridesSection = ({ overrides }: { overrides: OverrideRecord[] }) => {
+  if (!overrides || overrides.length === 0) return null;
+  return (
+    <section className="detail-section">
+      <div className="section-title">Human overrides</div>
+      <div className="override-list">
+        {overrides.map((override) => (
+          <article key={override.id} className={`override-item ${override.kind === 'drop' ? 'override-item--drop' : 'override-item--keep'} ${override.active ? '' : 'is-cleared'}`}>
+            <div className="override-item__head">
+              <span className={`chip status-chip ${override.kind === 'drop' ? 'is-red' : 'is-blue'}`}>
+                {override.kind === 'drop' ? 'Drop' : `Keep · ${override.step_id ? labelFor(override.step_id) : 'all gates'}`}
+              </span>
+              {override.active ? null : <span className="chip is-muted">cleared</span>}
+              {override.created_at ? <span className="step-time">{displayDate(override.created_at)}</span> : null}
+            </div>
+            <p>{override.reason || 'No reason recorded.'}</p>
+            {override.created_by ? <small>{override.created_by}</small> : null}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+};
 
 const StepCard = ({ step, isTerminal, isInProgress }: { step: RecordDetailStep; isTerminal: boolean; isInProgress: boolean }) => {
   const notReached = humanStatus(step.status) === 'not reached';
@@ -691,6 +726,15 @@ const StepCard = ({ step, isTerminal, isInProgress }: { step: RecordDetailStep; 
     ) : null}
     {!notReached && isInProgress ? <span className="ao-skeleton" aria-hidden="true" /> : null}
     {!notReached && !isInProgress ? <p>{decisionText(step)}</p> : null}
+    {!notReached && step.override ? (
+      <div className="override-note">
+        <span className="override-note__label">
+          Override · kept{step.override.scope === 'all_gates' ? ' (all gates)' : ''}
+        </span>
+        <p>{step.override.reason}</p>
+        <small>{[step.override.created_by, displayDate(step.override.created_at)].filter(Boolean).join(' · ')}</small>
+      </div>
+    ) : null}
     {!notReached && !isInProgress && Object.keys(step.outputs || {}).length > 0 ? (
       <div className="outputs">
         {Object.entries(step.outputs).map(([key, value]) => (
@@ -824,6 +868,7 @@ const DetailPanel = ({
               </div>
             </header>
             <ScoreSection detail={detail} />
+            <OverridesSection overrides={detail.overrides || []} />
             <section className="detail-section">
               <div className="section-title">Steps</div>
               <div className="status-filters">

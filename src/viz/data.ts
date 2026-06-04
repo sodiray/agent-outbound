@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
-import { openListDb } from '../orchestrator/runtime/db.js';
+import { listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
 
 const NUMERIC_COLUMNS = new Set([
   'priority_rank',
@@ -588,6 +588,25 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
     const costEvents = tableExists(db, 'cost_events') && hasTableColumn(db, 'cost_events', 'record_id')
       ? normalizedRows(db.prepare("SELECT * FROM cost_events WHERE COALESCE(record_id, '') IN ('', ?) ORDER BY occurred_at DESC").all(rowId))
       : [];
+    const overrideRows = tableExists(db, 'overrides')
+      ? listOverridesForRecord({ db, recordId: rowId, includeCleared: true })
+      : [];
+    const overrides = overrideRows.map((o: any) => ({
+      id: String(o.id || ''),
+      kind: String(o.kind || ''),
+      step_id: String(o.step_id || ''),
+      scope: String(o.step_id || '').trim() ? `gate:${o.step_id}` : (String(o.kind) === 'keep' ? 'all_gates' : 'manual'),
+      reason: String(o.reason || ''),
+      created_at: String(o.created_at || ''),
+      created_by: String(o.created_by || ''),
+      cleared_at: String(o.cleared_at || ''),
+      active: String(o.cleared_at || '').trim() === '',
+    }));
+    // Map active keep overrides to the gate they cover ('*' = all gates / blanket).
+    const activeKeepByStep = new Map<string, any>();
+    overrides.filter((o) => o.active && o.kind === 'keep').forEach((o) => {
+      activeKeepByStep.set(o.step_id || '*', o);
+    });
     const recordColumns = new Set(getRecordColumns(db).map((column) => column.key));
     const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
     const orderedSteps = [{ id: 'source', kind: 'source' }, ...pipeline.map((step: any) => ({ id: String(step.id || ''), kind: String(step.kind || '') }))];
@@ -632,14 +651,19 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
               : inferredStatus;
       const latestReason = [...events].reverse().find((event) => String(event.reason || '').trim())?.reason || '';
       const outputs = Object.fromEntries(outputEntries(step).map(([field, spec]) => [field, typedOutputValue(record[field], spec)]));
+      const stepKeep = activeKeepByStep.get(id) || activeKeepByStep.get('*');
+      const override = stepKeep
+        ? { kind: 'keep', scope: stepKeep.scope, reason: stepKeep.reason, created_at: stepKeep.created_at, created_by: stepKeep.created_by }
+        : null;
       return {
         id,
         kind: String(step.kind || ''),
         description: String(step.description || step.condition || step.type || ''),
         condition_summary: conditionSummary(step),
-        status,
+        status: override ? 'kept' : status,
         tool: { server: step?.tool?.server || null, tools: Array.isArray(step?.tool?.tools) ? step.tool.tools : [] },
         reasoning: isDropGate && !latestReason ? String(record.disqualify_reason || '') : latestReason,
+        override,
         outputs,
         events,
         cost: costPayload(selectCostForStep(costEvents, id)),
@@ -686,6 +710,13 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         detail: event.reasoning || String(event.score ?? ''),
         at: event.computed_at || '',
       })),
+      ...overrides.map((o) => ({
+        kind: 'override',
+        label: o.kind === 'keep' ? `override · keep ${o.step_id || 'all gates'}` : 'override · drop',
+        detail: o.reason,
+        at: o.created_at,
+        cleared: !o.active,
+      })),
       ...costEvents.filter((event) => event.record_id === rowId || selectCostForStep(costEvents, 'score') === event || pipeline.some((step: any) => costStepMatches(String(event.step_id || ''), String(step.id || '')))).map((event) => ({
         kind: 'cost',
         label: event.step_id || '',
@@ -693,7 +724,7 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         at: event.occurred_at || '',
       })),
     ].filter(Boolean).sort((a: any, b: any) => String(a.at || '').localeCompare(String(b.at || '')));
-    return { record, steps, score, timeline };
+    return { record, steps, score, timeline, overrides };
   } finally {
     db.close();
   }

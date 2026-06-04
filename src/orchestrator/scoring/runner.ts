@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
-import { ensureRecordColumns, inPlayWhere, insertScoreEvent, openListDb, upsertRecord } from '../runtime/db.js';
+import { ensureRecordColumns, inPlayWhere, insertScoreEvent, openListDb, overridesByRecordMap, upsertRecord } from '../runtime/db.js';
+import { writeFilterFailure } from '../pipeline/shared.js';
 import { readConfig } from '../lib/config.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, tickProgress, endRun } from '../runtime/progress.js';
@@ -75,6 +76,8 @@ const normalizeCriteria = (criteria) => (Array.isArray(criteria) ? criteria : []
     weight: numericOr(criterion?.weight, 0),
   }))
   .filter((criterion) => criterion.id);
+
+const MIN_SCORE_GATE = 'score_minimum';
 
 const computePriority = ({ fitScore, triggerScore, weights }) =>
   Math.round((numericOr(fitScore) * weights.fit) + (numericOr(triggerScore) * weights.trigger));
@@ -328,8 +331,22 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
     scoreConfig?.priority?.weight?.fit,
     scoreConfig?.priority?.weight?.trigger
   );
+  const minimumScore = numericOr(scoreConfig?.priority?.minimum, 0);
 
   const db = openListDb({ listDir, readonly: false });
+  const overridesByRecord = overridesByRecordMap({ db });
+  // A lead is protected from the score floor by a blanket keep or a keep on this gate.
+  const isScoreFloorOverridden = (record) => {
+    const keep = overridesByRecord.get(getRecordRowId(record));
+    return Boolean(keep && (keep.keepAll || keep.keepSteps.has(MIN_SCORE_GATE)));
+  };
+  const belowMinimum = (priorityRank, record) => (
+    minimumScore > 0
+    && priorityRank !== null
+    && priorityRank !== undefined
+    && Number(priorityRank) < minimumScore
+    && !isScoreFloorOverridden(record)
+  );
   ensureRecordColumns({
     db,
     columns: [
@@ -355,6 +372,7 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
     records: records.length,
     scored: 0,
     skipped_unchanged: 0,
+    dropped_below_minimum: 0,
     failed: 0,
     errors: [],
   };
@@ -363,10 +381,20 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
 
   try {
     if (dryRun) {
+      // Project the floor against current scores (no LLM): how many in-play leads it would drop.
+      const projectedFloorDrops = minimumScore > 0
+        ? records.filter((record) => belowMinimum(computePriority({
+          fitScore: record.fit_score === null ? null : numericOr(record.fit_score, 0),
+          triggerScore: record.trigger_score === null ? null : numericOr(record.trigger_score, 0),
+          weights,
+        }), record)).length
+        : 0;
       emitActivity({ event: 'phase_complete', phase: 'scoring', processed: 0, skipped: records.length, failed: 0 });
       return {
         dry_run: true,
         projected_records: records.length,
+        minimum_score: minimumScore,
+        projected_below_minimum: projectedFloorDrops,
         where: whereSql,
       };
     }
@@ -390,6 +418,25 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
         });
 
         if (!rescoreFit && !rescoreTrigger) {
+          // Already scored and unchanged — still enforce the floor (cheap, no LLM)
+          // so a newly-added/raised minimum applies without a forced re-score.
+          const existingPriority = computePriority({
+            fitScore: record.fit_score === null ? null : numericOr(record.fit_score, 0),
+            triggerScore: record.trigger_score === null ? null : numericOr(record.trigger_score, 0),
+            weights,
+          });
+          if (belowMinimum(existingPriority, record)) {
+            const action = writeFilterFailure({
+              db,
+              record,
+              stepId: MIN_SCORE_GATE,
+              reason: `Priority score ${existingPriority} below minimum ${minimumScore}`,
+              drop: true,
+            });
+            if (action === 'dropped') summary.dropped_below_minimum += 1;
+            emitActivity({ event: 'row_complete', phase: 'scoring', row: record.business_name || recordId });
+            return;
+          }
           summary.skipped_unchanged += 1;
           return;
         }
@@ -501,6 +548,16 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
           });
         }
         summary.scored += 1;
+        if (belowMinimum(updated.priority_rank, updated)) {
+          const action = writeFilterFailure({
+            db,
+            record: updated,
+            stepId: MIN_SCORE_GATE,
+            reason: `Priority score ${updated.priority_rank} below minimum ${minimumScore}`,
+            drop: true,
+          });
+          if (action === 'dropped') summary.dropped_below_minimum += 1;
+        }
         emitActivity({ event: 'row_complete', phase: 'scoring', row: record.business_name || recordId });
         tickProgress(db, runId, { done: summary.scored + summary.skipped_unchanged + summary.failed, message: `Scored ${record.business_name || recordId}` });
       } catch (error) {

@@ -424,8 +424,87 @@ select:focus {
   opacity: 0.8;
 }
 
+.is-blue {
+  border-color: rgba(96, 165, 250, 0.5);
+  background: rgba(96, 165, 250, 0.12);
+  color: #93c5fd;
+}
+
 .is-ghost {
   opacity: 0.52;
+}
+
+/* Human decision overrides */
+.override-note {
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border-left: 3px solid rgba(96, 165, 250, 0.7);
+  background: rgba(96, 165, 250, 0.08);
+  border-radius: 6px;
+}
+
+.override-note__label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #93c5fd;
+}
+
+.override-note--drop {
+  border-left-color: rgba(255, 102, 102, 0.7);
+  background: rgba(255, 102, 102, 0.08);
+}
+
+.override-note--drop .override-note__label {
+  color: var(--red);
+}
+
+.override-note p {
+  margin: 4px 0 2px;
+}
+
+.override-note small,
+.override-item small {
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.override-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.override-item {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.override-item--keep {
+  border-left: 3px solid rgba(96, 165, 250, 0.7);
+}
+
+.override-item--drop {
+  border-left: 3px solid rgba(255, 102, 102, 0.6);
+}
+
+.override-item.is-cleared {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+
+.override-item__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.override-item p {
+  margin: 2px 0;
 }
 
 .table-shell {
