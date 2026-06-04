@@ -8,6 +8,7 @@ export type BatchLoaderOptions<RecordShape, Outcome> = {
   getRecordId?: (record: RecordShape) => string;
   maxBatch?: number;
   windowMs?: number;
+  quiescenceGraceMs?: number;
   inFlight?: () => number;
   onFlush?: (info: { size: number; reason: 'size' | 'time' | 'quiescence'; first_enqueued_at: string; wait_ms: number; exec_ms: number; occurred_at: string }) => void | Promise<void>;
 };
@@ -27,6 +28,12 @@ type PendingRecord<RecordShape, Outcome> = {
 const normalizeMaxBatch = (value: number | undefined) => Math.max(1, Math.floor(Number(value || 10)));
 
 const normalizeWindowMs = (value: number | undefined) => Math.max(0, Math.floor(Number(value || 0)));
+
+const normalizeQuiescenceGraceMs = (value: number | undefined, windowMs: number) => {
+  if (value !== undefined) return Math.max(0, Math.floor(Number(value || 0)));
+  if (windowMs <= 0) return 0;
+  return Math.min(windowMs, 100);
+};
 
 const isErrorValue = <Outcome>(value: BatchOutcomeValue<Outcome> | undefined): value is Error => value instanceof Error;
 
@@ -83,25 +90,37 @@ export const createBatchLoader = <RecordShape = Record<string, unknown>, Outcome
   getRecordId = (record: RecordShape) => String(getRecordRowId(record)),
   maxBatch,
   windowMs,
+  quiescenceGraceMs,
   inFlight,
   onFlush,
 }: BatchLoaderOptions<RecordShape, Outcome>): BatchLoader<RecordShape, Outcome> => {
   const state: {
     pending: Array<PendingRecord<RecordShape, Outcome>>;
     timer: ReturnType<typeof setTimeout> | undefined;
+    quiescenceTimer: ReturnType<typeof setTimeout> | undefined;
     firstEnqueuedAt: number;
+    lastPendingChangeAt: number;
   } = {
     pending: [],
     timer: undefined,
+    quiescenceTimer: undefined,
     firstEnqueuedAt: 0,
+    lastPendingChangeAt: 0,
   };
   const batchLimit = normalizeMaxBatch(maxBatch);
   const windowLimit = normalizeWindowMs(windowMs);
+  const quiescenceGraceLimit = normalizeQuiescenceGraceMs(quiescenceGraceMs, windowLimit);
 
   const clearTimer = () => {
     if (!state.timer) return;
     clearTimeout(state.timer);
     state.timer = undefined;
+  };
+
+  const clearQuiescenceTimer = () => {
+    if (!state.quiescenceTimer) return;
+    clearTimeout(state.quiescenceTimer);
+    state.quiescenceTimer = undefined;
   };
 
   const notifyFlush = async ({ size, reason, firstEnqueuedAt, waitMs, execMs }: { size: number; reason: 'size' | 'time' | 'quiescence'; firstEnqueuedAt: number; waitMs: number; execMs: number }) => {
@@ -124,7 +143,9 @@ export const createBatchLoader = <RecordShape = Record<string, unknown>, Outcome
     const firstEnqueuedAt = state.firstEnqueuedAt || Date.now();
     state.pending = [];
     state.firstEnqueuedAt = 0;
+    state.lastPendingChangeAt = 0;
     clearTimer();
+    clearQuiescenceTimer();
     const execStartedAt = Date.now();
     const waitMs = execStartedAt - firstEnqueuedAt;
 
@@ -153,22 +174,33 @@ export const createBatchLoader = <RecordShape = Record<string, unknown>, Outcome
     return count > 0 && state.pending.length >= count;
   };
 
+  const armQuiescenceTimer = () => {
+    clearQuiescenceTimer();
+    state.quiescenceTimer = setTimeout(() => {
+      state.quiescenceTimer = undefined;
+      const stableForMs = Date.now() - state.lastPendingChangeAt;
+      if (stableForMs >= quiescenceGraceLimit && shouldFlushForQuiescence()) {
+        flushSoon('quiescence');
+      }
+    }, quiescenceGraceLimit);
+  };
+
   const scheduleFlush = () => {
     if (state.pending.length >= batchLimit) {
       flushSoon('size');
       return;
     }
 
-    if (shouldFlushForQuiescence()) {
-      flushSoon('quiescence');
-      return;
-    }
-
     armTimer();
+
+    if (shouldFlushForQuiescence()) {
+      armQuiescenceTimer();
+    }
   };
 
   const load = (record: RecordShape) => new Promise<Outcome>((resolve, reject) => {
     if (state.pending.length === 0) state.firstEnqueuedAt = Date.now();
+    state.lastPendingChangeAt = Date.now();
     state.pending = [...state.pending, { record, resolve, reject }];
     scheduleFlush();
   });

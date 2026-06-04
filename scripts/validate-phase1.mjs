@@ -35,6 +35,40 @@ const testCoalescing = async () => {
   return { invocations: invocations.length, rows: invocations[0].length };
 };
 
+const testStaggeredCoalescing = async () => {
+  const invocations = [];
+  const active = { count: 0 };
+  const loader = createBatchLoader({
+    maxBatch: 10,
+    windowMs: 80,
+    quiescenceGraceMs: 40,
+    inFlight: () => active.count,
+    executor: async (rows) => {
+      invocations.push(rows.map((item) => item._row_id));
+      return makeResultMap(rows);
+    },
+    fallback: async (record) => ok(record._row_id),
+  });
+  const enqueue = async (id, delayMs) => {
+    await sleep(delayMs);
+    active.count += 1;
+    return loader.load(row(id)).finally(() => {
+      active.count -= 1;
+    });
+  };
+  const results = await withTimeout(Promise.all([
+    enqueue('a', 0),
+    enqueue('b', 0),
+    enqueue('c', 5),
+    enqueue('d', 10),
+    enqueue('e', 15),
+  ]), 160, 'staggeredCoalescing');
+  assert.equal(invocations.length, 1);
+  assert.deepEqual(invocations[0], ['a', 'b', 'c', 'd', 'e']);
+  assert.deepEqual(results.map((item) => item.reason), ['ok:a', 'ok:b', 'ok:c', 'ok:d', 'ok:e']);
+  return { invocations: invocations.length, rows: invocations[0].length };
+};
+
 const testMaxBatch = async () => {
   const invocations = [];
   const startedAt = performance.now();
@@ -78,6 +112,26 @@ const testWindowNotDebounce = async () => {
   return { invocations: invocations.length, elapsedMs: Math.round(invocations[0].elapsedMs) };
 };
 
+const testLoneWindowLiveness = async () => {
+  const invocations = [];
+  const startedAt = performance.now();
+  const loader = createBatchLoader({
+    maxBatch: 10,
+    windowMs: 45,
+    executor: async (rows) => {
+      invocations.push(rows.map((item) => item._row_id));
+      return makeResultMap(rows);
+    },
+    fallback: async (record) => ok(record._row_id),
+  });
+  await withTimeout(loader.load(row('solo')), 120, 'loneWindow');
+  const elapsedMs = performance.now() - startedAt;
+  assert.equal(invocations.length, 1);
+  assert.deepEqual(invocations[0], ['solo']);
+  assert(elapsedMs < 120);
+  return { invocations: invocations.length, elapsedMs: Math.round(elapsedMs) };
+};
+
 const testPartialFallback = async () => {
   const fallbackRows = [];
   const loader = createBatchLoader({
@@ -118,6 +172,7 @@ const testQuiescence = async () => {
   const loader = createBatchLoader({
     maxBatch: 10,
     windowMs: 1000,
+    quiescenceGraceMs: 25,
     inFlight: () => 1,
     executor: async (rows) => {
       invocations.push(rows.map((item) => item._row_id));
@@ -125,18 +180,20 @@ const testQuiescence = async () => {
     },
     fallback: async (record) => ok(record._row_id),
   });
-  await withTimeout(loader.load(row('a')), 80, 'quiescence');
+  await withTimeout(loader.load(row('a')), 90, 'quiescence');
   const elapsedMs = performance.now() - startedAt;
   assert.equal(invocations.length, 1);
   assert.deepEqual(invocations[0], ['a']);
-  assert(elapsedMs < 80);
+  assert(elapsedMs < 90);
   return { invocations: invocations.length, elapsedMs: Math.round(elapsedMs) };
 };
 
 const summary = {
   coalescing: await testCoalescing(),
+  staggeredCoalescing: await testStaggeredCoalescing(),
   maxBatch: await testMaxBatch(),
   windowNotDebounce: await testWindowNotDebounce(),
+  loneWindowLiveness: await testLoneWindowLiveness(),
   partialFallback: await testPartialFallback(),
   perRecordRejectIsolation: await testPerRecordRejectIsolation(),
   quiescence: await testQuiescence(),

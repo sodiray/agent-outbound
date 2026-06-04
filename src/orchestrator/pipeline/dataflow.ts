@@ -79,6 +79,12 @@ const stepTier = (step: any) => {
 
 const stepBatchSize = (step: any) => Math.max(1, Math.floor(Number(step?.batch_size || 10)));
 
+const stepBatchWindowMs = (step: any) => {
+  const configured = Number(step?.batch_window_ms ?? step?.window_ms);
+  if (Number.isFinite(configured) && configured >= 0) return Math.floor(configured);
+  return stepTier(step) === 0 ? 0 : 150;
+};
+
 const largestBatchSize = (steps: DataflowStep[]) => Math.max(1, ...steps.map((entry) => stepBatchSize(entry.step)));
 
 const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] => steps.map((step, index) => {
@@ -407,7 +413,7 @@ export const runPipelineDataflow = async ({
       if (existing) return existing;
       const loader = createBatchLoader<DataflowRecord, StepExecutionOutcome>({
         maxBatch: stepBatchSize(step.step),
-        windowMs: 25,
+        windowMs: stepBatchWindowMs(step.step),
         inFlight,
         executor: async (batchRows) => executeStepBatch(await contextFor(step), step.step, step.id, batchRows),
         fallback: async (_record, cause) => ({ passed: false, errored: true, reason: formatErrorMessage(cause, 'batch_failed') }),
