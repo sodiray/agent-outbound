@@ -54,13 +54,9 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
     const kind = String(step?.kind || '');
     addExplicitRef(refs, `pipeline[${index}].model`, step?.model, kind === 'filter' ? 'evaluation' : 'research');
   }
-  addExplicitRef(refs, 'score.fit.model', config?.score?.fit?.model, 'evaluation');
-  addExplicitRef(refs, 'score.trigger.model', config?.score?.trigger?.model, 'evaluation');
-  for (const [index, criterion] of asArray(config?.score?.fit?.criteria).entries()) {
-    addExplicitRef(refs, `score.fit.criteria[${index}].config.model`, criterion?.config?.model, 'evaluation');
-  }
-  for (const [index, criterion] of asArray(config?.score?.trigger?.criteria).entries()) {
-    addExplicitRef(refs, `score.trigger.criteria[${index}].config.model`, criterion?.config?.model, 'evaluation');
+  addExplicitRef(refs, 'score.model', config?.score?.model, 'evaluation');
+  for (const [index, criterion] of asArray(config?.score?.criteria).entries()) {
+    addExplicitRef(refs, `score.criteria[${index}].config.model`, criterion?.config?.model, 'evaluation');
   }
   for (const [sequenceName, sequence] of Object.entries(config?.sequences || {})) {
     addExplicitRef(refs, `sequences.${sequenceName}.reply_check.model`, (sequence as any)?.reply_check?.model, 'evaluation');
@@ -90,13 +86,9 @@ const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source'
     return refs;
   }
   if (phase === 'score') {
-    addResolvedRef(refs, 'score.fit', config?.score?.fit?.model, 'evaluation', aiConfig);
-    addResolvedRef(refs, 'score.trigger', config?.score?.trigger?.model, 'evaluation', aiConfig);
-    for (const [index, criterion] of asArray(config?.score?.fit?.criteria).entries()) {
-      addResolvedRef(refs, `score.fit.criteria[${index}]`, criterion?.config?.model, 'evaluation', aiConfig);
-    }
-    for (const [index, criterion] of asArray(config?.score?.trigger?.criteria).entries()) {
-      addResolvedRef(refs, `score.trigger.criteria[${index}]`, criterion?.config?.model, 'evaluation', aiConfig);
+    addResolvedRef(refs, 'score', config?.score?.model, 'evaluation', aiConfig);
+    for (const [index, criterion] of asArray(config?.score?.criteria).entries()) {
+      addResolvedRef(refs, `score.criteria[${index}]`, criterion?.config?.model, 'evaluation', aiConfig);
     }
     return refs;
   }

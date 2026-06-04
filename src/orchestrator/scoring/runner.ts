@@ -47,14 +47,6 @@ const numericOr = (value, fallback = 0) => {
   return Number.isFinite(num) ? num : fallback;
 };
 
-const normalizeWeights = (fitWeight, triggerWeight) => {
-  const fit = Math.max(0, numericOr(fitWeight, 0.6));
-  const trigger = Math.max(0, numericOr(triggerWeight, 0.4));
-  const total = fit + trigger;
-  if (total <= 0) return { fit: 0.6, trigger: 0.4 };
-  return { fit: fit / total, trigger: trigger / total };
-};
-
 const normalizeCriterionWeights = (criteria) => {
   const nonnegative = criteria.map((criterion) => Math.max(0, numericOr(criterion.weight, 0)));
   const total = nonnegative.reduce((sum, weight) => sum + weight, 0);
@@ -79,9 +71,6 @@ const normalizeCriteria = (criteria) => (Array.isArray(criteria) ? criteria : []
 
 const MIN_SCORE_GATE = 'score_minimum';
 
-const computePriority = ({ fitScore, triggerScore, weights }) =>
-  Math.round((numericOr(fitScore) * weights.fit) + (numericOr(triggerScore) * weights.trigger));
-
 const scoringSnapshot = (record) => {
   const { extra_json, ...rest } = record || {};
   const extra = parseExtra(extra_json);
@@ -96,6 +85,10 @@ const scoringSnapshot = (record) => {
     'trigger_updated_at',
     'fit_score_updated_at',
     'trigger_score_updated_at',
+    'score_reasoning',
+    'score_breakdown',
+    'score_updated_at',
+    'score_scoring_error',
     '_updated_at',
     'updated_at',
   ]);
@@ -321,17 +314,10 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
   assertPhaseModelReferences({ config, phase: 'score' });
 
   const scoreConfig = config?.score || {};
-  const fitDescription = String(scoreConfig?.fit?.description || '').trim();
-  const triggerDescription = String(scoreConfig?.trigger?.description || '').trim();
-  const fitCriteria = normalizeCriteria(scoreConfig?.fit?.criteria);
-  const triggerCriteria = normalizeCriteria(scoreConfig?.trigger?.criteria);
-  const fitModel = String(scoreConfig?.fit?.model || '');
-  const triggerModel = String(scoreConfig?.trigger?.model || '');
-  const weights = normalizeWeights(
-    scoreConfig?.priority?.weight?.fit,
-    scoreConfig?.priority?.weight?.trigger
-  );
-  const minimumScore = numericOr(scoreConfig?.priority?.minimum, 0);
+  const scoreDescription = String(scoreConfig?.description || '').trim();
+  const scoreCriteria = normalizeCriteria(scoreConfig?.criteria);
+  const scoreModel = String(scoreConfig?.model || '');
+  const minimumScore = numericOr(scoreConfig?.minimum, 0);
 
   const db = openListDb({ listDir, readonly: false });
   const overridesByRecord = overridesByRecordMap({ db });
@@ -350,14 +336,10 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
   ensureRecordColumns({
     db,
     columns: [
-      { name: 'fit_reasoning', type: 'TEXT' },
-      { name: 'trigger_reasoning', type: 'TEXT' },
-      { name: 'fit_breakdown', type: 'TEXT' },
-      { name: 'trigger_breakdown', type: 'TEXT' },
-      { name: 'fit_updated_at', type: 'TEXT' },
-      { name: 'trigger_updated_at', type: 'TEXT' },
-      { name: 'fit_scoring_error', type: 'TEXT' },
-      { name: 'trigger_scoring_error', type: 'TEXT' },
+      { name: 'score_reasoning', type: 'TEXT' },
+      { name: 'score_breakdown', type: 'TEXT' },
+      { name: 'score_updated_at', type: 'TEXT' },
+      { name: 'score_scoring_error', type: 'TEXT' },
     ],
   });
   const whereSql = String(where || '1=1').trim() || '1=1';
@@ -383,11 +365,10 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
     if (dryRun) {
       // Project the floor against current scores (no LLM): how many in-play leads it would drop.
       const projectedFloorDrops = minimumScore > 0
-        ? records.filter((record) => belowMinimum(computePriority({
-          fitScore: record.fit_score === null ? null : numericOr(record.fit_score, 0),
-          triggerScore: record.trigger_score === null ? null : numericOr(record.trigger_score, 0),
-          weights,
-        }), record)).length
+        ? records.filter((record) => belowMinimum(
+          record.priority_rank === null ? null : numericOr(record.priority_rank, 0),
+          record,
+        )).length
         : 0;
       emitActivity({ event: 'phase_complete', phase: 'scoring', processed: 0, skipped: records.length, failed: 0 });
       return {
@@ -402,35 +383,24 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
     await mapWithConcurrency<any, void>(records as any[], async (record) => {
       const recordId = getRecordRowId(record);
       try {
-        const rescoreFit = Boolean(force) || shouldRescore({
+        const rescore = Boolean(force) || shouldRescore({
           db,
           record,
-          type: 'fit',
-          description: { description: fitDescription, criteria: fitCriteria },
+          type: 'score',
+          description: { description: scoreDescription, criteria: scoreCriteria },
           includeDate: false,
         });
-        const rescoreTrigger = Boolean(force) || shouldRescore({
-          db,
-          record,
-          type: 'trigger',
-          description: { description: triggerDescription, criteria: triggerCriteria },
-          includeDate: true,
-        });
 
-        if (!rescoreFit && !rescoreTrigger) {
+        if (!rescore) {
           // Already scored and unchanged — still enforce the floor (cheap, no LLM)
           // so a newly-added/raised minimum applies without a forced re-score.
-          const existingPriority = computePriority({
-            fitScore: record.fit_score === null ? null : numericOr(record.fit_score, 0),
-            triggerScore: record.trigger_score === null ? null : numericOr(record.trigger_score, 0),
-            weights,
-          });
-          if (belowMinimum(existingPriority, record)) {
+          const existingScore = record.priority_rank === null ? null : numericOr(record.priority_rank, 0);
+          if (belowMinimum(existingScore, record)) {
             const action = writeFilterFailure({
               db,
               record,
               stepId: MIN_SCORE_GATE,
-              reason: `Priority score ${existingPriority} below minimum ${minimumScore}`,
+              reason: `Score ${existingScore} below minimum ${minimumScore}`,
               drop: true,
             });
             if (action === 'dropped') summary.dropped_below_minimum += 1;
@@ -441,108 +411,50 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
           return;
         }
 
-        const fitRaw = rescoreFit
-          ? await scoreAxisCriteria({
-            db,
-            listDir,
-            record,
-            axis: 'fit',
-            description: fitDescription,
-            criteria: fitCriteria,
-            model: fitModel,
-            aiConfig: config?.ai || {},
-          }).then((value) => ({ ...value, error: '' })).catch((error) => ({
-            score: null,
-            reasoning: '',
-            breakdown: [],
-            error: String((error as any)?.message || error),
-          }))
-          : { score: record.fit_score === null ? null : numericOr(record.fit_score, 0), reasoning: String(record.fit_reasoning || ''), breakdown: parseExtra(record.fit_breakdown), error: String(record.fit_scoring_error || '') };
-        const triggerRaw = rescoreTrigger
-          ? await scoreAxisCriteria({
-            db,
-            listDir,
-            record,
-            axis: 'trigger',
-            description: triggerDescription,
-            criteria: triggerCriteria,
-            model: triggerModel,
-            aiConfig: config?.ai || {},
-          }).then((value) => ({ ...value, error: '' })).catch((error) => ({
-            score: null,
-            reasoning: '',
-            breakdown: [],
-            error: String((error as any)?.message || error),
-          }))
-          : { score: record.trigger_score === null ? null : numericOr(record.trigger_score, 0), reasoning: String(record.trigger_reasoning || ''), breakdown: parseExtra(record.trigger_breakdown), error: String(record.trigger_scoring_error || '') };
+        const scoreRaw = await scoreAxisCriteria({
+          db,
+          listDir,
+          record,
+          axis: 'score',
+          description: scoreDescription,
+          criteria: scoreCriteria,
+          model: scoreModel,
+          aiConfig: config?.ai || {},
+        }).then((value) => ({ ...value, error: '' })).catch((error) => ({
+          score: null,
+          reasoning: '',
+          breakdown: [],
+          error: String((error as any)?.message || error),
+        }));
 
-        const fit = applyOverride({
-          score: fitRaw.score,
-          reasoning: fitRaw.reasoning,
-          override: record.fit_score_override,
-          overrideReason: record.fit_score_override_reason,
-          axis: 'fit',
+        const scored = applyOverride({
+          score: scoreRaw.score,
+          reasoning: scoreRaw.reasoning,
+          override: record.score_override,
+          overrideReason: record.score_override_reason,
+          axis: 'score',
         });
-        const trigger = applyOverride({
-          score: triggerRaw.score,
-          reasoning: triggerRaw.reasoning,
-          override: record.trigger_score_override,
-          overrideReason: record.trigger_score_override_reason,
-          axis: 'trigger',
-        });
-
-        const triggerPeak = Math.max(
-          numericOr(record.trigger_score_peak, 0),
-          numericOr(trigger.score, 0)
-        );
 
         const updatedAt = new Date().toISOString();
         const updated = {
           ...record,
-          fit_score: numericOr(fit.score, 0),
-          fit_reasoning: fit.reasoning,
-          fit_breakdown: JSON.stringify(Array.isArray(fitRaw.breakdown) ? fitRaw.breakdown : []),
-          fit_scoring_error: fitRaw.error,
-          trigger_score: trigger.score === null ? null : numericOr(trigger.score, 0),
-          trigger_reasoning: trigger.reasoning,
-          trigger_breakdown: JSON.stringify(Array.isArray(triggerRaw.breakdown) ? triggerRaw.breakdown : []),
-          trigger_scoring_error: triggerRaw.error,
-          trigger_score_peak: triggerPeak,
-          fit_updated_at: updatedAt,
-          trigger_updated_at: updatedAt,
-          fit_score_updated_at: updatedAt,
-          trigger_score_updated_at: updatedAt,
-          priority_rank: computePriority({
-            fitScore: fit.score === null ? null : fit.score,
-            triggerScore: trigger.score === null ? null : trigger.score,
-            weights,
-          }),
+          priority_rank: scored.score === null ? null : numericOr(scored.score, 0),
+          score_reasoning: scored.reasoning,
+          score_breakdown: JSON.stringify(Array.isArray(scoreRaw.breakdown) ? scoreRaw.breakdown : []),
+          score_scoring_error: scoreRaw.error,
+          score_updated_at: updatedAt,
         };
-        updated.fit_score = fit.score === null ? null : numericOr(fit.score, 0);
 
         upsertRecord({ db, row: updated });
-        if (updated.fit_score !== null) {
+        if (updated.priority_rank !== null) {
           insertScoreEvent({
             db,
             event: {
               event_id: randomUUID(),
               row_id: recordId,
-              axis: 'fit',
-              score: Number(updated.fit_score || 0),
-              reasoning: String(updated.fit_reasoning || ''),
-              computed_at: updatedAt,
-            },
-          });
-        }
-        if (updated.trigger_score !== null) {
-          insertScoreEvent({
-            db,
-            event: {
-              event_id: randomUUID(),
-              row_id: recordId,
-              axis: 'trigger',
-              score: Number(updated.trigger_score || 0),
-              reasoning: String(updated.trigger_reasoning || ''),
+              axis: 'score',
+              score: Number(updated.priority_rank || 0),
+              reasoning: String(updated.score_reasoning || ''),
               computed_at: updatedAt,
             },
           });
@@ -553,7 +465,7 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
             db,
             record: updated,
             stepId: MIN_SCORE_GATE,
-            reason: `Priority score ${updated.priority_rank} below minimum ${minimumScore}`,
+            reason: `Score ${updated.priority_rank} below minimum ${minimumScore}`,
             drop: true,
           });
           if (action === 'dropped') summary.dropped_below_minimum += 1;

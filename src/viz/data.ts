@@ -21,7 +21,19 @@ const NUMERIC_COLUMNS = new Set([
   'outcome_value',
   'retry_count',
 ]);
-const NUMERIC_FILTER_COLUMNS = new Set(['priority_rank', 'fit_score', 'trigger_score', 'user_rating_count']);
+const NUMERIC_FILTER_COLUMNS = new Set(['priority_rank', 'user_rating_count']);
+
+// Single-score model: the legacy fit/trigger axes and internal score plumbing are
+// hidden from the table. priority_rank is the one visible "Score".
+const HIDDEN_SCORE_COLUMNS = new Set([
+  'fit_score', 'trigger_score', 'trigger_score_peak',
+  'fit_reasoning', 'trigger_reasoning', 'fit_breakdown', 'trigger_breakdown',
+  'fit_updated_at', 'trigger_updated_at', 'fit_score_updated_at', 'trigger_score_updated_at',
+  'fit_scoring_error', 'trigger_scoring_error',
+  'fit_score_override', 'trigger_score_override', 'fit_score_override_reason', 'trigger_score_override_reason',
+  'score_reasoning', 'score_breakdown', 'score_updated_at', 'score_scoring_error',
+  'score_override', 'score_override_reason',
+]);
 
 const BOOLEAN_COLUMNS = new Set([
   'suppressed',
@@ -243,41 +255,28 @@ const parseJsonArray = (value: any) => {
     return [];
   }
 };
-const configuredCriteria = (config: any) => ({
-  fit: Array.isArray(config?.score?.fit?.criteria) ? config.score.fit.criteria : [],
-  trigger: Array.isArray(config?.score?.trigger?.criteria) ? config.score.trigger.criteria : [],
-});
+const configuredCriteria = (config: any) => (Array.isArray(config?.score?.criteria) ? config.score.criteria : []);
 const criterionKey = (id: string) => `criterion__${id}`;
-const criterionColumns = (config: any) => {
-  const criteria = configuredCriteria(config);
-  return [...criteria.fit, ...criteria.trigger].map((criterion: any) => {
-    const id = String(criterion?.id || '');
-    return {
-      key: criterionKey(id),
-      label: labelFor(id),
-      type: 'verdict',
-      group: 'criterion',
-      default_visible: true,
-      locked: false,
-    };
-  }).filter((column) => column.key !== criterionKey(''));
-};
-const criterionIds = (config: any) => {
-  const criteria = configuredCriteria(config);
+const criterionColumns = (config: any) => configuredCriteria(config).map((criterion: any) => {
+  const id = String(criterion?.id || '');
   return {
-    fit: criteria.fit.map((criterion: any) => String(criterion?.id || '')).filter(Boolean),
-    trigger: criteria.trigger.map((criterion: any) => String(criterion?.id || '')).filter(Boolean),
+    key: criterionKey(id),
+    label: labelFor(id),
+    type: 'verdict',
+    group: 'criterion',
+    default_visible: true,
+    locked: false,
   };
-};
+}).filter((column) => column.key !== criterionKey(''));
+const criterionIds = (config: any) => configuredCriteria(config).map((criterion: any) => String(criterion?.id || '')).filter(Boolean);
 const nonEmptyValue = (value: any) => value !== null && value !== undefined && value !== '';
 const nonEmptyString = (value: any) => String(value || '').trim() !== '';
 const canonicalColumn = (realColumns: Set<string>, preferred: string, fallback: string) => realColumns.has(preferred) ? preferred : realColumns.has(fallback) ? fallback : '';
 const verdictsFromBreakdown = (rawBreakdown: any) => new Map(parseJsonArray(rawBreakdown).map((item: any) => [String(item?.id || ''), String(item?.verdict || '')]));
 const isScoredRecord = (record: any) =>
+  nonEmptyString(record.score_updated_at) ||
   nonEmptyString(record.fit_score_updated_at) ||
-  nonEmptyString(record.trigger_score_updated_at) ||
-  Number(record.priority_rank) > 0 ||
-  Number(record.fit_score) > 0;
+  Number(record.priority_rank) > 0;
 // Precedence matters: a dropped record never scores; a scored record outranks a
 // non-fatal per-step error (e.g. a stale timing_enrich error on an otherwise
 // fully scored lead). Only surface 'error' when nothing else completed.
@@ -404,11 +403,8 @@ const buildSteps = (config: any) => [
     id: 'score',
     kind: 'score',
     description: 'Score and prioritize records',
-    criteria: {
-      fit: Array.isArray(config?.score?.fit?.criteria) ? config.score.fit.criteria : [],
-      trigger: Array.isArray(config?.score?.trigger?.criteria) ? config.score.trigger.criteria : [],
-    },
-    priority_weight: config?.score?.priority?.weight || {},
+    criteria: Array.isArray(config?.score?.criteria) ? config.score.criteria : [],
+    minimum: Number(config?.score?.minimum ?? 0),
   },
 ];
 
@@ -416,7 +412,7 @@ export const buildMeta = (listDir: string) => {
   const db = openListDb({ listDir, readonly: true });
   try {
     const { config } = readConfig(listDir);
-    const recordColumns = getRecordColumns(db);
+    const recordColumns = getRecordColumns(db).filter((column) => !HIDDEN_SCORE_COLUMNS.has(column.key));
     const realColumns = new Set(recordColumns.map((column) => column.key));
     const outputs = stepOutputMap(config);
     const sourceOutputs = sourceOutputKeys(config);
@@ -428,22 +424,22 @@ export const buildMeta = (listDir: string) => {
     ].filter(Boolean));
     const realColumnMeta = recordColumns.map((column) => {
       const classified = classifyColumn({ key: column.key, dbType: column.dbType, config, outputs, sourceOutputs });
-      // Outcome, fit_score, and the business name are the three frozen/locked columns.
-      const locked = column.key === lockedNameKey || column.key === 'fit_score';
+      // The single Score (priority_rank) and the business name are the frozen/locked columns.
+      const locked = column.key === lockedNameKey || column.key === 'priority_rank';
       return {
         key: column.key,
-        label: labelFor(column.key),
+        label: column.key === 'priority_rank' ? 'Score' : labelFor(column.key),
         ...classified,
-        default_visible: locked || defaultFundamentals.has(column.key) || column.key === 'fit_score' || classified.group === 'enrich',
+        default_visible: locked || defaultFundamentals.has(column.key) || column.key === 'priority_rank' || classified.group === 'enrich',
         locked,
       };
     });
     const orderedKeys = [
       lockedNameKey,
+      realColumns.has('priority_rank') ? 'priority_rank' : '',
       canonicalColumn(realColumns, 'address', 'formattedAddress'),
       canonicalColumn(realColumns, 'website', 'websiteUri'),
       canonicalColumn(realColumns, 'phone', 'nationalPhoneNumber'),
-      realColumns.has('fit_score') ? 'fit_score' : '',
       ...realColumnMeta.filter((column: any) => column.group === 'enrich').map((column) => column.key),
     ].filter(Boolean);
     const orderedKeySet = new Set(orderedKeys);
@@ -536,15 +532,13 @@ export const queryRecords = (listDir: string, params: any = {}) => {
     const total = Number(db.prepare(`SELECT COUNT(*) AS count FROM records${whereSql}`).get(...values)?.count || 0);
     const records = normalizedRows(db.prepare(`SELECT * FROM records${whereSql} ORDER BY ${sortExpr} ${dir}, _row_id ASC LIMIT ? OFFSET ?`).all(...values, limit, offset))
       .map((record: any) => {
-        const fitVerdicts = verdictsFromBreakdown(record.fit_breakdown);
-        const triggerVerdicts = verdictsFromBreakdown(record.trigger_breakdown);
+        const verdicts = verdictsFromBreakdown(record.score_breakdown);
         return {
           ...record,
           __stage: String(record.disqualified_at || '') ? 'dropped' : 'scored',
           __dropped_at: String(record.disqualified_gate || ''),
           __outcome: derivedOutcome(record),
-          ...Object.fromEntries(criteria.fit.map((id) => [criterionKey(id), fitVerdicts.get(id) || ''])),
-          ...Object.fromEntries(criteria.trigger.map((id) => [criterionKey(id), triggerVerdicts.get(id) || ''])),
+          ...Object.fromEntries(criteria.map((id) => [criterionKey(id), verdicts.get(id) || ''])),
         };
       });
     const pipelineStepIds = (Array.isArray(config?.pipeline) ? config.pipeline : []).map((step: any) => String(step?.id || '')).filter(Boolean);
@@ -669,31 +663,14 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         cost: costPayload(selectCostForStep(costEvents, id)),
       };
     })];
-    const fitScore = Number(record.fit_score || 0);
-    const triggerScore = Number(record.trigger_score || 0);
-    const weight = config?.score?.priority?.weight || {};
-    const fitWeight = Number(weight.fit ?? 0);
-    const triggerWeight = Number(weight.trigger ?? 0);
-    const computedPriority = (fitScore * fitWeight) + (triggerScore * triggerWeight);
-    const rank = toNumberOrNull(record.priority_rank) ?? Number(computedPriority.toFixed(1));
+    const rank = toNumberOrNull(record.priority_rank) ?? 0;
+    const minimum = Number(config?.score?.minimum ?? 0);
     const score = {
-      fit: {
-        score: fitScore,
-        reasoning: record.fit_reasoning || '',
-        criteria: mergeCriteriaBreakdown(config?.score?.fit?.criteria, record.fit_breakdown),
-        updated_at: record.fit_score_updated_at || record.fit_updated_at || '',
-      },
-      trigger: {
-        score: triggerScore,
-        reasoning: record.trigger_reasoning || '',
-        criteria: mergeCriteriaBreakdown(config?.score?.trigger?.criteria, record.trigger_breakdown),
-        updated_at: record.trigger_score_updated_at || record.trigger_updated_at || '',
-      },
-      priority: {
-        rank,
-        weight: { fit: fitWeight, trigger: triggerWeight },
-        computation: `${fitScore} × ${fitWeight} + ${triggerScore} × ${triggerWeight} = ${rank.toFixed(1)}`,
-      },
+      value: rank,
+      reasoning: record.score_reasoning || record.fit_reasoning || '',
+      criteria: mergeCriteriaBreakdown(config?.score?.criteria, record.score_breakdown),
+      minimum,
+      updated_at: record.score_updated_at || record.fit_score_updated_at || '',
       events: scoreEvents,
     };
     const timeline = [

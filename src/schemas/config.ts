@@ -281,18 +281,13 @@ export const ScoringCriterionSchema = z.object({
   config: StepConfigSchema.default({}),
 }).partial().default({});
 
-const ScoreAxisSchema = z.object({
+// A single lead score (0-100). One weighted criteria list, one LLM pass.
+// Legacy fit/trigger/priority configs are normalized into this shape at load time.
+const ScoreSchema = z.object({
   description: z.string().default(''),
   model: ProviderModelSchema.optional(),
   criteria: z.array(ScoringCriterionSchema).default([]),
-}).partial().default({});
-
-const PrioritySchema = z.object({
-  weight: z.object({
-    fit: z.coerce.number().min(0).max(1).default(0.6),
-    trigger: z.coerce.number().min(0).max(1).default(0.4),
-  }).partial().default({}),
-  // Leads whose priority score falls below this threshold are dropped at scoring time
+  // Leads scoring below this threshold are dropped at scoring time
   // (gate "score_minimum"). 0 / unset disables the floor.
   minimum: z.coerce.number().min(0).max(100).default(0),
 }).partial().default({});
@@ -425,11 +420,7 @@ export const ConfigSchema = z.object({
     budget: SourceBudgetSchema.default({}),
   }).partial().default({}),
   pipeline: z.array(PipelineStepSchema).default([]),
-  score: z.object({
-    fit: ScoreAxisSchema.default({}),
-    trigger: ScoreAxisSchema.default({}),
-    priority: PrioritySchema.default({}),
-  }).partial().default({}),
+  score: ScoreSchema,
   sequences: z.record(SequenceSchema).default({ default: { steps: [] } }),
   templates: z.record(TemplateSchema).default({}),
   ai: AiSchema.default({}),
@@ -439,8 +430,31 @@ export const ConfigSchema = z.object({
   crm: CrmSchema.optional(),
 }).partial().default({});
 
+// Fold a legacy fit/trigger/priority score block into the single-score shape so
+// existing configs keep validating and scoring after the collapse to one score.
+const coerceLegacyScore = (raw) => {
+  if (!raw || typeof raw !== 'object') return raw;
+  const score = (raw as any).score;
+  if (!score || typeof score !== 'object') return raw;
+  const hasLegacy = score.fit || score.trigger || score.priority;
+  const hasSingle = Array.isArray(score.criteria) || typeof score.description === 'string';
+  if (!hasLegacy || hasSingle) return raw;
+  const fit = score.fit && typeof score.fit === 'object' ? score.fit : {};
+  const trigger = score.trigger && typeof score.trigger === 'object' ? score.trigger : {};
+  const single = {
+    description: String(fit.description || trigger.description || '').trim(),
+    ...(fit.model ? { model: fit.model } : {}),
+    criteria: [
+      ...(Array.isArray(fit.criteria) ? fit.criteria : []),
+      ...(Array.isArray(trigger.criteria) ? trigger.criteria : []),
+    ],
+    minimum: Number(score.priority?.minimum ?? score.minimum ?? 0),
+  };
+  return { ...(raw as any), score: single };
+};
+
 export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
-  const parsed = ConfigSchema.safeParse(value || {});
+  const parsed = ConfigSchema.safeParse(coerceLegacyScore(value || {}));
   if (!parsed.success) {
     return {
       error: parsed.error.message,

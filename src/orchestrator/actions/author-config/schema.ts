@@ -297,11 +297,11 @@ export const ConfigChangeSchema = z.discriminatedUnion('op', [
 
   // Set — overwrite a top-level config field
   z.object({
-    op: z.literal('set_score_axis'),
-    axis: enumWithDefault(['fit', 'trigger'], 'fit'),
+    op: z.literal('set_score'),
     patch: objectWithDefault(z.object({
       description: nullableString(),
       model: ProviderModelSchema.optional(),
+      minimum: z.coerce.number().min(0).max(100).optional(),
     }).partial()),
   }),
   z.object({

@@ -137,10 +137,9 @@ export const applyConfigChange = (config, change) => {
     return setAtPath(next, `sequences.${sequence}`, updated);
   }
 
-  if (op === 'set_score_axis') {
-    const axis = String(change?.axis || 'fit');
-    const current = next?.score?.[axis] || {};
-    return setAtPath(next, `score.${axis}`, deepMergeConfig(current, change.patch || {}));
+  if (op === 'set_score') {
+    const current = next?.score || {};
+    return setAtPath(next, 'score', deepMergeConfig(current, change.patch || {}));
   }
 
   if (op === 'modify_search') {

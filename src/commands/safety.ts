@@ -236,10 +236,9 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
     errors.push(String((error as any)?.message || error));
   }
 
-  const fitDescription = String(config?.score?.fit?.description || '').trim();
-  const triggerDescription = String(config?.score?.trigger?.description || '').trim();
-  if (!fitDescription) errors.push('score.fit.description must be non-empty.');
-  if (!triggerDescription) errors.push('score.trigger.description must be non-empty.');
+  const scoreDescription = String(config?.score?.description || '').trim();
+  const scoreCriteria = Array.isArray(config?.score?.criteria) ? config.score.criteria : [];
+  if (!scoreDescription && scoreCriteria.length === 0) errors.push('score.description or score.criteria must be provided.');
 
   const outputOwners = new Map<string, string>();
   const enrichSteps = (Array.isArray(config?.pipeline) ? config.pipeline : []).filter((step: any) => String(step?.kind || '') === 'enrich');

@@ -12,7 +12,6 @@ import type {
   RecordDetail,
   RecordDetailStep,
   RecordRow,
-  ScoreAxisName,
   ScoreCriterion,
   SortDir,
 } from './types.js';
@@ -204,14 +203,14 @@ const VerdictChip = ({ verdict }: { verdict?: string | null }) => {
 
 const BooleanValue = ({ value }: { value: unknown }) => <span className="boolean-value">{Number(value) ? 'yes' : 'no'}</span>;
 
-const SCORE_BAR_KEYS = new Set(['fit_score', 'trigger_score', 'priority_rank']);
+const FROZEN_SCORE_KEY = 'priority_rank';
+const SCORE_BAR_KEYS = new Set([FROZEN_SCORE_KEY]);
 const isScoreBarColumn = (column: ColumnMeta) => column.group === 'score' && SCORE_BAR_KEYS.has(column.key);
 
 // A score column is "unscored" (vs. a real 0) when scoring never ran for it —
 // detected via the matching *_updated_at timestamp being empty.
 const SCORE_UPDATED_KEY: Record<string, string> = {
-  fit_score: 'fit_updated_at',
-  trigger_score: 'trigger_updated_at',
+  [FROZEN_SCORE_KEY]: 'score_updated_at',
 };
 const isUnscored = (record: RecordRow, key: string) => {
   const updatedKey = SCORE_UPDATED_KEY[key];
@@ -224,7 +223,7 @@ const isUnscored = (record: RecordRow, key: string) => {
 const stateRank = (record: RecordRow, inProgressRowIds: Set<string>) => {
   if (isDropped(record)) return 3;
   if (inProgressRowIds.has(rowId(record))) return 1;
-  if (!isUnscored(record, 'fit_score')) return 0;
+  if (!isUnscored(record, FROZEN_SCORE_KEY)) return 0;
   return 2;
 };
 const isWebsiteColumn = (column: ColumnMeta) => column.key === 'website' || column.key === 'websiteUri';
@@ -290,10 +289,10 @@ const OutcomeIcon = ({ record }: { record: RecordRow }) => {
   );
 };
 
-const FitFrozenCell = ({ record }: { record: RecordRow }) => {
+const ScoreFrozenCell = ({ record }: { record: RecordRow }) => {
   if (isDropped(record)) return <span className="fit-frozen is-empty">—</span>;
-  if (isUnscored(record, 'fit_score')) return <span className="fit-frozen is-unscored" title="Not yet scored">––</span>;
-  const score = numberValue(record.fit_score);
+  if (isUnscored(record, FROZEN_SCORE_KEY)) return <span className="fit-frozen is-unscored" title="Not yet scored">––</span>;
+  const score = numberValue(record[FROZEN_SCORE_KEY]);
   return <span className="fit-frozen">{Number.isInteger(score) ? score : score.toFixed(0)}</span>;
 };
 
@@ -531,10 +530,10 @@ const TableView = ({
   const nameColumn = visibleColumns.find((column) => column.locked && (column.key === 'business_name' || column.key === 'name')) || null;
   const nameKey = nameColumn?.key || 'business_name';
   const nameLabel = nameColumn?.label || 'Business';
-  // Frozen columns (outcome icon, fit, name) are rendered explicitly; everything
+  // Frozen columns (outcome icon, score, name) are rendered explicitly; everything
   // else — locked or not — is excluded from the horizontally scrolling set.
   const scrollColumns = visibleColumns.filter(
-    (column) => !column.locked && column.key !== 'business_name' && column.key !== 'name',
+    (column) => !column.locked && column.key !== FROZEN_SCORE_KEY && column.key !== 'business_name' && column.key !== 'name',
   );
   return (
   <div className="table-shell">
@@ -543,9 +542,9 @@ const TableView = ({
         <tr>
           <th className="col-outcome" aria-label="Outcome"><span className="col-outcome__dot" aria-hidden="true" /></th>
           <th className="col-fit">
-            <button className="th-button" type="button" onClick={() => onSort('fit_score')}>
-              Fit
-              <span>{sort === 'fit_score' ? (dir === 'asc' ? 'Up' : 'Down') : ''}</span>
+            <button className="th-button" type="button" onClick={() => onSort(FROZEN_SCORE_KEY)}>
+              Score
+              <span>{sort === FROZEN_SCORE_KEY ? (dir === 'asc' ? 'Up' : 'Down') : ''}</span>
             </button>
           </th>
           <th className="col-name">
@@ -570,7 +569,7 @@ const TableView = ({
             <td className="col-outcome">
               {inProgressRowIds.has(rowId(record)) ? <span className="ao-spinner" aria-label="Processing" role="img" /> : <OutcomeIcon record={record} />}
             </td>
-            <td className="col-fit"><FitFrozenCell record={record} /></td>
+            <td className="col-fit"><ScoreFrozenCell record={record} /></td>
             <td className="col-name">
               <span className="cell-name">{textValue(identityValue(record, ['business_name', 'name']))}</span>
             </td>
@@ -591,38 +590,42 @@ const TableView = ({
 
 const criterionPoints = (criterion: ScoreCriterion) => (Number.isFinite(Number(criterion.points)) ? Number(criterion.points) : 0);
 
-const CriteriaBreakdown = ({ axis, detail }: { axis: ScoreAxisName; detail: RecordDetail }) => {
-  const score = detail.score[axis];
+const CriteriaBreakdown = ({ detail }: { detail: RecordDetail }) => {
+  const score = detail.score;
   const points = score.criteria.map(criterionPoints);
   const hasScoredCriteria = score.criteria.some((criterion) => criterion.verdict !== null && criterion.verdict !== undefined);
   const sum = points.reduce((total, point) => total + point, 0);
-  const scoreTotal = hasScoredCriteria ? sum : numberValue(score.score);
+  const scoreTotal = hasScoredCriteria ? sum : numberValue(score.value);
 
   return (
     <div className="score-card">
       <div className="score-card__top">
-        <span>{labelFor(axis)}</span>
+        <span>Score</span>
         <ScoreBar value={scoreTotal} />
       </div>
-      {score.reasoning ? <p>{score.reasoning}</p> : <p className="muted">Axis has not been scored for this lead.</p>}
-      <div className="criteria-list">
-        {score.criteria.map((criterion) => {
-          const notScored = criterion.verdict === null || criterion.verdict === undefined;
-          return (
-            <div key={criterion.id} className={`criterion ${notScored ? 'is-not-scored' : ''}`}>
-              <div>
-                <strong>{labelFor(criterion.id)}</strong>
-                <small>{criterion.description}</small>
+      {score.reasoning ? <p>{score.reasoning}</p> : <p className="muted">This lead has not been scored yet.</p>}
+      {score.criteria.length > 0 ? (
+        <div className="criteria-list">
+          {score.criteria.map((criterion) => {
+            const notScored = criterion.verdict === null || criterion.verdict === undefined;
+            return (
+              <div key={criterion.id} className={`criterion ${notScored ? 'is-not-scored' : ''}`}>
+                <div>
+                  <strong>{labelFor(criterion.id)}</strong>
+                  <small>{criterion.description}</small>
+                </div>
+                <VerdictChip verdict={criterion.verdict} />
+                <strong>{notScored ? '0' : `+${criterionPoints(criterion)}`}</strong>
+                <span>{Math.round(numberValue(criterion.weight) * 100)}%</span>
+                <p>{notScored ? 'Not scored.' : criterion.reasoning || 'Scored without additional notes.'}</p>
               </div>
-              <VerdictChip verdict={criterion.verdict} />
-              <strong>{notScored ? '0' : `+${criterionPoints(criterion)}`}</strong>
-              <span>{Math.round(numberValue(criterion.weight) * 100)}%</span>
-              <p>{notScored ? 'Not scored.' : criterion.reasoning || 'Scored without additional notes.'}</p>
-            </div>
-          );
-        })}
-      </div>
-      <div className="score-math">{hasScoredCriteria ? `${points.join(' + ')} = ${sum}` : `Not scored · definition weights shown`}</div>
+            );
+          })}
+        </div>
+      ) : null}
+      {score.criteria.length > 0 ? (
+        <div className="score-math">{hasScoredCriteria ? `${points.join(' + ')} = ${sum}` : 'Not scored · definition weights shown'}</div>
+      ) : null}
     </div>
   );
 };
@@ -632,8 +635,8 @@ const ScoreSection = ({ detail }: { detail: RecordDetail }) => {
   return (
     <section className="detail-section">
       <div className="section-title">Score</div>
-      {(['fit', 'trigger'] as const).map((axis) => <CriteriaBreakdown axis={axis} detail={detail} key={axis} />)}
-      <div className="blend-line">{detail.score.priority.computation}</div>
+      <CriteriaBreakdown detail={detail} />
+      {detail.score.minimum > 0 ? <div className="blend-line">Minimum to qualify: {detail.score.minimum}</div> : null}
       {droppedByFloor ? (
         <div className="override-note override-note--drop">
           <span className="override-note__label">Dropped · below minimum score</span>
@@ -787,11 +790,11 @@ const StepsTimeline = ({
             <div className="step-card__head">
               <div>
                 <strong>Scored</strong>
-                <small>Fit and trigger criteria produced the priority rank.</small>
+                <small>The lead score (0-100) from the configured criteria.</small>
               </div>
               <StatusChip status="ok" />
             </div>
-            <p>{detail.score.priority.computation}</p>
+            <p>Score {Number(detail.score.value || 0).toFixed(0)}{detail.score.reasoning ? ` · ${detail.score.reasoning}` : ''}</p>
           </article>
         </div>
       ) : null}
@@ -863,8 +866,8 @@ const DetailPanel = ({
                 </div>
               </div>
               <div className="hero-score">
-                <span>{Number(detail.score.priority.rank || 0).toFixed(1)}</span>
-                <small>{detail.score.priority.computation}</small>
+                <span>{Number(detail.score.value || 0).toFixed(0)}</span>
+                <small>Score{detail.score.minimum > 0 ? ` · min ${detail.score.minimum}` : ''}</small>
               </div>
             </header>
             <ScoreSection detail={detail} />
@@ -1057,12 +1060,12 @@ export const App = () => {
     const base = showInProgress ? records.filter((record) => inProgressRowIds.has(rowId(record))) : records;
     if (sort !== 'state') return base;
     // Server can't order by lifecycle state, so sort it here. dir flips the order
-    // (default desc = kept first); ties break by fit_score, highest first.
+    // (default desc = kept first); ties break by score, highest first.
     const flip = dir === 'asc' ? -1 : 1;
     return [...base].sort((a, b) => {
       const rankDelta = stateRank(a, inProgressRowIds) - stateRank(b, inProgressRowIds);
       if (rankDelta !== 0) return rankDelta * flip;
-      return numberValue(b.fit_score) - numberValue(a.fit_score);
+      return numberValue(b[FROZEN_SCORE_KEY]) - numberValue(a[FROZEN_SCORE_KEY]);
     });
   }, [records, showInProgress, inProgressRowIds, sort, dir]);
   const runPhaseLabel = progress ? (PROGRESS_PHASE_LABELS[progress.phase] ?? labelFor(progress.phase)) : '';

@@ -109,28 +109,19 @@ export type RecordDetailStep = {
   } | null;
 };
 
-export type ScoreAxis = {
-  score: number;
+export type LeadScore = {
+  value: number;
   reasoning: string;
   criteria: ScoreCriterion[];
+  minimum: number;
   updated_at: string;
+  events: Array<{ axis: string; score: number; reasoning: string; computed_at: string }>;
 };
-
-export type ScoreAxisName = 'fit' | 'trigger';
 
 export type RecordDetail = {
   record: RecordRow;
   steps: RecordDetailStep[];
-  score: {
-    fit: ScoreAxis;
-    trigger: ScoreAxis;
-    priority: {
-      rank: number;
-      weight: { fit: number; trigger: number };
-      computation: string;
-    };
-    events: Array<{ axis: string; score: number; reasoning: string; computed_at: string }>;
-  };
+  score: LeadScore;
   timeline: Array<{ kind: string; label: string; detail: string; at: string; cleared?: boolean }>;
   overrides: OverrideRecord[];
 };

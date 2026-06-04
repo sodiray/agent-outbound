@@ -36,7 +36,7 @@ Remove (find by `id` and remove from the relevant array):
 - `remove_sequence_step` { op, sequence?: string, id: string }
 
 Set (overwrite a top-level config field):
-- `set_score_axis`         { op, axis: "fit" | "trigger", patch: { description?, model? } }
+- `set_score`             { op, patch: { description?, model?, minimum? } }  — single lead score (0-100)
 - `set_channel`            { op, channel: "email" | "mail" | "visit" | "sms" | "call", patch: {...} }
 - `set_sequence`           { op, sequence?: string, patch: {...} }
 - `set_template`           { op, template: string, patch: {...} }
@@ -48,7 +48,7 @@ Important:
 - There are NO path-based operations. Do NOT generate freeform paths. Use the typed ops above.
 - To modify an item, use the matching `modify_*` op with the item's `id`. Do NOT invent new op names.
 - `set_identity` replaces the entire array — include all desired values, not just additions.
-- Scoring is agent-driven: update via `set_score_axis` with natural-language `description` (not criteria arrays).
+- Scoring is a single lead score (0-100): update via `set_score` with a natural-language `description`. `minimum` sets a drop floor.
 - Pipeline dependencies are computed after your changes. Do NOT hand-wire `depends_on`.
 - If a pipeline step needs a rare non-data ordering constraint, use `runs_after`; data dependencies still come from the post-pass.
 - Be honest and complete about enrichment `outputs`; each produced field must be declared.
