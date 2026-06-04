@@ -71,6 +71,7 @@ export {
   mcpRemoveCommand,
   mcpTestCommand,
 } from './mcp.js';
+export { leadAddCommand } from './leads.js';
 
 const listDirsFromCwd = () => {
   const cwd = process.cwd();

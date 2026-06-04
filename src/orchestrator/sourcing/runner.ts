@@ -253,7 +253,7 @@ const valueAtPath = (row: any, path: string) => {
   ), row);
 };
 
-const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record<string, string> }) => {
+export const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record<string, string> }) => {
   const mapped = { ...row };
   for (const [targetKey, sourcePath] of Object.entries(outputMap || {})) {
     const value = valueAtPath(row, sourcePath);
@@ -278,7 +278,7 @@ const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record<string
   return mapped;
 };
 
-const extractRowsFromToolResult = (result: any) => {
+export const extractRowsFromToolResult = (result: any) => {
   if (Array.isArray(result)) return result;
   if (Array.isArray(result?.results)) {
     const rawPlaces = Array.isArray(result?.raw?.places) ? result.raw.places : [];
@@ -338,9 +338,9 @@ const executeStrategyTask = async ({
   return { rows: extractRowsFromToolResult(result), params };
 };
 
-const normalizeDedupKey = (dedupKey: string) => String(dedupKey || 'place_id').trim() || 'place_id';
+export const normalizeDedupKey = (dedupKey: string) => String(dedupKey || 'place_id').trim() || 'place_id';
 
-const dedupValueFor = (row: any, dedupKey: string) => {
+export const dedupValueFor = (row: any, dedupKey: string) => {
   const key = normalizeDedupKey(dedupKey);
   if (key === 'place_id') return String(row?.place_id || row?.placeId || row?.google_place_id || '').trim();
   return String(valueAtPath(row, key) ?? row?.[key] ?? '').trim();
@@ -369,7 +369,7 @@ export const dedupRowsByKey = ({
   return { unique, duplicates, seen };
 };
 
-const loadExistingDedupValues = ({ db, dedupKey }: { db: any; dedupKey: string }) => {
+export const loadExistingDedupValues = ({ db, dedupKey }: { db: any; dedupKey: string }) => {
   const key = normalizeDedupKey(dedupKey);
   const seen = new Set<string>();
   if (key === 'place_id') {

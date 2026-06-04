@@ -61,6 +61,7 @@ import {
   templatesShowCommand,
   templatesUpdateCommand,
   initCommand,
+  leadAddCommand,
   launchDraftCommand,
   launchSendCommand,
   listCreateCommand,
@@ -181,6 +182,7 @@ const printHelp = () => {
   process.stdout.write(`  export <list> --to FILE --select "col1,col2" [--where SQL] [--format csv|jsonl|parquet]\n`);
   process.stdout.write(`  views save <list> --name NAME --select "col1,col2" [--where SQL]\n`);
   process.stdout.write(`  record show <list> <row_id> [--include enrichment,scores,events,contacts,sequence,drafts,ai-usage]\n`);
+  process.stdout.write(`  lead add <list> --name NAME [--near LOCALITY] [--query TEXT] [--run] [--dry-run] [--max N]\n`);
   process.stdout.write(`  override keep <list> <record> [--step STEP_ID | --all-gates] --reason TEXT   # bypass a gate that dropped a lead\n`);
   process.stdout.write(`  override drop <list> <record> --reason TEXT                                 # manually disqualify a lead\n`);
   process.stdout.write(`  override clear <list> <record> [--step STEP_ID]                             # remove human overrides on a lead\n`);
@@ -851,6 +853,25 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown record subcommand: ${sub}`);
+  }
+
+  if (command === 'lead') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'add') {
+      const list = String(argv.shift() || '');
+      const name = consumeFlag(argv, '--name', '');
+      const near = consumeFlag(argv, '--near', '');
+      const query = consumeFlag(argv, '--query', '');
+      const runLead = hasFlag(argv, '--run');
+      const dryRun = hasFlag(argv, '--dry-run');
+      const max = toNumber(consumeFlag(argv, '--max', '5'), 5);
+      setResponseContext({ command: 'lead add', list });
+      print(await leadAddCommand({
+        list, name, near, query, run: runLead, dryRun, max,
+      }));
+      return;
+    }
+    throw new Error(`Unknown lead subcommand: ${sub}`);
   }
 
   if (command === 'pipeline' && String(argv[0] || '').trim() === 'show') {
