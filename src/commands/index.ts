@@ -774,6 +774,260 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
   };
 };
 
+const millis = (value: string) => new Date(String(value || '')).getTime();
+
+const durationText = (ms: number) => {
+  const total = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+};
+
+const distinctCount = (items: string[]) => new Set(items.filter(Boolean)).size;
+
+const costMatchesStep = (cost: any, stepId: string) => {
+  const value = String(cost?.step_id || '');
+  return value === stepId || value.endsWith(`:${stepId}`) || value.includes(stepId);
+};
+
+const safeAll = (db: any, sql: string, params: any[] = []) => {
+  try {
+    return db.prepare(sql).all(...params);
+  } catch {
+    return [];
+  }
+};
+
+const batchStats = (batches: any[]) => {
+  const sizes = batches.map((batch) => Number(batch?.size || 0)).filter((size) => size > 0);
+  if (sizes.length === 0) return { count: 0, min: 0, avg: 0, max: 0 };
+  return {
+    count: sizes.length,
+    min: Math.min(...sizes),
+    avg: sizes.reduce((sum, size) => sum + size, 0) / sizes.length,
+    max: Math.max(...sizes),
+  };
+};
+
+const groupedErroredRecords = (events: any[]) => [...events.reduce((groups: Map<string, any>, event: any) => {
+  const recordId = String(event.record_id || '');
+  const stepId = String(event.step_id || '');
+  const error = String(event.error || '');
+  const key = `${recordId}\u0000${stepId}\u0000${error}`;
+  const existing = groups.get(key);
+  groups.set(key, {
+    record_id: recordId,
+    step_id: stepId,
+    error,
+    occurred_at: String(event.occurred_at || existing?.occurred_at || ''),
+    attempts: Number(existing?.attempts || 0) + 1,
+  });
+  return groups;
+}, new Map<string, any>()).values()];
+
+const renderPipelineReport = (report: any) => {
+  const erroredOverview = Number(report.overview.errored_attempts || 0) > Number(report.overview.errored || 0)
+    ? `${report.overview.errored} records (${report.overview.errored_attempts} attempts)`
+    : `${report.overview.errored}`;
+  const stepLines = report.steps.map((step: any) => [
+    step.step_id,
+    step.kind,
+    `eval=${step.evaluated}`,
+    `pass=${step.passed}`,
+    `drop=${step.dropped}`,
+    `flag=${step.flagged}`,
+    `err=${step.errored}`,
+    `llm=${step.llm_calls}`,
+    `batches=${step.batches}`,
+    `batch=${step.batch_size.min}/${step.batch_size.avg.toFixed(1)}/${step.batch_size.max}`,
+    `tok=${step.tokens_in}/${step.tokens_out}`,
+    `span=${step.first_to_last || '-'}`,
+    `dur=${step.step_duration || '-'}`,
+    `avg=${step.avg_per_record_latency || '-'}`,
+  ].join(' | '));
+  const batchLines = report.batching.length > 0
+    ? report.batching.map((entry: any) => `${entry.step_id}: ${entry.count} batches sizes=[${entry.sizes.join(',')}] reasons=${entry.reasons.join(',')}`)
+    : ['(no batch_events for this run)'];
+  const timelineLines = report.timeline.buckets.length > 0
+    ? report.timeline.buckets.map((bucket: any) => `${bucket.bucket}: ${bucket.records} records`)
+    : ['(no record completion events)'];
+  const erroredLines = report.timeline.errored_records.length > 0
+    ? report.timeline.errored_records.map((entry: any) => {
+      const attempts = Number(entry.attempts || 0) > 1 ? ` (${entry.attempts} attempts)` : '';
+      return `${entry.record_id || '(unknown)'} @ ${entry.step_id || '(unknown)'}${attempts}: ${entry.error || ''}`;
+    })
+    : ['(none)'];
+  return [
+    'RUN OVERVIEW',
+    `status: ${report.overview.status}`,
+    `started: ${report.overview.started_at}`,
+    `ended: ${report.overview.ended_at}`,
+    `wall_clock: ${report.overview.wall_clock}`,
+    `records_in: ${report.overview.records_in}`,
+    `survivors: ${report.overview.survivors}`,
+    `dropped: ${report.overview.dropped}`,
+    `flagged: ${report.overview.flagged}`,
+    `errored: ${erroredOverview}`,
+    '',
+    'PER-STEP',
+    ...stepLines,
+    '',
+    'BATCHING DETAIL',
+    ...batchLines,
+    '',
+    'COMPLETION TIMELINE',
+    ...timelineLines,
+    '',
+    'ERRORED RECORDS',
+    ...erroredLines,
+    '',
+    'TOTALS',
+    `llm_calls: ${report.totals.llm_calls}`,
+    `tokens_in: ${report.totals.tokens_in}`,
+    `tokens_out: ${report.totals.tokens_out}`,
+    `usd_cost: ${report.totals.usd_cost}`,
+    `wall_clock: ${report.totals.wall_clock}`,
+  ].join('\n');
+};
+
+export const pipelineReportCommand = ({ list, run = 'latest' }) => {
+  const listDir = resolveListDir(list);
+  const { config } = readConfig(listDir);
+  const steps = (Array.isArray(config?.pipeline) ? config.pipeline : []).map((step: any, index: number) => ({
+    id: String(step?.id || '').trim() || `pipeline_step_${index + 1}`,
+    kind: String(step?.kind || ''),
+    dropGate: String(step?.kind || '') === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag',
+  }));
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    const runRow = String(run || 'latest') === 'latest'
+      ? db.prepare("SELECT * FROM run_state WHERE phase = 'pipeline' ORDER BY started_at DESC LIMIT 1").get()
+      : db.prepare("SELECT * FROM run_state WHERE phase = 'pipeline' AND run_id = ? LIMIT 1").get(String(run || ''));
+    if (!runRow) throw new Error('No pipeline run found.');
+    const startedAt = String(runRow.started_at || '');
+    const endedAt = String(runRow.updated_at || startedAt);
+    const runStartMs = millis(startedAt);
+    const runEndMs = millis(endedAt);
+    const pipelineEvents = safeAll(db, `
+      SELECT * FROM pipeline_events
+      WHERE occurred_at >= ? AND occurred_at <= ?
+      ORDER BY occurred_at ASC
+    `, [startedAt, endedAt]);
+    const costEvents = safeAll(db, `
+      SELECT * FROM cost_events
+      WHERE occurred_at >= ? AND occurred_at <= ?
+      ORDER BY occurred_at ASC
+    `, [startedAt, endedAt]);
+    const batchEvents = safeAll(db, `
+      SELECT * FROM batch_events
+      WHERE run_id = ?
+      ORDER BY occurred_at ASC
+    `, [String(runRow.run_id || '')]);
+    const erroredEvents = safeAll(db, `
+      SELECT * FROM errored_events
+      WHERE run_id = ?
+      ORDER BY occurred_at ASC
+    `, [String(runRow.run_id || '')]);
+    const stepReports = steps.map((step) => {
+      const events = pipelineEvents.filter((event: any) => String(event.step_id || '') === step.id);
+      const costs = costEvents.filter((cost: any) => costMatchesStep(cost, step.id));
+      const batches = batchEvents.filter((batch: any) => String(batch.step_id || '') === step.id);
+      const errors = erroredEvents.filter((error: any) => String(error.step_id || '') === step.id);
+      const times = [
+        ...events.map((event: any) => millis(event.occurred_at)),
+        ...costs.map((cost: any) => millis(cost.occurred_at)),
+        ...batches.map((batch: any) => millis(batch.occurred_at)),
+        ...errors.map((error: any) => millis(error.occurred_at)),
+      ].filter((time) => Number.isFinite(time) && time > 0);
+      const first = times.length > 0 ? Math.min(...times) : 0;
+      const last = times.length > 0 ? Math.max(...times) : 0;
+      const stats = batchStats(batches);
+      const evaluated = distinctCount([
+        ...events.map((event: any) => String(event.record_id || '')),
+        ...errors.map((error: any) => String(error.record_id || '')),
+      ]);
+      return {
+        step_id: step.id,
+        kind: step.kind,
+        evaluated,
+        passed: distinctCount(events.filter((event: any) => Number(event.passed || 0) === 1).map((event: any) => String(event.record_id || ''))),
+        dropped: distinctCount(events.filter((event: any) => Number(event.passed || 0) === 0 && step.dropGate).map((event: any) => String(event.record_id || ''))),
+        flagged: distinctCount(events.filter((event: any) => Number(event.passed || 0) === 0 && !step.dropGate).map((event: any) => String(event.record_id || ''))),
+        errored: errors.length,
+        llm_calls: costs.length,
+        batches: stats.count,
+        batch_size: { min: stats.min, avg: stats.avg, max: stats.max },
+        tokens_in: costs.reduce((sum: number, cost: any) => sum + Number(cost.input_tokens || 0), 0),
+        tokens_out: costs.reduce((sum: number, cost: any) => sum + Number(cost.output_tokens || 0), 0),
+        first_to_last: first && last ? `${new Date(first).toISOString()} -> ${new Date(last).toISOString()}` : '',
+        step_duration: first && last ? durationText(last - first) : '',
+        avg_per_record_latency: evaluated > 0 && first && last ? durationText((last - first) / evaluated) : '',
+      };
+    });
+    const recordLastEvents = new Map<string, number>();
+    pipelineEvents.forEach((event: any) => {
+      const recordId = String(event.record_id || '');
+      const time = millis(event.occurred_at);
+      if (!recordId || !Number.isFinite(time)) return;
+      recordLastEvents.set(recordId, Math.max(Number(recordLastEvents.get(recordId) || 0), time));
+    });
+    const timelineBuckets = [...recordLastEvents.values()].reduce((buckets: Map<string, number>, time) => {
+      const minute = Math.max(0, Math.floor((time - runStartMs) / 60000));
+      const key = `${minute}m`;
+      buckets.set(key, Number(buckets.get(key) || 0) + 1);
+      return buckets;
+    }, new Map<string, number>());
+    const dropped = stepReports.reduce((sum: number, step: any) => sum + Number(step.dropped || 0), 0);
+    const flagged = stepReports.reduce((sum: number, step: any) => sum + Number(step.flagged || 0), 0);
+    const erroredAttempts = stepReports.reduce((sum: number, step: any) => sum + Number(step.errored || 0), 0);
+    const errored = distinctCount(erroredEvents.map((event: any) => String(event.record_id || '')));
+    const recordsIn = Number(runRow.target_count || 0);
+    const totals = {
+      llm_calls: costEvents.length,
+      tokens_in: costEvents.reduce((sum: number, cost: any) => sum + Number(cost.input_tokens || 0), 0),
+      tokens_out: costEvents.reduce((sum: number, cost: any) => sum + Number(cost.output_tokens || 0), 0),
+      usd_cost: Number(costEvents.reduce((sum: number, cost: any) => sum + Number(cost.usd_cost || 0), 0).toFixed(6)),
+      wall_clock: durationText(runEndMs - runStartMs),
+    };
+    const report = {
+      run_id: String(runRow.run_id || ''),
+      overview: {
+        status: String(runRow.status || ''),
+        started_at: startedAt,
+        ended_at: endedAt,
+        wall_clock: durationText(runEndMs - runStartMs),
+        records_in: recordsIn,
+        survivors: Math.max(0, recordsIn - dropped),
+        dropped,
+        flagged,
+        errored,
+        errored_attempts: erroredAttempts,
+      },
+      steps: stepReports,
+      batching: steps
+        .map((step) => ({
+          step_id: step.id,
+          events: batchEvents.filter((batch: any) => String(batch.step_id || '') === step.id),
+        }))
+        .filter((entry) => entry.events.length > 0)
+        .map((entry) => ({
+          step_id: entry.step_id,
+          count: entry.events.length,
+          sizes: entry.events.map((event: any) => Number(event.size || 0)),
+          reasons: entry.events.map((event: any) => String(event.reason || '')),
+        })),
+      timeline: {
+        buckets: [...timelineBuckets.entries()].map(([bucket, records]) => ({ bucket, records })),
+        errored_records: groupedErroredRecords(erroredEvents),
+      },
+      totals,
+    };
+    return { ...report, summary: renderPipelineReport(report) };
+  } finally {
+    db.close();
+  }
+};
+
 export const runCommand = async ({ list, more = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);

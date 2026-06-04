@@ -29,6 +29,7 @@ import {
   duplicatesListCommand,
   exportCommand,
   pipelineCommand,
+  pipelineReportCommand,
   pipelineShowCommand,
   queryCommand,
   refreshToolsCommand,
@@ -176,6 +177,7 @@ const printHelp = () => {
   process.stdout.write(`  views save <list> --name NAME --select "col1,col2" [--where SQL]\n`);
   process.stdout.write(`  record show <list> <row_id> [--include enrichment,scores,events,contacts,sequence,drafts,ai-usage]\n`);
   process.stdout.write(`  pipeline show <list> [--format json|summary]\n`);
+  process.stdout.write(`  pipeline report <list> [--json] [--run latest]\n`);
   process.stdout.write(`  route show <list> --date YYYY-MM-DD [--include enrichment,contacts,prior-touches]\n`);
   process.stdout.write(`  replies show <list> [--record ROW_ID] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--classification VALUE]\n`);
   process.stdout.write(`  ai-usage <list> [--step STEP_ID] [--record ROW_ID] [--period 7d] [--group-by step|record|run|period] [--format json|summary]\n`);
@@ -812,6 +814,21 @@ const run = async () => {
       return;
     }
     print(result);
+    return;
+  }
+
+  if (command === 'pipeline' && String(argv[0] || '').trim() === 'report') {
+    argv.shift();
+    const list = String(argv.shift() || '');
+    const json = hasFlag(argv, '--json');
+    const run = consumeFlag(argv, '--run', 'latest');
+    setResponseContext({ command: 'pipeline report', list });
+    const result = pipelineReportCommand({ list, run });
+    if (json) {
+      print(result);
+      return;
+    }
+    process.stdout.write(`${String(result?.summary || '')}\n`);
     return;
   }
 

@@ -218,6 +218,29 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_pipeline_events_record ON pipeline_events(record_id, occurred_at DESC);
 
+  CREATE TABLE IF NOT EXISTS batch_events (
+    run_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    wait_ms INTEGER DEFAULT 0,
+    exec_ms INTEGER DEFAULT 0,
+    occurred_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_batch_events_run ON batch_events(run_id, occurred_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_batch_events_step ON batch_events(step_id, occurred_at DESC);
+
+  CREATE TABLE IF NOT EXISTS errored_events (
+    run_id TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    error TEXT DEFAULT '',
+    occurred_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_errored_events_run ON errored_events(run_id, occurred_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_errored_events_step ON errored_events(step_id, occurred_at DESC);
+
   CREATE TABLE IF NOT EXISTS run_state (
     run_id TEXT PRIMARY KEY,
     phase TEXT NOT NULL,

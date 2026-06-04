@@ -409,6 +409,13 @@ export const runPipelineDataflow = async ({
         inFlight,
         executor: async (batchRows) => executeStepBatch(await contextFor(step), step.step, step.id, batchRows),
         fallback: async (_record, cause) => ({ passed: false, errored: true, reason: String((cause as Error)?.message || cause || 'batch_failed') }),
+        onFlush: async (info) => {
+          emitActivity({ event: 'batch_flush', phase: 'pipeline', step: step.id, size: info.size, reason: info.reason, wait_ms: info.wait_ms, exec_ms: info.exec_ms });
+          db.prepare(`
+            INSERT INTO batch_events (run_id, step_id, size, reason, wait_ms, exec_ms, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `).run(runId, step.id, info.size, info.reason, info.wait_ms, info.exec_ms, info.occurred_at);
+        },
       });
       loaders.set(step.id, loader);
       return loader;
@@ -430,12 +437,17 @@ export const runPipelineDataflow = async ({
         const now = new Date().toISOString();
         if (step.kind === 'enrich') {
           if (outcome.errored) {
+            const error = String(outcome.reason || 'failed');
+            db.prepare(`
+              INSERT INTO errored_events (run_id, record_id, step_id, kind, error, occurred_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+            `).run(runId, recordId, step.id, step.kind, error, now);
             summary.failed += 1;
             summary.errored += 1;
-            summary.errors.push({ step: step.id, record_id: recordId, error: String(outcome.reason || 'failed'), errored: true });
+            summary.errors.push({ step: step.id, record_id: recordId, error, errored: true });
             progressState.done += 1;
             tickProgress(db, runId, { done: progressState.done, target: rows.length });
-            emitActivity({ event: 'error', phase: 'pipeline', step: step.id, row: recordId, detail: String(outcome.reason || 'failed'), errored: true });
+            emitActivity({ event: 'error', phase: 'pipeline', step: step.id, row: recordId, detail: error, errored: true });
             return { record: refreshRecord({ db, record: recordState.record }), resolved: false, errored: true };
           }
           insertPipelineEvent({
@@ -460,12 +472,17 @@ export const runPipelineDataflow = async ({
         }
 
         if (outcome.errored) {
+          const error = String(outcome.reason || 'failed');
+          db.prepare(`
+            INSERT INTO errored_events (run_id, record_id, step_id, kind, error, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(runId, recordId, step.id, step.kind, error, now);
           summary.failed += 1;
           summary.errored += 1;
-          summary.errors.push({ step: step.id, record_id: recordId, error: String(outcome.reason || 'failed'), errored: true });
+          summary.errors.push({ step: step.id, record_id: recordId, error, errored: true });
           progressState.done += 1;
           tickProgress(db, runId, { done: progressState.done, target: rows.length });
-          emitActivity({ event: 'error', phase: 'pipeline', step: step.id, row: recordId, detail: String(outcome.reason || 'failed'), errored: true });
+          emitActivity({ event: 'error', phase: 'pipeline', step: step.id, row: recordId, detail: error, errored: true });
           return { record: refreshRecord({ db, record: recordState.record }), resolved: false, errored: true };
         }
 
