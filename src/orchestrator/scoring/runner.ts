@@ -66,8 +66,19 @@ const normalizeCriteria = (criteria) => (Array.isArray(criteria) ? criteria : []
     id: String(criterion?.id || '').trim(),
     description: String(criterion?.description || '').trim(),
     weight: numericOr(criterion?.weight, 0),
+    reward_only: Boolean(criterion?.reward_only),
   }))
   .filter((criterion) => criterion.id);
+
+const isBaseCriterion = (criterion) => !criterion.reward_only;
+
+const criterionVerdict = (returnedById, criterion) => returnedById.get(criterion.id)?.verdict || 'no';
+
+const criterionReasoning = (returnedById, criterion) => String(returnedById.get(criterion.id)?.reasoning || '');
+
+const rewardOnlyPoints = (criterion, verdict) => (
+  Math.max(0, Math.round(100 * Math.max(0, numericOr(criterion.weight, 0)) * verdictValue(verdict)))
+);
 
 const MIN_SCORE_GATE = 'score_minimum';
 
@@ -255,25 +266,43 @@ const scoreAxisCriteria = async ({ db, listDir, record, axis, description, crite
     const returnedById = new Map(parsed.criteria
       .filter((criterion) => configuredIds.has(String(criterion.id || '').trim()))
       .map((criterion) => [String(criterion.id || '').trim(), criterion]));
-    const weights = normalizeCriterionWeights(normalizedCriteria);
-    const weightedScore = normalizedCriteria.reduce((sum, criterion, index) => {
-      const verdict = returnedById.get(criterion.id)?.verdict || 'no';
-      return sum + (weights[index] * verdictValue(verdict));
+    const baseCriteria = normalizedCriteria.filter(isBaseCriterion);
+    const baseWeights = normalizeCriterionWeights(baseCriteria);
+    const baseWeightById = new Map(baseCriteria.map((criterion, index) => [criterion.id, baseWeights[index]]));
+    const baseScore = baseCriteria.reduce((sum, criterion, index) => {
+      const verdict = criterionVerdict(returnedById, criterion);
+      return sum + (baseWeights[index] * verdictValue(verdict));
     }, 0);
-    const breakdown = normalizedCriteria.map((criterion, index) => {
-      const verdict = returnedById.get(criterion.id)?.verdict || 'no';
+    const rewardBonus = normalizedCriteria
+      .filter((criterion) => criterion.reward_only)
+      .reduce((sum, criterion) => sum + rewardOnlyPoints(criterion, criterionVerdict(returnedById, criterion)), 0);
+    const breakdown = normalizedCriteria.map((criterion) => {
+      const verdict = criterionVerdict(returnedById, criterion);
       const subScore = verdictValue(verdict);
+      if (criterion.reward_only) {
+        return {
+          id: criterion.id,
+          description: criterion.description,
+          weight: criterion.weight,
+          verdict,
+          sub_score: subScore,
+          points: rewardOnlyPoints(criterion, verdict),
+          reasoning: criterionReasoning(returnedById, criterion),
+          reward_only: true,
+        };
+      }
+      const weight = baseWeightById.get(criterion.id) || 0;
       return {
         id: criterion.id,
         description: criterion.description,
-        weight: weights[index],
+        weight,
         verdict,
         sub_score: subScore,
-        points: Math.round(100 * weights[index] * subScore),
-        reasoning: String(returnedById.get(criterion.id)?.reasoning || ''),
+        points: Math.round(100 * weight * subScore),
+        reasoning: criterionReasoning(returnedById, criterion),
       };
     });
-    const score = Math.max(0, Math.min(100, Math.round(100 * weightedScore)));
+    const score = Math.max(0, Math.min(100, Math.round((100 * baseScore) + rewardBonus)));
 
     return {
       score,

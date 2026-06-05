@@ -276,6 +276,7 @@ export const ScoringCriterionSchema = z.object({
   description: z.string().default(''),
   condition: z.string().default(''),
   weight: z.coerce.number().default(1),
+  reward_only: z.boolean().default(false),
   anchor_column: z.string().default(''),
   decay: TriggerDecaySchema.optional(),
   config: StepConfigSchema.default({}),
