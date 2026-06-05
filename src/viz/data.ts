@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
+import { getEnv } from '../orchestrator/runtime/env.js';
 
 const NUMERIC_COLUMNS = new Set([
   'priority_rank',
@@ -472,6 +473,7 @@ export const buildMeta = (listDir: string) => {
       steps: buildSteps(config),
       columns,
       filters,
+      mapsApiKey: getEnv('GOOGLE_MAPS_API_KEY'),
     };
   } finally {
     db.close();

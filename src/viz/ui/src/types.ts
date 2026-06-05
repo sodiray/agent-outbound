@@ -59,6 +59,7 @@ export type MetaResponse = {
   steps: StepMeta[];
   columns: ColumnMeta[];
   filters: FilterMeta[];
+  mapsApiKey: string;
 };
 
 export type RecordsResponse = {

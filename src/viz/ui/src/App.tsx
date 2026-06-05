@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode, RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { Link } from 'react-router-dom';
 import { fetchMeta, fetchProgress, fetchRecordDetail, fetchRecords } from './api.js';
 import type { ProgressRun } from './api.js';
 import type {
@@ -1117,6 +1118,7 @@ export const App = () => {
             </span>
           </span>
         </div>
+        <Link to="/map" className="map-nav-link">Map</Link>
       </header>
       <section className="toolbar">
         <div className="preset-row">
