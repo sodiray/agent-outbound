@@ -229,8 +229,30 @@ const PipelineEnrichmentStepSchema = z.object({
   idempotency: true,
 });
 
+const PipelineGenerateStepSchema = z.object({
+  kind: z.literal('generate'),
+  id: z.string(),
+  description: z.string().optional(),
+  label: z.string().optional(),
+  depends_on: PipelineEnrichmentStepSchema.shape.depends_on,
+  model: PipelineEnrichmentStepSchema.shape.model,
+  reasoning: PipelineEnrichmentStepSchema.shape.reasoning,
+  step_budget: PipelineEnrichmentStepSchema.shape.step_budget,
+  concurrency: PipelineEnrichmentStepSchema.shape.concurrency,
+  cache_key: PipelineEnrichmentStepSchema.shape.cache_key,
+  action: PipelineEnrichmentStepSchema.shape.action,
+  tool: PipelineEnrichmentStepSchema.shape.tool,
+  args: PipelineEnrichmentStepSchema.shape.args,
+  outputs: PipelineEnrichmentStepSchema.shape.outputs,
+  on_error: z.enum(['fail', 'empty']).default('empty'),
+  when: PipelineEnrichmentStepSchema.shape.when,
+  prompt_file: PipelineEnrichmentStepSchema.shape.prompt_file,
+  prompt_args: PipelineEnrichmentStepSchema.shape.prompt_args,
+});
+
 export const PipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
+  PipelineGenerateStepSchema,
   PipelineFilterStepSchema,
 ]);
 
@@ -252,6 +274,7 @@ export const SequenceStepSchema = z.preprocess((value) => {
   template: z.union([z.string(), z.array(z.string())]).optional(),
   template_version: z.coerce.number().int().min(1).optional(),
   variables: z.record(z.any()).default({}),
+  uses_asset: z.string().optional(),
   draft_approval_required: z.boolean().optional(),
   day: z.coerce.number().int().min(0).max(365).default(0),
   condition: z.string().optional(),

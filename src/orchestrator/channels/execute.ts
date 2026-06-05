@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { buildIdempotencyKey, claimIdempotency, completeIdempotency, failIdempotency } from '../runtime/idempotency.js';
-import { insertChannelEvent, insertDraft, nowTimestamp, upsertRecord, updateDraft } from '../runtime/db.js';
+import { findAsset, insertChannelEvent, insertDraft, nowTimestamp, upsertRecord, updateDraft } from '../runtime/db.js';
 import { getRecordRowId } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
 import { computeNextScheduledAction, resolveWorkingDayConfig, toIsoDate } from '../lib/working-days.js';
@@ -89,6 +89,42 @@ const applyArtifactUpdates = ({ record, artifacts, outputs, intent }) => {
   return next;
 };
 
+const parseAssetOutputs = (value: unknown): Record<string, unknown> => {
+  try {
+    const parsed = JSON.parse(String(value || '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const outputString = (outputs: Record<string, unknown>, key: string) => (
+  Object.prototype.hasOwnProperty.call(outputs, key) && outputs[key] !== null && outputs[key] !== undefined
+    ? String(outputs[key])
+    : ''
+);
+
+const assetDraftOverride = ({ asset, usesAssetId, stepArtifacts, stepOutputs }) => {
+  const outputs = parseAssetOutputs(asset?.outputs_json);
+  const reference = asset?.is_reference ? String(asset?.result || '').trim() : '';
+  const subject = outputString(outputs, 'subject') || String(stepArtifacts.subject || stepOutputs.subject || '');
+  const body = outputString(outputs, 'body') || String(asset?.result || '');
+  return {
+    subject,
+    body,
+    artifacts: {
+      uses_asset: usesAssetId,
+      asset_id: String(asset?.asset_id || ''),
+      asset_step_id: String(asset?.step_id || ''),
+      asset_status: String(asset?.status || ''),
+      asset_outputs: outputs,
+      ...(reference ? { reference, asset_url: reference } : {}),
+    },
+  };
+};
+
 export const executeChannelStep = async ({
   mcp,
   listDir,
@@ -108,6 +144,8 @@ export const executeChannelStep = async ({
   const now = nowTimestamp();
   const recordId = getRecordRowId(record);
   const sequenceStepId = String(step?.id || `step_${stepNumber}`);
+  const usesAssetId = String(step?.uses_asset || '').trim();
+  const assetForStep = usesAssetId ? findAsset({ db, rowId: recordId, stepId: usesAssetId }) : null;
 
   const idemConfig = step?.config?.idempotency;
   let idemKey = '';
@@ -255,6 +293,16 @@ export const executeChannelStep = async ({
       if (draftId) {
         const existing = db.prepare('SELECT draft_id FROM drafts WHERE draft_id = ? LIMIT 1').get(draftId);
         if (!existing) {
+          const assetOverride = assetForStep
+            ? assetDraftOverride({ asset: assetForStep, usesAssetId, stepArtifacts, stepOutputs })
+            : null;
+          const missingAssetArtifacts = usesAssetId && !assetForStep
+            ? {
+              uses_asset: usesAssetId,
+              asset_missing: true,
+              asset_missing_reason: `Asset not found for step ${usesAssetId}`,
+            }
+            : {};
           insertDraft({
             db,
             draft: {
@@ -265,13 +313,14 @@ export const executeChannelStep = async ({
               step_id: sequenceStepId,
               channel: 'email',
               status: 'pending_approval',
-              subject: String(stepArtifacts.subject || stepOutputs.subject || ''),
-              body: String(stepArtifacts.body || stepOutputs.body || ''),
-              reason: String(stepResult.reason || ''),
+              subject: assetOverride ? assetOverride.subject : String(stepArtifacts.subject || stepOutputs.subject || ''),
+              body: assetOverride ? assetOverride.body : String(stepArtifacts.body || stepOutputs.body || ''),
+              reason: String(stepResult.reason || (usesAssetId && !assetForStep ? `Asset not found for step ${usesAssetId}` : '')),
               artifacts: {
                 summary: stepResult.summary || '',
                 outputs: stepOutputs,
                 artifacts: stepArtifacts,
+                ...(assetOverride ? assetOverride.artifacts : missingAssetArtifacts),
               },
             },
           });

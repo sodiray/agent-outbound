@@ -32,6 +32,7 @@ import { authorConfigAction } from '../orchestrator/actions/author-config/index.
 import { runSourcing, runSourcingMore } from '../orchestrator/sourcing/runner.js';
 import { runPipelineDataflow } from '../orchestrator/pipeline/dataflow.js';
 import { runScoring } from '../orchestrator/scoring/runner.js';
+import { runGeneration } from '../orchestrator/generate/runner.js';
 import {
   followupSend,
   getSequenceStatus,
@@ -72,6 +73,12 @@ export {
   mcpTestCommand,
 } from './mcp.js';
 export { leadAddCommand } from './leads.js';
+export {
+  assetsCommand,
+  assetsListCommand,
+  assetsOpenCommand,
+  assetsShowCommand,
+} from './assets.js';
 
 const listDirsFromCwd = () => {
   const cwd = process.cwd();
@@ -1067,11 +1074,13 @@ export const runCommand = async ({ list, more = 0 }) => {
   })();
 
   const scoreResult = await runScoring({ listDir });
+  const generateResult = await runGeneration({ listDir });
 
   return {
     source: sourceResult,
     pipeline: pipelineResult,
     score: scoreResult,
+    generate: generateResult,
   };
 };
 
@@ -1104,6 +1113,53 @@ export const scoreCommand = async ({ list, dryRun = false, sample = 0, force = f
   const scored = await runScoring({ listDir, force });
   return {
     ...scored,
+    auto_snapshot: autoSnapshot,
+  };
+};
+
+export const generateCommand = async ({ list, where = '', step = '', force = false, dryRun = false, sample = 0 }) => {
+  const listDir = resolveListDir(list);
+  const loaded = readConfig(listDir);
+  assertPhaseModelReferences({ config: loaded.config, phase: 'pipeline' });
+  const whereSql = String(where || '').trim();
+  const whereCheck = validateWhereSql(whereSql);
+  if (!whereCheck.ok) throw new Error(whereCheck.error || 'Invalid --where SQL fragment.');
+
+  const db = openListDb({ listDir, readonly: true });
+  const total = db.prepare(`
+    SELECT COUNT(*) as count
+    FROM records
+    WHERE ${inPlayWhere()} AND sequence_status != 'opted_out' ${whereSql ? `AND (${whereSql})` : ''}
+  `).get();
+  db.close();
+  const totalCount = Number(total?.count || 0);
+  const { config } = loaded;
+  const threshold = getBulkSnapshotThreshold(config || {});
+
+  if (dryRun) {
+    return {
+      dry_run: true,
+      where: whereSql,
+      step_id: String(step || ''),
+      matching_in_play_records: totalCount,
+      note: 'Dry-run reports scope only; generation is not executed.',
+    };
+  }
+  const sampleN = Math.max(0, Number(sample || 0));
+  if (sampleN > 0) {
+    return withUsageSampling({
+      listDir,
+      sampledCount: sampleN,
+      totalCount: Math.max(totalCount, sampleN),
+      run: () => runGeneration({ listDir, where: whereSql, stepId: String(step || ''), force, limit: sampleN }),
+    });
+  }
+  const autoSnapshot = totalCount >= threshold
+    ? snapshotCreateCommand({ list: listDir, label: `auto-before-generate-${new Date().toISOString()}` })
+    : null;
+  const generated = await runGeneration({ listDir, where: whereSql, stepId: String(step || ''), force });
+  return {
+    ...generated,
     auto_snapshot: autoSnapshot,
   };
 };

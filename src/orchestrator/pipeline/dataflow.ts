@@ -384,12 +384,12 @@ export const runPipelineDataflow = async ({
   const rawSteps: any[] = Array.isArray(config?.pipeline) ? config.pipeline as any[] : [];
   const db = openListDb({ listDir, readonly: dryRun });
   try {
-    const steps = buildSteps({ db, steps: rawSteps });
+    const steps = buildSteps({ db, steps: rawSteps }).filter((step) => step.kind !== 'generate');
     // Honor human decision overrides before selecting the in-play set: drops are
     // re-disqualified (excluded), keeps are un-disqualified (re-included).
     if (!dryRun) reconcileOverrides({ db });
     const rows = readInPlayRows({ db, where, limit });
-    if (dryRun) return simulatePipeline({ db, steps: rawSteps, baseRows: rows, force, reapply });
+    if (dryRun) return simulatePipeline({ db, steps: steps.map((entry) => ({ ...entry.step, id: entry.id })), baseRows: rows, force, reapply });
     const overridesByRecord = overridesByRecordMap({ db });
 
     const largestBatch = largestBatchSize(steps);
@@ -403,7 +403,7 @@ export const runPipelineDataflow = async ({
       records_in: rows.length,
       by_step: byStep,
       survivors: rows.length,
-      steps: rawSteps.length,
+      steps: steps.length,
       processed: 0,
       failed: 0,
       errored: 0,
@@ -418,7 +418,7 @@ export const runPipelineDataflow = async ({
       && hasPassedStep({ db, recordId: getRecordRowId(row), stepId: step.id })
     )).length, 0);
 
-    emitActivity({ event: 'phase_start', phase: 'pipeline', rows: rows.length, steps: rawSteps.length, engine: 'dataflow' });
+    emitActivity({ event: 'phase_start', phase: 'pipeline', rows: rows.length, steps: steps.length, engine: 'dataflow' });
     const runId = beginRun(db, { phase: 'pipeline', target: rows.length, message: `Filtering ${rows.length} records` });
     const progressState = { done: 0 };
     const heartbeatTimer = setInterval(() => heartbeat(db, runId), 3000);

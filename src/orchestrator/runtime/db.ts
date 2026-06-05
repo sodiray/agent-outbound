@@ -335,6 +335,22 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status, created_at DESC);
   CREATE INDEX IF NOT EXISTS idx_drafts_row ON drafts(row_id, created_at DESC);
 
+  CREATE TABLE IF NOT EXISTS assets (
+    asset_id   TEXT PRIMARY KEY,
+    row_id     TEXT NOT NULL,
+    step_id    TEXT NOT NULL,
+    label      TEXT DEFAULT '',
+    result     TEXT DEFAULT '',
+    outputs_json TEXT DEFAULT '{}',
+    is_reference INTEGER DEFAULT 0,
+    status     TEXT DEFAULT 'ready',
+    reason     TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_assets_row  ON assets(row_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_assets_step ON assets(step_id, created_at DESC);
+
   CREATE TABLE IF NOT EXISTS account_timeline (
     timeline_id TEXT PRIMARY KEY,
     row_id TEXT NOT NULL,
@@ -450,6 +466,20 @@ const SCHEMA_SQL = `
 `;
 
 const nowIso = () => new Date().toISOString();
+
+export type Asset = {
+  asset_id: string;
+  row_id: string;
+  step_id: string;
+  label: string;
+  result: string;
+  outputs_json: string;
+  is_reference: boolean;
+  status: string;
+  reason: string;
+  created_at: string;
+  updated_at: string;
+};
 
 const applyPragmas = (db, { readonly = false } = {}) => {
   if (!readonly) {
@@ -778,6 +808,24 @@ const safeJson = (value) => {
   } catch {
     return '{}';
   }
+};
+
+const normalizeAssetRow = (row: unknown): Asset | null => {
+  if (!row || typeof row !== 'object') return null;
+  const asset = row as Record<string, unknown>;
+  return {
+    asset_id: String(asset.asset_id || ''),
+    row_id: String(asset.row_id || ''),
+    step_id: String(asset.step_id || ''),
+    label: String(asset.label || ''),
+    result: String(asset.result || ''),
+    outputs_json: String(asset.outputs_json || '{}'),
+    is_reference: Number(asset.is_reference || 0) === 1,
+    status: String(asset.status || 'ready'),
+    reason: String(asset.reason || ''),
+    created_at: String(asset.created_at || ''),
+    updated_at: String(asset.updated_at || ''),
+  };
 };
 
 const appendJsonLine = (path, payload) => {
@@ -1577,6 +1625,104 @@ export const updateDraft = ({ db, draftId, patch }) => {
   });
   return db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1').get(existing.draft_id);
 };
+
+export const insertAsset = ({
+  db,
+  rowId,
+  stepId,
+  label = '',
+  result = '',
+  outputsJson = '{}',
+  isReference = false,
+  status = 'ready',
+  reason = '',
+}) => {
+  const assetId = `asset_${randomUUID().slice(0, 12)}`;
+  const now = nowIso();
+  db.prepare(`
+    INSERT INTO assets (
+      asset_id, row_id, step_id, label, result, outputs_json, is_reference,
+      status, reason, created_at, updated_at
+    ) VALUES (
+      @asset_id, @row_id, @step_id, @label, @result, @outputs_json, @is_reference,
+      @status, @reason, @created_at, @updated_at
+    )
+  `).run({
+    asset_id: assetId,
+    row_id: String(rowId || ''),
+    step_id: String(stepId || ''),
+    label: String(label || ''),
+    result: String(result || ''),
+    outputs_json: typeof outputsJson === 'string' ? outputsJson : safeJson(outputsJson || {}),
+    is_reference: isReference ? 1 : 0,
+    status: String(status || 'ready'),
+    reason: String(reason || ''),
+    created_at: now,
+    updated_at: now,
+  });
+  return getAsset({ db, assetId });
+};
+
+export const updateAsset = ({
+  db,
+  assetId,
+  label,
+  result,
+  outputsJson,
+  isReference,
+  status,
+  reason,
+}) => {
+  const existing = db.prepare('SELECT * FROM assets WHERE asset_id = ? LIMIT 1').get(String(assetId || '').trim());
+  if (!existing) return null;
+  const merged = {
+    ...existing,
+    label: label === undefined ? existing.label : label,
+    result: result === undefined ? existing.result : result,
+    status: status === undefined ? existing.status : status,
+    reason: reason === undefined ? existing.reason : reason,
+    outputs_json: outputsJson === undefined
+      ? existing.outputs_json
+      : (typeof outputsJson === 'string' ? outputsJson : safeJson(outputsJson || {})),
+    is_reference: isReference === undefined ? existing.is_reference : (isReference ? 1 : 0),
+    updated_at: nowIso(),
+  };
+  db.prepare(`
+    UPDATE assets
+    SET label = @label,
+        result = @result,
+        outputs_json = @outputs_json,
+        is_reference = @is_reference,
+        status = @status,
+        reason = @reason,
+        updated_at = @updated_at
+    WHERE asset_id = @asset_id
+  `).run({
+    asset_id: existing.asset_id,
+    label: String(merged.label || ''),
+    result: String(merged.result || ''),
+    outputs_json: String(merged.outputs_json || '{}'),
+    is_reference: merged.is_reference ? 1 : 0,
+    status: String(merged.status || 'ready'),
+    reason: String(merged.reason || ''),
+    updated_at: String(merged.updated_at),
+  });
+  return getAsset({ db, assetId: existing.asset_id });
+};
+
+export const getAsset = ({ db, assetId }) =>
+  normalizeAssetRow(db.prepare('SELECT * FROM assets WHERE asset_id = ? LIMIT 1').get(String(assetId || '').trim()));
+
+export const getAssetsForRow = ({ db, rowId }) =>
+  db.prepare('SELECT * FROM assets WHERE row_id = ? ORDER BY created_at DESC').all(String(rowId || '').trim()).map(normalizeAssetRow);
+
+export const findAsset = ({ db, rowId, stepId }) =>
+  normalizeAssetRow(db.prepare(`
+    SELECT * FROM assets
+    WHERE row_id = ? AND step_id = ?
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get(String(rowId || '').trim(), String(stepId || '').trim()));
 
 export const listDrafts = ({ db, whereSql = '1=1', params = [], limit = 100, offset = 0 }) =>
   db.prepare(`

@@ -20,7 +20,7 @@ import { formatErrorMessage } from '../lib/error-format.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
 
-const parseExtra = (value) => {
+export const parseExtra = (value) => {
   try {
     if (!value) return {};
     if (typeof value === 'object') return value;
@@ -38,7 +38,7 @@ const isBlank = (value) => {
   return false;
 };
 
-const mergedRecordForEnrichment = ({ db, record }) => {
+export const mergedRecordForEnrichment = ({ db, record }) => {
   const rowId = getRecordRowId(record);
   if (String(record?.duplicate_of || '').trim()) return record;
   const linked = db.prepare(`
@@ -57,7 +57,7 @@ const mergedRecordForEnrichment = ({ db, record }) => {
   return merged;
 };
 
-const writeStaleness = ({ db, recordId, stepId, depHash, cacheTtlSeconds, cacheTtl }) => {
+export const writeStaleness = ({ db, recordId, stepId, depHash, cacheTtlSeconds, cacheTtl }) => {
   db.prepare(`
     INSERT INTO staleness (id, record_id, step_id, dep_hash, cache_ttl, cache_ttl_seconds, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -69,10 +69,10 @@ const writeStaleness = ({ db, recordId, stepId, depHash, cacheTtlSeconds, cacheT
   `).run(randomUUID(), recordId, stepId, depHash, String(cacheTtl || ''), cacheTtlSeconds, nowTimestamp());
 };
 
-const readStaleness = ({ db, recordId, stepId }) =>
+export const readStaleness = ({ db, recordId, stepId }) =>
   db.prepare('SELECT * FROM staleness WHERE record_id = ? AND step_id = ?').get(recordId, stepId);
 
-const ttlToSeconds = (ttl) => {
+export const ttlToSeconds = (ttl) => {
   const raw = String(ttl || '').trim().toLowerCase();
   if (!raw) return 0;
   const match = raw.match(/^(\d+)([smhd])$/);
@@ -118,7 +118,7 @@ const legacyEnrichDepHash = (stepConfig: any, depValues: Record<string, any> = {
 // its hash matches the material (or legacy) hash, AND it is within TTL. A step
 // with NO configured TTL (cache_ttl_seconds <= 0) caches FOREVER — so an
 // unchanged step is never redundantly re-run. TTL is opt-in periodic refresh.
-const isEnrichFresh = ({ cached, stepConfig, depValues = {}, force = false }: { cached: any; stepConfig: any; depValues?: Record<string, any>; force?: boolean }): boolean => {
+export const isEnrichFresh = ({ cached, stepConfig, depValues = {}, force = false }: { cached: any; stepConfig: any; depValues?: Record<string, any>; force?: boolean }): boolean => {
   if (force || !cached) return false;
   const material = enrichDepHash(stepConfig, depValues);
   const legacy = legacyEnrichDepHash(stepConfig, depValues);
@@ -142,7 +142,7 @@ type OutputDef = {
   enum?: string[];
 };
 
-const getDeclaredOutputs = (stepConfig: any): Record<string, OutputDef> => {
+export const getDeclaredOutputs = (stepConfig: any): Record<string, OutputDef> => {
   const declared = (stepConfig?.outputs && typeof stepConfig.outputs === 'object')
     ? stepConfig.outputs
     : {};
@@ -159,7 +159,7 @@ const getDeclaredOutputs = (stepConfig: any): Record<string, OutputDef> => {
   return outputs;
 };
 
-const getLegacyColumns = (stepConfig: any): Record<string, string> => {
+export const getLegacyColumns = (stepConfig: any): Record<string, string> => {
   return (stepConfig?.columns && typeof stepConfig.columns === 'object')
     ? stepConfig.columns
     : {};
@@ -226,7 +226,7 @@ const coerceForSqlite = (value: any, type: OutputDef['type']): string | number |
   return String(value);
 };
 
-const outputOutcomeFor = ({ outputs, expectedOutputs }: { outputs: any; expectedOutputs: Record<string, any> }) => {
+export const outputOutcomeFor = ({ outputs, expectedOutputs }: { outputs: any; expectedOutputs: Record<string, any> }) => {
   const expectedNames = Object.keys(expectedOutputs || {});
   if (expectedNames.length === 0) return 'ok';
   const hasAnyValue = expectedNames.some((name) => !isBlank(outputs?.[name]));
@@ -239,9 +239,9 @@ const declaredOutputsHaveAnyValue = ({ record, expectedOutputs }: { record: Reco
   return expectedNames.some((name) => !isBlank(record?.[name]));
 };
 
-const emptyOutputsFor = (outputZod: z.ZodTypeAny) => outputZod.parse({});
+export const emptyOutputsFor = (outputZod: z.ZodTypeAny) => outputZod.parse({});
 
-const enrichStepUsesEmptyOnError = (stepConfig: unknown) => {
+export const enrichStepUsesEmptyOnError = (stepConfig: unknown) => {
   const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
   return String(config.on_error || 'fail').trim().toLowerCase() === 'empty';
 };
@@ -263,7 +263,7 @@ export const enrichmentStepNeedsMcp = (step: unknown, options: { listDir?: strin
   return enrichmentActionNeedsMcp(stepConfig) || toolSpecNeedsMcp(stepConfig.tool as ToolSpec | undefined, options);
 };
 
-const whenPredicateForStep = ({ step, stepConfig }: { step: any; stepConfig: any }) => (
+export const whenPredicateForStep = ({ step, stepConfig }: { step: any; stepConfig: any }) => (
   stepConfig?.when && typeof stepConfig.when === 'object'
     ? stepConfig.when
     : step?.when && typeof step.when === 'object'
@@ -271,7 +271,7 @@ const whenPredicateForStep = ({ step, stepConfig }: { step: any; stepConfig: any
       : null
 );
 
-const shouldRunForRecord = ({ record, predicate }: { record: any; predicate: any }) => {
+export const shouldRunForRecord = ({ record, predicate }: { record: any; predicate: any }) => {
   if (!predicate) return { passed: true, reason: '' };
   return evaluateFieldCheckGroup({
     row: record,
@@ -318,7 +318,7 @@ const upsertPrimaryContactIfPresent = ({ db, record }: { db: any; record: any })
   });
 };
 
-const dependencyValueForRecord = ({ dep, record, extra }) => {
+export const dependencyValueForRecord = ({ dep, record, extra }) => {
   const key = String(dep || '').trim();
   if (!key) return undefined;
   if (key.includes('.')) {
@@ -365,7 +365,7 @@ export const countEnrichWorkForStep = ({ db, step, stepId = '', rows = [], force
   return result;
 };
 
-const executeEnrichmentAction = async ({
+export const executeEnrichmentAction = async ({
   mcp,
   listDir,
   stepId,

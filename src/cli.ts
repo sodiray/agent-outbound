@@ -7,6 +7,7 @@ import { Writable } from 'node:stream';
 import {
   DEEPINFRA_RECOMMENDED_MODELS,
   aiUsageCommand,
+  assetsCommand,
   authConnectCommand,
   authLoginCommand,
   authListCommand,
@@ -83,6 +84,7 @@ import {
   sourceMoreCommand,
   suppressCommand,
   forgetCommand,
+  generateCommand,
   routePlanCommand,
 } from './commands/index.js';
 import { onboardCommand } from './commands/onboard.js';
@@ -212,6 +214,7 @@ const printHelp = () => {
   process.stdout.write(`  remove <list> --keep-top N [--sort-by COLUMN]\n`);
   process.stdout.write(`  pipeline <list> [--where SQL] [--limit N] [--dry-run] [--sample N] [--concurrency N]\n`);
   process.stdout.write(`  score <list> [--dry-run] [--sample N] [--force]\n`);
+  process.stdout.write(`  generate <list> [--where SQL] [--step ID] [--dry-run] [--sample N] [--force]\n`);
   process.stdout.write(`  run <list> [--more N]\n`);
   process.stdout.write(`  launch draft <list> [--limit N] [--sequence NAME] [--dry-run] [--sample N]\n`);
   process.stdout.write(`  launch send <list> [--limit N] [--dry-run] [--sample N]\n`);
@@ -228,6 +231,9 @@ const printHelp = () => {
   process.stdout.write(`  drafts approve <list> --id DRAFT_ID | --all --where SQL\n`);
   process.stdout.write(`  drafts reject <list> --id DRAFT_ID [--reason TEXT]\n`);
   process.stdout.write(`  drafts edit <list> --id DRAFT_ID [--subject TEXT] [--body TEXT]\n`);
+  process.stdout.write(`  assets list <list> [--label X] [--step ID] [--row ID] [--status S]\n`);
+  process.stdout.write(`  assets show <list> <row_id> [--step ID]\n`);
+  process.stdout.write(`  assets open <list> <row_id> --step ID\n`);
   process.stdout.write(`  templates list <list>\n`);
   process.stdout.write(`  templates show <list> --id TEMPLATE_ID\n`);
   process.stdout.write(`  templates create <list> --id TEMPLATE_ID [--channel CHANNEL] [--subject TEXT] [--body TEXT] [--variables JSON]\n`);
@@ -1013,6 +1019,58 @@ const run = async () => {
     throw new Error(`Unknown drafts subcommand: ${sub}`);
   }
 
+  if (command === 'assets') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'list') {
+      const list = String(argv.shift() || '');
+      const label = consumeFlag(argv, '--label', '');
+      const step = consumeFlag(argv, '--step', '');
+      const row = consumeFlag(argv, '--row', '');
+      const status = consumeFlag(argv, '--status', '');
+      setResponseContext({ command: 'assets list', list });
+      const delegated = await callServeAction('assets_list', {
+        list, label, step, row, status,
+      }, list);
+      if (delegated) {
+        print(delegated);
+        return;
+      }
+      print(await assetsCommand({
+        action: sub, list, label, step, row, status,
+      }));
+      return;
+    }
+    if (sub === 'show') {
+      const list = String(argv.shift() || '');
+      const rowId = String(argv.shift() || '');
+      const step = consumeFlag(argv, '--step', '');
+      setResponseContext({ command: 'assets show', list });
+      const delegated = await callServeAction('assets_show', { list, rowId, step }, list);
+      if (delegated) {
+        print(delegated);
+        return;
+      }
+      print(await assetsCommand({ action: sub, list, rowId, step }));
+      return;
+    }
+    if (sub === 'open') {
+      const list = String(argv.shift() || '');
+      const rowId = String(argv.shift() || '');
+      const step = consumeFlag(argv, '--step', '');
+      if (!step) throw new Error('assets open requires --step ID.');
+      setResponseContext({ command: 'assets open', list });
+      const delegated = await callServeAction('assets_open', { list, rowId, step }, list);
+      const result = delegated || await assetsCommand({ action: sub, list, rowId, step });
+      if (!result?.opened) {
+        process.stdout.write(`${String(result?.result || '')}\n`);
+        return;
+      }
+      print(result);
+      return;
+    }
+    throw new Error(`Unknown assets subcommand: ${sub}`);
+  }
+
   if (command === 'ai-usage') {
     const list = String(argv.shift() || '');
     const step = consumeFlag(argv, '--step', '');
@@ -1228,6 +1286,26 @@ const run = async () => {
       return;
     }
     print(await scoreCommand({ list, dryRun, sample, force }));
+    return;
+  }
+
+  if (command === 'generate') {
+    const list = String(argv.shift() || '');
+    const where = consumeFlag(argv, '--where', '');
+    const step = consumeFlag(argv, '--step', '');
+    const dryRun = hasFlag(argv, '--dry-run');
+    const force = hasFlag(argv, '--force');
+    const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
+    const delegated = await callServeAction('generate', {
+      list, where, step, dryRun, sample, force,
+    }, list);
+    if (delegated) {
+      print(delegated);
+      return;
+    }
+    print(await generateCommand({
+      list, where, step, dryRun, sample, force,
+    }));
     return;
   }
 
