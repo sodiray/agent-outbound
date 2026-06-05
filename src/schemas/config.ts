@@ -198,6 +198,7 @@ const PipelineEnrichmentStepSchema = z.object({
   // the staleness hash is derived from the step's material fields only, so cosmetic
   // edits (description, concurrency, etc.) never re-run already-enriched records.
   cache_key: z.string().default(''),
+  action: z.string().default(''),
   tool: ToolSpecSchema.optional(),
   args: z.record(z.any()).default({}),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
@@ -216,6 +217,7 @@ const PipelineEnrichmentStepSchema = z.object({
   concurrency: true,
   cache: true,
   cache_key: true,
+  action: true,
   tool: true,
   args: true,
   outputs: true,

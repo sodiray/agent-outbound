@@ -4,7 +4,7 @@ import { validatePipelineGraph } from '../lib/pipeline-graph.js';
 import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
-import { countEnrichWorkForStep } from '../enrichment/runner.js';
+import { countEnrichWorkForStep, enrichmentStepNeedsMcp } from '../enrichment/runner.js';
 import { closeMcpClient, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
@@ -13,7 +13,6 @@ import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.j
 import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileOverrides } from '../runtime/db.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
-import { toolSpecNeedsMcp } from '../runtime/tools.js';
 import {
   pipelineStepId,
   readInPlayRows,
@@ -309,6 +308,7 @@ const initializeResolved = ({
     const initial = new Set(Array.from(passed.get(recordId) || []).filter((stepId) => {
       const step = steps.find((entry) => entry.id === stepId);
       if (!step) return true;
+      if (step.kind === 'enrich') return !force;
       if (step.kind !== 'filter') return true;
       return !reapply;
     }));
@@ -339,7 +339,7 @@ const makeApplicable = ({ db, force }: { db: any; force: boolean }) => (recordSt
 const createLazyExecutionContext = ({ db, listDir, config, force }: { db: any; listDir: string; config: any; force: boolean }) => {
   const state: { mcp: any; toolCatalog: any } = { mcp: null, toolCatalog: null };
   return async (step: DataflowStep) => {
-    if (step.kind === 'enrich' && toolSpecNeedsMcp(step.step?.tool, { listDir }) && !state.mcp) state.mcp = await getMcpClient();
+    if (step.kind === 'enrich' && enrichmentStepNeedsMcp(step.step, { listDir }) && !state.mcp) state.mcp = await getMcpClient();
     if (step.kind === 'enrich' && !state.toolCatalog) state.toolCatalog = readToolCatalog(listDir);
     return {
       db,

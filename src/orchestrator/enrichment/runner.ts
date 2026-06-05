@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { z } from 'zod';
 import { ensureRecordColumns, inPlayWhere, openListDb, upsertContact, upsertRecord, nowTimestamp } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
@@ -16,7 +17,8 @@ import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { evaluateFieldCheckGroup } from '../lib/conditions.js';
 import { nullableBoolean, nullableNumber, nullableString } from '../actions/schema-helpers.js';
 import { formatErrorMessage } from '../lib/error-format.js';
-import { toolSpecNeedsMcp } from '../runtime/tools.js';
+import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
+import { executeDecisionMakersAction } from './actions/decision-makers.js';
 
 const parseExtra = (value) => {
   try {
@@ -88,7 +90,7 @@ const ttlToSeconds = (ttl) => {
 // columns, when, cache TTL) must NOT invalidate already-computed enrichment. An
 // explicit `cache_key` overrides everything, giving authors deterministic control
 // over when a step is forced to recompute.
-const MATERIAL_ENRICH_FIELDS = ['tool', 'args', 'outputs', 'model', 'reasoning', 'prompt_file', 'prompt_args', 'depends_on', 'on_error'] as const;
+const MATERIAL_ENRICH_FIELDS = ['action', 'tool', 'args', 'outputs', 'model', 'reasoning', 'prompt_file', 'prompt_args', 'depends_on', 'on_error'] as const;
 
 export const materialEnrichConfig = (stepConfig: any): Record<string, any> => {
   const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};
@@ -231,11 +233,34 @@ const outputOutcomeFor = ({ outputs, expectedOutputs }: { outputs: any; expected
   return hasAnyValue ? 'ok' : 'empty';
 };
 
+const declaredOutputsHaveAnyValue = ({ record, expectedOutputs }: { record: Record<string, unknown>; expectedOutputs: Record<string, unknown> }) => {
+  const expectedNames = Object.keys(expectedOutputs || {});
+  if (expectedNames.length === 0) return true;
+  return expectedNames.some((name) => !isBlank(record?.[name]));
+};
+
 const emptyOutputsFor = (outputZod: z.ZodTypeAny) => outputZod.parse({});
 
 const enrichStepUsesEmptyOnError = (stepConfig: unknown) => {
   const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
   return String(config.on_error || 'fail').trim().toLowerCase() === 'empty';
+};
+
+export const enrichmentActionNeedsMcp = (stepConfig: unknown) => {
+  const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
+  return String(config.action || '').trim().toLowerCase() === 'decision_makers';
+};
+
+export const enrichmentStepConfig = (step: unknown): Record<string, unknown> => {
+  const record = step && typeof step === 'object' ? step as Record<string, unknown> : {};
+  return record.config && typeof record.config === 'object'
+    ? record.config as Record<string, unknown>
+    : record;
+};
+
+export const enrichmentStepNeedsMcp = (step: unknown, options: { listDir?: string } = {}) => {
+  const stepConfig = enrichmentStepConfig(step);
+  return enrichmentActionNeedsMcp(stepConfig) || toolSpecNeedsMcp(stepConfig.tool as ToolSpec | undefined, options);
 };
 
 const whenPredicateForStep = ({ step, stepConfig }: { step: any; stepConfig: any }) => (
@@ -319,17 +344,74 @@ const resolveStepId = (step: any, index: number) => {
 // dry-run impact preview is accurate. (Pipeline enrich uses empty depValues.)
 export const countEnrichWorkForStep = ({ db, step, stepId = '', rows = [], force = false }: { db: any; step: any; stepId?: string; rows?: any[]; force?: boolean }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
-  const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+  const stepConfig = enrichmentStepConfig(step);
+  const declaredOutputs = getDeclaredOutputs(stepConfig || {});
+  const legacyColumns = getLegacyColumns(stepConfig || {});
+  const expectedOutputs = Object.keys(declaredOutputs).length > 0
+    ? declaredOutputs
+    : legacyColumns;
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
   const result = { would_enrich: 0, skip_fresh: 0, skip_when: 0 };
   for (const record of rows || []) {
     const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate });
     if (!whenOutcome.passed) { result.skip_when += 1; continue; }
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
-    if (isEnrichFresh({ cached, stepConfig, depValues: {}, force })) { result.skip_fresh += 1; continue; }
+    if (
+      isEnrichFresh({ cached, stepConfig, depValues: {}, force })
+      && declaredOutputsHaveAnyValue({ record, expectedOutputs })
+    ) { result.skip_fresh += 1; continue; }
     result.would_enrich += 1;
   }
   return result;
+};
+
+const executeEnrichmentAction = async ({
+  mcp,
+  listDir,
+  stepId,
+  description,
+  stepConfig,
+  record,
+  aiConfig,
+  context,
+  outputSchema,
+  toolCatalog,
+}: {
+  mcp: Client | null;
+  listDir: string;
+  stepId: string;
+  description: string;
+  stepConfig: Record<string, unknown>;
+  record: Record<string, unknown>;
+  aiConfig: Record<string, unknown>;
+  context: Record<string, unknown>;
+  outputSchema: z.ZodTypeAny;
+  toolCatalog?: ToolCatalog;
+}) => {
+  const action = String(stepConfig?.action || '').trim().toLowerCase();
+  if (action === 'decision_makers') {
+    return executeDecisionMakersAction({
+      mcp,
+      listDir,
+      stepId,
+      stepConfig,
+      record,
+      aiConfig,
+    });
+  }
+  return executeStepAction({
+    mcp,
+    listDir,
+    stepId,
+    description,
+    stepConfig,
+    record,
+    aiConfig,
+    role: 'research',
+    context,
+    outputSchema,
+    toolCatalog,
+  });
 };
 
 export const executeEnrichmentStepOnRecords = async ({
@@ -354,7 +436,7 @@ export const executeEnrichmentStepOnRecords = async ({
   force?: boolean;
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
-  const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+  const stepConfig = enrichmentStepConfig(step);
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
   const legacyColumns = getLegacyColumns(stepConfig || {});
   const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
@@ -402,14 +484,20 @@ export const executeEnrichmentStepOnRecords = async ({
     const depHash = enrichDepHash(stepConfig, {});
     const cached = readStaleness({ db, recordId, stepId: id });
 
-    if (isEnrichFresh({ cached, stepConfig, depValues: {}, force })) {
+    const expectedOutputs = Object.keys(declaredOutputs).length > 0
+      ? declaredOutputs
+      : legacyColumns;
+    if (
+      isEnrichFresh({ cached, stepConfig, depValues: {}, force })
+      && declaredOutputsHaveAnyValue({ record, expectedOutputs })
+    ) {
       summary.skipped_fresh += 1;
       return;
     }
 
     const runAttempt = async (attempt: number) => {
       const inputRecord = mergedRecordForEnrichment({ db, record });
-      const result = await executeStepAction({
+      const result = await executeEnrichmentAction({
         mcp,
         listDir,
         stepId: id,
@@ -417,7 +505,6 @@ export const executeEnrichmentStepOnRecords = async ({
         stepConfig,
         record: inputRecord,
         aiConfig: config?.ai || {},
-        role: 'research',
         context: {
           phase: 'pipeline',
           step: id,
@@ -427,9 +514,6 @@ export const executeEnrichmentStepOnRecords = async ({
         toolCatalog,
       });
 
-      const expectedOutputs = Object.keys(declaredOutputs).length > 0
-        ? declaredOutputs
-        : legacyColumns;
       const outputs = result.outputs || {};
       const outcome = outputOutcomeFor({ outputs, expectedOutputs });
 
@@ -653,7 +737,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
   }
   const mcpState: { client: any } = { client: null };
   const mcpForStep = async (stepConfig: any) => {
-    if (!toolSpecNeedsMcp(stepConfig?.tool, { listDir })) return null;
+    if (!enrichmentStepNeedsMcp(stepConfig, { listDir })) return null;
     if (!mcpState.client) mcpState.client = await getMcpClient();
     return mcpState.client;
   };
@@ -765,7 +849,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           const depHash = enrichDepHash(step?.config || {}, depValues);
           const cached = readStaleness({ db, recordId, stepId: id });
 
-          if (isEnrichFresh({ cached, stepConfig: step?.config || {}, depValues, force })) {
+          const expectedOutputs = Object.keys(declaredOutputs).length > 0
+            ? declaredOutputs
+            : legacyColumns;
+          if (
+            isEnrichFresh({ cached, stepConfig: step?.config || {}, depValues, force })
+            && declaredOutputsHaveAnyValue({ record, expectedOutputs })
+          ) {
             summary.skipped_fresh += 1;
             return;
           }
@@ -773,7 +863,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           try {
             const inputRecord = mergedRecordForEnrichment({ db, record });
             const stepConfig = step?.config || {};
-            const result = await executeStepAction({
+            const result = await executeEnrichmentAction({
               mcp: await mcpForStep(stepConfig),
               listDir,
               stepId: id,
@@ -781,7 +871,6 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               stepConfig,
               record: inputRecord,
               aiConfig: config?.ai || {},
-              role: 'research',
               context: {
                 phase: 'enrichment',
                 step: id,
@@ -791,9 +880,6 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               toolCatalog,
             });
 
-            const expectedOutputs = Object.keys(declaredOutputs).length > 0
-              ? declaredOutputs
-              : legacyColumns;
             const outputs = result.outputs || {};
             const outcome = outputOutcomeFor({ outputs, expectedOutputs });
             if (
