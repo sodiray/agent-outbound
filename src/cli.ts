@@ -88,15 +88,19 @@ import {
 import { onboardCommand } from './commands/onboard.js';
 import { validateAnthropicKey } from './orchestrator/runtime/anthropic.js';
 import { listDeepInfraModels } from './orchestrator/runtime/deepinfra.js';
+import { closeMcpClient } from './orchestrator/runtime/mcp.js';
 import { startServeMode } from './serve.js';
 import { getDbPath, getServePidPath, getServePortPath, resolveListDir } from './orchestrator/runtime/paths.js';
 import { getEnv } from './orchestrator/runtime/env.js';
 import { failureEnvelope, successEnvelope, toStructuredError } from './orchestrator/runtime/contract.js';
 
 const args = process.argv.slice(2);
-let responseCommand = '';
-let responseList = '';
-let globalIdemKey = '';
+const cliState = {
+  responseCommand: '',
+  responseList: '',
+  globalIdemKey: '',
+  skipMcpClose: false,
+};
 
 const consumeFlag = (arr, name, fallback = '') => {
   const idx = arr.indexOf(name);
@@ -130,8 +134,8 @@ const toNumber = (value, fallback) => {
 };
 
 const setResponseContext = ({ command = '', list = '' }: { command?: string; list?: string }) => {
-  if (command) responseCommand = String(command);
-  if (list !== undefined) responseList = String(list || '');
+  if (command) cliState.responseCommand = String(command);
+  if (list !== undefined) cliState.responseList = String(list || '');
 };
 
 const print = (value) => {
@@ -147,8 +151,8 @@ const print = (value) => {
       delete (result as any).warnings;
       delete (result as any).signals;
       return successEnvelope({
-        command: responseCommand || 'unknown',
-        list: responseList || '',
+        command: cliState.responseCommand || 'unknown',
+        list: cliState.responseList || '',
         result,
         warnings,
         signals,
@@ -290,7 +294,7 @@ const callServeAction = async (action: string, payload: any, listForDiscovery = 
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         ...(payload || {}),
-        ...(globalIdemKey ? { idem_key: globalIdemKey } : {}),
+        ...(cliState.globalIdemKey ? { idem_key: cliState.globalIdemKey } : {}),
       }),
     });
     if (!resp.ok) {
@@ -315,7 +319,7 @@ const callServeAction = async (action: string, payload: any, listForDiscovery = 
 const run = async () => {
   const argv = [...args];
   const format = consumeFlag(argv, '--format', 'json');
-  globalIdemKey = consumeFlag(argv, '--idem-key', '');
+  cliState.globalIdemKey = consumeFlag(argv, '--idem-key', '');
   if (format && format !== 'json' && format !== 'summary' && format !== 'markdown') {
     throw new Error(`Unsupported --format "${format}". Supported: json, summary, markdown.`);
   }
@@ -1620,6 +1624,7 @@ const run = async () => {
   if (command === 'serve') {
     const list = String(argv.shift() || '.');
     const port = toNumber(consumeFlag(argv, '--port', '49391'), 49391);
+    cliState.skipMcpClose = true;
     startServeMode({ list, port });
     process.stdout.write(`serve mode started on port ${port}\n`);
     return;
@@ -1718,13 +1723,21 @@ const run = async () => {
   throw new Error(`Unknown command: ${command}`);
 };
 
-run().catch((error) => {
-  const structured = toStructuredError(error);
-  const payload = failureEnvelope({
-    command: responseCommand || 'unknown',
-    list: responseList || '',
-    error: structured,
-  });
-  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
-  process.exit(1);
-});
+const main = async () => {
+  try {
+    await run();
+  } catch (error) {
+    const structured = toStructuredError(error);
+    const payload = failureEnvelope({
+      command: cliState.responseCommand || 'unknown',
+      list: cliState.responseList || '',
+      error: structured,
+    });
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    process.exitCode = 1;
+  } finally {
+    if (!cliState.skipMcpClose) await closeMcpClient();
+  }
+};
+
+void main();

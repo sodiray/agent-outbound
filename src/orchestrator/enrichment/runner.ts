@@ -88,7 +88,7 @@ const ttlToSeconds = (ttl) => {
 // columns, when, cache TTL) must NOT invalidate already-computed enrichment. An
 // explicit `cache_key` overrides everything, giving authors deterministic control
 // over when a step is forced to recompute.
-const MATERIAL_ENRICH_FIELDS = ['tool', 'args', 'outputs', 'model', 'reasoning', 'prompt_file', 'prompt_args', 'depends_on'] as const;
+const MATERIAL_ENRICH_FIELDS = ['tool', 'args', 'outputs', 'model', 'reasoning', 'prompt_file', 'prompt_args', 'depends_on', 'on_error'] as const;
 
 export const materialEnrichConfig = (stepConfig: any): Record<string, any> => {
   const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};
@@ -229,6 +229,13 @@ const outputOutcomeFor = ({ outputs, expectedOutputs }: { outputs: any; expected
   if (expectedNames.length === 0) return 'ok';
   const hasAnyValue = expectedNames.some((name) => !isBlank(outputs?.[name]));
   return hasAnyValue ? 'ok' : 'empty';
+};
+
+const emptyOutputsFor = (outputZod: z.ZodTypeAny) => outputZod.parse({});
+
+const enrichStepUsesEmptyOnError = (stepConfig: unknown) => {
+  const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
+  return String(config.on_error || 'fail').trim().toLowerCase() === 'empty';
 };
 
 const whenPredicateForStep = ({ step, stepConfig }: { step: any; stepConfig: any }) => (
@@ -464,6 +471,29 @@ export const executeEnrichmentStepOnRecords = async ({
       await runAttempt(1);
     } catch (error) {
       if (isBudgetExceededError(error)) throw error;
+      if (enrichStepUsesEmptyOnError(stepConfig)) {
+        const outputs = emptyOutputsFor(outputZod);
+        const patch = applyOutputs({
+          step: { ...step, config: stepConfig, __list_dir: listDir },
+          outputs,
+        });
+        patch[statusColumn] = 'empty';
+        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+        const merged = { ...currentRow, ...patch };
+        upsertRecord({ db, row: merged });
+        writeStaleness({
+          db,
+          recordId,
+          stepId: id,
+          depHash,
+          cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
+          cacheTtl: String(stepConfig?.cache || ''),
+        });
+        summary.processed += 1;
+        summary.record_ids.push(recordId);
+        emitActivity({ event: 'row_complete', phase: 'pipeline', step: id, row: rowLabel, outcome: 'empty' });
+        return;
+      }
       const firstDetail = formatErrorMessage(error);
       emitActivity({ event: 'row_retry', phase: 'pipeline', step: id, row: rowLabel, detail: firstDetail });
       try {
@@ -764,11 +794,18 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             const expectedOutputs = Object.keys(declaredOutputs).length > 0
               ? declaredOutputs
               : legacyColumns;
-            if (Object.keys(expectedOutputs).length > 0 && Object.keys(result.outputs || {}).length === 0) {
+            const outputs = result.outputs || {};
+            const outcome = outputOutcomeFor({ outputs, expectedOutputs });
+            if (
+              outcome === 'empty'
+              && !enrichStepUsesEmptyOnError(stepConfig)
+              && Object.keys(expectedOutputs).length > 0
+              && Object.keys(outputs).length === 0
+            ) {
               throw new Error(`Step "${id}" returned no outputs for declared outputs.`);
             }
 
-            outputZod.parse(result.outputs || {});
+            if (outcome === 'ok') outputZod.parse(outputs);
             recordCostEvent({
               db,
               listDir,
@@ -781,9 +818,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
 
             const patch = applyOutputs({
               step: { ...step, __list_dir: listDir },
-              outputs: result.outputs || {},
+              outputs,
             });
-            patch[statusColumn] = 'ok';
+            patch[statusColumn] = outcome;
             patches.push({
               recordId,
               rowLabel,
@@ -795,6 +832,25 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             });
           } catch (error) {
             if (isBudgetExceededError(error)) throw error;
+            const neutralStepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+            if (enrichStepUsesEmptyOnError(neutralStepConfig)) {
+              const outputs = emptyOutputsFor(outputZod);
+              const patch = applyOutputs({
+                step: { ...step, __list_dir: listDir },
+                outputs,
+              });
+              patch[statusColumn] = 'empty';
+              patches.push({
+                recordId,
+                rowLabel,
+                patch,
+                depHash,
+                cacheTtlSeconds: ttlToSeconds(neutralStepConfig?.cache),
+                cacheTtl: String(neutralStepConfig?.cache || ''),
+                skippedWhen: false,
+              });
+              return;
+            }
             const detail = formatErrorMessage(error);
             markStepFailure(recordId, id);
             failures.push({ recordId, rowLabel, error: detail });

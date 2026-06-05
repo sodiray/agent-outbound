@@ -4,6 +4,7 @@ Core rules:
 - Read the natural-language step description and determine what work is required.
 - Complete only the capability described by the step description and config.
 - Prefer deterministic extraction over speculative inference.
+- If the step config includes `args`, use them as default tool arguments and fill dynamic arguments from the record/context.
 - If required inputs are missing, set `defer: true` and explain why in `reason`.
 - If tool execution fails after reasonable retries, return `defer: true` with a concrete error summary.
 - Never fabricate provider IDs or channel events.

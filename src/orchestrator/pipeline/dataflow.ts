@@ -5,7 +5,7 @@ import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { countEnrichWorkForStep } from '../enrichment/runner.js';
-import { getMcpClient } from '../runtime/mcp.js';
+import { closeMcpClient, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
@@ -552,6 +552,7 @@ export const runPipelineDataflow = async ({
     }).finally(async () => {
       clearInterval(heartbeatTimer);
       await Promise.all(Array.from(loaders.values()).map((loader) => loader.flush()));
+      await closeMcpClient();
     });
 
     summary.survivors = Number(db.prepare(`SELECT COUNT(*) AS n FROM records WHERE ${inPlayWhere()}`).get()?.n || 0);

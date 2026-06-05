@@ -10,8 +10,13 @@ const CLIENT_VERSION = '0.9.0';
 
 type McpClient = Client;
 
-let sharedClient: McpClient | null = null;
-let sharedClientPromise: Promise<McpClient> | null = null;
+const sharedMcpState: {
+  client: McpClient | null;
+  clientPromise: Promise<McpClient> | null;
+} = {
+  client: null,
+  clientPromise: null,
+};
 
 // Composio threads a per-workflow session ID through meta-tool responses
 // (`data.session.id`). Search passes it back as `session: { id }` (or
@@ -40,25 +45,25 @@ export const makeMcpClient = async (): Promise<McpClient> => {
 };
 
 export const getMcpClient = async (): Promise<McpClient> => {
-  if (sharedClient) return sharedClient;
-  if (!sharedClientPromise) {
-    sharedClientPromise = makeMcpClient()
+  if (sharedMcpState.client) return sharedMcpState.client;
+  if (!sharedMcpState.clientPromise) {
+    sharedMcpState.clientPromise = makeMcpClient()
       .then((client) => {
-        sharedClient = client;
+        sharedMcpState.client = client;
         return client;
       })
       .catch((error) => {
-        sharedClientPromise = null;
+        sharedMcpState.clientPromise = null;
         throw error;
       });
   }
-  return sharedClientPromise;
+  return sharedMcpState.clientPromise;
 };
 
 export const closeMcpClient = async () => {
-  const client = sharedClient;
-  sharedClient = null;
-  sharedClientPromise = null;
+  const client = sharedMcpState.client;
+  sharedMcpState.client = null;
+  sharedMcpState.clientPromise = null;
   if (!client) return;
   try {
     await client.close();
@@ -66,14 +71,6 @@ export const closeMcpClient = async () => {
     // ignore
   }
 };
-
-// CLI one-shots shouldn't hang on a lingering SSE stream. Close the shared
-// client on beforeExit so Node can finish cleanly.
-process.once('beforeExit', () => {
-  if (sharedClient) {
-    void closeMcpClient();
-  }
-});
 
 const extractText = (result: any): string => {
   const content = Array.isArray(result?.content) ? result.content : [];
