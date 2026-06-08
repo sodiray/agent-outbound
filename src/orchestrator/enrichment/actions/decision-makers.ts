@@ -114,6 +114,27 @@ const bareDomainFrom = (record: Record<string, unknown>) => {
   }
 };
 
+const normalizedDomain = (domain: string) => text(domain)
+  .replace(/^https?:\/\//i, '')
+  .split('/')[0]
+  .split('?')[0]
+  .replace(/^www\./i, '')
+  .replace(/\.$/, '')
+  .toLowerCase();
+
+const sourceDomainMatchesRecordDomain = ({
+  sourceDomain,
+  recordDomain,
+}: {
+  sourceDomain: string;
+  recordDomain: string;
+}) => {
+  const source = normalizedDomain(sourceDomain);
+  const record = normalizedDomain(recordDomain);
+  if (!source || !record) return false;
+  return source === record;
+};
+
 export const deriveDecisionMakerBrandRoot = (businessName: unknown) => {
   const originalTokens = tokensFor(text(businessName));
   const stripped = originalTokens.filter((token) => !PRODUCT_AND_LEGAL_TOKENS.has(token));
@@ -135,8 +156,10 @@ const companySearchMatchesBrand = ({
 }) => {
   const tokens = significantBrandTokens(brandRoot);
   if (tokens.length === 0) return false;
+  const normalizedBrandRoot = normalizeToken(brandRoot);
   const haystack = normalizeToken(`${organization} ${domain}`);
-  return tokens.some((token) => haystack.includes(token));
+  if (normalizedBrandRoot.length >= 5 && haystack.includes(normalizedBrandRoot)) return true;
+  return tokens.length > 1 && tokens.every((token) => haystack.includes(token));
 };
 
 const nestedRecord = (value: unknown): Record<string, unknown> => (
@@ -228,10 +251,13 @@ const sourceDecisionMakerCandidates = async ({
 }) => {
   const seniority = ['senior', 'executive'];
   const domain = bareDomainFrom(record);
-  const domainCandidates = domain
-    ? uniqueCandidates(await callHunterDomainSearch(mcp, { domain, seniority, limit: 10 }))
-    : [];
-  if (domainCandidates.length > 0) return domainCandidates;
+  if (domain) {
+    const candidates = await callHunterDomainSearch(mcp, { domain, seniority, limit: 10 });
+    return uniqueCandidates(candidates.filter((candidate) => sourceDomainMatchesRecordDomain({
+      sourceDomain: candidate.source_domain,
+      recordDomain: domain,
+    })));
+  }
 
   const brandRoot = deriveDecisionMakerBrandRoot(record.business_name);
   if (!brandRoot) return [];
