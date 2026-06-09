@@ -4,7 +4,7 @@ import { validatePipelineGraph } from '../lib/pipeline-graph.js';
 import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
-import { countEnrichWorkForStep, enrichmentStepNeedsMcp } from '../enrichment/runner.js';
+import { countEnrichWorkForStep, enrichmentStepNeedsMcp, readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { closeMcpClient, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
@@ -15,6 +15,9 @@ import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
 import {
   pipelineStepId,
+  filterDefHash,
+  filterStalenessStepId,
+  isFilterDefFresh,
   readInPlayRows,
   simulatePipeline,
   writeFilterFailure,
@@ -310,7 +313,21 @@ const initializeResolved = ({
       if (!step) return true;
       if (step.kind === 'enrich') return !force;
       if (step.kind !== 'filter') return true;
-      return !reapply;
+      if (reapply) return false;
+      const staleStepId = filterStalenessStepId(step.id);
+      const cached = readStaleness({ db, recordId, stepId: staleStepId });
+      if (!cached) {
+        writeStaleness({
+          db,
+          recordId,
+          stepId: staleStepId,
+          depHash: filterDefHash(step.step),
+          cacheTtl: '',
+          cacheTtlSeconds: 0,
+        });
+        return true;
+      }
+      return isFilterDefFresh({ cached, stepConfig: step.step });
     }));
     // Force-resolve gates the human has chosen to keep this record past, even under
     // --reapply (which otherwise re-evaluates passed filters). The gate never runs.
@@ -529,6 +546,14 @@ export const runPipelineDataflow = async ({
             reason,
             occurred_at: now,
           },
+        });
+        writeStaleness({
+          db,
+          recordId,
+          stepId: filterStalenessStepId(step.id),
+          depHash: filterDefHash(step.step),
+          cacheTtl: '',
+          cacheTtlSeconds: 0,
         });
         const action = effectivePassed
           ? ''

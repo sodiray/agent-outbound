@@ -1,8 +1,29 @@
 import { hasPassedStep, inPlayWhere, isRecordCommitted, upsertRecord } from '../runtime/db.js';
 import { evaluateFieldCheckGroup } from '../lib/conditions.js';
-import { countEnrichWorkForStep } from '../enrichment/runner.js';
+import { countEnrichWorkForStep, readStaleness } from '../enrichment/runner.js';
 import { avgStepCostUsd } from '../lib/costs.js';
-import { getRecordRowId } from '../lib/record.js';
+import { getRecordRowId, stableHash } from '../lib/record.js';
+
+const MATERIAL_FILTER_FIELDS = ['type', 'match', 'condition', 'conditions', 'value', 'operator', 'field', 'on_fail', 'model'] as const;
+
+export const filterMaterialConfig = (stepConfig: any): Record<string, any> => {
+  const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};
+  const material: Record<string, any> = {};
+  for (const field of [...MATERIAL_FILTER_FIELDS].sort()) {
+    if (Object.prototype.hasOwnProperty.call(cfg, field) && cfg[field] !== undefined) {
+      material[field] = cfg[field];
+    }
+  }
+  return material;
+};
+
+export const filterDefHash = (stepConfig: any) => stableHash({ config: filterMaterialConfig(stepConfig) });
+
+export const filterStalenessStepId = (stepId: string) => `filter:${stepId}`;
+
+export const isFilterDefFresh = ({ cached, stepConfig }: { cached: any; stepConfig: any }) => (
+  !cached || String(cached.dep_hash || '') === filterDefHash(stepConfig)
+);
 
 export const pipelineStepId = (step: any, index: number) => (
   String(step?.id || '').trim() || `pipeline_step_${index + 1}`
@@ -95,7 +116,12 @@ export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: 
 
     const filterType = String(step?.type || 'semantic').trim().toLowerCase();
     const onFail = String(step?.on_fail || 'drop').trim().toLowerCase() === 'flag' ? 'flag' : 'drop';
-    const evalRows = reapply ? active : active.filter((record) => !hasPassedStep({ db, recordId: getRecordRowId(record), stepId }));
+    const evalRows = reapply ? active : active.filter((record) => {
+      const recordId = getRecordRowId(record);
+      if (!hasPassedStep({ db, recordId, stepId })) return true;
+      const cached = readStaleness({ db, recordId, stepId: filterStalenessStepId(stepId) });
+      return !isFilterDefFresh({ cached, stepConfig: step });
+    });
     const skippedPassed = active.length - evalRows.length;
 
     if (filterType === 'field_check') {
