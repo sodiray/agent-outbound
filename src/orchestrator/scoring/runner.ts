@@ -337,7 +337,7 @@ const applyOverride = ({ score, reasoning, override, overrideReason, axis }) => 
   };
 };
 
-export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = false, force = false }) => {
+export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = false, force = false }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   assertPhaseModelReferences({ config, phase: 'score' });
@@ -371,10 +371,10 @@ export const runScoring = async ({ listDir, where = '1=1', limit = 0, dryRun = f
       { name: 'score_scoring_error', type: 'TEXT' },
     ],
   });
-  const whereSql = String(where || '1=1').trim() || '1=1';
+  const whereSql = String(where || '').trim();
   const records = db.prepare(`
     SELECT * FROM records
-    WHERE ${inPlayWhere()} AND (${whereSql})
+    WHERE ${inPlayWhere()} ${whereSql ? `AND (${whereSql})` : ''}
     ORDER BY updated_at DESC
     ${Number(limit || 0) > 0 ? `LIMIT ${Number(limit || 0)}` : ''}
   `).all();

@@ -213,7 +213,7 @@ const printHelp = () => {
   process.stdout.write(`  remove <list> --where SQL\n`);
   process.stdout.write(`  remove <list> --keep-top N [--sort-by COLUMN]\n`);
   process.stdout.write(`  pipeline <list> [--where SQL] [--limit N] [--dry-run] [--sample N] [--concurrency N]\n`);
-  process.stdout.write(`  score <list> [--dry-run] [--sample N] [--force]\n`);
+  process.stdout.write(`  score <list> [--where SQL] [--dry-run] [--sample N] [--force]\n`);
   process.stdout.write(`  generate <list> [--where SQL] [--step ID] [--dry-run] [--sample N] [--force]\n`);
   process.stdout.write(`  run <list> [--more N]\n`);
   process.stdout.write(`  launch draft <list> [--limit N] [--sequence NAME] [--dry-run] [--sample N]\n`);
@@ -1277,15 +1277,20 @@ const run = async () => {
 
   if (command === 'score') {
     const list = String(argv.shift() || '');
+    const where = consumeFlag(argv, '--where', '');
     const dryRun = hasFlag(argv, '--dry-run');
     const force = hasFlag(argv, '--force');
     const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
-    const delegated = await callServeAction('score', { list, dryRun, sample, force }, list);
+    const delegated = await callServeAction('score', {
+      list, where, dryRun, sample, force,
+    }, list);
     if (delegated) {
       print(delegated);
       return;
     }
-    print(await scoreCommand({ list, dryRun, sample, force }));
+    print(await scoreCommand({
+      list, where, dryRun, sample, force,
+    }));
     return;
   }
 

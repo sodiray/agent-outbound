@@ -1084,19 +1084,29 @@ export const runCommand = async ({ list, more = 0 }) => {
   };
 };
 
-export const scoreCommand = async ({ list, dryRun = false, sample = 0, force = false }) => {
+export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 0, force = false }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'score' });
+  const whereSql = String(where || '').trim();
+  const whereCheck = validateWhereSql(whereSql);
+  if (!whereCheck.ok) throw new Error(whereCheck.error || 'Invalid --where SQL fragment.');
+
   const db = openListDb({ listDir, readonly: true });
-  const total = db.prepare(`SELECT COUNT(*) as count FROM records WHERE ${inPlayWhere()}`).get();
+  const total = db.prepare(`
+    SELECT COUNT(*) as count
+    FROM records
+    WHERE ${inPlayWhere()} ${whereSql ? `AND (${whereSql})` : ''}
+  `).get();
   db.close();
   const totalCount = Number(total?.count || 0);
   const { config } = loaded;
   const threshold = getBulkSnapshotThreshold(config || {});
 
   if (dryRun) {
-    return runScoring({ listDir, dryRun: true, force });
+    return runScoring({
+      listDir, where: whereSql, dryRun: true, force,
+    });
   }
   const sampleN = Math.max(0, Number(sample || 0));
   if (sampleN > 0) {
@@ -1104,13 +1114,15 @@ export const scoreCommand = async ({ list, dryRun = false, sample = 0, force = f
       listDir,
       sampledCount: sampleN,
       totalCount: Math.max(totalCount, sampleN),
-      run: () => runScoring({ listDir, limit: sampleN, force }),
+      run: () => runScoring({
+        listDir, where: whereSql, limit: sampleN, force,
+      }),
     });
   }
   const autoSnapshot = totalCount >= threshold
     ? snapshotCreateCommand({ list: listDir, label: `auto-before-score-${new Date().toISOString()}` })
     : null;
-  const scored = await runScoring({ listDir, force });
+  const scored = await runScoring({ listDir, where: whereSql, force });
   return {
     ...scored,
     auto_snapshot: autoSnapshot,
