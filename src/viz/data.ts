@@ -1,7 +1,8 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
-import { listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
+import { listFieldOverridesForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
+import { LEAD_STATUSES, leadStatus, leadStatusCaseSql } from '../orchestrator/runtime/status.js';
 import { getEnv } from '../orchestrator/runtime/env.js';
 
 const NUMERIC_COLUMNS = new Set([
@@ -468,9 +469,19 @@ export const buildMeta = (listDir: string) => {
       return [];
     });
     filters.push({ key: 'disqualified', label: 'Status', type: 'enum', options: ['qualified', 'disqualified'] });
+    filters.push({ key: 'lead_status', label: 'Lead status', type: 'enum', options: [...LEAD_STATUSES] });
+    const statusCounts = normalizedRows(db.prepare(`
+      SELECT ${leadStatusCaseSql({ availableColumns: realColumns })} AS status, COUNT(*) AS count
+      FROM records GROUP BY status
+    `).all());
     return {
       list: { name: basename(listDir), dir: listDir },
-      counts: { total, qualified, disqualified: total - qualified },
+      counts: {
+        total,
+        qualified,
+        disqualified: total - qualified,
+        by_status: Object.fromEntries(statusCounts.map((row: any) => [String(row.status || ''), Number(row.count || 0)])),
+      },
       steps: buildSteps(config),
       columns,
       filters,
@@ -495,6 +506,14 @@ export const queryRecords = (listDir: string, params: any = {}) => {
       if (key === 'disqualified') {
         if (filterValue === 'qualified' && realColumns.has('disqualified_at')) where.push("COALESCE(disqualified_at, '') = ''");
         if (filterValue === 'disqualified' && realColumns.has('disqualified_at')) where.push("COALESCE(disqualified_at, '') != ''");
+        continue;
+      }
+      if (key === 'lead_status') {
+        const status = String(filterValue || '');
+        if ((LEAD_STATUSES as readonly string[]).includes(status)) {
+          where.push(`${leadStatusCaseSql({ availableColumns: realColumns })} = ?`);
+          values.push(status);
+        }
         continue;
       }
       if (!realColumns.has(key)) continue;
@@ -541,6 +560,7 @@ export const queryRecords = (listDir: string, params: any = {}) => {
         return {
           ...record,
           __stage: String(record.disqualified_at || '') ? 'dropped' : 'scored',
+          __lead_status: leadStatus(record),
           __dropped_at: String(record.disqualified_gate || ''),
           __outcome: derivedOutcome(record),
           ...Object.fromEntries(criteria.map((id) => [criterionKey(id), verdicts.get(id) || ''])),
@@ -589,6 +609,9 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
       : [];
     const overrideRows = tableExists(db, 'overrides')
       ? listOverridesForRecord({ db, recordId: rowId, includeCleared: true })
+      : [];
+    const fieldOverrides = tableExists(db, 'field_overrides')
+      ? listFieldOverridesForRecord({ db, recordId: rowId, includeCleared: true })
       : [];
     const overrides = overrideRows.map((o: any) => ({
       id: String(o.id || ''),
@@ -699,6 +722,13 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         at: o.created_at,
         cleared: !o.active,
       })),
+      ...fieldOverrides.map((o: any) => ({
+        kind: 'override',
+        label: `field set · ${o.field}`,
+        detail: [o.value === null ? '(cleared)' : `= ${o.value}`, o.reason].filter(Boolean).join(' — '),
+        at: o.created_at,
+        cleared: String(o.cleared_at || '').trim() !== '',
+      })),
       ...costEvents.filter((event) => event.record_id === rowId || selectCostForStep(costEvents, 'score') === event || pipeline.some((step: any) => costStepMatches(String(event.step_id || ''), String(step.id || '')))).map((event) => ({
         kind: 'cost',
         label: event.step_id || '',
@@ -706,7 +736,15 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         at: event.occurred_at || '',
       })),
     ].filter(Boolean).sort((a: any, b: any) => String(a.at || '').localeCompare(String(b.at || '')));
-    return { record, steps, score, timeline, overrides };
+    const manualFields = fieldOverrides
+      .filter((o: any) => String(o.cleared_at || '').trim() === '')
+      .map((o: any) => ({
+        field: String(o.field || ''),
+        value: o.value === null || o.value === undefined ? null : String(o.value),
+        reason: String(o.reason || ''),
+        created_at: String(o.created_at || ''),
+      }));
+    return { record, lead_status: leadStatus(record), manual_fields: manualFields, steps, score, timeline, overrides };
   } finally {
     db.close();
   }

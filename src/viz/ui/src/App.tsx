@@ -8,6 +8,7 @@ import type {
   ActiveFilter,
   ColumnMeta,
   FilterMeta,
+  ManualField,
   MetaResponse,
   OverrideRecord,
   RecordDetail,
@@ -272,6 +273,20 @@ const OutcomeBadge = ({ record }: { record: RecordRow }) => {
     return <span className="outcome-badge is-dropped">Dropped · {labelFor(droppedAt(record) || 'gate')}</span>;
   }
   return <span className="outcome-badge is-scored">Scored</span>;
+};
+
+const LEAD_STATUS_BADGES: Record<string, { label: string; className: string }> = {
+  qualified: { label: 'Qualified', className: 'is-scored' },
+  unscored: { label: 'Unscored', className: '' },
+  dropped_low_score: { label: 'Dropped · low score', className: 'is-dropped' },
+  dropped_gate: { label: 'Dropped · gate', className: 'is-dropped' },
+  dropped_manual: { label: 'Dropped · manual', className: 'is-dropped' },
+};
+
+const LeadStatusBadge = ({ status }: { status: string }) => {
+  const badge = LEAD_STATUS_BADGES[status];
+  if (!badge) return null;
+  return <span className={`outcome-badge ${badge.className}`}>{badge.label}</span>;
 };
 
 const OUTCOME_ICON: Record<string, { glyph: string; cls: string; title: string }> = {
@@ -681,6 +696,26 @@ const metadataChips = (step: RecordDetailStep) => [
   step.cost?.occurred_at ? displayDate(step.cost.occurred_at) : '',
 ].filter((value) => value && value !== 'n/a');
 
+const ManualFieldsSection = ({ fields }: { fields: ManualField[] }) => {
+  if (!fields || fields.length === 0) return null;
+  return (
+    <section className="detail-section">
+      <div className="section-title">Human-set fields</div>
+      <div className="override-list">
+        {fields.map((entry) => (
+          <article key={entry.field} className="override-item override-item--keep">
+            <div className="override-item__head">
+              <span className="chip status-chip is-blue">{labelFor(entry.field)}</span>
+              {entry.created_at ? <span className="step-time">{displayDate(entry.created_at)}</span> : null}
+            </div>
+            <p>{entry.value === null || entry.value === '' ? '(cleared)' : entry.value}{entry.reason ? ` — ${entry.reason}` : ''}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+};
+
 const OverridesSection = ({ overrides }: { overrides: OverrideRecord[] }) => {
   if (!overrides || overrides.length === 0) return null;
   return (
@@ -872,7 +907,7 @@ const DetailPanel = ({
           <>
             <header className="detail-header">
               <div>
-                <OutcomeBadge record={record} />
+                {detail.lead_status ? <LeadStatusBadge status={detail.lead_status} /> : <OutcomeBadge record={record} />}
                 <h2>{textValue(identityValue(record, ['business_name', 'name']))}</h2>
                 <p>{textValue(identityValue(record, ['address', 'formattedAddress']))}</p>
                 <div className="contact-row">
@@ -886,6 +921,7 @@ const DetailPanel = ({
               </div>
             </header>
             <ScoreSection detail={detail} />
+            <ManualFieldsSection fields={Array.isArray(detail.manual_fields) ? detail.manual_fields : []} />
             <OverridesSection overrides={overrides} />
             <section className="detail-section">
               <div className="section-title">Steps</div>

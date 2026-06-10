@@ -3,7 +3,8 @@ import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { validateWhereSql } from '../orchestrator/lib/sql-safety.js';
-import { ensureDataAccessViews, getRecordById, listContactsByRecord, openListDb } from '../orchestrator/runtime/db.js';
+import { ensureDataAccessViews, getRecordById, listContactsByRecord, listFieldOverridesForRecord, openListDb } from '../orchestrator/runtime/db.js';
+import { leadStatus } from '../orchestrator/runtime/status.js';
 import { listCommandDefinitions } from '../orchestrator/runtime/describe.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
@@ -603,7 +604,13 @@ export const recordShowCommand = ({ list, rowId, include = '' }) => {
       `).all(recordId);
     }
 
-    return { record, sections };
+    const manualFields = listFieldOverridesForRecord({ db, recordId }).map((row: any) => ({
+      field: String(row.field || ''),
+      value: row.value === null || row.value === undefined ? null : String(row.value),
+      reason: String(row.reason || ''),
+      created_at: String(row.created_at || ''),
+    }));
+    return { record, lead_status: leadStatus(record), manual_fields: manualFields, sections };
   } finally {
     db.close();
   }

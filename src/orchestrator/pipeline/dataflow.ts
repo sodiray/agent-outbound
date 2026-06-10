@@ -10,7 +10,7 @@ import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
-import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileOverrides } from '../runtime/db.js';
+import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides } from '../runtime/db.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
 import {
@@ -405,6 +405,9 @@ export const runPipelineDataflow = async ({
     // Honor human decision overrides before selecting the in-play set: drops are
     // re-disqualified (excluded), keeps are un-disqualified (re-included).
     if (!dryRun) reconcileOverrides({ db });
+    // Re-assert human-owned field values (lead set) before and regardless of
+    // whatever the steps write; upsertRecord also enforces these per-write.
+    if (!dryRun) reconcileFieldOverrides({ db });
     const rows = readInPlayRows({ db, where, limit });
     if (dryRun) return simulatePipeline({ db, steps: steps.map((entry) => ({ ...entry.step, id: entry.id })), baseRows: rows, force, reapply });
     const overridesByRecord = overridesByRecordMap({ db });

@@ -256,6 +256,20 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_overrides_record ON overrides(record_id, cleared_at);
 
+  CREATE TABLE IF NOT EXISTS field_overrides (
+    id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    field TEXT NOT NULL,
+    value TEXT,
+    reason TEXT DEFAULT '',
+    created_by TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    cleared_at TEXT DEFAULT '',
+    cleared_by TEXT DEFAULT '',
+    FOREIGN KEY(record_id) REFERENCES records(_row_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_field_overrides_record ON field_overrides(record_id, cleared_at);
+
   CREATE TABLE IF NOT EXISTS run_state (
     run_id TEXT PRIMARY KEY,
     phase TEXT NOT NULL,
@@ -1003,10 +1017,26 @@ const isDynamicRecordValue = (value) => (
     || typeof value === 'bigint'
 );
 
-export const upsertRecord = ({ db, row }) => {
-  const rowId = String(row._row_id || row.id || '').trim();
+// Overlay active human field overrides onto an incoming row. upsertRecord is the
+// chokepoint every writer (enrichment, generate, scoring, sequencer) flows
+// through, so a manually-set field can never be clobbered by a pipeline rerun.
+const withFieldOverrides = ({ db, recordId, row }) => {
+  const overrides = (() => {
+    try {
+      return activeFieldOverrideMap({ db, recordId });
+    } catch {
+      return new Map();
+    }
+  })();
+  if (overrides.size === 0) return row;
+  return { ...row, ...Object.fromEntries(overrides) };
+};
+
+export const upsertRecord = ({ db, row: inputRow }) => {
+  const rowId = String(inputRow._row_id || inputRow.id || '').trim();
   if (!rowId) throw new Error('Record id/_row_id is required.');
   const current = db.prepare('SELECT id, _row_id FROM records WHERE _row_id = ? OR id = ?').get(rowId, rowId);
+  const row = withFieldOverrides({ db, recordId: String(current?._row_id || rowId), row: inputRow });
   const timestamp = nowIso();
 
   if (current?.id) {
@@ -1403,6 +1433,96 @@ export const reconcileOverrides = ({ db }) => {
         summary.keeps_restored += 1;
       }
     }
+  });
+  return summary;
+};
+
+// --- Field overrides --------------------------------------------------------
+// Human-set values for individual record fields ("the decision maker is Teresa").
+// Append-only with soft clears, one active override per (record, field). A field
+// with an active override is owned by the human: every write path flows through
+// upsertRecord, which re-asserts the override value, so enrichment and scoring
+// reruns can never clobber field intel.
+
+// Fields where a manual value would fight the machinery that owns them.
+// Disqualification belongs to `override keep/drop`, suppression to `suppress`.
+export const FIELD_OVERRIDE_PROTECTED = new Set([
+  '_row_id', 'id', '_created_at', '_updated_at', 'created_at', 'updated_at',
+  'extra_json', 'workflow_signals',
+  'disqualified_at', 'disqualified_gate', 'disqualify_reason',
+  'needs_review', 'review_reason', 'review_flagged_at',
+  'suppressed', 'suppressed_reason', 'suppressed_at',
+  'duplicate_of', 'duplicate_status',
+]);
+
+export const insertFieldOverride = ({ db, recordId, field, value, reason = '', createdBy = '' }) => {
+  const fieldName = String(field || '').trim();
+  if (!fieldName) throw new Error('A field name is required.');
+  if (FIELD_OVERRIDE_PROTECTED.has(fieldName)) {
+    throw new Error(`Field "${fieldName}" cannot be manually overridden — it is owned by the pipeline. Use the matching command (override drop/keep, suppress) instead.`);
+  }
+  const tableCols = getTableColumns(db, 'records');
+  if (!tableCols.has(fieldName)) {
+    throw new Error(`Unknown record field "${fieldName}". Run \`schema <list> --table records\` to see available columns.`);
+  }
+  const now = nowIso();
+  // One active override per (record, field): supersede, keep history.
+  db.prepare(`
+    UPDATE field_overrides SET cleared_at = ?, cleared_by = 'superseded'
+    WHERE record_id = ? AND field = ? AND (cleared_at IS NULL OR cleared_at = '')
+  `).run(now, String(recordId), fieldName);
+  const id = `fov_${randomUUID().slice(0, 12)}`;
+  db.prepare(`
+    INSERT INTO field_overrides (id, record_id, field, value, reason, created_by, created_at, cleared_at, cleared_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, '', '')
+  `).run(id, String(recordId), fieldName, value === null || value === undefined ? null : String(value), String(reason || ''), String(createdBy || ''), now);
+  return { id, record_id: String(recordId), field: fieldName, value: value === null || value === undefined ? null : String(value), reason: String(reason || ''), created_at: now };
+};
+
+export const listFieldOverridesForRecord = ({ db, recordId, includeCleared = false }) => {
+  const sql = includeCleared
+    ? 'SELECT * FROM field_overrides WHERE record_id = ? ORDER BY created_at DESC'
+    : "SELECT * FROM field_overrides WHERE record_id = ? AND (cleared_at IS NULL OR cleared_at = '') ORDER BY created_at DESC";
+  return db.prepare(sql).all(String(recordId));
+};
+
+export const listActiveFieldOverrides = ({ db }) =>
+  db.prepare("SELECT * FROM field_overrides WHERE cleared_at IS NULL OR cleared_at = '' ORDER BY created_at DESC").all();
+
+export const clearFieldOverrides = ({ db, recordId, field = null, clearedBy = '' }) => {
+  const now = nowIso();
+  const active = listFieldOverridesForRecord({ db, recordId });
+  const matched = active.filter((o) => field === null || String(o.field) === String(field || '').trim());
+  const update = db.prepare('UPDATE field_overrides SET cleared_at = ?, cleared_by = ? WHERE id = ?');
+  matched.forEach((o) => update.run(now, String(clearedBy || ''), o.id));
+  return matched;
+};
+
+export const activeFieldOverrideMap = ({ db, recordId }) => {
+  const rows = listFieldOverridesForRecord({ db, recordId });
+  // Rows are newest-first; first write per field wins (= the active latest).
+  return rows.reduce((map, row) => {
+    const field = String(row.field || '');
+    if (!field || map.has(field)) return map;
+    map.set(field, row.value === null || row.value === undefined ? null : String(row.value));
+    return map;
+  }, new Map());
+};
+
+// Re-stamp every active field override onto its record. Idempotent; belt-and-
+// braces alongside the upsertRecord hook (covers direct UPDATEs that bypass it).
+export const reconcileFieldOverrides = ({ db }) => {
+  const rows = listActiveFieldOverrides({ db });
+  const tableCols = getTableColumns(db, 'records');
+  const summary = { applied: 0 };
+  rows.forEach((row) => {
+    const field = String(row.field || '');
+    if (!field || !tableCols.has(field)) return;
+    const quoted = `"${field.replace(/"/g, '""')}"`;
+    const result = db.prepare(`UPDATE records SET ${quoted} = ?, updated_at = ? WHERE _row_id = ? AND ${quoted} IS NOT ?`).run(
+      row.value, nowIso(), String(row.record_id), row.value,
+    );
+    if (result.changes > 0) summary.applied += 1;
   });
   return summary;
 };

@@ -63,6 +63,9 @@ import {
   templatesUpdateCommand,
   initCommand,
   leadAddCommand,
+  leadOverridesCommand,
+  leadSetCommand,
+  leadUnsetCommand,
   launchDraftCommand,
   launchSendCommand,
   listCreateCommand,
@@ -189,6 +192,9 @@ const printHelp = () => {
   process.stdout.write(`  views save <list> --name NAME --select "col1,col2" [--where SQL]\n`);
   process.stdout.write(`  record show <list> <row_id> [--include enrichment,scores,events,contacts,sequence,drafts,ai-usage]\n`);
   process.stdout.write(`  lead add <list> --name NAME [--near LOCALITY] [--query TEXT] [--run] [--dry-run] [--max N]\n`);
+  process.stdout.write(`  lead set <list> <record> --field FIELD --value VALUE [--reason TEXT]        # human-set a field; survives pipeline reruns\n`);
+  process.stdout.write(`  lead unset <list> <record> [--field FIELD]                                  # release manually-set field(s) back to the pipeline\n`);
+  process.stdout.write(`  lead overrides <list> <record>                                              # manual field values + history for one lead\n`);
   process.stdout.write(`  override keep <list> <record> [--step STEP_ID | --all-gates] --reason TEXT   # bypass a gate that dropped a lead\n`);
   process.stdout.write(`  override drop <list> <record> --reason TEXT                                 # manually disqualify a lead\n`);
   process.stdout.write(`  override clear <list> <record> [--step STEP_ID]                             # remove human overrides on a lead\n`);
@@ -879,6 +885,33 @@ const run = async () => {
       print(await leadAddCommand({
         list, name, near, query, run: runLead, dryRun, max,
       }));
+      return;
+    }
+    if (sub === 'set') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const field = consumeFlag(argv, '--field', '');
+      const value = consumeFlag(argv, '--value', '');
+      const reason = consumeFlag(argv, '--reason', '');
+      const createdBy = consumeFlag(argv, '--by', '');
+      setResponseContext({ command: 'lead set', list });
+      print(leadSetCommand({ list, ref, field, value, reason, createdBy }));
+      return;
+    }
+    if (sub === 'unset') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const field = consumeFlag(argv, '--field', '');
+      const clearedBy = consumeFlag(argv, '--by', '');
+      setResponseContext({ command: 'lead unset', list });
+      print(leadUnsetCommand({ list, ref, field: field || null, clearedBy }));
+      return;
+    }
+    if (sub === 'overrides') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      setResponseContext({ command: 'lead overrides', list });
+      print(leadOverridesCommand({ list, ref }));
       return;
     }
     throw new Error(`Unknown lead subcommand: ${sub}`);

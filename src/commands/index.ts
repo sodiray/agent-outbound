@@ -72,7 +72,7 @@ export {
   mcpRemoveCommand,
   mcpTestCommand,
 } from './mcp.js';
-export { leadAddCommand } from './leads.js';
+export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand } from './leads.js';
 export {
   assetsCommand,
   assetsListCommand,

@@ -119,8 +119,17 @@ export type LeadScore = {
   events: Array<{ axis: string; score: number; reasoning: string; computed_at: string }>;
 };
 
+export type ManualField = {
+  field: string;
+  value: string | null;
+  reason: string;
+  created_at: string;
+};
+
 export type RecordDetail = {
   record: RecordRow;
+  lead_status: string;
+  manual_fields: ManualField[];
   steps: RecordDetailStep[];
   score: LeadScore;
   timeline: Array<{ kind: string; label: string; detail: string; at: string; cleared?: boolean }>;
