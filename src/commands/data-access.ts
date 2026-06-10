@@ -324,7 +324,7 @@ export const schemaCommand = ({ list, table = '', format = 'json' }) => {
     }
 
     const examples = [
-      'SELECT business_name, priority_rank FROM records_enriched ORDER BY priority_rank DESC LIMIT 20',
+      'SELECT business_name, fit_score FROM records_enriched ORDER BY COALESCE(fit_score, priority_rank) DESC LIMIT 20',
       'SELECT * FROM sequence_state WHERE gating_state = \'due\' ORDER BY next_action_date ASC',
       'SELECT row_id, event_type, occurred_at FROM records_timeline ORDER BY occurred_at DESC LIMIT 50',
       'SELECT step_id, SUM(usd_cost) FROM ai_usage GROUP BY step_id ORDER BY SUM(usd_cost) DESC',
@@ -438,7 +438,7 @@ export const exportCommand = async ({ list, toFile, select, where = '', format =
     SELECT ${expressions.join(', ')}
     FROM records_enriched
     WHERE ${String(where || '').trim() || '1=1'}
-    ORDER BY priority_rank DESC, _row_id ASC
+    ORDER BY COALESCE(fit_score, priority_rank) DESC, _row_id ASC
   `;
 
   const db = openListDb({ listDir, readonly: true });
@@ -680,7 +680,7 @@ export const routeShowCommand = ({ list, date, include = '', cursor = '', limit 
         re.address,
         re.city,
         re.state,
-        re.priority_rank,
+        COALESCE(re.fit_score, re.priority_rank) AS priority_rank,
         re.primary_contact_name,
         re.primary_contact_email,
         re.primary_contact_phone

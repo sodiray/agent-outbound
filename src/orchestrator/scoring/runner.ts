@@ -1,12 +1,12 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
-import { ensureRecordColumns, inPlayWhere, insertScoreEvent, openListDb, overridesByRecordMap, upsertRecord } from '../runtime/db.js';
+import { ensureRecordColumns, inPlayWhere, insertPipelineEvent, insertScoreEvent, openListDb, overridesByRecordMap, upsertRecord } from '../runtime/db.js';
 import { writeFilterFailure } from '../pipeline/shared.js';
 import { readConfig } from '../lib/config.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, tickProgress, endRun } from '../runtime/progress.js';
 import { recordCostEvent } from '../lib/costs.js';
-import { getRecordRowId } from '../lib/record.js';
+import { getRecordRowId, recordScore } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
@@ -81,6 +81,41 @@ const rewardOnlyPoints = (criterion, verdict) => (
 );
 
 const MIN_SCORE_GATE = 'score_minimum';
+
+const scoreCandidateWhere = () => `(((${inPlayWhere()}) OR (disqualified_gate = '${MIN_SCORE_GATE}' AND (suppressed IS NULL OR suppressed = 0))))`;
+
+const hasActiveManualDropOverride = ({ db, recordId }) => Boolean(db.prepare(`
+  SELECT 1 FROM overrides
+  WHERE record_id = ? AND kind = 'drop' AND (cleared_at IS NULL OR cleared_at = '')
+  LIMIT 1
+`).get(String(recordId)));
+
+const reinstateScoreMinimumDrop = ({ db, record, score, minimumScore }) => {
+  const recordId = getRecordRowId(record);
+  if (String(record.disqualified_gate || '') !== MIN_SCORE_GATE) return false;
+  if (score === null || score === undefined || Number(score) < minimumScore) return false;
+  if (hasActiveManualDropOverride({ db, recordId })) return false;
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE records
+    SET disqualified_at = '', disqualified_gate = '', disqualify_reason = '',
+      needs_review = 0, review_reason = '', review_flagged_at = '', updated_at = ?
+    WHERE _row_id = ?
+  `).run(now, recordId);
+  insertPipelineEvent({
+    db,
+    event: {
+      event_id: randomUUID(),
+      record_id: recordId,
+      step_id: MIN_SCORE_GATE,
+      kind: 'filter',
+      passed: 1,
+      reason: `Reinstated: score ${score} >= minimum ${minimumScore}`,
+      occurred_at: now,
+    },
+  });
+  return true;
+};
 
 const scoringSnapshot = (record) => {
   const { extra_json, ...rest } = record || {};
@@ -374,7 +409,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
   const whereSql = String(where || '').trim();
   const records = db.prepare(`
     SELECT * FROM records
-    WHERE ${inPlayWhere()} ${whereSql ? `AND (${whereSql})` : ''}
+    WHERE ${scoreCandidateWhere()} ${whereSql ? `AND (${whereSql})` : ''}
     ORDER BY updated_at DESC
     ${Number(limit || 0) > 0 ? `LIMIT ${Number(limit || 0)}` : ''}
   `).all();
@@ -395,7 +430,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
       // Project the floor against current scores (no LLM): how many in-play leads it would drop.
       const projectedFloorDrops = minimumScore > 0
         ? records.filter((record) => belowMinimum(
-          record.priority_rank === null ? null : numericOr(record.priority_rank, 0),
+          recordScore(record),
           record,
         )).length
         : 0;
@@ -423,7 +458,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
         if (!rescore) {
           // Already scored and unchanged — still enforce the floor (cheap, no LLM)
           // so a newly-added/raised minimum applies without a forced re-score.
-          const existingScore = record.priority_rank === null ? null : numericOr(record.priority_rank, 0);
+          const existingScore = recordScore(record);
           if (belowMinimum(existingScore, record)) {
             const action = writeFilterFailure({
               db,
@@ -436,6 +471,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
             emitActivity({ event: 'row_complete', phase: 'scoring', row: record.business_name || recordId });
             return;
           }
+          reinstateScoreMinimumDrop({ db, record, score: existingScore, minimumScore });
           summary.skipped_unchanged += 1;
           return;
         }
@@ -465,39 +501,45 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
         });
 
         const updatedAt = new Date().toISOString();
+        const finalScore = scored.score === null ? null : numericOr(scored.score, 0);
         const updated = {
           ...record,
-          priority_rank: scored.score === null ? null : numericOr(scored.score, 0),
+          fit_score: finalScore,
+          priority_rank: finalScore,
           score_reasoning: scored.reasoning,
           score_breakdown: JSON.stringify(Array.isArray(scoreRaw.breakdown) ? scoreRaw.breakdown : []),
           score_scoring_error: scoreRaw.error,
           score_updated_at: updatedAt,
+          fit_score_updated_at: updatedAt,
+          fit_updated_at: updatedAt,
         };
 
         upsertRecord({ db, row: updated });
-        if (updated.priority_rank !== null) {
+        if (finalScore !== null) {
           insertScoreEvent({
             db,
             event: {
               event_id: randomUUID(),
               row_id: recordId,
               axis: 'score',
-              score: Number(updated.priority_rank || 0),
+              score: Number(finalScore || 0),
               reasoning: String(updated.score_reasoning || ''),
               computed_at: updatedAt,
             },
           });
         }
         summary.scored += 1;
-        if (belowMinimum(updated.priority_rank, updated)) {
+        if (belowMinimum(finalScore, updated)) {
           const action = writeFilterFailure({
             db,
             record: updated,
             stepId: MIN_SCORE_GATE,
-            reason: `Score ${updated.priority_rank} below minimum ${minimumScore}`,
+            reason: `Score ${finalScore} below minimum ${minimumScore}`,
             drop: true,
           });
           if (action === 'dropped') summary.dropped_below_minimum += 1;
+        } else {
+          reinstateScoreMinimumDrop({ db, record: updated, score: finalScore, minimumScore });
         }
         emitActivity({ event: 'row_complete', phase: 'scoring', row: record.business_name || recordId });
         tickProgress(db, runId, { done: summary.scored + summary.skipped_unchanged + summary.failed, message: `Scored ${record.business_name || recordId}` });

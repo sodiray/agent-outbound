@@ -10,16 +10,20 @@ export const scoreColor = (rank: number) => {
   return `hsl(${clamped * 1.2}, 75%, 48%)`;
 };
 
+export const recordScore = (record: RecordRow) => {
+  const fitScore = record.fit_score === null || record.fit_score === undefined || record.fit_score === '' ? null : Number(record.fit_score);
+  if (fitScore !== null && Number.isFinite(fitScore)) return fitScore;
+  const priorityRank = record.priority_rank === null || record.priority_rank === undefined || record.priority_rank === '' ? null : Number(record.priority_rank);
+  return priorityRank !== null && Number.isFinite(priorityRank) ? priorityRank : null;
+};
+
 export const hasScore = (record: RecordRow) =>
-  record.priority_rank !== null
-  && record.priority_rank !== undefined
-  && record.priority_rank !== ''
-  && Number.isFinite(Number(record.priority_rank));
+  recordScore(record) !== null;
 
 export const pinColor = (record: RecordRow, deselected = false) => {
   if (deselected) return DESELECTED_PIN;
   if (!hasScore(record)) return NEUTRAL_PIN;
-  return scoreColor(Number(record.priority_rank));
+  return scoreColor(recordScore(record) || 0);
 };
 
 export const isLocated = (record: RecordRow) => {

@@ -1345,7 +1345,7 @@ export const visitsTodayCommand = ({ list = '', allLists = false, date = '' }) =
           rec.business_name,
           rec.address,
           rec.phone,
-          rec.priority_rank
+          COALESCE(rec.fit_score, rec.priority_rank) AS priority_rank
         FROM route_stops rs
         INNER JOIN routes rt ON rt.id = rs.route_id
         LEFT JOIN records rec ON rec._row_id = rs.record_id OR rec.id = rs.record_id
@@ -1386,7 +1386,7 @@ export const routePlanCommand = async ({ list, date = '' }) => {
     const due = db.prepare(`
       SELECT * FROM records
       WHERE ${inPlayWhere()} AND visit_scheduled_date = ? AND sequence_status = 'active'
-      ORDER BY priority_rank DESC, updated_at DESC
+      ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
     `).all(routeDate);
 
     if (due.length === 0) {

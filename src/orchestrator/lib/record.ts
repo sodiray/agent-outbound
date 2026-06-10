@@ -25,6 +25,18 @@ export const makeRecordId = (row) => {
 
 export const getRecordRowId = (row) => String(row?._row_id || row?.id || makeRecordId(row)).trim();
 
+const numberOrNull = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
+export const recordScore = (record) => {
+  const fitScore = numberOrNull(record?.fit_score);
+  if (fitScore !== null) return fitScore;
+  return numberOrNull(record?.priority_rank);
+};
+
 export const isRecordScalarValue = (value) => (
   value === null
     || typeof value === 'string'
@@ -68,9 +80,9 @@ export const rowToRecordShape = ({ listName, row }) => {
     email_primary: String(row.email_primary || row.email || ''),
     contact_name_primary: String(row.contact_name_primary || row.contact_name || ''),
     contact_title_primary: String(row.contact_title_primary || row.contact_title || ''),
-    fit_score: Number(row.fit_score || 0),
+    fit_score: Number(recordScore(row) || 0),
     trigger_score: Number(row.trigger_score || 0),
-    priority_rank: Number(row.priority_rank || 0),
+    priority_rank: Number(recordScore(row) || 0),
     sequence_name: String(row.sequence_name || 'default'),
     sequence_status: String(row.sequence_status || 'idle'),
     sequence_step: Number(row.sequence_step || 0),

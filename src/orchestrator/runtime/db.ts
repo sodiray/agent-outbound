@@ -539,6 +539,18 @@ const ensureRecordCompatibility = (db) => {
   try { db.exec("ALTER TABLE records ADD COLUMN review_flagged_at TEXT DEFAULT ''"); } catch {}
   // Idempotent filters: fast lookup of "has this record already passed this step?".
   try { db.exec("CREATE INDEX IF NOT EXISTS idx_pipeline_events_record_step ON pipeline_events(record_id, step_id)"); } catch {}
+  // Backfill fit_score for records scored by the single-score path, which for a
+  // while wrote only priority_rank. Guarded on score_updated_at recency so legacy
+  // dual-axis rows (correct fit_score, stale combined priority_rank) are untouched.
+  try {
+    db.exec(`
+      UPDATE records SET fit_score = priority_rank
+      WHERE priority_rank IS NOT NULL
+        AND COALESCE(score_updated_at, '') != ''
+        AND COALESCE(score_updated_at, '') > COALESCE(fit_score_updated_at, '')
+        AND (fit_score IS NULL OR fit_score != priority_rank)
+    `);
+  } catch {}
 };
 
 // The "commit line": a record is committed (outreach has begun / work invested)
@@ -1051,6 +1063,7 @@ export const upsertRecord = ({ db, row }) => {
       email_verified_at: row.email_verified_at || '',
       fit_score: scoreValueForWrite(row.fit_score),
       trigger_score: scoreValueForWrite(row.trigger_score),
+      priority_rank: scoreValueForWrite(row.priority_rank),
       fit_reasoning: row.fit_reasoning || '',
       trigger_reasoning: row.trigger_reasoning || '',
       mail_last_cost_cents: Number(row.mail_last_cost_cents || 0),
@@ -1184,7 +1197,7 @@ export const upsertRecord = ({ db, row }) => {
     trigger_score: scoreValueForWrite(row.trigger_score),
     fit_reasoning: row.fit_reasoning || '',
     trigger_reasoning: row.trigger_reasoning || '',
-    priority_rank: Number(row.priority_rank || 0),
+    priority_rank: scoreValueForWrite(row.priority_rank),
     sequence_name: row.sequence_name || 'default',
     sequence_status: row.sequence_status || 'idle',
     sequence_step: Number(row.sequence_step || 0),
@@ -1726,7 +1739,7 @@ export const findAsset = ({ db, rowId, stepId }) =>
 
 export const listDrafts = ({ db, whereSql = '1=1', params = [], limit = 100, offset = 0 }) =>
   db.prepare(`
-    SELECT d.*, r.business_name, r.priority_rank
+    SELECT d.*, r.business_name, COALESCE(r.fit_score, r.priority_rank) AS priority_rank
     FROM drafts d
     LEFT JOIN records r ON r._row_id = d.row_id
     WHERE ${whereSql}

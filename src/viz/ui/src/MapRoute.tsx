@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { APIProvider, Map, Marker, useMap } from '@vis.gl/react-google-maps';
 import { Link } from 'react-router-dom';
 import { fetchMeta, fetchRecordDetail, fetchRecords } from './api.js';
-import { NEUTRAL_PIN, hasScore, isLocated, pinColor, pointOf, rowKey } from './map/colors.js';
+import { NEUTRAL_PIN, hasScore, isLocated, pinColor, pointOf, recordScore, rowKey } from './map/colors.js';
 import type { ActiveFilter, ColumnMeta, FilterMeta, MetaResponse, RecordDetail, RecordRow, RecordValue, SortDir } from './types.js';
 
 type PanelMode = 'list' | 'detail' | 'filter' | 'sort';
@@ -229,7 +229,7 @@ const LeadList = ({ records, selectedId, onSelect }: LeadListProps) => {
             onClick={() => onSelect(id)}
             type="button"
           >
-            <span className="lead-row__score" style={{ background: pinColor(record) }}>{hasScore(record) ? Math.round(Number(record.priority_rank)) : '—'}</span>
+            <span className="lead-row__score" style={{ background: pinColor(record) }}>{hasScore(record) ? Math.round(recordScore(record) || 0) : '—'}</span>
             <span className="lead-row__name">{leadName(record)}</span>
             <span className="lead-row__loc">{leadLocation(record)}</span>
           </button>

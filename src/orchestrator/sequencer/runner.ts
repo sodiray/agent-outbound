@@ -894,7 +894,7 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
   const records = db.prepare(`
     SELECT * FROM records
     WHERE sequence_status = 'idle' AND ${inPlayWhere()}
-    ORDER BY priority_rank DESC, updated_at DESC
+    ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
     LIMIT ?
   `).all(Number(limit));
 
@@ -1073,7 +1073,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
     const rows = db.prepare(`
       SELECT * FROM records
       WHERE ${inPlayWhere()} AND (${launchFilterSql})
-      ORDER BY priority_rank DESC, updated_at DESC
+      ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
       LIMIT ?
     `).all(Number(limit));
 

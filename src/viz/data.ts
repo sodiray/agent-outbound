@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
+import { recordScore } from '../orchestrator/lib/record.js';
 import { listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
 import { getEnv } from '../orchestrator/runtime/env.js';
 
@@ -277,7 +278,7 @@ const verdictsFromBreakdown = (rawBreakdown: any) => new Map(parseJsonArray(rawB
 const isScoredRecord = (record: any) =>
   nonEmptyString(record.score_updated_at) ||
   nonEmptyString(record.fit_score_updated_at) ||
-  Number(record.priority_rank) > 0;
+  Number(recordScore(record) || 0) > 0;
 // Precedence matters: a dropped record never scores; a scored record outranks a
 // non-fatal per-step error (e.g. a stale timing_enrich error on an otherwise
 // fully scored lead). Only surface 'error' when nothing else completed.
@@ -425,7 +426,7 @@ export const buildMeta = (listDir: string) => {
     ].filter(Boolean));
     const realColumnMeta = recordColumns.map((column) => {
       const classified = classifyColumn({ key: column.key, dbType: column.dbType, config, outputs, sourceOutputs });
-      // The single Score (priority_rank) and the business name are the frozen/locked columns.
+      // The single Score and the business name are the frozen/locked columns.
       const locked = column.key === lockedNameKey || column.key === 'priority_rank';
       return {
         key: column.key,
@@ -530,7 +531,9 @@ export const queryRecords = (listDir: string, params: any = {}) => {
     const dir = String(params?.dir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
     const limit = Math.max(1, Math.min(500, Number(params?.limit || 50) || 50));
     const offset = Math.max(0, Number(params?.offset || 0) || 0);
-    const sortExpr = NUMERIC_COLUMNS.has(sort) ? `CAST(NULLIF(${quoteIdent(sort)}, '') AS REAL)` : quoteIdent(sort);
+    const sortExpr = sort === 'priority_rank' && realColumns.has('fit_score')
+      ? `COALESCE(CAST(NULLIF(${quoteIdent('fit_score')}, '') AS REAL), CAST(NULLIF(${quoteIdent('priority_rank')}, '') AS REAL))`
+      : NUMERIC_COLUMNS.has(sort) ? `CAST(NULLIF(${quoteIdent(sort)}, '') AS REAL)` : quoteIdent(sort);
     const total = Number(db.prepare(`SELECT COUNT(*) AS count FROM records${whereSql}`).get(...values)?.count || 0);
     const records = normalizedRows(db.prepare(`SELECT * FROM records${whereSql} ORDER BY ${sortExpr} ${dir}, _row_id ASC LIMIT ? OFFSET ?`).all(...values, limit, offset))
       .map((record: any) => {
@@ -665,7 +668,7 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         cost: costPayload(selectCostForStep(costEvents, id)),
       };
     })];
-    const rank = toNumberOrNull(record.priority_rank) ?? 0;
+    const rank = recordScore(record) ?? 0;
     const minimum = Number(config?.score?.minimum ?? 0);
     const score = {
       value: rank,

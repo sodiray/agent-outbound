@@ -60,7 +60,7 @@ export const draftsShowCommand = ({ list, draftId }) => {
   const db = openListDb({ listDir, readonly: true });
   try {
     const row = db.prepare(`
-      SELECT d.*, r.business_name, r.sequence_status, r.priority_rank
+      SELECT d.*, r.business_name, r.sequence_status, COALESCE(r.fit_score, r.priority_rank) AS priority_rank
       FROM drafts d
       LEFT JOIN records r ON r._row_id = d.row_id
       WHERE d.draft_id = ?
@@ -179,4 +179,3 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
     db.close();
   }
 };
-
