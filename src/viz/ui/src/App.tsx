@@ -8,6 +8,7 @@ import type {
   ActiveFilter,
   ColumnMeta,
   FilterMeta,
+  Interaction,
   ManualField,
   MetaResponse,
   OverrideRecord,
@@ -696,6 +697,42 @@ const metadataChips = (step: RecordDetailStep) => [
   step.cost?.occurred_at ? displayDate(step.cost.occurred_at) : '',
 ].filter((value) => value && value !== 'n/a');
 
+const followUpChip = (interaction: Interaction) => {
+  if (!interaction.follow_up_at) return null;
+  if (interaction.follow_up_done_at) return <span className="chip is-muted">follow-up done</span>;
+  const due = interaction.follow_up_at.slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  return (
+    <span className={`chip status-chip ${due < today ? 'is-red' : 'is-blue'}`}>
+      {due < today ? `follow-up overdue · ${due}` : `follow-up ${due}`}
+    </span>
+  );
+};
+
+const InteractionsSection = ({ interactions }: { interactions: Interaction[] }) => {
+  if (!interactions || interactions.length === 0) return null;
+  return (
+    <section className="detail-section">
+      <div className="section-title">Interactions</div>
+      <div className="override-list">
+        {interactions.map((interaction) => (
+          <article key={interaction.interaction_id} className="override-item override-item--keep">
+            <div className="override-item__head">
+              <span className="chip status-chip is-blue">{labelFor(interaction.kind)}{interaction.contact ? ` · ${interaction.contact}` : ''}</span>
+              {followUpChip(interaction)}
+              {interaction.occurred_at ? <span className="step-time">{displayDate(interaction.occurred_at)}</span> : null}
+            </div>
+            <p><strong>{interaction.summary}</strong></p>
+            {interaction.body ? <p>{interaction.body}</p> : null}
+            {interaction.objections ? <p>⚠️ Objections: {interaction.objections}</p> : null}
+            {interaction.created_by ? <small>{interaction.created_by}</small> : null}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+};
+
 const ManualFieldsSection = ({ fields }: { fields: ManualField[] }) => {
   if (!fields || fields.length === 0) return null;
   return (
@@ -921,6 +958,7 @@ const DetailPanel = ({
               </div>
             </header>
             <ScoreSection detail={detail} />
+            <InteractionsSection interactions={Array.isArray(detail.interactions) ? detail.interactions : []} />
             <ManualFieldsSection fields={Array.isArray(detail.manual_fields) ? detail.manual_fields : []} />
             <OverridesSection overrides={overrides} />
             <section className="detail-section">

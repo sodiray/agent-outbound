@@ -1,7 +1,7 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
-import { listFieldOverridesForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
+import { listFieldOverridesForRecord, listInteractionsForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
 import { LEAD_STATUSES, leadStatus, leadStatusCaseSql } from '../orchestrator/runtime/status.js';
 import { getEnv } from '../orchestrator/runtime/env.js';
 
@@ -613,6 +613,22 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
     const fieldOverrides = tableExists(db, 'field_overrides')
       ? listFieldOverridesForRecord({ db, recordId: rowId, includeCleared: true })
       : [];
+    const interactionRows = tableExists(db, 'interactions')
+      ? listInteractionsForRecord({ db, recordId: rowId })
+      : [];
+    const interactions = interactionRows.map((row: any) => ({
+      interaction_id: String(row.interaction_id || ''),
+      kind: String(row.kind || ''),
+      contact: String(row.contact || ''),
+      summary: String(row.summary || ''),
+      body: String(row.body || ''),
+      objections: String(row.objections || ''),
+      follow_up_at: String(row.follow_up_at || ''),
+      follow_up_done_at: String(row.follow_up_done_at || ''),
+      follow_up_note: String(row.follow_up_note || ''),
+      occurred_at: String(row.occurred_at || ''),
+      created_by: String(row.created_by || ''),
+    }));
     const overrides = overrideRows.map((o: any) => ({
       id: String(o.id || ''),
       kind: String(o.kind || ''),
@@ -729,6 +745,12 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         at: o.created_at,
         cleared: String(o.cleared_at || '').trim() !== '',
       })),
+      ...interactions.map((i: any) => ({
+        kind: 'interaction',
+        label: `${i.kind}${i.contact ? ` · ${i.contact}` : ''}`,
+        detail: i.summary,
+        at: i.occurred_at,
+      })),
       ...costEvents.filter((event) => event.record_id === rowId || selectCostForStep(costEvents, 'score') === event || pipeline.some((step: any) => costStepMatches(String(event.step_id || ''), String(step.id || '')))).map((event) => ({
         kind: 'cost',
         label: event.step_id || '',
@@ -744,7 +766,7 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         reason: String(o.reason || ''),
         created_at: String(o.created_at || ''),
       }));
-    return { record, lead_status: leadStatus(record), manual_fields: manualFields, steps, score, timeline, overrides };
+    return { record, lead_status: leadStatus(record), manual_fields: manualFields, interactions, steps, score, timeline, overrides };
   } finally {
     db.close();
   }

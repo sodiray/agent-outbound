@@ -270,6 +270,27 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_field_overrides_record ON field_overrides(record_id, cleared_at);
 
+  CREATE TABLE IF NOT EXISTS interactions (
+    interaction_id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    contact TEXT DEFAULT '',
+    kind TEXT NOT NULL DEFAULT 'note',
+    summary TEXT NOT NULL,
+    body TEXT DEFAULT '',
+    objections TEXT DEFAULT '',
+    follow_up_at TEXT DEFAULT '',
+    follow_up_done_at TEXT DEFAULT '',
+    follow_up_note TEXT DEFAULT '',
+    created_by TEXT DEFAULT '',
+    occurred_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT DEFAULT '',
+    FOREIGN KEY(record_id) REFERENCES records(_row_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_interactions_record ON interactions(record_id, occurred_at);
+  CREATE INDEX IF NOT EXISTS idx_interactions_follow_up ON interactions(follow_up_at, follow_up_done_at, deleted_at);
+
   CREATE TABLE IF NOT EXISTS run_state (
     run_id TEXT PRIMARY KEY,
     phase TEXT NOT NULL,
@@ -1525,6 +1546,110 @@ export const reconcileFieldOverrides = ({ db }) => {
     if (result.changes > 0) summary.applied += 1;
   });
   return summary;
+};
+
+// --- Interactions -------------------------------------------------------------
+// The CRM slice: human touchpoints with a lead (visits, calls, notes) with what
+// was said, the objections raised, and an optional follow-up date. Soft-deleted,
+// never hard-deleted. An open follow-up surfaces in `followups` and is mirrored
+// onto records.next_action_date while the record is idle (an active sequence
+// owns that column and is left alone).
+
+export const INTERACTION_KINDS = ['visit', 'call', 'email', 'meeting', 'note'];
+
+const syncNextActionFromFollowUps = ({ db, recordId }) => {
+  const record = getRecordById({ db, id: String(recordId) });
+  if (!record) return;
+  if (String(record.sequence_status || 'idle') !== 'idle') return;
+  const earliest = db.prepare(`
+    SELECT MIN(follow_up_at) AS due FROM interactions
+    WHERE record_id = ? AND COALESCE(deleted_at, '') = ''
+      AND COALESCE(follow_up_at, '') != '' AND COALESCE(follow_up_done_at, '') = ''
+  `).get(String(recordId));
+  db.prepare('UPDATE records SET next_action_date = ?, updated_at = ? WHERE _row_id = ?')
+    .run(String(earliest?.due || ''), nowIso(), String(record._row_id));
+};
+
+export const insertInteraction = ({ db, recordId, kind = 'note', summary, body = '', objections = '', contact = '', followUpAt = '', followUpNote = '', occurredAt = '', createdBy = '' }) => {
+  const kindName = String(kind || 'note').trim().toLowerCase();
+  if (!INTERACTION_KINDS.includes(kindName)) {
+    throw new Error(`Unknown interaction kind "${kindName}". Kinds: ${INTERACTION_KINDS.join(', ')}`);
+  }
+  if (!String(summary || '').trim()) throw new Error('An interaction summary is required.');
+  const now = nowIso();
+  const id = `int_${randomUUID().slice(0, 12)}`;
+  db.prepare(`
+    INSERT INTO interactions (interaction_id, record_id, contact, kind, summary, body, objections,
+      follow_up_at, follow_up_done_at, follow_up_note, created_by, occurred_at, created_at, updated_at, deleted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, '')
+  `).run(
+    id, String(recordId), String(contact || ''), kindName, String(summary).trim(), String(body || ''), String(objections || ''),
+    String(followUpAt || ''), String(followUpNote || ''), String(createdBy || ''), String(occurredAt || now), now, now,
+  );
+  syncNextActionFromFollowUps({ db, recordId });
+  return getInteraction({ db, interactionId: id });
+};
+
+export const getInteraction = ({ db, interactionId }) =>
+  db.prepare('SELECT * FROM interactions WHERE interaction_id = ?').get(String(interactionId));
+
+export const listInteractionsForRecord = ({ db, recordId, includeDeleted = false }) => {
+  const sql = includeDeleted
+    ? 'SELECT * FROM interactions WHERE record_id = ? ORDER BY occurred_at DESC, created_at DESC'
+    : "SELECT * FROM interactions WHERE record_id = ? AND COALESCE(deleted_at, '') = '' ORDER BY occurred_at DESC, created_at DESC";
+  return db.prepare(sql).all(String(recordId));
+};
+
+export const updateInteraction = ({ db, interactionId, patch = {} }: { db: any; interactionId: string; patch?: Record<string, any> }) => {
+  const existing = getInteraction({ db, interactionId });
+  if (!existing) throw new Error(`Interaction not found: ${interactionId}`);
+  const editable = ['contact', 'kind', 'summary', 'body', 'objections', 'follow_up_at', 'follow_up_done_at', 'follow_up_note', 'occurred_at'];
+  const updates = Object.entries(patch || {}).filter(([key, value]) => editable.includes(key) && value !== undefined);
+  if (updates.length === 0) return existing;
+  const kindName = patch.kind === undefined ? null : String(patch.kind).trim().toLowerCase();
+  if (kindName !== null && !INTERACTION_KINDS.includes(kindName)) {
+    throw new Error(`Unknown interaction kind "${kindName}". Kinds: ${INTERACTION_KINDS.join(', ')}`);
+  }
+  const setSql = updates.map(([key]) => `${key} = ?`).join(', ');
+  db.prepare(`UPDATE interactions SET ${setSql}, updated_at = ? WHERE interaction_id = ?`)
+    .run(...updates.map(([key, value]) => (key === 'kind' ? kindName : String(value ?? ''))), nowIso(), String(interactionId));
+  syncNextActionFromFollowUps({ db, recordId: String(existing.record_id) });
+  return getInteraction({ db, interactionId });
+};
+
+export const completeFollowUp = ({ db, interactionId, note = '' }) => {
+  const existing = getInteraction({ db, interactionId });
+  if (!existing) throw new Error(`Interaction not found: ${interactionId}`);
+  if (!String(existing.follow_up_at || '').trim()) throw new Error(`Interaction ${interactionId} has no follow-up to complete.`);
+  db.prepare('UPDATE interactions SET follow_up_done_at = ?, follow_up_note = COALESCE(NULLIF(?, \'\'), follow_up_note), updated_at = ? WHERE interaction_id = ?')
+    .run(nowIso(), String(note || ''), nowIso(), String(interactionId));
+  syncNextActionFromFollowUps({ db, recordId: String(existing.record_id) });
+  return getInteraction({ db, interactionId });
+};
+
+export const softDeleteInteraction = ({ db, interactionId }) => {
+  const existing = getInteraction({ db, interactionId });
+  if (!existing) throw new Error(`Interaction not found: ${interactionId}`);
+  db.prepare('UPDATE interactions SET deleted_at = ?, updated_at = ? WHERE interaction_id = ?')
+    .run(nowIso(), nowIso(), String(interactionId));
+  syncNextActionFromFollowUps({ db, recordId: String(existing.record_id) });
+  return getInteraction({ db, interactionId });
+};
+
+// Open follow-ups across the list, soonest first. `dueBy` (YYYY-MM-DD) filters
+// to follow-ups due on or before that date.
+export const listOpenFollowUps = ({ db, dueBy = '' }) => {
+  const due = String(dueBy || '').trim();
+  return db.prepare(`
+    SELECT i.*, r.business_name, r.phone, r.address
+    FROM interactions i
+    LEFT JOIN records r ON r._row_id = i.record_id
+    WHERE COALESCE(i.deleted_at, '') = ''
+      AND COALESCE(i.follow_up_at, '') != ''
+      AND COALESCE(i.follow_up_done_at, '') = ''
+      ${due ? 'AND substr(i.follow_up_at, 1, 10) <= ?' : ''}
+    ORDER BY i.follow_up_at ASC, i.occurred_at ASC
+  `).all(...(due ? [due] : []));
 };
 
 export const deleteRecord = ({ db, id }) => {

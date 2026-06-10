@@ -126,10 +126,25 @@ export type ManualField = {
   created_at: string;
 };
 
+export type Interaction = {
+  interaction_id: string;
+  kind: string;
+  contact: string;
+  summary: string;
+  body: string;
+  objections: string;
+  follow_up_at: string;
+  follow_up_done_at: string;
+  follow_up_note: string;
+  occurred_at: string;
+  created_by: string;
+};
+
 export type RecordDetail = {
   record: RecordRow;
   lead_status: string;
   manual_fields: ManualField[];
+  interactions: Interaction[];
   steps: RecordDetailStep[];
   score: LeadScore;
   timeline: Array<{ kind: string; label: string; detail: string; at: string; cleared?: boolean }>;

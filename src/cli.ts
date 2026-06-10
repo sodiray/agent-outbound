@@ -62,6 +62,13 @@ import {
   templatesShowCommand,
   templatesUpdateCommand,
   initCommand,
+  interactionAddCommand,
+  interactionDoneCommand,
+  interactionEditCommand,
+  interactionListCommand,
+  interactionRemoveCommand,
+  interactionShowCommand,
+  followupsCommand,
   leadAddCommand,
   leadOverridesCommand,
   leadSetCommand,
@@ -195,6 +202,10 @@ const printHelp = () => {
   process.stdout.write(`  lead set <list> <record> --field FIELD --value VALUE [--reason TEXT]        # human-set a field; survives pipeline reruns\n`);
   process.stdout.write(`  lead unset <list> <record> [--field FIELD]                                  # release manually-set field(s) back to the pipeline\n`);
   process.stdout.write(`  lead overrides <list> <record>                                              # manual field values + history for one lead\n`);
+  process.stdout.write(`  interaction add <list> <record> --kind visit|call|email|meeting|note --summary TEXT [--body TEXT] [--objections TEXT] [--contact NAME] [--follow-up YYYY-MM-DD] [--occurred-at ISO]\n`);
+  process.stdout.write(`  interaction list <list> [<record>] [--kind K] [--due] [--overdue]           # logged touchpoints\n`);
+  process.stdout.write(`  interaction show|done|remove <list> <interaction_id> [--note TEXT]\n`);
+  process.stdout.write(`  followups <list> [--due-by YYYY-MM-DD]                                      # open follow-ups, overdue first\n`);
   process.stdout.write(`  override keep <list> <record> [--step STEP_ID | --all-gates] --reason TEXT   # bypass a gate that dropped a lead\n`);
   process.stdout.write(`  override drop <list> <record> --reason TEXT                                 # manually disqualify a lead\n`);
   process.stdout.write(`  override clear <list> <record> [--step STEP_ID]                             # remove human overrides on a lead\n`);
@@ -915,6 +926,88 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown lead subcommand: ${sub}`);
+  }
+
+  if (command === 'interaction') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'add') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      setResponseContext({ command: 'interaction add', list });
+      print(interactionAddCommand({
+        list,
+        ref,
+        kind: consumeFlag(argv, '--kind', 'note'),
+        summary: consumeFlag(argv, '--summary', ''),
+        body: consumeFlag(argv, '--body', ''),
+        objections: consumeFlag(argv, '--objections', ''),
+        contact: consumeFlag(argv, '--contact', ''),
+        followUp: consumeFlag(argv, '--follow-up', ''),
+        followUpNote: consumeFlag(argv, '--follow-up-note', ''),
+        occurredAt: consumeFlag(argv, '--occurred-at', ''),
+        createdBy: consumeFlag(argv, '--by', ''),
+      }));
+      return;
+    }
+    if (sub === 'list') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv[0] || '').startsWith('--') ? '' : String(argv.shift() || '');
+      setResponseContext({ command: 'interaction list', list });
+      print(interactionListCommand({
+        list,
+        ref,
+        kind: consumeFlag(argv, '--kind', ''),
+        due: hasFlag(argv, '--due'),
+        overdue: hasFlag(argv, '--overdue'),
+      }));
+      return;
+    }
+    if (sub === 'show') {
+      const list = String(argv.shift() || '');
+      const interactionId = String(argv.shift() || '');
+      setResponseContext({ command: 'interaction show', list });
+      print(interactionShowCommand({ list, interactionId }));
+      return;
+    }
+    if (sub === 'edit') {
+      const list = String(argv.shift() || '');
+      const interactionId = String(argv.shift() || '');
+      const patch = Object.fromEntries([
+        ['kind', consumeFlag(argv, '--kind', undefined as any)],
+        ['summary', consumeFlag(argv, '--summary', undefined as any)],
+        ['body', consumeFlag(argv, '--body', undefined as any)],
+        ['objections', consumeFlag(argv, '--objections', undefined as any)],
+        ['contact', consumeFlag(argv, '--contact', undefined as any)],
+        ['follow_up_at', consumeFlag(argv, '--follow-up', undefined as any)],
+        ['follow_up_note', consumeFlag(argv, '--follow-up-note', undefined as any)],
+        ['occurred_at', consumeFlag(argv, '--occurred-at', undefined as any)],
+      ].filter(([, value]) => value !== undefined && value !== ''));
+      setResponseContext({ command: 'interaction edit', list });
+      print(interactionEditCommand({ list, interactionId, patch }));
+      return;
+    }
+    if (sub === 'done') {
+      const list = String(argv.shift() || '');
+      const interactionId = String(argv.shift() || '');
+      setResponseContext({ command: 'interaction done', list });
+      print(interactionDoneCommand({ list, interactionId, note: consumeFlag(argv, '--note', '') }));
+      return;
+    }
+    if (sub === 'remove') {
+      const list = String(argv.shift() || '');
+      const interactionId = String(argv.shift() || '');
+      setResponseContext({ command: 'interaction remove', list });
+      print(interactionRemoveCommand({ list, interactionId }));
+      return;
+    }
+    throw new Error(`Unknown interaction subcommand: ${sub}`);
+  }
+
+  if (command === 'followups') {
+    const list = String(argv.shift() || '');
+    setResponseContext({ command: 'followups', list });
+    print(followupsCommand({ list, dueBy: consumeFlag(argv, '--due-by', '') }));
+    return;
   }
 
   if (command === 'pipeline' && String(argv[0] || '').trim() === 'show') {

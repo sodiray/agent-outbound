@@ -74,6 +74,15 @@ export {
 } from './mcp.js';
 export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand } from './leads.js';
 export {
+  followupsCommand,
+  interactionAddCommand,
+  interactionDoneCommand,
+  interactionEditCommand,
+  interactionListCommand,
+  interactionRemoveCommand,
+  interactionShowCommand,
+} from './interactions.js';
+export {
   assetsCommand,
   assetsListCommand,
   assetsOpenCommand,
