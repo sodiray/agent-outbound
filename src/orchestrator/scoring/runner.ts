@@ -492,6 +492,18 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           error: String((error as any)?.message || error),
         }));
 
+        if (scoreRaw.error && scoreRaw.score === null && !record.score_override) {
+          // Scoring failed (provider error, invalid response). Never destroy an
+          // existing score with nulls — record the error, roll back the
+          // optimistic staleness stamp so the next run retries, and move on.
+          db.prepare("DELETE FROM staleness WHERE record_id = ? AND step_id = 'score:score'").run(recordId);
+          upsertRecord({ db, row: { ...record, score_scoring_error: scoreRaw.error } });
+          summary.failed += 1;
+          summary.errors.push({ record_id: recordId, error: scoreRaw.error });
+          emitActivity({ event: 'error', phase: 'scoring', row: record.business_name || recordId, detail: scoreRaw.error });
+          return;
+        }
+
         const scored = applyOverride({
           score: scoreRaw.score,
           reasoning: scoreRaw.reasoning,
