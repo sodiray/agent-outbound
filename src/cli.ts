@@ -62,6 +62,8 @@ import {
   templatesShowCommand,
   templatesUpdateCommand,
   initCommand,
+  briefCommand,
+  briefShowCommand,
   interactionAddCommand,
   interactionDoneCommand,
   interactionEditCommand,
@@ -206,6 +208,8 @@ const printHelp = () => {
   process.stdout.write(`  interaction list <list> [<record>] [--kind K] [--due] [--overdue]           # logged touchpoints\n`);
   process.stdout.write(`  interaction show|done|remove <list> <interaction_id> [--note TEXT]\n`);
   process.stdout.write(`  followups <list> [--due-by YYYY-MM-DD]                                      # open follow-ups, overdue first\n`);
+  process.stdout.write(`  brief <list> [--where SQL] [--limit N] [--force]                            # generate SDR briefs for qualified leads\n`);
+  process.stdout.write(`  brief show <list> <record>                                                  # the generated brief for one lead\n`);
   process.stdout.write(`  override keep <list> <record> [--step STEP_ID | --all-gates] --reason TEXT   # bypass a gate that dropped a lead\n`);
   process.stdout.write(`  override drop <list> <record> --reason TEXT                                 # manually disqualify a lead\n`);
   process.stdout.write(`  override clear <list> <record> [--step STEP_ID]                             # remove human overrides on a lead\n`);
@@ -1007,6 +1011,26 @@ const run = async () => {
     const list = String(argv.shift() || '');
     setResponseContext({ command: 'followups', list });
     print(followupsCommand({ list, dueBy: consumeFlag(argv, '--due-by', '') }));
+    return;
+  }
+
+  if (command === 'brief') {
+    if (String(argv[0] || '').trim() === 'show') {
+      argv.shift();
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      setResponseContext({ command: 'brief show', list });
+      print(briefShowCommand({ list, ref }));
+      return;
+    }
+    const list = String(argv.shift() || '');
+    setResponseContext({ command: 'brief', list });
+    print(await briefCommand({
+      list,
+      where: consumeFlag(argv, '--where', ''),
+      limit: toNumber(consumeFlag(argv, '--limit', '0'), 0),
+      force: hasFlag(argv, '--force'),
+    }));
     return;
   }
 

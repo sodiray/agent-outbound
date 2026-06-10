@@ -31,7 +31,7 @@ import { recordCostEvent } from '../orchestrator/lib/costs.js';
 import { authorConfigAction } from '../orchestrator/actions/author-config/index.js';
 import { runSourcing, runSourcingMore } from '../orchestrator/sourcing/runner.js';
 import { runPipelineDataflow } from '../orchestrator/pipeline/dataflow.js';
-import { runScoring } from '../orchestrator/scoring/runner.js';
+import { runScoring, runScoringWithBriefs } from '../orchestrator/scoring/runner.js';
 import { runGeneration } from '../orchestrator/generate/runner.js';
 import {
   followupSend,
@@ -73,6 +73,7 @@ export {
   mcpTestCommand,
 } from './mcp.js';
 export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand } from './leads.js';
+export { briefCommand, briefShowCommand } from './briefs.js';
 export {
   followupsCommand,
   interactionAddCommand,
@@ -1082,7 +1083,7 @@ export const runCommand = async ({ list, more = 0 }) => {
     return runPipelineDataflow({ listDir, where: `_row_id IN (${escaped})` });
   })();
 
-  const scoreResult = await runScoring({ listDir });
+  const scoreResult = await runScoringWithBriefs({ listDir });
   const generateResult = await runGeneration({ listDir });
 
   return {
@@ -1131,7 +1132,7 @@ export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 
   const autoSnapshot = totalCount >= threshold
     ? snapshotCreateCommand({ list: listDir, label: `auto-before-score-${new Date().toISOString()}` })
     : null;
-  const scored = await runScoring({ listDir, where: whereSql, force });
+  const scored = await runScoringWithBriefs({ listDir, where: whereSql, force });
   return {
     ...scored,
     auto_snapshot: autoSnapshot,

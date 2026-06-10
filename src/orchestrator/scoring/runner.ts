@@ -558,3 +558,17 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
     db.close();
   }
 };
+
+// Generate briefs for freshly-qualified leads after a scoring pass when the
+// list opts in (brief.enabled + brief.auto). Brief failures never fail the
+// score run — the score is the product, the brief is a bonus.
+export const runScoringWithBriefs = async (input: { listDir: string; where?: string; limit?: number; dryRun?: boolean; force?: boolean }) => {
+  const summary = await runScoring(input);
+  if (input.dryRun) return summary;
+  const { config } = readConfig(input.listDir);
+  if (!config?.brief?.enabled || config?.brief?.auto === false) return summary;
+  const briefs = await import('../briefs/runner.js')
+    .then(({ runBriefs }) => runBriefs({ listDir: input.listDir, where: input.where || '' }))
+    .catch((error) => ({ failed: true, error: String((error as any)?.message || error) }));
+  return { ...summary, briefs };
+};

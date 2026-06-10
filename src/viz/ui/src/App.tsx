@@ -9,6 +9,7 @@ import type {
   ColumnMeta,
   FilterMeta,
   Interaction,
+  LeadBrief,
   ManualField,
   MetaResponse,
   OverrideRecord,
@@ -697,6 +698,31 @@ const metadataChips = (step: RecordDetailStep) => [
   step.cost?.occurred_at ? displayDate(step.cost.occurred_at) : '',
 ].filter((value) => value && value !== 'n/a');
 
+const BriefSection = ({ brief }: { brief: LeadBrief | null }) => {
+  const [expanded, setExpanded] = useState(false);
+  if (!brief) return null;
+  return (
+    <section className="detail-section">
+      <div className="section-title">SDR brief</div>
+      <article className="override-item override-item--keep">
+        <p><strong>{brief.summary}</strong></p>
+        {brief.roles.length > 0 ? (
+          <div className="override-item__head" style={{ flexWrap: 'wrap', gap: 4 }}>
+            {brief.roles.map((entry) => (
+              <span key={entry.role} className="chip status-chip is-blue" title={entry.workflows.join('; ')}>{entry.role}</span>
+            ))}
+          </div>
+        ) : null}
+        <button type="button" className="chip is-muted" onClick={() => setExpanded(!expanded)}>
+          {expanded ? 'Hide full brief' : 'Read full brief'}
+        </button>
+        {expanded ? <p style={{ whiteSpace: 'pre-wrap' }}>{brief.content}</p> : null}
+        <small>{brief.model}{brief.updated_at ? ` · ${displayDate(brief.updated_at)}` : ''}</small>
+      </article>
+    </section>
+  );
+};
+
 const followUpChip = (interaction: Interaction) => {
   if (!interaction.follow_up_at) return null;
   if (interaction.follow_up_done_at) return <span className="chip is-muted">follow-up done</span>;
@@ -957,6 +983,7 @@ const DetailPanel = ({
                 <small>Score{scoreMinimum > 0 ? ` · min ${scoreMinimum}` : ''}</small>
               </div>
             </header>
+            <BriefSection brief={detail.brief || null} />
             <ScoreSection detail={detail} />
             <InteractionsSection interactions={Array.isArray(detail.interactions) ? detail.interactions : []} />
             <ManualFieldsSection fields={Array.isArray(detail.manual_fields) ? detail.manual_fields : []} />

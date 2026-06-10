@@ -1,7 +1,7 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
-import { listFieldOverridesForRecord, listInteractionsForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
+import { getBriefForRecord, listFieldOverridesForRecord, listInteractionsForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
 import { LEAD_STATUSES, leadStatus, leadStatusCaseSql } from '../orchestrator/runtime/status.js';
 import { getEnv } from '../orchestrator/runtime/env.js';
 
@@ -766,7 +766,24 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         reason: String(o.reason || ''),
         created_at: String(o.created_at || ''),
       }));
-    return { record, lead_status: leadStatus(record), manual_fields: manualFields, interactions, steps, score, timeline, overrides };
+    const briefRow = tableExists(db, 'lead_briefs') ? getBriefForRecord({ db, rowId }) : null;
+    const brief = briefRow
+      ? {
+        summary: String(briefRow.summary || ''),
+        content: String(briefRow.content || ''),
+        roles: (() => {
+          try {
+            const parsed = JSON.parse(String(briefRow.roles_json || '[]'));
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })(),
+        model: String(briefRow.model || ''),
+        updated_at: String(briefRow.updated_at || ''),
+      }
+      : null;
+    return { record, lead_status: leadStatus(record), manual_fields: manualFields, interactions, brief, steps, score, timeline, overrides };
   } finally {
     db.close();
   }

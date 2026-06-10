@@ -1,6 +1,6 @@
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
 import { runPipelineDataflow } from '../orchestrator/pipeline/dataflow.js';
-import { runScoring } from '../orchestrator/scoring/runner.js';
+import { runScoringWithBriefs } from '../orchestrator/scoring/runner.js';
 import { addSingleLead } from '../orchestrator/sourcing/single-lead.js';
 import {
   clearFieldOverrides,
@@ -47,7 +47,7 @@ export const leadAddCommand = async ({
   const pipelineAndScore = async () => {
     if (!run || dryRun || !rowId) return null;
     const pipeline = await runPipelineDataflow({ listDir, where });
-    const score = await runScoring({ listDir, where });
+    const score = await runScoringWithBriefs({ listDir, where });
     return {
       where,
       pipeline,

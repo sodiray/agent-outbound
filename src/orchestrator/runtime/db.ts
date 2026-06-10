@@ -291,6 +291,21 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_interactions_record ON interactions(record_id, occurred_at);
   CREATE INDEX IF NOT EXISTS idx_interactions_follow_up ON interactions(follow_up_at, follow_up_done_at, deleted_at);
 
+  CREATE TABLE IF NOT EXISTS lead_briefs (
+    brief_id TEXT PRIMARY KEY,
+    row_id TEXT NOT NULL UNIQUE,
+    summary TEXT DEFAULT '',
+    content TEXT DEFAULT '',
+    roles_json TEXT DEFAULT '[]',
+    dep_hash TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    status TEXT DEFAULT 'ready',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(row_id) REFERENCES records(_row_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_lead_briefs_row ON lead_briefs(row_id);
+
   CREATE TABLE IF NOT EXISTS run_state (
     run_id TEXT PRIMARY KEY,
     phase TEXT NOT NULL,
@@ -1650,6 +1665,29 @@ export const listOpenFollowUps = ({ db, dueBy = '' }) => {
       ${due ? 'AND substr(i.follow_up_at, 1, 10) <= ?' : ''}
     ORDER BY i.follow_up_at ASC, i.occurred_at ASC
   `).all(...(due ? [due] : []));
+};
+
+// --- Lead briefs ---------------------------------------------------------------
+// One brief per record (latest wins), refreshed when its dep hash changes.
+
+export const getBriefForRecord = ({ db, rowId }) =>
+  db.prepare('SELECT * FROM lead_briefs WHERE row_id = ?').get(String(rowId));
+
+export const persistBrief = ({ db, rowId, summary, content, rolesJson = '[]', depHash = '', model = '' }) => {
+  const now = nowIso();
+  const existing = getBriefForRecord({ db, rowId });
+  if (existing) {
+    db.prepare(`
+      UPDATE lead_briefs SET summary = ?, content = ?, roles_json = ?, dep_hash = ?, model = ?, status = 'ready', updated_at = ?
+      WHERE row_id = ?
+    `).run(String(summary || ''), String(content || ''), String(rolesJson || '[]'), String(depHash || ''), String(model || ''), now, String(rowId));
+    return getBriefForRecord({ db, rowId });
+  }
+  db.prepare(`
+    INSERT INTO lead_briefs (brief_id, row_id, summary, content, roles_json, dep_hash, model, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
+  `).run(`brf_${randomUUID().slice(0, 12)}`, String(rowId), String(summary || ''), String(content || ''), String(rolesJson || '[]'), String(depHash || ''), String(model || ''), now, now);
+  return getBriefForRecord({ db, rowId });
 };
 
 export const deleteRecord = ({ db, id }) => {

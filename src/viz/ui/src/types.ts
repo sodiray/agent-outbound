@@ -140,11 +140,20 @@ export type Interaction = {
   created_by: string;
 };
 
+export type LeadBrief = {
+  summary: string;
+  content: string;
+  roles: Array<{ role: string; workflows: string[] }>;
+  model: string;
+  updated_at: string;
+};
+
 export type RecordDetail = {
   record: RecordRow;
   lead_status: string;
   manual_fields: ManualField[];
   interactions: Interaction[];
+  brief: LeadBrief | null;
   steps: RecordDetailStep[];
   score: LeadScore;
   timeline: Array<{ kind: string; label: string; detail: string; at: string; cleared?: boolean }>;

@@ -435,11 +435,45 @@ const AiSchema = z.object({
   },
 });
 
+// Global business context: who WE are, what we sell, and what we always need
+// to know about a lead. Optional everywhere — lists without it simply get
+// less-grounded briefs. Exposed to brief generation (and any prompt that wants
+// it) so Agent Outbound stays reusable across teams: the business specifics
+// live here, not in code.
+const BusinessSchema = z.object({
+  name: z.string().default(''),
+  description: z.string().default(''),
+  icp: z.string().default(''),
+  offer: z.string().default(''),
+  capabilities: z.array(z.string()).default([]),
+  // The questions the operator always needs answered before walking in the
+  // door of a lead. The brief answers what it can and flags the rest to ask.
+  field_questions: z.array(z.string()).default([]),
+  context: z.string().default(''),
+}).partial().default({});
+
+// Lead briefs: an SDR-expert take generated for every kept (qualified) lead.
+const BriefSchema = z.object({
+  enabled: z.boolean().default(false),
+  // Generate automatically after scoring (and lead add --run).
+  auto: z.boolean().default(true),
+  model: ProviderModelSchema.optional(),
+  // Only brief leads at or above this score; defaults to score.minimum.
+  min_score: z.coerce.number().min(0).max(100).optional(),
+  // Optional path (relative to the list dir) to a prompt file that replaces
+  // the built-in brief prompt. Receives the same record/business context.
+  prompt_file: z.string().default(''),
+  // Bump to force regeneration of every brief.
+  cache_key: z.string().default(''),
+}).partial().default({});
+
 export const ConfigSchema = z.object({
   list: z.object({
     name: z.string().default(''),
     territory: TerritorySchema.default({}),
   }).partial().default({}),
+  business: BusinessSchema,
+  brief: BriefSchema,
   source: z.object({
     identity: z.array(z.string()).default([]),
     searches: z.array(SourceSearchSchema).default([]),

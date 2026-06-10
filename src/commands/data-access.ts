@@ -603,6 +603,16 @@ export const recordShowCommand = ({ list, rowId, include = '' }) => {
         LIMIT 200
       `).all(recordId);
     }
+    if (includes.has('brief')) {
+      sections.brief = db.prepare('SELECT * FROM lead_briefs WHERE row_id = ? LIMIT 1').get(recordId) || null;
+    }
+    if (includes.has('interactions')) {
+      sections.interactions = db.prepare(`
+        SELECT * FROM interactions
+        WHERE record_id = ? AND COALESCE(deleted_at, '') = ''
+        ORDER BY occurred_at DESC
+      `).all(recordId);
+    }
 
     const manualFields = listFieldOverridesForRecord({ db, recordId }).map((row: any) => ({
       field: String(row.field || ''),
