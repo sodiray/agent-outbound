@@ -3,7 +3,7 @@ import { openListDb } from '../orchestrator/runtime/db.js';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { getDbPath, resolveListDir } from '../orchestrator/runtime/paths.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
-import { getRecordRowId, recordScore } from '../orchestrator/lib/record.js';
+import { getRecordRowId } from '../orchestrator/lib/record.js';
 import { matchExcludeRule, normalizeExcludeRules } from '../orchestrator/lib/source-exclude.js';
 
 const CHUNK = 400;
@@ -14,13 +14,13 @@ const chunks = <T>(items: T[]): T[][] => {
   return out;
 };
 
-// A matched record is protected from deletion when a human has touched it:
-// logged interactions, field overrides, decision overrides, a score on record,
-// or live sequence activity. Junk has none of these.
+// A matched record is protected from deletion only when a HUMAN has touched it:
+// logged interactions, field overrides, decision overrides, or live sequence
+// activity. A machine-generated score is not protection — early pipeline runs
+// scored junk before the exclusion rules existed.
 const isProtected = ({ db, record }: { db: any; record: any }) => {
   const recordId = getRecordRowId(record);
   const reasons: string[] = [];
-  if (recordScore(record) !== null) reasons.push('scored');
   const sequenceStatus = String(record.sequence_status || '').trim();
   if (sequenceStatus && sequenceStatus !== 'idle') reasons.push(`sequence_${sequenceStatus}`);
   const interaction = db.prepare("SELECT 1 FROM interactions WHERE record_id = ? AND COALESCE(deleted_at,'') = '' LIMIT 1").get(recordId);
