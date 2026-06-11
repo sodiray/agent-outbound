@@ -129,8 +129,45 @@ export type GenerateObjectWithToolsInput = {
   reasoning?: boolean;
 };
 
+// Models routinely emit long markdown values with RAW control characters
+// inside JSON strings (a literal newline instead of \n) — invalid JSON that
+// otherwise matches the schema perfectly. Escape control chars found inside
+// string literals so those responses survive parsing.
+const escapeControlCharsInJsonStrings = (text: string): string => {
+  const out: string[] = [];
+  const state = { inString: false, escaped: false };
+  for (const char of String(text || '')) {
+    if (state.inString) {
+      if (state.escaped) {
+        out.push(char);
+        state.escaped = false;
+        continue;
+      }
+      if (char === '\\') {
+        out.push(char);
+        state.escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        out.push(char);
+        state.inString = false;
+        continue;
+      }
+      if (char === '\n') { out.push('\\n'); continue; }
+      if (char === '\r') { out.push('\\r'); continue; }
+      if (char === '\t') { out.push('\\t'); continue; }
+      out.push(char);
+      continue;
+    }
+    if (char === '"') state.inString = true;
+    out.push(char);
+  }
+  return out.join('');
+};
+
 const tryParseJsonSlice = (text: string): unknown => {
   try { return JSON.parse(text); } catch {}
+  try { return JSON.parse(escapeControlCharsInJsonStrings(text)); } catch {}
   return null;
 };
 
