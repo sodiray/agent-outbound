@@ -203,9 +203,10 @@ const StatusChip = ({ status, label }: { status: unknown; label?: string }) => {
   return <span className={`chip status-chip ${STATUS_CLASS[normalized] ?? 'is-ghost'}`}>{label || normalized}</span>;
 };
 
-const VerdictChip = ({ verdict }: { verdict?: string | null }) => {
+const VerdictChip = ({ verdict, grade }: { verdict?: string | null; grade?: number | null }) => {
   const normalized = verdict || 'n/a';
-  return <span className={`chip verdict-chip ${VERDICT_CLASS[normalized] ?? 'is-ghost'}`}>{normalized}</span>;
+  const label = grade === null || grade === undefined ? normalized : `${grade}/10`;
+  return <span className={`chip verdict-chip ${VERDICT_CLASS[normalized] ?? 'is-ghost'}`}>{label}</span>;
 };
 
 const BooleanValue = ({ value }: { value: unknown }) => <span className="boolean-value">{Number(value) ? 'yes' : 'no'}</span>;
@@ -669,7 +670,7 @@ const CriteriaBreakdown = ({ detail }: { detail: RecordDetail }) => {
                   <strong>{labelFor(criterion.id)}</strong>
                   <small>{criterion.description}</small>
                 </div>
-                <VerdictChip verdict={criterion.verdict} />
+                <VerdictChip verdict={criterion.verdict} grade={criterion.grade ?? null} />
                 <strong>{notScored ? '0' : `+${criterionPoints(criterion)}`}</strong>
                 <span>{Math.round(numberValue(criterion.weight) * 100)}%</span>
                 <p>{notScored ? 'Not scored.' : criterion.reasoning || 'Scored without additional notes.'}</p>

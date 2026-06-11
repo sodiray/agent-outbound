@@ -25,6 +25,7 @@ export type ScoreCriterion = {
   description: string;
   weight: number;
   verdict?: 'yes' | 'partial' | 'no' | null;
+  grade?: number | null;
   sub_score?: number | null;
   points?: number | null;
   reasoning?: string;

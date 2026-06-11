@@ -330,6 +330,10 @@ export const ScoringCriterionSchema = z.object({
 const ScoreSchema = z.object({
   description: z.string().default(''),
   model: ProviderModelSchema.optional(),
+  // ternary: criteria graded yes/partial/no (1 / 0.5 / 0) — coarse, saturates
+  // easily. graded: integer 0-10 per criterion with anchored skeptical
+  // calibration — granular, spreads the distribution.
+  grading: z.enum(['ternary', 'graded']).default('ternary'),
   criteria: z.array(ScoringCriterionSchema).default([]),
   // Leads scoring below this threshold are dropped at scoring time
   // (gate "score_minimum"). 0 / unset disables the floor.

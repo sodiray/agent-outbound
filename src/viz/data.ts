@@ -355,6 +355,7 @@ const mergeCriteriaBreakdown = (criteria: any[], rawBreakdown: any) => {
       description: String(criterion?.description || ''),
       weight: toNumberOrNull(criterion?.weight),
       verdict: breakdown.verdict === undefined ? null : String(breakdown.verdict || ''),
+      grade: breakdown.grade === undefined ? null : toNumberOrNull(breakdown.grade),
       sub_score: breakdown.sub_score === undefined ? null : toNumberOrNull(breakdown.sub_score),
       points: breakdown.points === undefined ? null : toNumberOrNull(breakdown.points),
       reasoning: String(breakdown.reasoning || ''),
