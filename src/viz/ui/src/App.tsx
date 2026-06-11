@@ -260,8 +260,37 @@ const NumberCell = ({ value }: { value: unknown }) => {
   return <span className="num-cell">{String(value)}</span>;
 };
 
+const isAddressColumn = (column: ColumnMeta) => column.key === 'address' || column.key === 'formattedAddress';
+
+// A record is reachable on the map when it has coordinates AND is not dropped
+// (the map view only plots non-dropped leads). Dropped or unlocated leads render
+// their address as plain text — no dead link.
+const isMappable = (record: RecordRow) => {
+  if (isDropped(record)) return false;
+  const lat = Number(record.latitude);
+  const lng = Number(record.longitude);
+  return Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0)
+    && record.latitude !== null && record.latitude !== '' && record.longitude !== null && record.longitude !== '';
+};
+
+const AddressCell = ({ value, record }: { value: unknown; record: RecordRow }) => {
+  const text = textValue(value);
+  if (text === 'n/a' || !isMappable(record)) return <span className="cell-text">{text}</span>;
+  return (
+    <Link
+      className="cell-link"
+      to={`/map?focus=${encodeURIComponent(rowId(record))}`}
+      title="Show on map"
+      onClick={(event) => event.stopPropagation()}
+    >
+      {text}
+    </Link>
+  );
+};
+
 const ValueCell = ({ column, record }: { column: ColumnMeta; record: RecordRow }) => {
   const value = record[column.key];
+  if (isAddressColumn(column)) return <AddressCell value={value} record={record} />;
   if (isWebsiteColumn(column)) return <WebsiteCell value={value} />;
   if (column.type === 'verdict') return <VerdictChip verdict={(value as string) || null} />;
   if (column.type === 'status') return <StatusChip status={value || 'n/a'} />;
@@ -300,7 +329,10 @@ const OUTCOME_ICON: Record<string, { glyph: string; cls: string; title: string }
 };
 
 const OutcomeIcon = ({ record }: { record: RecordRow }) => {
-  const outcome = String(record.__outcome || (isDropped(record) ? 'dropped' : 'scored'));
+  // Source of truth is the server-derived __outcome (lead-status taxonomy); the
+  // fallback only fires if it's missing and must NOT default a non-dropped record
+  // to 'scored' — that's the bug that made the glyph disagree with the pills.
+  const outcome = String(record.__outcome || (isDropped(record) ? 'dropped' : 'not_scored'));
   const spec = OUTCOME_ICON[outcome] ?? OUTCOME_ICON.not_scored;
   const title = outcome === 'dropped' ? `Dropped at ${labelFor(droppedAt(record) || 'a gate')}` : spec.title;
   return (
@@ -677,14 +709,19 @@ const OutputValue = ({ value }: { value: unknown }) => {
   return <span>{String(value)}</span>;
 };
 
+// The BODY of a step box is the model's OUTPUT — its decision/reasoning — never a
+// repeat of the configured intent (that already lives in the step head as the
+// description). When a step produced no model reasoning (e.g. a gate that passed
+// silently, or a deterministic field check), show a short outcome label only —
+// do NOT pad it with step.description, which is what caused the duplicate render.
 const decisionText = (step: RecordDetailStep) => {
   if (step.reasoning) return step.reasoning;
-  if (step.condition_summary) return `${labelFor(step.status)} · ${step.condition_summary}`;
-  if (humanStatus(step.status) === 'skipped') return 'Skipped · condition not met';
-  if (humanStatus(step.status) === 'not reached' || humanStatus(step.status) === 'n/a') return 'Not reached';
-  if (humanStatus(step.status) === 'done') return `Completed · ${step.description}`;
-  if (humanStatus(step.status) === 'passed' || humanStatus(step.status) === 'ok') return `Passed · ${step.description}`;
-  if (humanStatus(step.status) === 'failed' || humanStatus(step.status) === 'dropped') return `Stopped · ${step.description}`;
+  const status = humanStatus(step.status);
+  if (status === 'skipped') return 'Skipped · condition not met';
+  if (status === 'not reached' || status === 'n/a') return 'Not reached';
+  if (status === 'done') return 'Completed';
+  if (status === 'passed' || status === 'ok') return 'Passed';
+  if (status === 'failed' || status === 'dropped') return 'Stopped here';
   return labelFor(step.status);
 };
 
@@ -1208,8 +1245,9 @@ export const App = () => {
         </div>
         <div className="stats">
           <span>Total <strong>{meta.counts.total}</strong></span>
-          <span>Scored <strong>{meta.counts.qualified}</strong></span>
-          <span>Dropped <strong>{meta.counts.disqualified}</strong></span>
+          <span title="Scored and in play (lead status: qualified)">Qualified <strong>{meta.counts.by_status?.qualified ?? meta.counts.qualified}</strong></span>
+          <span title="Sourced/enriched but not yet scored">Unscored <strong>{meta.counts.by_status?.unscored ?? Math.max(0, meta.counts.total - meta.counts.qualified - meta.counts.disqualified)}</strong></span>
+          <span title={meta.counts.by_status ? `Gate ${meta.counts.by_status.dropped_gate} · Low score ${meta.counts.by_status.dropped_low_score} · Manual ${meta.counts.by_status.dropped_manual}` : 'Dropped at a gate, by low score, or manually'}>Dropped <strong>{meta.counts.disqualified}</strong></span>
           <span className="live-pill" tabIndex={0}>
             <span className={`live-dot ${runActive ? 'is-active' : ''}`} aria-hidden="true" />
             {liveStatusLabel}

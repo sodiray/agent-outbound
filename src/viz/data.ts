@@ -276,18 +276,23 @@ const nonEmptyValue = (value: any) => value !== null && value !== undefined && v
 const nonEmptyString = (value: any) => String(value || '').trim() !== '';
 const canonicalColumn = (realColumns: Set<string>, preferred: string, fallback: string) => realColumns.has(preferred) ? preferred : realColumns.has(fallback) ? fallback : '';
 const verdictsFromBreakdown = (rawBreakdown: any) => new Map(parseJsonArray(rawBreakdown).map((item: any) => [String(item?.id || ''), String(item?.verdict || '')]));
-const isScoredRecord = (record: any) =>
-  nonEmptyString(record.score_updated_at) ||
-  nonEmptyString(record.fit_score_updated_at) ||
-  Number(recordScore(record) || 0) > 0;
-// Precedence matters: a dropped record never scores; a scored record outranks a
-// non-fatal per-step error (e.g. a stale timing_enrich error on an otherwise
-// fully scored lead). Only surface 'error' when nothing else completed.
+// The row-level outcome glyph MUST agree with the lifecycle pills, so it derives
+// from the same lead-status taxonomy. A record is only 'scored' when it is truly
+// qualified (has a current score) — not merely "survived the gates" or carrying a
+// legacy backfilled fit_score. Any dropped status collapses to the 'dropped' glyph.
 const derivedOutcome = (record: any) => {
-  if (nonEmptyString(record.disqualified_at)) return 'dropped';
-  if (isScoredRecord(record)) return 'scored';
-  if (nonEmptyString(record.last_error) || nonEmptyString(record.fit_scoring_error) || nonEmptyString(record.trigger_scoring_error)) return 'error';
-  return 'not_scored';
+  const status = leadStatus(record);
+  if (status === 'qualified') {
+    return nonEmptyString(record.last_error) || nonEmptyString(record.fit_scoring_error) || nonEmptyString(record.trigger_scoring_error)
+      ? 'error'
+      : 'scored';
+  }
+  if (status === 'unscored') {
+    return nonEmptyString(record.last_error) || nonEmptyString(record.fit_scoring_error) || nonEmptyString(record.trigger_scoring_error)
+      ? 'error'
+      : 'not_scored';
+  }
+  return 'dropped';
 };
 const costPayload = (row: any) => row ? {
   model: row.model || '',
@@ -452,9 +457,6 @@ export const buildMeta = (listDir: string) => {
     ];
     const columns = [...orderedRealColumns, ...criterionColumns(config)];
     const total = Number(db.prepare('SELECT COUNT(*) AS count FROM records').get()?.count || 0);
-    const qualified = realColumns.has('disqualified_at')
-      ? Number(db.prepare("SELECT COUNT(*) AS count FROM records WHERE COALESCE(disqualified_at, '') = ''").get()?.count || 0)
-      : total;
     const filters: any[] = columns.flatMap((column: any): any[] => {
       if ((LOW_CARDINALITY_FILTERS.has(column.key) || String(column.key).endsWith('__status')) && realColumns.has(column.key)) {
         const options = normalizedRows(db.prepare(`SELECT DISTINCT ${quoteIdent(column.key)} AS value FROM records WHERE COALESCE(${quoteIdent(column.key)}, '') != '' ORDER BY ${quoteIdent(column.key)} COLLATE NOCASE LIMIT 200`).all())
@@ -470,17 +472,16 @@ export const buildMeta = (listDir: string) => {
     });
     filters.push({ key: 'disqualified', label: 'Status', type: 'enum', options: ['qualified', 'disqualified'] });
     filters.push({ key: 'lead_status', label: 'Lead status', type: 'enum', options: [...LEAD_STATUSES] });
-    const statusCounts = normalizedRows(db.prepare(`
-      SELECT ${leadStatusCaseSql({ availableColumns: realColumns })} AS status, COUNT(*) AS count
-      FROM records GROUP BY status
-    `).all());
+    const byStatus = leadStatusBreakdown(db);
     return {
       list: { name: basename(listDir), dir: listDir },
       counts: {
         total,
-        qualified,
-        disqualified: total - qualified,
-        by_status: Object.fromEntries(statusCounts.map((row: any) => [String(row.status || ''), Number(row.count || 0)])),
+        // "Qualified" = actually scored and in play (lead_status === 'qualified'),
+        // NOT "survived the gates". The old total-minus-dropped count was misleading.
+        qualified: byStatus.qualified,
+        disqualified: byStatus.dropped_low_score + byStatus.dropped_gate + byStatus.dropped_manual,
+        by_status: byStatus,
       },
       steps: buildSteps(config),
       columns,
@@ -818,14 +819,34 @@ export const getProgress = (listDir: string) => {
   }
 };
 
+// One source of truth for the lifecycle pills: the lead-status taxonomy. Every
+// record maps to exactly one status, so the parts sum to total and the table's
+// `lead_status` filter agrees with these counts.
+const leadStatusBreakdown = (db: any) => {
+  const realColumns = new Set(getRecordColumns(db).map((column) => column.key));
+  const rows = normalizedRows(db.prepare(`
+    SELECT ${leadStatusCaseSql({ availableColumns: realColumns })} AS status, COUNT(*) AS count
+    FROM records GROUP BY status
+  `).all());
+  const counts = Object.fromEntries(rows.map((row: any) => [String(row.status || ''), Number(row.count || 0)]));
+  return {
+    unscored: Number(counts.unscored || 0),
+    qualified: Number(counts.qualified || 0),
+    dropped_low_score: Number(counts.dropped_low_score || 0),
+    dropped_gate: Number(counts.dropped_gate || 0),
+    dropped_manual: Number(counts.dropped_manual || 0),
+  };
+};
+
 export const getCounts = (listDir: string) => {
   const db = openListDb({ listDir, readonly: true });
   try {
     const total = Number(db.prepare('SELECT COUNT(*) AS count FROM records').get()?.count || 0);
-    const qualified = hasTableColumn(db, 'records', 'disqualified_at')
-      ? Number(db.prepare("SELECT COUNT(*) AS count FROM records WHERE COALESCE(disqualified_at, '') = ''").get()?.count || 0)
-      : total;
-    return { total, qualified, disqualified: total - qualified };
+    const byStatus = leadStatusBreakdown(db);
+    // "Qualified" means actually-scored-and-in-play, not merely "survived the gates".
+    const qualified = byStatus.qualified;
+    const disqualified = byStatus.dropped_low_score + byStatus.dropped_gate + byStatus.dropped_manual;
+    return { total, qualified, disqualified, by_status: byStatus };
   } finally {
     db.close();
   }

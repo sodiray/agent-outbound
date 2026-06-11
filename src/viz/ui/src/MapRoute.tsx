@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { APIProvider, Map, Marker, useMap } from '@vis.gl/react-google-maps';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { fetchMeta, fetchRecordDetail, fetchRecords } from './api.js';
 import { NEUTRAL_PIN, hasScore, isLocated, pinColor, pointOf, recordScore, rowKey } from './map/colors.js';
 import type { ActiveFilter, ColumnMeta, FilterMeta, MetaResponse, RecordDetail, RecordRow, RecordValue, SortDir } from './types.js';
@@ -11,8 +11,12 @@ type MapContentProps = {
   records: RecordRow[];
   selectedId: string | null;
   fitSignal: number;
+  focusId: string | null;
+  focusSignal: number;
   onSelect: (id: string) => void;
 };
+
+const FOCUS_ZOOM = 15;
 
 type MapPanelProps = {
   meta: MetaResponse;
@@ -163,14 +167,18 @@ const MapLegend = () => (
   </div>
 );
 
-const MapContent = ({ records, selectedId, fitSignal, onSelect }: MapContentProps) => {
+const MapContent = ({ records, selectedId, fitSignal, focusId, focusSignal, onSelect }: MapContentProps) => {
   const map = useMap();
   const recordsRef = useRef(records);
   const didInitialFit = useRef(false);
+  // When deep-linked with ?focus=<id>, suppress the once-only "fit all" so the
+  // initial view is centered on the focused lead, not the whole bounds.
+  const hasPendingFocus = useRef(Boolean(focusId));
   recordsRef.current = records;
 
   useEffect(() => {
     if (!map || didInitialFit.current) return;
+    if (hasPendingFocus.current) return;
     if (records.length === 0) return;
     fitToRecords(map, records);
     didInitialFit.current = true;
@@ -180,6 +188,19 @@ const MapContent = ({ records, selectedId, fitSignal, onSelect }: MapContentProp
     if (!map || fitSignal === 0) return;
     fitToRecords(map, recordsRef.current);
   }, [map, fitSignal]);
+
+  // Deep-link focus: center AND zoom onto the focused lead's pin once its record
+  // is loaded. setCenter+setZoom on the live map instance forces a repaint —
+  // Google tiles otherwise don't redraw until the next user interaction.
+  useEffect(() => {
+    if (!map || !focusId) return;
+    const record = records.find((candidate) => rowKey(candidate) === focusId);
+    if (!record || !isLocated(record)) return;
+    map.setCenter(pointOf(record));
+    map.setZoom(FOCUS_ZOOM);
+    didInitialFit.current = true;
+    hasPendingFocus.current = false;
+  }, [map, focusId, focusSignal, records]);
 
   useEffect(() => {
     if (!map || !selectedId) return;
@@ -460,6 +481,9 @@ export const MapRoute = () => {
   const [dir, setDir] = useState<SortDir>('desc');
   const [fitSignal, setFitSignal] = useState(0);
   const [error, setError] = useState('');
+  const [searchParams] = useSearchParams();
+  const focusId = searchParams.get('focus');
+  const focusHandled = useRef(false);
 
   useEffect(() => {
     fetchMeta()
@@ -473,6 +497,16 @@ export const MapRoute = () => {
       .then((response) => setRecords(response.records))
       .catch((nextError: Error) => setError(nextError.message));
   }, [meta, sort, dir, q, filters]);
+
+  // Deep-link: once records are loaded, open the focused lead's detail panel.
+  // Run once per focus id so the user can later navigate away freely.
+  useEffect(() => {
+    if (!focusId || focusHandled.current || records.length === 0) return;
+    if (!records.some((record) => rowKey(record) === focusId)) return;
+    setSelectedId(focusId);
+    setPanelMode('detail');
+    focusHandled.current = true;
+  }, [focusId, records]);
 
   const selectLead = (id: string) => {
     setSelectedId(id);
@@ -514,7 +548,7 @@ export const MapRoute = () => {
         {meta.mapsApiKey ? (
           <APIProvider apiKey={meta.mapsApiKey}>
             <Map defaultZoom={4} defaultCenter={DEFAULT_CENTER} gestureHandling="greedy" style={{ width: '100%', height: '100%' }}>
-              <MapContent records={records} selectedId={selectedId} fitSignal={fitSignal} onSelect={selectLead} />
+              <MapContent records={records} selectedId={selectedId} fitSignal={fitSignal} focusId={focusId} focusSignal={records.length} onSelect={selectLead} />
             </Map>
           </APIProvider>
         ) : (

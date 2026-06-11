@@ -53,9 +53,17 @@ export type StepMeta = {
   priority_weight?: { fit?: number; trigger?: number };
 };
 
+export type LeadStatusCounts = {
+  unscored: number;
+  qualified: number;
+  dropped_low_score: number;
+  dropped_gate: number;
+  dropped_manual: number;
+};
+
 export type MetaResponse = {
   list: { name: string; dir: string };
-  counts: { total: number; qualified: number; disqualified: number };
+  counts: { total: number; qualified: number; disqualified: number; by_status: LeadStatusCounts };
   steps: StepMeta[];
   columns: ColumnMeta[];
   filters: FilterMeta[];
