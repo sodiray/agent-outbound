@@ -19,6 +19,7 @@ import { nullableBoolean, nullableNumber, nullableString } from '../actions/sche
 import { formatErrorMessage } from '../lib/error-format.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
+import { executeToolCallAction } from './actions/tool-call.js';
 
 export const parseExtra = (value) => {
   try {
@@ -90,7 +91,7 @@ export const ttlToSeconds = (ttl) => {
 // columns, when, cache TTL) must NOT invalidate already-computed enrichment. An
 // explicit `cache_key` overrides everything, giving authors deterministic control
 // over when a step is forced to recompute.
-const MATERIAL_ENRICH_FIELDS = ['action', 'tool', 'args', 'outputs', 'model', 'reasoning', 'prompt_file', 'prompt_args', 'depends_on', 'on_error'] as const;
+const MATERIAL_ENRICH_FIELDS = ['action', 'tool', 'args', 'args_map', 'output_map', 'outputs', 'model', 'reasoning', 'prompt_file', 'prompt_args', 'depends_on', 'on_error'] as const;
 
 export const materialEnrichConfig = (stepConfig: any): Record<string, any> => {
   const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};
@@ -397,6 +398,16 @@ export const executeEnrichmentAction = async ({
       stepConfig,
       record,
       aiConfig,
+    });
+  }
+  if (action === 'tool_call') {
+    return executeToolCallAction({
+      mcp,
+      listDir,
+      stepId,
+      stepConfig,
+      record,
+      toolCatalog,
     });
   }
   return executeStepAction({

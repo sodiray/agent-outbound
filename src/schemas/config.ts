@@ -211,6 +211,10 @@ const PipelineEnrichmentStepSchema = z.object({
   action: z.string().default(''),
   tool: ToolSpecSchema.optional(),
   args: z.record(z.any()).default({}),
+  // action: tool_call only — deterministic single tool execution, no LLM.
+  // args_map: tool arg <- record field. output_map: output field <- result path.
+  args_map: z.record(z.string()).default({}),
+  output_map: z.record(z.string()).default({}),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(),
   on_error: z.enum(['fail', 'empty']).default('fail'),
@@ -230,6 +234,8 @@ const PipelineEnrichmentStepSchema = z.object({
   action: true,
   tool: true,
   args: true,
+  args_map: true,
+  output_map: true,
   outputs: true,
   columns: true,
   on_error: true,
