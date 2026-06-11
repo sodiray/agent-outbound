@@ -25,6 +25,13 @@ import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { loadTools } from '../runtime/tools.js';
+import { matchExcludeRule, normalizeExcludeRules, type SourceExcludeRule } from '../lib/source-exclude.js';
+
+const mergeExcludedByRule = (summary: any, excludedByRule: Record<string, number>) => {
+  for (const [rule, count] of Object.entries(excludedByRule || {})) {
+    summary.excluded_by_rule[rule] = (summary.excluded_by_rule[rule] || 0) + count;
+  }
+};
 
 const toSearchRows = async ({
   mcp,
@@ -474,6 +481,7 @@ const processAndInsertRows = async ({
   listName,
   listDir,
   aiConfig,
+  excludeRules = [],
   limit = 0,
 }: {
   db: any;
@@ -482,9 +490,21 @@ const processAndInsertRows = async ({
   listName: string;
   listDir: string;
   aiConfig: any;
+  excludeRules?: SourceExcludeRule[];
   limit?: number;
 }) => {
-  const rowsToProcess = Number(limit || 0) > 0 ? rows.slice(0, Number(limit || 0)) : rows;
+  // Pre-insert exclusion runs before everything — excluded rows never become
+  // records and never spend embedding/dedup calls.
+  const excludedByRule: Record<string, number> = {};
+  const keptRows = (rows || []).filter((row) => {
+    const rule = matchExcludeRule({ row, rules: excludeRules });
+    if (!rule) return true;
+    const key = String(rule.description || 'excluded');
+    excludedByRule[key] = (excludedByRule[key] || 0) + 1;
+    return false;
+  });
+  const excludedCount = (rows || []).length - keptRows.length;
+  const rowsToProcess = Number(limit || 0) > 0 ? keptRows.slice(0, Number(limit || 0)) : keptRows;
   const dynamicColumns = new Map<string, { name: string; type: string }>();
   const existingColumns = new Set(
     db.prepare('PRAGMA table_info(records)').all().map((column: any) => String(column.name || '')),
@@ -563,7 +583,8 @@ const processAndInsertRows = async ({
     rows_found: rowsToProcess.length,
     insertedIds,
     deduped,
-    filtered,
+    filtered: filtered + excludedCount,
+    excludedByRule,
     errors,
   };
 };
@@ -610,6 +631,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
   const listName = config?.list?.name || 'list';
   const searches = Array.isArray(config?.source?.searches) ? config.source.searches : [];
   const strategies = Array.isArray(config?.source?.strategies) ? config.source.strategies : [];
+  const excludeRules = normalizeExcludeRules(config?.source?.exclude);
   const dedupKey = normalizeDedupKey(config?.source?.dedup_key || 'place_id');
   const maxCalls = config?.source?.budget?.max_calls === undefined
     ? null
@@ -633,6 +655,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
     inserted_ids: [],
     deduped_total: 0,
     filtered_out: 0,
+    excluded_by_rule: {},
     errors: [],
   };
 
@@ -743,6 +766,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
             listName,
             listDir,
             aiConfig: config?.ai || {},
+            excludeRules,
             limit: remaining,
           });
           summary.inserted_ids.push(...processed.insertedIds);
@@ -750,6 +774,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
           tickProgress(db, runId, { done: summary.inserted_total });
           summary.deduped_total += processed.deduped;
           summary.filtered_out += processed.filtered;
+          mergeExcludedByRule(summary, processed.excludedByRule);
           summary.errors.push(...processed.errors);
 
           const params = typeof task?.params === 'string' ? JSON.parse(task.params || '{}') : task.params || {};
@@ -791,6 +816,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
         listName,
         listDir,
         aiConfig: config?.ai || {},
+        excludeRules,
         limit: legacyLimit,
       });
       summary.inserted_ids.push(...processed.insertedIds);
@@ -798,6 +824,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
       tickProgress(db, runId, { done: summary.inserted_total });
       summary.deduped_total += processed.deduped;
       summary.filtered_out += processed.filtered;
+      mergeExcludedByRule(summary, processed.excludedByRule);
       summary.errors.push(...processed.errors);
     }
 
@@ -846,6 +873,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
 
   const listName = config?.list?.name || 'list';
   const searches = Array.isArray(config?.source?.searches) ? config.source.searches : [];
+  const excludeRules = normalizeExcludeRules(config?.source?.exclude);
   const db = openListDb({ listDir, readonly: false });
   const mcp = await getMcpClient();
   const toolCatalog = readToolCatalog(listDir);
@@ -860,6 +888,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
     exhausted_searches: [],
     deduped_total: 0,
     filtered_out: 0,
+    excluded_by_rule: {},
     errors: [],
   };
 
@@ -926,6 +955,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
           listName,
           listDir,
           aiConfig: config?.ai || {},
+          excludeRules,
           limit: remaining,
         });
 
@@ -934,6 +964,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
         tickProgress(db, runId, { done: summary.inserted_total });
         summary.deduped_total += processed.deduped;
         summary.filtered_out += processed.filtered;
+        mergeExcludedByRule(summary, processed.excludedByRule);
         summary.errors.push(...processed.errors);
 
         totalFetched += rows.length;

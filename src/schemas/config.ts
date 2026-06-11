@@ -166,6 +166,16 @@ const FieldCheckPredicateSchema = z.object({
   conditions: z.array(FieldCheckConditionSchema).default([]),
 }).partial({ match: true, conditions: true });
 
+// Deterministic pre-insert exclusion: a sourced row matching ANY rule is never
+// persisted — no record, no embedding, no dedup spend. For things that are not
+// businesses at all (ATMs, restrooms, parks). Real-but-off-ICP businesses belong
+// in pipeline gates instead, where the drop stays visible and recoverable.
+const SourceExcludeRuleSchema = z.object({
+  description: z.string().default(''),
+  match: z.enum(['any', 'all']).default('all'),
+  conditions: z.array(FieldCheckConditionSchema).default([]),
+}).partial({ description: true, match: true, conditions: true });
+
 const PipelineFilterStepSchema = z.object({
   kind: z.literal('filter'),
   id: z.string().default(''),
@@ -478,6 +488,7 @@ export const ConfigSchema = z.object({
     identity: z.array(z.string()).default([]),
     searches: z.array(SourceSearchSchema).default([]),
     strategies: z.array(StrategySchema).default([]),
+    exclude: z.array(SourceExcludeRuleSchema).default([]),
     dedup_key: z.string().default('place_id'),
     budget: SourceBudgetSchema.default({}),
   }).partial().default({}),
