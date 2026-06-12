@@ -15,6 +15,10 @@ import { isBudgetExceededError } from '../runtime/contract.js';
 // Bump when the built-in prompt changes materially so existing briefs refresh.
 const BUILTIN_PROMPT_VERSION = 'v1';
 
+// Lenient by design: `roles`/`workflows` default to [] so a model that omits or
+// malforms the optional roles array still parses on the first try (no retry storm).
+// Briefs run on Anthropic/Haiku (not OpenAI strict mode), so strict-compatibility
+// is unnecessary here — leniency is what keeps brief generation cheap and reliable.
 const BriefResultSchema = z.object({
   summary: z.string().min(1),
   content: z.string().min(1),

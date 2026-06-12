@@ -52,6 +52,7 @@ import { hasComposioOAuthTokens, loginComposio } from '../orchestrator/runtime/c
 import { listAnthropicModels, validateAnthropicKey } from '../orchestrator/runtime/anthropic.js';
 import { listDeepInfraModels, validateDeepInfraModel } from '../orchestrator/runtime/deepinfra.js';
 import { listXaiModels } from '../orchestrator/runtime/xai.js';
+import { listOpenAiModels } from '../orchestrator/runtime/openai.js';
 import { runCrmSync } from '../orchestrator/crm/runner.js';
 import { getEnv, readGlobalEnv, writeGlobalEnv } from '../orchestrator/runtime/env.js';
 import { planRouteAction } from '../orchestrator/actions/plan-route/index.js';
@@ -112,10 +113,12 @@ const applyProviderModels = ({
   anthropicModels = [],
   deepinfraModels = [],
   xaiModels = [],
+  openaiModels = [],
 }: {
   anthropicModels?: string[];
   deepinfraModels?: string[];
   xaiModels?: string[];
+  openaiModels?: string[];
 }) => {
   let state = readModelsState();
   state = setProviderModels({
@@ -132,6 +135,11 @@ const applyProviderModels = ({
     state,
     providerId: 'xai',
     models: xaiModels,
+  });
+  state = setProviderModels({
+    state,
+    providerId: 'openai',
+    models: openaiModels,
   });
   return writeModelsState(state);
 };
@@ -326,8 +334,9 @@ export const modelsRefreshCommand = async ({
   const anthropicKey = String(getEnv('ANTHROPIC_API_KEY') || '').trim();
   const deepinfraKey = String(getEnv('DEEPINFRA_API_KEY') || '').trim();
   const xaiKey = String(getEnv('XAI_API_KEY') || '').trim();
-  if (!anthropicKey && !deepinfraKey && !xaiKey) {
-    throw new Error('At least one provider key is required. Configure Anthropic, DeepInfra, and/or xAI in `agent-outbound init`.');
+  const openaiKey = String(getEnv('OPENAI_API_KEY') || '').trim();
+  if (!anthropicKey && !deepinfraKey && !xaiKey && !openaiKey) {
+    throw new Error('At least one provider key is required. Configure Anthropic, DeepInfra, xAI, and/or OpenAI in `agent-outbound init`.');
   }
 
   const current = readModelsState();
@@ -342,6 +351,12 @@ export const modelsRefreshCommand = async ({
     : { ok: false, error: 'not configured', models: [] as string[] };
   if (xaiKey && !xaiList.ok) {
     throw new Error(`xAI refresh failed: ${xaiList.error}`);
+  }
+  const openaiList = openaiKey
+    ? await listOpenAiModels(openaiKey)
+    : { ok: false, error: 'not configured', models: [] as string[] };
+  if (openaiKey && !openaiList.ok) {
+    throw new Error(`OpenAI refresh failed: ${openaiList.error}`);
   }
 
   let deepinfraSelected: string[] = [];
@@ -371,6 +386,7 @@ export const modelsRefreshCommand = async ({
     anthropicModels: anthropicKey ? (anthroList.models || []) : (current.providers?.anthropic?.models || []),
     deepinfraModels: deepinfraKey ? deepinfraSelected : (current.providers?.deepinfra?.models || []),
     xaiModels: xaiKey ? (xaiList.models || []) : (current.providers?.xai?.models || []),
+    openaiModels: openaiKey ? (openaiList.models || []) : (current.providers?.openai?.models || []),
   });
 
   return {
@@ -388,6 +404,10 @@ export const modelsRefreshCommand = async ({
       xai: {
         configured: Boolean(xaiKey),
         model_count: written.state.providers?.xai?.models?.length || 0,
+      },
+      openai: {
+        configured: Boolean(openaiKey),
+        model_count: written.state.providers?.openai?.models?.length || 0,
       },
     },
   };

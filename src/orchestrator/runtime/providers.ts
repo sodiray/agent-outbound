@@ -2,6 +2,7 @@ import { getEnv } from './env.js';
 import { listAnthropicModels } from './anthropic.js';
 import { listDeepInfraModels } from './deepinfra.js';
 import { listXaiModels } from './xai.js';
+import { listOpenAiModels } from './openai.js';
 
 type ProviderValidateResult = {
   ok: boolean;
@@ -90,6 +91,75 @@ const getDeepInfraProviderOptions = (modelId: string, opts?: { reasoning?: boole
   return {};
 };
 
+const buildOpenAiModel = async (modelId: string, apiKey: string) => {
+  const modName = '@ai-sdk/openai';
+  const providerModule = await import(modName);
+  // Strict structured outputs (the default) — reliable schema conformance. All
+  // schemas used with OpenAI must be strict-compatible (every field required, no
+  // minLength/min/max/defaults); see BriefResultSchema, kept strict-safe for this.
+  const id = String(modelId || '').trim();
+  if (typeof (providerModule as any).createOpenAI === 'function') {
+    const openai = (providerModule as any).createOpenAI({ apiKey });
+    // Route via chat-completions, not the Responses API: the SDK's Responses
+    // structured-output path is flaky here (silent retry storms on the score
+    // schema), while chat-completions + strict json_schema is reliable (verified
+    // by direct API probe). Strict stays ON (default) for guaranteed conformance.
+    if (typeof openai.chat === 'function') return openai.chat(id);
+    return openai(id);
+  }
+  if (typeof (providerModule as any).openai === 'function') {
+    return (providerModule as any).openai(id, { apiKey });
+  }
+  throw new Error('Failed to initialize OpenAI provider from @ai-sdk/openai.');
+};
+
+// OpenAI's API does not return a cost field, so we compute it from token usage.
+// USD per 1M tokens (input/output). Update if OpenAI changes pricing.
+const OPENAI_PRICES: Record<string, { in: number; out: number }> = {
+  'gpt-4.1-nano': { in: 0.10, out: 0.40 },
+  'gpt-4.1-mini': { in: 0.40, out: 1.60 },
+  'gpt-4.1': { in: 2.00, out: 8.00 },
+  'gpt-4o-mini': { in: 0.15, out: 0.60 },
+};
+
+const computeOpenAiUsd = (result: any): number | null => {
+  const usage = result?.usage || {};
+  const inTok = Number(usage.inputTokens ?? usage.promptTokens ?? 0);
+  const outTok = Number(usage.outputTokens ?? usage.completionTokens ?? 0);
+  if (!Number.isFinite(inTok) || !Number.isFinite(outTok)) return null;
+  const modelId = String(result?.model || result?.response?.modelId || '').trim().toLowerCase();
+  // Prefix-match so dated suffixes (e.g. gpt-4.1-nano-2025-04-14) resolve; default to nano.
+  const sorted = Object.entries(OPENAI_PRICES).sort((a, b) => b[0].length - a[0].length);
+  const price = sorted.find(([k]) => modelId.startsWith(k))?.[1] || OPENAI_PRICES['gpt-4.1-nano'];
+  return (inTok / 1e6) * price.in + (outTok / 1e6) * price.out;
+};
+
+// Anthropic's AI SDK result doesn't populate a cost field (usage.totalCost is
+// undefined), so cost_events logged $0. Compute from token usage like OpenAI.
+// USD per 1M tokens. Cache write ~1.25x input, cache read ~0.1x input.
+const ANTHROPIC_PRICES: Record<string, { in: number; out: number; cacheWrite: number; cacheRead: number }> = {
+  'claude-haiku-4-5': { in: 1.0, out: 5.0, cacheWrite: 1.25, cacheRead: 0.10 },
+  'claude-3-5-haiku': { in: 0.8, out: 4.0, cacheWrite: 1.00, cacheRead: 0.08 },
+};
+
+const computeAnthropicUsd = (result: any): number | null => {
+  // Only trust a positive direct cost; Anthropic reports totalCost as 0 (not
+  // undefined), which would short-circuit to $0. Fall through to token-based calc.
+  const direct = parseUsd(result?.usage?.totalCost);
+  if (direct !== null && direct > 0) return direct;
+  const usage = result?.usage || {};
+  const inTok = Number(usage.inputTokens ?? usage.promptTokens ?? 0);
+  const outTok = Number(usage.outputTokens ?? usage.completionTokens ?? 0);
+  const cacheWrite = Number(usage.cacheCreationInputTokens ?? usage.cachedInputTokens ?? 0);
+  const cacheRead = Number(usage.cacheReadInputTokens ?? 0);
+  if (!Number.isFinite(inTok) || !Number.isFinite(outTok)) return null;
+  const modelId = String(result?.model || result?.response?.modelId || '').trim().toLowerCase();
+  const sorted = Object.entries(ANTHROPIC_PRICES).sort((a, b) => b[0].length - a[0].length);
+  const p = sorted.find(([k]) => modelId.startsWith(k))?.[1] || ANTHROPIC_PRICES['claude-haiku-4-5'];
+  return (inTok / 1e6) * p.in + (outTok / 1e6) * p.out
+    + (cacheWrite / 1e6) * p.cacheWrite + (cacheRead / 1e6) * p.cacheRead;
+};
+
 const buildXaiModel = async (modelId: string, apiKey: string) => {
   const modName = '@ai-sdk/xai';
   const providerModule: unknown = await import(modName);
@@ -118,7 +188,7 @@ export const PROVIDERS: RuntimeProvider[] = [
         },
       },
     }),
-    extractUsdCost: (result: any) => parseUsd(result?.usage?.totalCost),
+    extractUsdCost: (result: any) => computeAnthropicUsd(result),
   },
   {
     id: 'deepinfra',
@@ -132,6 +202,14 @@ export const PROVIDERS: RuntimeProvider[] = [
       ?? parseDeepInfraUsdFromResponseBody(result?.response?.body)
       ?? parseDeepInfraUsdFromResponseBody(result?.rawResponse?.body)
     ),
+  },
+  {
+    id: 'openai',
+    envKey: 'OPENAI_API_KEY',
+    supportsCacheControl: false,
+    validateKey: async (apiKey: string) => listOpenAiModels(apiKey),
+    buildModel: buildOpenAiModel,
+    extractUsdCost: (result: any) => computeOpenAiUsd(result),
   },
   {
     id: 'xai',
