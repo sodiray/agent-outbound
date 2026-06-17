@@ -1,7 +1,7 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
-import { getBriefForRecord, listFieldOverridesForRecord, listInteractionsForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
+import { getAssetsForRow, getBriefForRecord, listFieldOverridesForRecord, listInteractionsForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
 import { LEAD_STATUSES, leadStatus, leadStatusCaseSql } from '../orchestrator/runtime/status.js';
 import { getEnv } from '../orchestrator/runtime/env.js';
 
@@ -488,6 +488,7 @@ export const buildMeta = (listDir: string) => {
       columns,
       filters,
       mapsApiKey: getEnv('GOOGLE_MAPS_API_KEY'),
+      scoreMinimum: Number(config?.score?.minimum ?? 0),
     };
   } finally {
     db.close();
@@ -548,7 +549,15 @@ export const queryRecords = (listDir: string, params: any = {}) => {
     }
     const whereSql = where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '';
     const requestedSort = String(params?.sort || 'priority_rank');
-    const sort = realColumns.has(requestedSort) ? requestedSort : realColumns.has('priority_rank') ? 'priority_rank' : '_row_id';
+    // 'state' is the client's lifecycle pseudo-sort (resolved client-side), NOT the
+    // address `state` column — which exists but is empty, so ordering by it collapses
+    // to insertion order and truncates qualified leads past the page limit. Reserve it
+    // (and any other pseudo-sort) so the server orders by score and every qualified lead
+    // lands in the first page for the client to re-sort by lifecycle.
+    const PSEUDO_SORTS = new Set(['state']);
+    const sort = (!PSEUDO_SORTS.has(requestedSort) && realColumns.has(requestedSort))
+      ? requestedSort
+      : realColumns.has('priority_rank') ? 'priority_rank' : '_row_id';
     const dir = String(params?.dir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
     const limit = Math.max(1, Math.min(500, Number(params?.limit || 50) || 50));
     const offset = Math.max(0, Number(params?.offset || 0) || 0);
@@ -785,7 +794,30 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         updated_at: String(briefRow.updated_at || ''),
       }
       : null;
-    return { record, lead_status: leadStatus(record), manual_fields: manualFields, interactions, brief, steps, score, timeline, overrides };
+    // Generated assets for this lead (e.g. the automation plan), keyed by step_id.
+    // The brief lives in its own table, so it is never included here.
+    const assets = (tableExists(db, 'assets') ? getAssetsForRow({ db, rowId }) : []).map((asset: any) => {
+      const outputs = (() => {
+        try {
+          const parsed = JSON.parse(String(asset.outputs_json || '{}'));
+          return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch {
+          return {};
+        }
+      })();
+      return {
+        asset_id: String(asset.asset_id || ''),
+        step_id: String(asset.step_id || ''),
+        label: String(asset.label || labelFor(asset.step_id || '')),
+        summary: String(asset.reason || outputs.summary || ''),
+        content: String(asset.result || ''),
+        is_reference: Boolean(asset.is_reference),
+        status: String(asset.status || ''),
+        model: String(outputs.model || ''),
+        updated_at: String(asset.updated_at || ''),
+      };
+    });
+    return { record, lead_status: leadStatus(record), manual_fields: manualFields, interactions, brief, assets, steps, score, timeline, overrides };
   } finally {
     db.close();
   }

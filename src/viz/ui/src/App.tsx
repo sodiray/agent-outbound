@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode, RefObject } from 'react';
 import { createPortal } from 'react-dom';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { fetchMeta, fetchProgress, fetchRecordDetail, fetchRecords } from './api.js';
 import type { ProgressRun } from './api.js';
+import { InfoTooltip } from './InfoTooltip.js';
+import { Markdown } from './markdown.js';
 import type {
   ActiveFilter,
   ColumnMeta,
   FilterMeta,
   Interaction,
+  LeadAsset,
   LeadBrief,
   ManualField,
   MetaResponse,
@@ -619,7 +622,7 @@ const TableView = ({
       </thead>
       <tbody>
         {records.map((record) => (
-          <tr key={rowId(record)} className={isDropped(record) ? 'is-disqualified' : ''} onClick={() => onOpen(rowId(record))}>
+          <tr key={rowId(record)} data-row-id={rowId(record)} className={isDropped(record) ? 'is-disqualified' : ''} onClick={() => onOpen(rowId(record))}>
             <td className="col-outcome">
               {inProgressRowIds.has(rowId(record)) ? <span className="ao-spinner" aria-label="Processing" role="img" /> : <OutcomeIcon record={record} />}
             </td>
@@ -667,8 +670,10 @@ const CriteriaBreakdown = ({ detail }: { detail: RecordDetail }) => {
             return (
               <div key={criterion.id} className={`criterion ${notScored ? 'is-not-scored' : ''}`}>
                 <div>
-                  <strong>{labelFor(criterion.id)}</strong>
-                  <small>{criterion.description}</small>
+                  <span className="label-with-info">
+                    <strong>{labelFor(criterion.id)}</strong>
+                    <InfoTooltip text={criterion.description} />
+                  </span>
                 </div>
                 <VerdictChip verdict={criterion.verdict} grade={criterion.grade ?? null} />
                 <strong>{notScored ? '0' : `+${criterionPoints(criterion)}`}</strong>
@@ -741,23 +746,48 @@ const BriefSection = ({ brief }: { brief: LeadBrief | null }) => {
   if (!brief) return null;
   return (
     <section className="detail-section">
-      <div className="section-title">SDR brief</div>
-      <article className="override-item override-item--keep">
-        <p><strong>{brief.summary}</strong></p>
-        {brief.roles.length > 0 ? (
-          <div className="override-item__head" style={{ flexWrap: 'wrap', gap: 4 }}>
-            {brief.roles.map((entry) => (
-              <span key={entry.role} className="chip status-chip is-blue" title={entry.workflows.join('; ')}>{entry.role}</span>
-            ))}
-          </div>
+      <div className="section-title section-title--row">
+        <span>SDR brief</span>
+        {brief.content ? (
+          <button type="button" className="text-button" onClick={() => setExpanded(!expanded)}>
+            {expanded ? 'Hide full brief' : 'Show full brief'}
+          </button>
         ) : null}
-        <button type="button" className="chip is-muted" onClick={() => setExpanded(!expanded)}>
-          {expanded ? 'Hide full brief' : 'Read full brief'}
-        </button>
-        {expanded ? <p style={{ whiteSpace: 'pre-wrap' }}>{brief.content}</p> : null}
+      </div>
+      <article className="brief-card">
+        {brief.summary ? <p className="brief-card__summary"><strong>{brief.summary}</strong></p> : null}
+        {expanded ? <Markdown text={brief.content} className="brief-card__body" /> : null}
         <small>{brief.model}{brief.updated_at ? ` · ${displayDate(brief.updated_at)}` : ''}</small>
       </article>
     </section>
+  );
+};
+
+// Generated assets for a lead (the automation plan, and any future per-lead
+// assets). The brief is rendered separately above the tabs — it is never in this
+// list. Each asset shows its summary and its markdown body.
+const AssetCard = ({ asset }: { asset: LeadAsset }) => (
+  <article className="brief-card">
+    <div className="asset-card__head">
+      <strong>{asset.label}</strong>
+      {asset.status && asset.status !== 'ready' ? <span className="chip is-muted">{asset.status}</span> : null}
+    </div>
+    {asset.summary ? <p className="brief-card__summary">{asset.summary}</p> : null}
+    {asset.is_reference
+      ? <p><a href={asset.content} target="_blank" rel="noreferrer">{asset.content}</a></p>
+      : asset.content ? <Markdown text={asset.content} className="brief-card__body" /> : null}
+    {asset.model || asset.updated_at ? <small>{asset.model}{asset.updated_at ? ` · ${displayDate(asset.updated_at)}` : ''}</small> : null}
+  </article>
+);
+
+const AssetsTab = ({ assets }: { assets: LeadAsset[] }) => {
+  if (!assets || assets.length === 0) {
+    return <p className="muted assets-empty">No assets generated for this lead yet.</p>;
+  }
+  return (
+    <div className="assets-list">
+      {assets.map((asset) => <AssetCard key={asset.asset_id} asset={asset} />)}
+    </div>
   );
 };
 
@@ -848,8 +878,10 @@ const StepCard = ({ step, isTerminal, isInProgress }: { step: RecordDetailStep; 
   <article className={`step-card ${notReached ? 'is-not-reached' : ''}`}>
     <div className="step-card__head">
       <div>
-        <strong>{labelFor(step.id)}</strong>
-        {notReached ? null : <small>{step.description}</small>}
+        <span className="label-with-info">
+          <strong>{labelFor(step.id)}</strong>
+          {notReached ? null : <InfoTooltip text={step.description} />}
+        </span>
       </div>
       <div className="step-card__badges">
         <span className="chip">{labelFor(step.kind)}</span>
@@ -936,8 +968,10 @@ const StepsTimeline = ({
           <article className="step-card scored-node">
             <div className="step-card__head">
               <div>
-                <strong>Scored</strong>
-                <small>The lead score (0-100) from the configured criteria.</small>
+                <span className="label-with-info">
+                  <strong>Scored</strong>
+                  <InfoTooltip text="The lead score (0-100) from the configured criteria." />
+                </span>
               </div>
               <StatusChip status="ok" />
             </div>
@@ -963,11 +997,13 @@ const DetailPanel = ({
   const [detail, setDetail] = useState<RecordDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState('all');
+  const [tab, setTab] = useState<'score' | 'pipeline' | 'assets'>('score');
 
   useEffect(() => {
     if (!rowIdValue) return;
     setLoading(true);
     setDetail(null);
+    setTab('score');
     fetchRecordDetail(rowIdValue)
       .then(setDetail)
       .finally(() => setLoading(false));
@@ -1022,21 +1058,39 @@ const DetailPanel = ({
               </div>
             </header>
             <BriefSection brief={detail.brief || null} />
-            <ScoreSection detail={detail} />
-            <InteractionsSection interactions={Array.isArray(detail.interactions) ? detail.interactions : []} />
-            <ManualFieldsSection fields={Array.isArray(detail.manual_fields) ? detail.manual_fields : []} />
-            <OverridesSection overrides={overrides} />
-            <section className="detail-section">
-              <div className="section-title">Steps</div>
-              <div className="status-filters">
-                {STATUS_FILTERS.map((status) => (
-                  <button className={statusFilter === status ? 'is-active' : ''} type="button" key={status} onClick={() => setStatusFilter(status)}>
-                    {labelFor(status)}
-                  </button>
-                ))}
-              </div>
-              <StepsTimeline detail={detail} statusFilter={statusFilter} activeStep={activeStep} recordInProgress={recordInProgress} />
-            </section>
+            <nav className="detail-tabs" role="tablist">
+              <button className={tab === 'score' ? 'is-active' : ''} type="button" role="tab" aria-selected={tab === 'score'} onClick={() => setTab('score')}>Score</button>
+              <button className={tab === 'pipeline' ? 'is-active' : ''} type="button" role="tab" aria-selected={tab === 'pipeline'} onClick={() => setTab('pipeline')}>Pipeline</button>
+              <button className={tab === 'assets' ? 'is-active' : ''} type="button" role="tab" aria-selected={tab === 'assets'} onClick={() => setTab('assets')}>
+                Assets{Array.isArray(detail.assets) && detail.assets.length > 0 ? ` (${detail.assets.length})` : ''}
+              </button>
+            </nav>
+            {tab === 'score' ? (
+              <>
+                <ScoreSection detail={detail} />
+                <InteractionsSection interactions={Array.isArray(detail.interactions) ? detail.interactions : []} />
+                <ManualFieldsSection fields={Array.isArray(detail.manual_fields) ? detail.manual_fields : []} />
+                <OverridesSection overrides={overrides} />
+              </>
+            ) : null}
+            {tab === 'pipeline' ? (
+              <section className="detail-section">
+                <div className="section-title">Steps</div>
+                <div className="status-filters">
+                  {STATUS_FILTERS.map((status) => (
+                    <button className={statusFilter === status ? 'is-active' : ''} type="button" key={status} onClick={() => setStatusFilter(status)}>
+                      {labelFor(status)}
+                    </button>
+                  ))}
+                </div>
+                <StepsTimeline detail={detail} statusFilter={statusFilter} activeStep={activeStep} recordInProgress={recordInProgress} />
+              </section>
+            ) : null}
+            {tab === 'assets' ? (
+              <section className="detail-section">
+                <AssetsTab assets={Array.isArray(detail.assets) ? detail.assets : []} />
+              </section>
+            ) : null}
           </>
         ) : null}
       </aside>
@@ -1059,6 +1113,9 @@ export const App = () => {
   const [sort, setSort] = useState('state');
   const [dir, setDir] = useState<SortDir>('desc');
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
+  const [searchParams] = useSearchParams();
+  const focusId = searchParams.get('focus');
+  const focusScrolled = useRef(false);
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
   const [error, setError] = useState('');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
@@ -1092,6 +1149,25 @@ export const App = () => {
       })
       .catch((nextError: Error) => setError(nextError.message));
   }, [sort, dir, q, filters, markUpdated]);
+
+  // Deep-link from the map's "View in Table": ?focus=<rowId> opens that lead's
+  // detail panel. The panel fetches its record by id independently, so it works
+  // even when the row falls outside the table's 500-row window.
+  useEffect(() => {
+    if (!focusId) return;
+    setSelectedRowId(focusId);
+    focusScrolled.current = false;
+  }, [focusId]);
+
+  // Best-effort scroll the focused row into view once it has rendered. If the row
+  // isn't in the loaded set (beyond the limit), the panel still opens; we just skip.
+  useEffect(() => {
+    if (!focusId || focusScrolled.current) return;
+    const row = document.querySelector(`[data-row-id="${CSS.escape(focusId)}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    focusScrolled.current = true;
+  }, [focusId, records]);
 
   const pollLiveData = useCallback(() => {
     Promise.all([fetchRecords({ sort, dir, q, filters }), fetchMeta()])

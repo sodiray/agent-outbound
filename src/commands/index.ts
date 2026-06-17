@@ -75,6 +75,7 @@ export {
 } from './mcp.js';
 export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand } from './leads.js';
 export { briefCommand, briefShowCommand } from './briefs.js';
+export { automationsCommand, automationsShowCommand } from './automations.js';
 export { purgeCommand } from './purge.js';
 export {
   followupsCommand,

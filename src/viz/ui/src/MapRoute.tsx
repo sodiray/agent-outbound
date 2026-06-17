@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { APIProvider, Map, Marker, useMap } from '@vis.gl/react-google-maps';
 import { Link, useSearchParams } from 'react-router-dom';
 import { fetchMeta, fetchRecordDetail, fetchRecords } from './api.js';
-import { NEUTRAL_PIN, hasScore, isLocated, pinColor, pointOf, recordScore, rowKey } from './map/colors.js';
+import { NEUTRAL_PIN, hasScore, isLocated, pinColor, pointOf, ratioColor, recordScore, rowKey } from './map/colors.js';
+import { InfoTooltip } from './InfoTooltip.js';
+import { Markdown } from './markdown.js';
 import type { ActiveFilter, ColumnMeta, FilterMeta, MetaResponse, RecordDetail, RecordRow, RecordValue, SortDir } from './types.js';
 
 type PanelMode = 'list' | 'detail' | 'filter' | 'sort';
@@ -13,6 +15,7 @@ type MapContentProps = {
   fitSignal: number;
   focusId: string | null;
   focusSignal: number;
+  floor: number;
   onSelect: (id: string) => void;
 };
 
@@ -42,6 +45,7 @@ type MapPanelProps = {
 type LeadListProps = {
   records: RecordRow[];
   selectedId: string | null;
+  floor: number;
   onSelect: (id: string) => void;
 };
 
@@ -156,18 +160,18 @@ const FitIcon = () => (
   </svg>
 );
 
-const MapLegend = () => (
+const MapLegend = ({ floor }: { floor: number }) => (
   <div className="map-legend" aria-hidden="true">
-    <span className="map-legend__label">Low</span>
+    <span className="map-legend__label">{floor > 0 ? floor : 'Low'}</span>
     <span className="map-legend__bar" />
-    <span className="map-legend__label">High</span>
+    <span className="map-legend__label">{floor > 0 ? '100' : 'High'}</span>
     <span className="map-legend__sep" />
     <span className="map-legend__swatch" style={{ background: NEUTRAL_PIN }} />
     <span className="map-legend__label">No score</span>
   </div>
 );
 
-const MapContent = ({ records, selectedId, fitSignal, focusId, focusSignal, onSelect }: MapContentProps) => {
+const MapContent = ({ records, selectedId, fitSignal, focusId, focusSignal, floor, onSelect }: MapContentProps) => {
   const map = useMap();
   const recordsRef = useRef(records);
   const didInitialFit = useRef(false);
@@ -223,7 +227,7 @@ const MapContent = ({ records, selectedId, fitSignal, focusId, focusSignal, onSe
             onClick={() => onSelect(id)}
             icon={{
               path: google.maps.SymbolPath.CIRCLE,
-              fillColor: pinColor(record, Boolean(selectedId) && !selected),
+              fillColor: pinColor(record, Boolean(selectedId) && !selected, floor),
               fillOpacity: 1,
               strokeColor: '#ffffff',
               strokeWeight: 2,
@@ -236,7 +240,7 @@ const MapContent = ({ records, selectedId, fitSignal, focusId, focusSignal, onSe
   );
 };
 
-const LeadList = ({ records, selectedId, onSelect }: LeadListProps) => {
+const LeadList = ({ records, selectedId, floor, onSelect }: LeadListProps) => {
   if (records.length === 0) return <div className="lead-empty">No leads match.</div>;
 
   return (
@@ -250,7 +254,7 @@ const LeadList = ({ records, selectedId, onSelect }: LeadListProps) => {
             onClick={() => onSelect(id)}
             type="button"
           >
-            <span className="lead-row__score" style={{ background: pinColor(record) }}>{hasScore(record) ? Math.round(recordScore(record) || 0) : '—'}</span>
+            <span className="lead-row__score" style={{ background: pinColor(record, false, floor) }}>{hasScore(record) ? Math.round(recordScore(record) || 0) : '—'}</span>
             <span className="lead-row__name">{leadName(record)}</span>
             <span className="lead-row__loc">{leadLocation(record)}</span>
           </button>
@@ -263,11 +267,13 @@ const LeadList = ({ records, selectedId, onSelect }: LeadListProps) => {
 const LeadDetail = ({ rowId, onBack }: LeadDetailProps) => {
   const [detail, setDetail] = useState<RecordDetail | null>(null);
   const [error, setError] = useState('');
+  const [briefOpen, setBriefOpen] = useState(false);
 
   useEffect(() => {
     if (!rowId) return;
     setDetail(null);
     setError('');
+    setBriefOpen(false);
     fetchRecordDetail(rowId)
       .then(setDetail)
       .catch((nextError: Error) => setError(nextError.message));
@@ -289,7 +295,10 @@ const LeadDetail = ({ rowId, onBack }: LeadDetailProps) => {
 
   return (
     <div className="map-detail">
-      <button className="map-detail__back" onClick={onBack} type="button">← Back</button>
+      <div className="map-detail__actions">
+        <button className="map-detail__back" onClick={onBack} type="button">← Back</button>
+        <Link className="map-detail__table-link" to={`/?focus=${encodeURIComponent(rowId)}`}>View in Table</Link>
+      </div>
       <div className="map-detail__head">
         <div className="map-detail__title">
           <h2>{leadName(record)}</h2>
@@ -307,16 +316,41 @@ const LeadDetail = ({ rowId, onBack }: LeadDetailProps) => {
           {email ? <span>{email}</span> : null}
         </div>
       ) : null}
+      {detail.brief ? (
+        <section className="map-detail__section">
+          <div className="map-detail__section-head">
+            <h3>SDR brief</h3>
+            {detail.brief.content ? (
+              <button type="button" className="text-button" onClick={() => setBriefOpen((value) => !value)}>
+                {briefOpen ? 'Hide full brief' : 'Show full brief'}
+              </button>
+            ) : null}
+          </div>
+          {detail.brief.summary ? <p className="map-detail__brief-summary"><strong>{detail.brief.summary}</strong></p> : null}
+          {briefOpen ? <Markdown text={detail.brief.content} className="map-detail__brief-body" /> : null}
+        </section>
+      ) : null}
       <section className="map-detail__section">
         <h3>Why this score</h3>
-        <p>{detail.score.reasoning}</p>
+        {detail.score.reasoning ? <p>{detail.score.reasoning}</p> : null}
         <div className="map-detail__criteria">
-          {detail.score.criteria.map((criterion) => (
-            <div className="map-detail__criterion" key={criterion.id}>
-              <span>{criterion.description}</span>
-              <strong>{[criterion.verdict ?? '', criterion.points ?? ''].filter(Boolean).map((value) => String(value)).join(' · ')}</strong>
-            </div>
-          ))}
+          {detail.score.criteria.map((criterion) => {
+            const grade = criterion.grade;
+            const graded = grade !== null && grade !== undefined;
+            const scoreLabel = graded ? `${grade}/10` : (criterion.verdict ?? '');
+            return (
+              <div className="map-detail__criterion" key={criterion.id}>
+                <div className="map-detail__criterion-head">
+                  <span className="label-with-info">
+                    <strong>{labelFor(criterion.id)}</strong>
+                    <InfoTooltip text={criterion.description} />
+                  </span>
+                  {scoreLabel ? <strong style={graded ? { color: ratioColor(Number(grade), 10) } : undefined}>{scoreLabel}</strong> : null}
+                </div>
+                {criterion.reasoning ? <p className="map-detail__criterion-reason">{criterion.reasoning}</p> : null}
+              </div>
+            );
+          })}
         </div>
       </section>
     </div>
@@ -460,7 +494,7 @@ const MapPanel = ({
     </div>
     {collapsed ? null : (
       <div className="map-panel__body">
-        {panelMode === 'list' ? <LeadList records={records} selectedId={selectedId} onSelect={onSelect} /> : null}
+        {panelMode === 'list' ? <LeadList records={records} selectedId={selectedId} floor={meta.scoreMinimum} onSelect={onSelect} /> : null}
         {panelMode === 'detail' ? <LeadDetail rowId={selectedId} onBack={onBack} /> : null}
         {panelMode === 'filter' ? <FilterForm meta={meta} filters={filters} q={q} onApply={onApplyFilters} onCancel={onCloseForm} /> : null}
         {panelMode === 'sort' ? <SortForm meta={meta} sort={sort} dir={dir} onApply={onApplySort} onCancel={onCloseForm} /> : null}
@@ -548,13 +582,13 @@ export const MapRoute = () => {
         {meta.mapsApiKey ? (
           <APIProvider apiKey={meta.mapsApiKey}>
             <Map defaultZoom={4} defaultCenter={DEFAULT_CENTER} gestureHandling="greedy" style={{ width: '100%', height: '100%' }}>
-              <MapContent records={records} selectedId={selectedId} fitSignal={fitSignal} focusId={focusId} focusSignal={records.length} onSelect={selectLead} />
+              <MapContent records={records} selectedId={selectedId} fitSignal={fitSignal} focusId={focusId} focusSignal={records.length} floor={meta.scoreMinimum} onSelect={selectLead} />
             </Map>
           </APIProvider>
         ) : (
           <div className="map-empty">Google Maps API key not configured</div>
         )}
-        {meta.mapsApiKey ? <MapLegend /> : null}
+        {meta.mapsApiKey ? <MapLegend floor={meta.scoreMinimum} /> : null}
         <MapPanel
           meta={meta}
           records={records}

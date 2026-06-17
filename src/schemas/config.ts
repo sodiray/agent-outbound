@@ -487,6 +487,25 @@ const BriefSchema = z.object({
   cache_key: z.string().default(''),
 }).partial().default({});
 
+// Automation plans: an internal, post-brief asset. Reads the lead's brief (its
+// busy-work especially) plus our `business.capabilities` and proposes the one or
+// more concrete automations WE could build for that business. Not a pitch — a
+// flat internal read so the operator knows exactly what we'd automate and how it
+// would work. Persisted to the `assets` table under step_id `automation_plan`.
+const AutomationsSchema = z.object({
+  enabled: z.boolean().default(false),
+  // Generate automatically after briefs (and lead add --run).
+  auto: z.boolean().default(true),
+  model: ProviderModelSchema.optional(),
+  // Only plan leads at or above this score; defaults to brief.min_score / score.minimum.
+  min_score: z.coerce.number().min(0).max(100).optional(),
+  // Optional path (relative to the list dir) to a prompt file that replaces
+  // the built-in automation-plan prompt. Receives the brief + record + business.
+  prompt_file: z.string().default(''),
+  // Bump to force regeneration of every plan.
+  cache_key: z.string().default(''),
+}).partial().default({});
+
 export const ConfigSchema = z.object({
   list: z.object({
     name: z.string().default(''),
@@ -494,6 +513,7 @@ export const ConfigSchema = z.object({
   }).partial().default({}),
   business: BusinessSchema,
   brief: BriefSchema,
+  automations: AutomationsSchema,
   source: z.object({
     identity: z.array(z.string()).default([]),
     searches: z.array(SourceSearchSchema).default([]),
