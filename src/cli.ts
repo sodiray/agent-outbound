@@ -67,6 +67,10 @@ import {
   briefShowCommand,
   automationsCommand,
   automationsShowCommand,
+  territoriesAssignCommand,
+  territoriesListCommand,
+  territoriesNoteCommand,
+  territoriesShowCommand,
   interactionAddCommand,
   interactionDoneCommand,
   interactionEditCommand,
@@ -97,6 +101,7 @@ import {
   sequenceStatusCommand,
   sourceCommand,
   sourceMoreCommand,
+  sourceTerritoryCommand,
   suppressCommand,
   forgetCommand,
   generateCommand,
@@ -215,6 +220,10 @@ const printHelp = () => {
   process.stdout.write(`  brief show <list> <record>                                                  # the generated brief for one lead\n`);
   process.stdout.write(`  automations <list> [--where SQL] [--limit N] [--force]                      # generate automation plans (needs a brief)\n`);
   process.stdout.write(`  automations show <list> <record>                                            # the generated automation plan for one lead\n`);
+  process.stdout.write(`  territories list <list>\n`);
+  process.stdout.write(`  territories assign <list>\n`);
+  process.stdout.write(`  territories note <list> <territoryId> --body TEXT [--by NAME]\n`);
+  process.stdout.write(`  territories show <list> <territoryId>\n`);
   process.stdout.write(`  purge <list> [--dry-run]                                                    # hard-delete records matching source.exclude (backs up the db first)\n`);
   process.stdout.write(`  override keep <list> <record> [--step STEP_ID | --all-gates] --reason TEXT   # bypass a gate that dropped a lead\n`);
   process.stdout.write(`  override drop <list> <record> --reason TEXT                                 # manually disqualify a lead\n`);
@@ -236,6 +245,7 @@ const printHelp = () => {
   process.stdout.write(`  config infer-deps <list> [--write]\n`);
   process.stdout.write(`  refresh-tools <list>\n`);
   process.stdout.write(`  source <list> [--limit N] [--more N] [--dry-run] [--sample N]\n`);
+  process.stdout.write(`  source-territory <list> <territoryId> [--r0 350] [--floor 60] [--dry-run] [--max-calls 400] [--concurrency 5]\n`);
   process.stdout.write(`  remove <list> --row ROW_ID\n`);
   process.stdout.write(`  remove <list> --where SQL\n`);
   process.stdout.write(`  remove <list> --keep-top N [--sort-by COLUMN]\n`);
@@ -1060,6 +1070,36 @@ const run = async () => {
     return;
   }
 
+  if (command === 'territories') {
+    const sub = String(argv.shift() || '').trim();
+    const list = String(argv.shift() || '');
+    setResponseContext({ command: `territories ${sub}`, list });
+    if (sub === 'list') {
+      print(territoriesListCommand({ list }));
+      return;
+    }
+    if (sub === 'assign') {
+      print(territoriesAssignCommand({ list }));
+      return;
+    }
+    if (sub === 'note') {
+      const territoryId = String(argv.shift() || '');
+      print(territoriesNoteCommand({
+        list,
+        territoryId,
+        body: consumeFlag(argv, '--body', ''),
+        by: consumeFlag(argv, '--by', ''),
+      }));
+      return;
+    }
+    if (sub === 'show') {
+      const territoryId = String(argv.shift() || '');
+      print(territoriesShowCommand({ list, territoryId }));
+      return;
+    }
+    throw new Error(`Unknown territories subcommand: ${sub}`);
+  }
+
   if (command === 'purge') {
     const list = String(argv.shift() || '');
     setResponseContext({ command: 'purge', list });
@@ -1414,6 +1454,22 @@ const run = async () => {
       return;
     }
     print(await sourceCommand({ list, limit, dryRun, sample }));
+    return;
+  }
+
+  if (command === 'source-territory') {
+    const list = String(argv.shift() || '');
+    const territoryId = String(argv.shift() || '');
+    setResponseContext({ command: 'source-territory', list });
+    print(await sourceTerritoryCommand({
+      list,
+      territoryId,
+      r0: toNumber(consumeFlag(argv, '--r0', '350'), 350),
+      floor: toNumber(consumeFlag(argv, '--floor', '60'), 60),
+      dryRun: hasFlag(argv, '--dry-run'),
+      maxCalls: toNumber(consumeFlag(argv, '--max-calls', '400'), 400),
+      concurrency: toNumber(consumeFlag(argv, '--concurrency', '5'), 5),
+    }));
     return;
   }
 

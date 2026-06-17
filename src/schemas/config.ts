@@ -472,6 +472,19 @@ const BusinessSchema = z.object({
   context: z.string().default(''),
 }).partial().default({});
 
+const TerritoryPointSchema = z.object({
+  lat: z.coerce.number(),
+  lng: z.coerce.number(),
+});
+
+export const TerritoryAreaSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().default(''),
+  polygon: z.array(TerritoryPointSchema).min(3),
+  color: z.string().default(''),
+}).partial({ description: true, color: true });
+
 // Lead briefs: an SDR-expert take generated for every kept (qualified) lead.
 const BriefSchema = z.object({
   enabled: z.boolean().default(false),
@@ -512,6 +525,7 @@ export const ConfigSchema = z.object({
     territory: TerritorySchema.default({}),
   }).partial().default({}),
   business: BusinessSchema,
+  territories: z.array(TerritoryAreaSchema).default([]),
   brief: BriefSchema,
   automations: AutomationsSchema,
   source: z.object({
@@ -556,6 +570,49 @@ const coerceLegacyScore = (raw) => {
   return { ...(raw as any), score: single };
 };
 
+const sameTerritoryPoint = (a: any, b: any) => (
+  Number(a?.lat) === Number(b?.lat) && Number(a?.lng) === Number(b?.lng)
+);
+
+const orientation = (a: any, b: any, c: any) => {
+  const value = (Number(b.lng) - Number(a.lng)) * (Number(c.lat) - Number(b.lat))
+    - (Number(b.lat) - Number(a.lat)) * (Number(c.lng) - Number(b.lng));
+  if (Math.abs(value) < 1e-12) return 0;
+  return value > 0 ? 1 : 2;
+};
+
+const onSegment = (a: any, b: any, c: any) => (
+  Number(b.lng) <= Math.max(Number(a.lng), Number(c.lng))
+  && Number(b.lng) >= Math.min(Number(a.lng), Number(c.lng))
+  && Number(b.lat) <= Math.max(Number(a.lat), Number(c.lat))
+  && Number(b.lat) >= Math.min(Number(a.lat), Number(c.lat))
+);
+
+const segmentsIntersect = (a: any, b: any, c: any, d: any) => {
+  const o1 = orientation(a, b, c);
+  const o2 = orientation(a, b, d);
+  const o3 = orientation(c, d, a);
+  const o4 = orientation(c, d, b);
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && onSegment(a, c, b)) return true;
+  if (o2 === 0 && onSegment(a, d, b)) return true;
+  if (o3 === 0 && onSegment(c, a, d)) return true;
+  if (o4 === 0 && onSegment(c, b, d)) return true;
+  return false;
+};
+
+const isSimpleRing = (ring: any[]) => {
+  const segmentCount = Math.max(0, ring.length - 1);
+  for (const i of Array.from({ length: segmentCount }, (_, index) => index)) {
+    for (const j of Array.from({ length: segmentCount }, (_, index) => index)) {
+      if (j <= i + 1) continue;
+      if (i === 0 && j === segmentCount - 1) continue;
+      if (segmentsIntersect(ring[i], ring[i + 1], ring[j], ring[j + 1])) return false;
+    }
+  }
+  return true;
+};
+
 export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
   const parsed = ConfigSchema.safeParse(coerceLegacyScore(value || {}));
   if (!parsed.success) {
@@ -585,8 +642,25 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
     };
   }
 
+  const territories = (parsed.data?.territories || []).map((territory: any) => {
+    const polygon = Array.isArray(territory?.polygon) ? territory.polygon : [];
+    const first = polygon[0];
+    const last = polygon[polygon.length - 1];
+    const closed = first && last && !sameTerritoryPoint(first, last)
+      ? [...polygon, { lat: Number(first.lat), lng: Number(first.lng) }]
+      : polygon;
+    return { ...territory, polygon: closed };
+  });
+
+  const territoryWarnings = territories.flatMap((territory: any) => (
+    isSimpleRing(territory.polygon || [])
+      ? []
+      : [`Territory "${String(territory.id || territory.name || 'unknown')}" polygon appears to self-intersect.`]
+  ));
+
   const config = {
       ...parsed.data,
+      territories,
       ai: {
         ...(parsed.data?.ai || {}),
         defaults: {
@@ -600,7 +674,7 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
   return {
     error: graph.errors.join('\n'),
     errors: graph.errors,
-    warnings: graph.warnings,
+    warnings: [...graph.warnings, ...territoryWarnings],
     config,
   };
 };

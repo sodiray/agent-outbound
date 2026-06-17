@@ -62,12 +62,23 @@ export type LeadStatusCounts = {
   dropped_manual: number;
 };
 
+export type Territory = {
+  id: string;
+  name: string;
+  description: string;
+  color: string;
+  polygon: { lat: number; lng: number }[];
+  lead_count: number;
+  qualified_count: number;
+};
+
 export type MetaResponse = {
   list: { name: string; dir: string };
   counts: { total: number; qualified: number; disqualified: number; by_status: LeadStatusCounts };
   steps: StepMeta[];
   columns: ColumnMeta[];
   filters: FilterMeta[];
+  territories: Territory[];
   mapsApiKey: string;
   scoreMinimum: number;
 };

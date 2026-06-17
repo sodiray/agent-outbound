@@ -26,6 +26,7 @@ import { readToolCatalog } from '../lib/tool-catalog.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { loadTools } from '../runtime/tools.js';
 import { matchExcludeRule, normalizeExcludeRules, type SourceExcludeRule } from '../lib/source-exclude.js';
+import { assignTerritories } from '../territories/assign.js';
 
 const mergeExcludedByRule = (summary: any, excludedByRule: Record<string, number>) => {
   for (const [rule, count] of Object.entries(excludedByRule || {})) {
@@ -302,6 +303,43 @@ export const extractRowsFromToolResult = (result: any) => {
   return [];
 };
 
+export const nearbySearch = async ({
+  mcp,
+  listDir,
+  toolCatalog,
+  params,
+  taskId = 'territory_nearby',
+}: {
+  mcp: any;
+  listDir: string;
+  toolCatalog: any;
+  params: any;
+  taskId?: string;
+}) => {
+  const toolSpec = params?.tool || {};
+  const resolvedTools = await loadTools(mcp, toolSpec, toolCatalog, { listDir });
+  const toolEntries = Object.entries(resolvedTools);
+  if (toolEntries.length === 0) throw new Error(`source.strategy: no tool resolved for task ${taskId}.`);
+  const [, toolDef] = toolEntries[0] as [string, any];
+  const googleMapsNearby = isGoogleMapsNearbyTask({ toolSpec });
+  const args = {
+    lat: params.lat,
+    lng: params.lng,
+    radius_m: params.radius_m,
+    rank: params.rank || 'distance',
+    types: Array.isArray(params.types) ? params.types.join(',') : params.types,
+    excluded_types: Array.isArray(params.excluded_types) ? params.excluded_types.join(',') : params.excluded_types,
+    max_results: Number(params.max_results || 100),
+    ...(googleMapsNearby ? {
+      field_mask: GOOGLE_PLACES_FIELD_MASK,
+      fields: GOOGLE_PLACES_FIELD_MASK,
+      raw: true,
+    } : {}),
+  };
+  const result = await toolDef.execute(args);
+  return { rows: extractRowsFromToolResult(result), params };
+};
+
 const executeStrategyTask = async ({
   mcp,
   listDir,
@@ -314,34 +352,20 @@ const executeStrategyTask = async ({
   toolCatalog: any;
 }) => {
   const params = typeof task?.params === 'string' ? JSON.parse(task.params || '{}') : task.params || {};
+  if (task.kind === 'geo_tiles') {
+    return nearbySearch({ mcp, listDir, toolCatalog, params, taskId: task?.id || '' });
+  }
   const toolSpec = params?.tool || {};
   const resolvedTools = await loadTools(mcp, toolSpec, toolCatalog, { listDir });
   const toolEntries = Object.entries(resolvedTools);
   if (toolEntries.length === 0) throw new Error(`source.strategy: no tool resolved for task ${task?.id || ''}.`);
   const [, toolDef] = toolEntries[0] as [string, any];
-  const googleMapsNearby = task.kind === 'geo_tiles' && isGoogleMapsNearbyTask({ toolSpec });
-  const args = task.kind === 'geo_tiles'
-    ? {
-      lat: params.lat,
-      lng: params.lng,
-      radius_m: params.radius_m,
-      rank: params.rank || 'distance',
-      types: Array.isArray(params.types) ? params.types.join(',') : params.types,
-      excluded_types: Array.isArray(params.excluded_types) ? params.excluded_types.join(',') : params.excluded_types,
-      max_results: Number(params.max_results || 100),
-      ...(googleMapsNearby ? {
-        field_mask: GOOGLE_PLACES_FIELD_MASK,
-        fields: GOOGLE_PLACES_FIELD_MASK,
-        raw: true,
-      } : {}),
-    }
-    : {
-      query: params.query || '',
-      max_results: Number(params.max_results || 100),
-      max_pages: Number(params.max_pages || 1),
-      excluded_types: Array.isArray(params.excluded_types) ? params.excluded_types.join(',') : params.excluded_types,
-    };
-  const result = await toolDef.execute(args);
+  const result = await toolDef.execute({
+    query: params.query || '',
+    max_results: Number(params.max_results || 100),
+    max_pages: Number(params.max_pages || 1),
+    excluded_types: Array.isArray(params.excluded_types) ? params.excluded_types.join(',') : params.excluded_types,
+  });
   return { rows: extractRowsFromToolResult(result), params };
 };
 
@@ -474,7 +498,7 @@ const refreshEmbeddingsAndLinks = async ({
   }, 3);
 };
 
-const processAndInsertRows = async ({
+export const processAndInsertRows = async ({
   db,
   rows,
   identityFields,
@@ -828,6 +852,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
       summary.errors.push(...processed.errors);
     }
 
+    summary.territories = assignTerritories({ listDir, config, db, rowIds: summary.inserted_ids });
     logSourcingEvent({ listDir, payload: summary });
     emitActivity({
       event: 'phase_complete',

@@ -513,6 +513,23 @@ const SCHEMA_SQL = `
     occurred_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_activity_history_occurred ON activity_history(occurred_at DESC);
+
+  CREATE TABLE IF NOT EXISTS lead_territories (
+    row_id TEXT NOT NULL,
+    territory_id TEXT NOT NULL,
+    assigned_at TEXT DEFAULT '',
+    PRIMARY KEY (row_id, territory_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_lead_territories_territory ON lead_territories(territory_id);
+
+  CREATE TABLE IF NOT EXISTS territory_notes (
+    note_id TEXT PRIMARY KEY,
+    territory_id TEXT NOT NULL,
+    body TEXT DEFAULT '',
+    created_at TEXT DEFAULT '',
+    created_by TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_territory_notes_territory ON territory_notes(territory_id);
 `;
 
 const nowIso = () => new Date().toISOString();
@@ -601,6 +618,13 @@ const ensureRecordCompatibility = (db) => {
         AND (fit_score IS NULL OR fit_score != priority_rank)
     `);
   } catch {}
+};
+
+const ensureTerritoryCompatibility = (db) => {
+  try { db.exec("ALTER TABLE lead_territories ADD COLUMN assigned_at TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE territory_notes ADD COLUMN created_by TEXT DEFAULT ''"); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_lead_territories_territory ON lead_territories(territory_id)"); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_territory_notes_territory ON territory_notes(territory_id)"); } catch {}
 };
 
 // The "commit line": a record is committed (outreach has begun / work invested)
@@ -815,6 +839,7 @@ const openDb = ({ dbPath, readonly = false }) => {
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_run_at TEXT DEFAULT ''"); } catch {}
     ensureRecordCompatibility(db);
     ensureSuppressionCompatibility(db);
+    ensureTerritoryCompatibility(db);
     ensureDataAccessViewsInternal(db);
   }
   return db;
@@ -1359,6 +1384,51 @@ export const listRecords = ({ db, whereSql = '1=1', params = [], limit = 1000, o
   db.prepare(`SELECT * FROM records WHERE ${whereSql} ORDER BY ${orderBy} LIMIT ?`).all(...params, Number(limit));
 
 export const getRecordById = ({ db, id }) => db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ?').get(id, id);
+
+export const setLeadTerritories = ({ db, rowId, territoryIds, at = '' }) => {
+  const cleanIds = [...new Set((Array.isArray(territoryIds) ? territoryIds : []).map((id) => String(id || '').trim()).filter(Boolean))];
+  const assignedAt = String(at || nowIso());
+  const write = db.transaction(() => {
+    db.prepare('DELETE FROM lead_territories WHERE row_id = ?').run(String(rowId));
+    const insert = db.prepare('INSERT OR REPLACE INTO lead_territories (row_id, territory_id, assigned_at) VALUES (?, ?, ?)');
+    cleanIds.forEach((territoryId) => insert.run(String(rowId), territoryId, assignedAt));
+  });
+  write();
+  return { row_id: String(rowId), territory_ids: cleanIds, assigned_at: assignedAt };
+};
+
+export const getTerritoryMembership = ({ db }) => {
+  const rows = db.prepare('SELECT territory_id, row_id FROM lead_territories ORDER BY territory_id, row_id').all();
+  return rows.reduce((map, row) => {
+    const territoryId = String(row.territory_id || '');
+    const rowId = String(row.row_id || '');
+    if (!territoryId || !rowId) return map;
+    const set = map.get(territoryId) || new Set();
+    set.add(rowId);
+    map.set(territoryId, set);
+    return map;
+  }, new Map());
+};
+
+export const getTerritoriesForRow = ({ db, rowId }) => db
+  .prepare('SELECT territory_id FROM lead_territories WHERE row_id = ? ORDER BY territory_id')
+  .all(String(rowId))
+  .map((row) => String(row.territory_id || ''))
+  .filter(Boolean);
+
+export const insertTerritoryNote = ({ db, territoryId, body, createdBy = '' }) => {
+  const now = nowIso();
+  const noteId = `tnote_${randomUUID().slice(0, 12)}`;
+  db.prepare(`
+    INSERT INTO territory_notes (note_id, territory_id, body, created_at, created_by)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(noteId, String(territoryId || ''), String(body || ''), now, String(createdBy || ''));
+  return db.prepare('SELECT * FROM territory_notes WHERE note_id = ?').get(noteId);
+};
+
+export const getTerritoryNotes = ({ db, territoryId }) => db
+  .prepare('SELECT * FROM territory_notes WHERE territory_id = ? ORDER BY created_at DESC')
+  .all(String(territoryId || ''));
 
 // Resolve a human-typed reference (id or business name) to exactly one record.
 // Match order: exact _row_id/id, then exact business_name (case-insensitive), then

@@ -7,7 +7,7 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { buildMeta, getCounts, getProgress, getRecordDetail, queryRecords } from './data.js';
+import { buildMeta, getCounts, getProgress, getRecordDetail, getTerritories, getTerritoryNotesForViz, insertTerritoryNoteForViz, queryRecords } from './data.js';
 
 const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 const uiDistDir = resolve(moduleDir, 'ui/dist');
@@ -83,6 +83,36 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
   app.get('/api/records/:rowId', (c) => {
     try {
       return c.json(getRecordDetail(listDir, c.req.param('rowId')));
+    } catch (error) {
+      return c.json({ error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.get('/api/territories', (c) => {
+    try {
+      return c.json(getTerritories(listDir));
+    } catch (error) {
+      return c.json({ error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.get('/api/territories/:id/notes', (c) => {
+    try {
+      return c.json(getTerritoryNotesForViz(listDir, c.req.param('id')));
+    } catch (error) {
+      return c.json({ error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.post('/api/territories/:id/notes', async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      return c.json(insertTerritoryNoteForViz(
+        listDir,
+        c.req.param('id'),
+        String(body?.body || ''),
+        String(body?.by || ''),
+      ));
     } catch (error) {
       return c.json({ error: String(error?.message || error) }, 500);
     }

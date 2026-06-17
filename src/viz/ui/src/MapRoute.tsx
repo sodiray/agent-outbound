@@ -5,12 +5,16 @@ import { fetchMeta, fetchRecordDetail, fetchRecords } from './api.js';
 import { NEUTRAL_PIN, hasScore, isLocated, pinColor, pointOf, ratioColor, recordScore, rowKey } from './map/colors.js';
 import { InfoTooltip } from './InfoTooltip.js';
 import { Markdown } from './markdown.js';
-import type { ActiveFilter, ColumnMeta, FilterMeta, MetaResponse, RecordDetail, RecordRow, RecordValue, SortDir } from './types.js';
+import type { ActiveFilter, ColumnMeta, FilterMeta, MetaResponse, RecordDetail, RecordRow, RecordValue, SortDir, Territory } from './types.js';
 
 type PanelMode = 'list' | 'detail' | 'filter' | 'sort';
 
 type MapContentProps = {
   records: RecordRow[];
+  territories: Territory[];
+  visibleTerritoryIds: Set<string>;
+  selectedTerritoryId: string | null;
+  territoryFitSignal: number;
   selectedId: string | null;
   fitSignal: number;
   focusId: string | null;
@@ -40,6 +44,17 @@ type MapPanelProps = {
   onApplyFilters: (nextFilters: ActiveFilter[], nextQ: string) => void;
   onApplySort: (nextSort: string, nextDir: SortDir) => void;
   onCloseForm: () => void;
+};
+
+type TerritoriesPanelProps = {
+  territories: Territory[];
+  visibleTerritoryIds: Set<string>;
+  selectedTerritoryId: string | null;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  onToggleTerritory: (id: string) => void;
+  onToggleAll: () => void;
+  onSelectTerritory: (id: string) => void;
 };
 
 type LeadListProps = {
@@ -74,6 +89,7 @@ type RangeDraft = Record<string, { min: string; max: string }>;
 
 const DEFAULT_CENTER = { lat: 39.5, lng: -98.35 };
 const QUALIFIED_FILTER: ActiveFilter = { kind: 'enum', key: 'disqualified', value: 'qualified' };
+const TERRITORY_COLOR = '#f5d547';
 
 const valueText = (value: RecordValue | undefined) => {
   if (value === null || value === undefined) return '';
@@ -135,6 +151,13 @@ const fitToRecords = (map: google.maps.Map, records: RecordRow[]) => {
   map.fitBounds(bounds, { left: 380, top: 64, right: 64, bottom: 64 });
 };
 
+const fitToTerritory = (map: google.maps.Map, territory: Territory) => {
+  if (territory.polygon.length === 0) return;
+  const bounds = new google.maps.LatLngBounds();
+  territory.polygon.forEach((point) => bounds.extend(point));
+  map.fitBounds(bounds, { left: 380, top: 64, right: 380, bottom: 64 });
+};
+
 const ChevronIcon = ({ collapsed }: { collapsed: boolean }) => (
   <svg className="map-panel__chevron" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" style={{ transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)' }}>
     <path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -171,7 +194,66 @@ const MapLegend = ({ floor }: { floor: number }) => (
   </div>
 );
 
-const MapContent = ({ records, selectedId, fitSignal, focusId, focusSignal, floor, onSelect }: MapContentProps) => {
+const TerritoryShapes = ({
+  territories,
+  visibleTerritoryIds,
+  selectedTerritoryId,
+  territoryFitSignal,
+}: {
+  territories: Territory[];
+  visibleTerritoryIds: Set<string>;
+  selectedTerritoryId: string | null;
+  territoryFitSignal: number;
+}) => {
+  const map = useMap();
+  const territoriesRef = useRef(territories);
+  territoriesRef.current = territories;
+
+  useEffect(() => {
+    if (!map) return undefined;
+    const polygons = territories
+      .filter((territory) => visibleTerritoryIds.has(territory.id) && territory.polygon.length >= 3)
+      .map((territory) => {
+        const selected = territory.id === selectedTerritoryId;
+        const color = territory.color || TERRITORY_COLOR;
+        const polygon = new google.maps.Polygon({
+          paths: territory.polygon,
+          strokeColor: color,
+          strokeOpacity: selected ? 0.95 : 0.72,
+          strokeWeight: selected ? 3 : 2,
+          fillColor: color,
+          fillOpacity: selected ? 0.22 : 0.12,
+          clickable: false,
+        });
+        polygon.setMap(map);
+        return polygon;
+      });
+    return () => polygons.forEach((polygon) => polygon.setMap(null));
+  }, [map, selectedTerritoryId, territories, visibleTerritoryIds]);
+
+  useEffect(() => {
+    if (!map || !selectedTerritoryId || territoryFitSignal === 0) return;
+    const territory = territoriesRef.current.find((candidate) => candidate.id === selectedTerritoryId);
+    if (!territory) return;
+    fitToTerritory(map, territory);
+  }, [map, selectedTerritoryId, territoryFitSignal]);
+
+  return null;
+};
+
+const MapContent = ({
+  records,
+  territories,
+  visibleTerritoryIds,
+  selectedTerritoryId,
+  territoryFitSignal,
+  selectedId,
+  fitSignal,
+  focusId,
+  focusSignal,
+  floor,
+  onSelect,
+}: MapContentProps) => {
   const map = useMap();
   const recordsRef = useRef(records);
   const didInitialFit = useRef(false);
@@ -216,6 +298,7 @@ const MapContent = ({ records, selectedId, fitSignal, focusId, focusSignal, floo
 
   return (
     <>
+      <TerritoryShapes territories={territories} visibleTerritoryIds={visibleTerritoryIds} selectedTerritoryId={selectedTerritoryId} territoryFitSignal={territoryFitSignal} />
       {records.filter(isLocated).map((record) => {
         const id = rowKey(record);
         const selected = Boolean(selectedId) && id === selectedId;
@@ -503,6 +586,57 @@ const MapPanel = ({
   </aside>
 );
 
+const TerritoriesPanel = ({
+  territories,
+  visibleTerritoryIds,
+  selectedTerritoryId,
+  collapsed,
+  onToggleCollapse,
+  onToggleTerritory,
+  onToggleAll,
+  onSelectTerritory,
+}: TerritoriesPanelProps) => {
+  const allVisible = territories.every((territory) => visibleTerritoryIds.has(territory.id));
+  const visibleCount = territories.filter((territory) => visibleTerritoryIds.has(territory.id)).length;
+
+  return (
+    <aside className={`territories-panel${collapsed ? ' is-collapsed' : ''}`}>
+      <div className="territories-panel__header">
+        <button className="territories-panel__title" onClick={onToggleCollapse} type="button">Territories</button>
+        {collapsed ? null : (
+          <button className="territories-panel__toggle-all" onClick={onToggleAll} type="button">
+            {allVisible ? 'Hide all' : `Show all (${visibleCount}/${territories.length})`}
+          </button>
+        )}
+      </div>
+      {collapsed ? null : (
+        <div className="territories-panel__body">
+          {territories.map((territory) => {
+            const visible = visibleTerritoryIds.has(territory.id);
+            const selected = territory.id === selectedTerritoryId;
+            return (
+              <div className={`territory-row${selected ? ' is-active' : ''}`} key={territory.id}>
+                <label className="territory-row__visible">
+                  <input type="checkbox" checked={visible} onChange={() => onToggleTerritory(territory.id)} />
+                  <span className="territory-row__swatch" style={{ background: territory.color || TERRITORY_COLOR }} />
+                </label>
+                <div className="territory-row__main">
+                  <div className="territory-row__head">
+                    <strong>{territory.name}</strong>
+                    <span>{territory.lead_count}</span>
+                  </div>
+                  {territory.description ? <p>{territory.description}</p> : null}
+                  <button className="territory-row__action" onClick={() => onSelectTerritory(territory.id)} type="button">Filter to this</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </aside>
+  );
+};
+
 export const MapRoute = () => {
   const [meta, setMeta] = useState<MetaResponse | null>(null);
   const [records, setRecords] = useState<RecordRow[]>([]);
@@ -514,6 +648,10 @@ export const MapRoute = () => {
   const [sort, setSort] = useState('priority_rank');
   const [dir, setDir] = useState<SortDir>('desc');
   const [fitSignal, setFitSignal] = useState(0);
+  const [territoryFitSignal, setTerritoryFitSignal] = useState(0);
+  const [visibleTerritoryIds, setVisibleTerritoryIds] = useState<Set<string>>(() => new Set());
+  const [selectedTerritoryId, setSelectedTerritoryId] = useState<string | null>(null);
+  const [territoriesCollapsed, setTerritoriesCollapsed] = useState(false);
   const [error, setError] = useState('');
   const [searchParams] = useSearchParams();
   const focusId = searchParams.get('focus');
@@ -531,6 +669,17 @@ export const MapRoute = () => {
       .then((response) => setRecords(response.records))
       .catch((nextError: Error) => setError(nextError.message));
   }, [meta, sort, dir, q, filters]);
+
+  useEffect(() => {
+    if (!meta) return;
+    const territories = meta.territories || [];
+    setVisibleTerritoryIds((current) => {
+      const validIds = new Set(territories.map((territory) => territory.id));
+      const retainedIds = [...current].filter((id) => validIds.has(id));
+      const nextIds = current.size === 0 ? territories.map((territory) => territory.id) : retainedIds;
+      return new Set(nextIds);
+    });
+  }, [meta]);
 
   // Deep-link: once records are loaded, open the focused lead's detail panel.
   // Run once per focus id so the user can later navigate away freely.
@@ -559,6 +708,35 @@ export const MapRoute = () => {
     setPanelMode('list');
   };
 
+  const selectTerritory = (id: string) => {
+    setSelectedTerritoryId(id);
+    setVisibleTerritoryIds((current) => new Set([...current, id]));
+    setFilters((current) => [
+      ...current.filter((filter) => filter.key !== 'territory'),
+      { kind: 'enum', key: 'territory', value: id },
+    ]);
+    setSelectedId(null);
+    setPanelMode('list');
+    setTerritoryFitSignal((signal) => signal + 1);
+  };
+
+  const toggleTerritory = (id: string) => {
+    setVisibleTerritoryIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+        return next;
+      }
+      next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllTerritories = () => {
+    const territories = meta?.territories || [];
+    setVisibleTerritoryIds((current) => current.size === territories.length ? new Set() : new Set(territories.map((territory) => territory.id)));
+  };
+
   const applySort = (nextSort: string, nextDir: SortDir) => {
     setSort(nextSort);
     setDir(nextDir);
@@ -568,6 +746,8 @@ export const MapRoute = () => {
   if (!meta) {
     return <main className="map-shell"><div className="loading">{error || 'Loading map...'}</div></main>;
   }
+
+  const territories = meta.territories || [];
 
   return (
     <main className="map-shell">
@@ -582,7 +762,19 @@ export const MapRoute = () => {
         {meta.mapsApiKey ? (
           <APIProvider apiKey={meta.mapsApiKey}>
             <Map defaultZoom={4} defaultCenter={DEFAULT_CENTER} gestureHandling="greedy" style={{ width: '100%', height: '100%' }}>
-              <MapContent records={records} selectedId={selectedId} fitSignal={fitSignal} focusId={focusId} focusSignal={records.length} floor={meta.scoreMinimum} onSelect={selectLead} />
+              <MapContent
+                records={records}
+                territories={territories}
+                visibleTerritoryIds={visibleTerritoryIds}
+                selectedTerritoryId={selectedTerritoryId}
+                territoryFitSignal={territoryFitSignal}
+                selectedId={selectedId}
+                fitSignal={fitSignal}
+                focusId={focusId}
+                focusSignal={records.length}
+                floor={meta.scoreMinimum}
+                onSelect={selectLead}
+              />
             </Map>
           </APIProvider>
         ) : (
@@ -609,6 +801,18 @@ export const MapRoute = () => {
           onApplySort={applySort}
           onCloseForm={() => setPanelMode('list')}
         />
+        {territories.length > 0 ? (
+          <TerritoriesPanel
+            territories={territories}
+            visibleTerritoryIds={visibleTerritoryIds}
+            selectedTerritoryId={selectedTerritoryId}
+            collapsed={territoriesCollapsed}
+            onToggleCollapse={() => setTerritoriesCollapsed((value) => !value)}
+            onToggleTerritory={toggleTerritory}
+            onToggleAll={toggleAllTerritories}
+            onSelectTerritory={selectTerritory}
+          />
+        ) : null}
       </div>
     </main>
   );

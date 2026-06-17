@@ -1,7 +1,7 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
-import { getAssetsForRow, getBriefForRecord, listFieldOverridesForRecord, listInteractionsForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
+import { getAssetsForRow, getBriefForRecord, getTerritoryNotes, insertTerritoryNote, listFieldOverridesForRecord, listInteractionsForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
 import { LEAD_STATUSES, leadStatus, leadStatusCaseSql } from '../orchestrator/runtime/status.js';
 import { getEnv } from '../orchestrator/runtime/env.js';
 
@@ -417,6 +417,72 @@ const buildSteps = (config: any) => [
   },
 ];
 
+const territoryCountsById = (db: any, realColumns: Set<string>) => {
+  if (!tableExists(db, 'lead_territories')) return new Map();
+  const rows = normalizedRows(db.prepare(`
+    SELECT lt.territory_id,
+      COUNT(*) AS lead_count,
+      SUM(CASE WHEN ${leadStatusCaseSql({ alias: 'r', availableColumns: realColumns })} = 'qualified' THEN 1 ELSE 0 END) AS qualified_count
+    FROM lead_territories lt
+    JOIN records r ON r._row_id = lt.row_id
+    GROUP BY lt.territory_id
+  `).all());
+  return new Map(rows.map((row: any) => [String(row.territory_id || ''), {
+    lead_count: Number(row.lead_count || 0),
+    qualified_count: Number(row.qualified_count || 0),
+  }]));
+};
+
+const buildTerritories = ({ config, db, realColumns }: { config: any; db: any; realColumns: Set<string> }) => {
+  const counts = territoryCountsById(db, realColumns);
+  return (Array.isArray(config?.territories) ? config.territories : []).map((territory: any) => {
+    const id = String(territory.id || '');
+    const count = counts.get(id) || { lead_count: 0, qualified_count: 0 };
+    return {
+      id,
+      name: String(territory.name || ''),
+      description: String(territory.description || ''),
+      color: String(territory.color || ''),
+      polygon: (Array.isArray(territory.polygon) ? territory.polygon : []).map((point: any) => ({
+        lat: Number(point.lat),
+        lng: Number(point.lng),
+      })),
+      lead_count: count.lead_count,
+      qualified_count: count.qualified_count,
+    };
+  });
+};
+
+export const getTerritories = (listDir: string) => {
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    const { config } = readConfig(listDir);
+    const realColumns = new Set(getRecordColumns(db).map((column) => column.key));
+    return buildTerritories({ config, db, realColumns });
+  } finally {
+    db.close();
+  }
+};
+
+export const getTerritoryNotesForViz = (listDir: string, territoryId: string) => {
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    if (!tableExists(db, 'territory_notes')) return [];
+    return getTerritoryNotes({ db, territoryId });
+  } finally {
+    db.close();
+  }
+};
+
+export const insertTerritoryNoteForViz = (listDir: string, territoryId: string, body: string, createdBy = '') => {
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    return insertTerritoryNote({ db, territoryId, body, createdBy });
+  } finally {
+    db.close();
+  }
+};
+
 export const buildMeta = (listDir: string) => {
   const db = openListDb({ listDir, readonly: true });
   try {
@@ -473,7 +539,9 @@ export const buildMeta = (listDir: string) => {
     });
     filters.push({ key: 'disqualified', label: 'Status', type: 'enum', options: ['qualified', 'disqualified'] });
     filters.push({ key: 'lead_status', label: 'Lead status', type: 'enum', options: [...LEAD_STATUSES] });
+    filters.push({ key: 'territory', label: 'Territory', type: 'enum', options: (Array.isArray(config?.territories) ? config.territories : []).map((territory: any) => String(territory.id || '')).filter(Boolean) });
     const byStatus = leadStatusBreakdown(db);
+    const territories = buildTerritories({ config, db, realColumns });
     return {
       list: { name: basename(listDir), dir: listDir },
       counts: {
@@ -487,6 +555,7 @@ export const buildMeta = (listDir: string) => {
       steps: buildSteps(config),
       columns,
       filters,
+      territories,
       mapsApiKey: getEnv('GOOGLE_MAPS_API_KEY'),
       scoreMinimum: Number(config?.score?.minimum ?? 0),
     };
@@ -506,6 +575,14 @@ export const queryRecords = (listDir: string, params: any = {}) => {
     const values: any[] = [];
     const filters = params?.filters && typeof params.filters === 'object' ? params.filters : {};
     for (const [key, filterValue] of Object.entries(filters)) {
+      if (key === 'territory') {
+        const territoryId = String(filterValue || '').trim();
+        if (territoryId && tableExists(db, 'lead_territories')) {
+          where.push('_row_id IN (SELECT row_id FROM lead_territories WHERE territory_id = ?)');
+          values.push(territoryId);
+        }
+        continue;
+      }
       if (key === 'disqualified') {
         if (filterValue === 'qualified' && realColumns.has('disqualified_at')) where.push("COALESCE(disqualified_at, '') = ''");
         if (filterValue === 'disqualified' && realColumns.has('disqualified_at')) where.push("COALESCE(disqualified_at, '') != ''");
