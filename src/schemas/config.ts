@@ -192,6 +192,17 @@ const PipelineFilterStepSchema = z.object({
   reasoning: z.boolean().optional(),
 }).partial({ description: true, depends_on: true, runs_after: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
 
+const PipelineReviewStepSchema = z.object({
+  kind: z.literal('review'),
+  id: z.string().min(1),
+  description: PipelineFilterStepSchema.shape.description,
+  depends_on: PipelineFilterStepSchema.shape.depends_on,
+  runs_after: PipelineFilterStepSchema.shape.runs_after,
+  label: z.string().default(''),
+  fields: z.array(z.string()).default([]),
+  when: FieldCheckPredicateSchema.optional(),
+});
+
 const PipelineEnrichmentStepSchema = z.object({
   kind: z.literal('enrich'),
   id: z.string().default(''),
@@ -270,6 +281,7 @@ export const PipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
   PipelineGenerateStepSchema,
   PipelineFilterStepSchema,
+  PipelineReviewStepSchema,
 ]);
 
 export const SequenceStepSchema = z.preprocess((value) => {

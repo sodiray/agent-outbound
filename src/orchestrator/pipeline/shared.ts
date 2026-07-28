@@ -85,6 +85,7 @@ export const writeFilterFailure = ({ db, record, stepId, reason, drop }: { db: a
 export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: any; steps: any[]; baseRows: any[]; force: boolean; reapply: boolean }) => {
   const state = {
     removed: new Set<string>(),
+    parked: new Set<string>(),
     estTotalCostUsd: 0,
     stepReports: [] as any[],
   };
@@ -93,7 +94,10 @@ export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: 
   steps.forEach((step, index) => {
     const stepId = pipelineStepId(step, index);
     const kind = String(step?.kind || '');
-    const active = baseRows.filter((record) => !state.removed.has(getRecordRowId(record)));
+    const active = baseRows.filter((record) => (
+      !state.removed.has(getRecordRowId(record))
+      && !state.parked.has(getRecordRowId(record))
+    ));
 
     if (kind === 'enrich') {
       const work = countEnrichWorkForStep({ db, step, stepId, rows: active, force });
@@ -105,6 +109,59 @@ export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: 
         would_skip_fresh: work.skip_fresh,
         would_skip_when: work.skip_when,
         est_cost_usd: Number(estCost.toFixed(4)),
+      });
+      return;
+    }
+
+    if (kind === 'review') {
+      const evalRows = active.filter((record) => !hasPassedStep({ db, recordId: getRecordRowId(record), stepId }));
+      const skippedPassed = active.length - evalRows.length;
+      const matchingRows = evalRows.filter((record) => {
+        if (!step?.when || typeof step.when !== 'object') return true;
+        return evaluateFieldCheckGroup({
+          row: record,
+          conditions: Array.isArray(step.when.conditions) ? step.when.conditions : [],
+          match: step.when.match || 'all',
+        }).passed;
+      });
+      const skippedWhen = evalRows.length - matchingRows.length;
+      const recordIds = matchingRows.map((record) => getRecordRowId(record));
+      const placeholders = recordIds.map(() => '?').join(', ');
+      const verdictRows = recordIds.length === 0
+        ? []
+        : db.prepare(`
+          SELECT record_id, kind
+          FROM overrides
+          WHERE (cleared_at IS NULL OR cleared_at = '')
+            AND record_id IN (${placeholders})
+            AND (
+              (kind = 'keep' AND (step_id = ? OR step_id = ''))
+              OR (kind = 'drop' AND step_id = '' AND created_by = 'review:' || ?)
+            )
+        `).all(...recordIds, stepId, stepId);
+      const verdicts = verdictRows.reduce((map: Map<string, 'pass' | 'drop'>, row: any) => {
+        const recordId = String(row.record_id || '').trim();
+        const kindValue = String(row.kind || '').trim();
+        const existing = map.get(recordId);
+        map.set(recordId, kindValue === 'drop' || existing === 'drop' ? 'drop' : 'pass');
+        return map;
+      }, new Map<string, 'pass' | 'drop'>());
+      const counts = matchingRows.reduce((acc, record) => {
+        const recordId = getRecordRowId(record);
+        const verdict = verdicts.get(recordId);
+        if (verdict === 'pass') return { ...acc, wouldPass: acc.wouldPass + 1 };
+        if (verdict === 'drop') {
+          state.removed.add(recordId);
+          return { ...acc, wouldDrop: acc.wouldDrop + 1 };
+        }
+        state.parked.add(recordId);
+        return { ...acc, wouldAwait: acc.wouldAwait + 1 };
+      }, { wouldPass: 0, wouldDrop: 0, wouldAwait: 0 });
+      state.stepReports.push({
+        id: stepId, kind, type: 'review',
+        would_evaluate: evalRows.length, would_skip_passed: skippedPassed, would_skip_when: skippedWhen,
+        would_pass: counts.wouldPass, would_drop: counts.wouldDrop, awaiting_review: counts.wouldAwait,
+        est_cost_usd: 0,
       });
       return;
     }

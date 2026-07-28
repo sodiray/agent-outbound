@@ -155,16 +155,32 @@ const hasEarlierProducer = (config: any, stepIdValue: string, field: string) => 
   return producedFieldsByStep(config).some((producer) => producer.field === field && producer.index < index);
 };
 
+const positionalReviewDependencies = (config: any) => {
+  const steps = pipelineSteps(config);
+  const entries: Array<[string, Set<string>]> = steps.map((step: any, index: number) => {
+    const id = stepId(step);
+    const deps = steps
+      .slice(0, index)
+      .filter((candidate: any) => String(candidate?.kind || '') === 'review')
+      .map((candidate: any) => stepId(candidate))
+      .filter(Boolean);
+    return [id, new Set(deps)];
+  }).filter(([id]) => Boolean(id));
+  return new Map(entries);
+};
+
 export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = {}): Map<string, Set<string>> => {
   const producers = producedFieldsByStep(config);
   const proseHits = collectProseHits(config, options);
+  const reviewDependencies = positionalReviewDependencies(config);
   const entries: Array<[string, Set<string>]> = pipelineSteps(config).map((step: any, index: number) => {
     const id = stepId(step);
-    const deps = new Set<string>();
+    const deps = new Set<string>(reviewDependencies.get(id) || []);
     if (!id) return [id, deps] as [string, Set<string>];
 
     const structuralFields = [
       ...(String(step?.kind || '') === 'enrich' ? conditionFields(step?.when) : []),
+      ...(String(step?.kind || '') === 'review' ? conditionFields(step?.when) : []),
       ...(String(step?.kind || '') === 'filter' ? conditionFields(step) : []),
       ...collectTokens(step?.prompt_args),
       ...collectTokens(step?.args),
@@ -207,12 +223,13 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
   const errors: string[] = [];
   const warnings: string[] = [];
   const explicitEdges = new Map<string, Set<string>>();
+  const reviewDependencies = positionalReviewDependencies(config);
 
   steps.forEach((step: any) => {
     const id = stepId(step);
     if (!id) return;
     const refs = [...stringArray(step?.depends_on), ...stringArray(step?.runs_after)];
-    explicitEdges.set(id, new Set(refs));
+    explicitEdges.set(id, new Set([...refs, ...Array.from(reviewDependencies.get(id) || [])]));
     refs.forEach((ref) => {
       if (!idSet.has(ref)) {
         errors.push(`pipeline.${id} references unknown dependency "${ref}".`);
@@ -237,6 +254,7 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
     const acknowledged = new Set([
       ...declared,
       ...stringArray(steps.find((step: any) => stepId(step) === id)?.runs_after),
+      ...Array.from(reviewDependencies.get(id) || []),
     ]);
     Array.from(deps).filter((dep) => !acknowledged.has(dep)).forEach((dep) => {
       errors.push(`pipeline.${id} consumes data from "${dep}" but is missing depends_on: "${dep}".`);

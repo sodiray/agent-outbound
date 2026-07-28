@@ -25,6 +25,13 @@ type PipelineStepLike = Record<string, unknown> & {
   match?: string;
   conditions?: unknown;
   batch_size?: unknown;
+  when?: unknown;
+};
+
+type QueryableDb = {
+  prepare: (sql: string) => {
+    all: (...params: string[]) => Array<Record<string, unknown>>;
+  };
 };
 
 const textValue = (value: unknown, fallback = '') => {
@@ -112,6 +119,53 @@ const executeEnrichBatch = async (
   return outcomes;
 };
 
+const executeReviewBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+) => {
+  const matchingRows = rows.filter((row) => {
+    if (!step.when || typeof step.when !== 'object') return true;
+    const predicate = step.when as Record<string, unknown>;
+    return evaluateFieldCheckGroup({
+      row,
+      conditions: Array.isArray(predicate.conditions) ? predicate.conditions : [],
+      match: String(predicate.match || 'all'),
+    }).passed;
+  });
+  const recordIds = matchingRows.map((row) => getRecordRowId(row));
+  const placeholders = recordIds.map(() => '?').join(', ');
+  const verdictRows = recordIds.length === 0
+    ? []
+    : (ctx.db as QueryableDb).prepare(`
+      SELECT record_id, kind
+      FROM overrides
+      WHERE (cleared_at IS NULL OR cleared_at = '')
+        AND record_id IN (${placeholders})
+        AND (
+          (kind = 'keep' AND (step_id = ? OR step_id = ''))
+          OR (kind = 'drop' AND step_id = '' AND created_by = 'review:' || ?)
+        )
+    `).all(...recordIds, stepId, stepId);
+  const verdicts = verdictRows.reduce((map, row) => {
+    const recordId = String(row.record_id || '').trim();
+    const kind = String(row.kind || '').trim();
+    const existing = map.get(recordId);
+    map.set(recordId, kind === 'drop' || existing === 'drop' ? 'drop' : 'pass');
+    return map;
+  }, new Map<string, 'pass' | 'drop'>());
+  const matchingIds = new Set(recordIds);
+  return new Map(rows.map((row) => {
+    const recordId = getRecordRowId(row);
+    if (!matchingIds.has(recordId)) return [recordId, { passed: true, reason: '' }];
+    const verdict = verdicts.get(recordId);
+    if (verdict === 'pass') return [recordId, { passed: true, reason: '' }];
+    if (verdict === 'drop') return [recordId, { passed: false, reason: 'review: dropped' }];
+    return [recordId, { passed: false, reason: 'awaiting_review' }];
+  }));
+};
+
 export const executeStepBatch = async (
   ctx: StepExecutionContext,
   step: PipelineStepLike,
@@ -127,6 +181,7 @@ export const executeStepBatch = async (
   }
 
   if (kind === 'enrich') return executeEnrichBatch(ctx, step, stepId, rows);
+  if (kind === 'review') return executeReviewBatch(ctx, step, stepId, rows);
 
   throw new Error(`unsupported_pipeline_step_kind:${kind || 'unknown'}`);
 };

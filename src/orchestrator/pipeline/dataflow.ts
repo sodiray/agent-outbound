@@ -74,6 +74,7 @@ const stringArray = (value: unknown) => Array.isArray(value)
 const stepTier = (step: any) => {
   const kind = String(step?.kind || '').trim().toLowerCase();
   if (kind === 'filter' && String(step?.type || 'semantic').trim().toLowerCase() === 'field_check') return 0;
+  if (kind === 'review') return 1;
   if (kind === 'filter') return 1;
   if (kind === 'enrich') return 2;
   return 3;
@@ -92,16 +93,23 @@ const largestBatchSize = (steps: DataflowStep[]) => Math.max(1, ...steps.map((en
 const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] => steps.map((step, index) => {
   const id = pipelineStepId(step, index);
   const kind = String(step?.kind || '').trim().toLowerCase();
+  const reviewDeps = steps
+    .flatMap((candidate, candidateIndex) => (
+      candidateIndex < index
+      && String(candidate?.kind || '').trim().toLowerCase() === 'review'
+        ? [pipelineStepId(candidate, candidateIndex)]
+        : []
+    ));
   return {
     id,
     index,
     step,
     kind,
     tier: stepTier(step),
-    cost: db ? avgStepCostUsd({ db, stepId: id }) : Number(step?.cost || 0),
-    dropGate: kind === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag',
-    deps: [...new Set([...stringArray(step?.depends_on), ...stringArray(step?.runs_after)])],
-    executable: kind === 'filter' || kind === 'enrich',
+    cost: kind === 'review' ? 0 : (db ? avgStepCostUsd({ db, stepId: id }) : Number(step?.cost || 0)),
+    dropGate: kind === 'review' || (kind === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag'),
+    deps: [...new Set([...stringArray(step?.depends_on), ...stringArray(step?.runs_after), ...reviewDeps])],
+    executable: kind === 'filter' || kind === 'enrich' || kind === 'review',
   };
 });
 
@@ -287,6 +295,63 @@ const enrichWork = ({ db, step, stepId, record, force }: { db: any; step: any; s
   countEnrichWorkForStep({ db, step, stepId, rows: [record], force })
 );
 
+const hasAwaitingReviewEvent = ({ db, recordId, stepId }: { db: any; recordId: string; stepId: string }) => Boolean(db.prepare(`
+  SELECT 1
+  FROM pipeline_events
+  WHERE record_id = ? AND step_id = ? AND kind = 'review'
+    AND passed = 0 AND reason = 'awaiting_review'
+  LIMIT 1
+`).get(recordId, stepId));
+
+const hasActiveReviewVerdict = ({ db, recordId, stepId }: { db: any; recordId: string; stepId: string }) => Boolean(db.prepare(`
+  SELECT 1
+  FROM overrides
+  WHERE record_id = ? AND (cleared_at IS NULL OR cleared_at = '')
+    AND (
+      (kind = 'keep' AND (step_id = ? OR step_id = ''))
+      OR (kind = 'drop' AND step_id = '' AND created_by = 'review:' || ?)
+    )
+  LIMIT 1
+`).get(recordId, stepId, stepId));
+
+const countAwaitingReview = ({ db, stepIds }: { db: any; stepIds: string[] }) => {
+  if (stepIds.length === 0) return 0;
+  const placeholders = stepIds.map(() => '?').join(', ');
+  return Number(db.prepare(`
+    SELECT COUNT(DISTINCT event.record_id) AS n
+    FROM pipeline_events event
+    JOIN records record ON record._row_id = event.record_id
+    WHERE event.kind = 'review'
+      AND event.step_id IN (${placeholders})
+      AND event.passed = 0
+      AND event.reason = 'awaiting_review'
+      AND ${inPlayWhere('record')}
+      AND record.sequence_status != 'opted_out'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pipeline_events passed
+        WHERE passed.record_id = event.record_id
+          AND passed.step_id = event.step_id
+          AND passed.kind = 'review'
+          AND passed.passed = 1
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM overrides verdict
+        WHERE verdict.record_id = event.record_id
+          AND (verdict.cleared_at IS NULL OR verdict.cleared_at = '')
+          AND (
+            (verdict.kind = 'keep' AND (verdict.step_id = event.step_id OR verdict.step_id = ''))
+            OR (
+              verdict.kind = 'drop'
+              AND verdict.step_id = ''
+              AND verdict.created_by = 'review:' || event.step_id
+            )
+          )
+      )
+  `).get(...stepIds)?.n || 0);
+};
+
 type KeepDirective = { keepAll: boolean; keepSteps: Set<string> };
 
 const initializeResolved = ({
@@ -304,7 +369,6 @@ const initializeResolved = ({
   reapply: boolean;
   overridesByRecord?: Map<string, KeepDirective>;
 }) => {
-  const dropGateIds = steps.filter((entry) => entry.dropGate).map((entry) => entry.id);
   const passed = readPassedPipelineEvents({ db, recordIds: rows.map((row) => getRecordRowId(row)) });
   return new Map(rows.map((row) => {
     const recordId = getRecordRowId(row);
@@ -330,10 +394,16 @@ const initializeResolved = ({
       return isFilterDefFresh({ cached, stepConfig: step.step });
     }));
     // Force-resolve gates the human has chosen to keep this record past, even under
-    // --reapply (which otherwise re-evaluates passed filters). The gate never runs.
+    // --reapply. Review gates execute once so their pass event is persisted.
     const keep = overridesByRecord.get(recordId);
     if (keep) {
-      const kept = keep.keepAll ? dropGateIds : dropGateIds.filter((id) => keep.keepSteps.has(id));
+      const kept = steps
+        .filter((entry) => (
+          entry.dropGate
+          && entry.kind !== 'review'
+          && (keep.keepAll || keep.keepSteps.has(entry.id))
+        ))
+        .map((entry) => entry.id);
       kept.forEach((id) => initial.add(id));
     }
     steps
@@ -348,6 +418,11 @@ const initializeResolved = ({
 
 const makeApplicable = ({ db, force }: { db: any; force: boolean }) => (recordState: RecordState, step: DataflowStep) => {
   if (!defaultApplicable(recordState, step)) return false;
+  if (step.kind === 'review') {
+    const recordId = getRecordRowId(recordState.record);
+    if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
+    return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
+  }
   if (step.kind !== 'enrich') return true;
   const work = enrichWork({ db, step: step.step, stepId: step.id, record: recordState.record, force });
   return Number(work.would_enrich || 0) > 0;
@@ -428,6 +503,8 @@ export const runPipelineDataflow = async ({
       failed: 0,
       errored: 0,
       review_flagged: 0,
+      awaiting_review: 0,
+      newly_parked: 0,
       skipped_passed: 0,
       errors: unsupportedStepErrors(steps) as any[],
     };
@@ -530,6 +607,66 @@ export const runPipelineDataflow = async ({
           return { record: refreshRecord({ db, record: recordState.record }), resolved: false, errored: true };
         }
 
+        if (step.kind === 'review') {
+          if (outcome.passed) {
+            insertPipelineEvent({
+              db,
+              event: {
+                event_id: randomUUID(),
+                record_id: recordId,
+                step_id: step.id,
+                kind: step.kind,
+                passed: true,
+                reason: '',
+                occurred_at: now,
+              },
+            });
+            progressState.done += 1;
+            tickProgress(db, runId, { done: progressState.done, target: rows.length });
+            emitActivity({ event: 'step_complete', phase: 'pipeline', step: step.id, kind: step.kind, passed: 1, rows: 1 });
+            return { record: refreshRecord({ db, record: recordState.record }) };
+          }
+          if (String(outcome.reason || '') === 'review: dropped') {
+            insertPipelineEvent({
+              db,
+              event: {
+                event_id: randomUUID(),
+                record_id: recordId,
+                step_id: step.id,
+                kind: step.kind,
+                passed: false,
+                reason: 'review: dropped',
+                occurred_at: now,
+              },
+            });
+            byStep[step.id] = Number(byStep[step.id] || 0) + 1;
+            progressState.done += 1;
+            tickProgress(db, runId, { done: progressState.done, target: rows.length });
+            emitActivity({ event: 'step_complete', phase: 'pipeline', step: step.id, kind: step.kind, dropped: 1, rows: 1 });
+            return { record: refreshRecord({ db, record: recordState.record }), dropped: true };
+          }
+          const alreadyAwaiting = hasAwaitingReviewEvent({ db, recordId, stepId: step.id });
+          if (!alreadyAwaiting) {
+            insertPipelineEvent({
+              db,
+              event: {
+                event_id: randomUUID(),
+                record_id: recordId,
+                step_id: step.id,
+                kind: step.kind,
+                passed: false,
+                reason: 'awaiting_review',
+                occurred_at: now,
+              },
+            });
+          }
+          summary.newly_parked += alreadyAwaiting ? 0 : 1;
+          progressState.done += 1;
+          tickProgress(db, runId, { done: progressState.done, target: rows.length });
+          emitActivity({ event: 'step_complete', phase: 'pipeline', step: step.id, kind: step.kind, awaiting_review: 1, rows: 1 });
+          return { record: refreshRecord({ db, record: recordState.record }), resolved: false };
+        }
+
         // A human "keep" override on a failing drop gate converts the verdict to a
         // pass (audited), so the record is never dropped here.
         const keep = overridesByRecord.get(recordId);
@@ -584,10 +721,16 @@ export const runPipelineDataflow = async ({
     });
 
     summary.survivors = Number(db.prepare(`SELECT COUNT(*) AS n FROM records WHERE ${inPlayWhere()}`).get()?.n || 0);
+    summary.awaiting_review = countAwaitingReview({
+      db,
+      stepIds: steps.filter((step) => step.kind === 'review').map((step) => step.id),
+    });
     const funnel = {
       records_in: summary.records_in,
       by_step: summary.by_step,
       survivors: summary.survivors,
+      awaiting_review: summary.awaiting_review,
+      newly_parked: summary.newly_parked,
     };
     logPipelineEvent({ listDir, payload: funnel });
     emitActivity({ event: 'phase_complete', phase: 'pipeline', ...funnel, engine: 'dataflow' });
@@ -597,8 +740,8 @@ export const runPipelineDataflow = async ({
     endRun(db, runId, {
       status: summary.errored > 0 ? 'error' : 'done',
       message: summary.errored > 0
-        ? `Pipeline incomplete · ${summary.errored} errored records need retry`
-        : `Pipeline complete · ${summary.survivors} survivors`,
+        ? `Pipeline incomplete · ${summary.errored} errored records need retry · ${summary.awaiting_review} awaiting review`
+        : `Pipeline complete · ${summary.survivors} survivors · ${summary.awaiting_review} awaiting review`,
     });
     return summary;
   } catch (error) {

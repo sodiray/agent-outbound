@@ -37,8 +37,8 @@ const recordDecisionState = (record: any) => {
   };
 };
 
-const filterStepIds = (config: any) => (Array.isArray(config?.pipeline) ? config.pipeline : [])
-  .filter((step: any) => String(step?.kind || '') === 'filter')
+const gateStepIds = (config: any) => (Array.isArray(config?.pipeline) ? config.pipeline : [])
+  .filter((step: any) => ['filter', 'review'].includes(String(step?.kind || '')))
   .map((step: any) => String(step?.id || '').trim())
   .filter(Boolean);
 
@@ -49,9 +49,9 @@ export const overrideKeepCommand = ({ list, ref, step = '', allGates = false, re
   const { config } = readConfig(listDir);
   const stepId = String(step || '').trim();
   if (!allGates) {
-    const validSteps = filterStepIds(config);
+    const validSteps = gateStepIds(config);
     if (!validSteps.includes(stepId)) {
-      throw new AgentOutboundError({ code: 'NOT_FOUND', message: `Unknown filter step "${stepId}". Filter steps: ${validSteps.join(', ') || '(none)'}`, retryable: false });
+      throw new AgentOutboundError({ code: 'NOT_FOUND', message: `Unknown pipeline gate "${stepId}". Pipeline gates: ${validSteps.join(', ') || '(none)'}`, retryable: false });
     }
   }
   const db = openListDb({ listDir, readonly: false });
