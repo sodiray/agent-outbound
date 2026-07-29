@@ -38,6 +38,12 @@ type ToolRef = {
   owner: any;
 };
 
+type UnresolvedToolRef = {
+  path: string;
+  server: string;
+  tool: string;
+};
+
 const asStringArray = (value: unknown, { upper = false } = {}) => {
   const input = Array.isArray(value) ? value : [];
   const items = input
@@ -243,28 +249,33 @@ export const resolveConfigToolCatalog = async ({
 
   const allSlugs = new Set<string>();
   let resolvedSpecs = 0;
-  let invalidToolsRemoved = 0;
   let unresolvedSpecs = 0;
   let inputArgsRemoved = 0;
+  const unresolvedToolRefs: UnresolvedToolRef[] = [];
   const connectedToolkits = new Set((await listConnectedToolkits().catch(() => [] as string[])).map((slug) => String(slug || '').trim().toUpperCase()).filter(Boolean));
 
   for (const ref of refs) {
     const server = normalizeServer(ref.spec?.server);
     const provider = getProviderForRef(server, listDir);
+    const availableToolkits = isComposioServer(server) ? connectedToolkits : new Set<string>();
     const toolkits = asStringArray(ref.spec?.toolkits, { upper: true });
     const explicitTools = asStringArray(ref.spec?.tools, { upper: true });
     const explicitSchemas = explicitTools.length > 0
       ? filterSchemasByToolkit(
         await fetchSchemasForRef({ provider, mcp, slugs: explicitTools }),
         isComposioServer(server) ? toolkits : [],
-        connectedToolkits,
+        availableToolkits,
       )
       : [];
     const validExplicit = new Set(explicitSchemas.map(getSchemaSlug).filter(Boolean));
     const invalidTools = explicitTools.filter((slug) => !validExplicit.has(slug));
-    invalidToolsRemoved += invalidTools.length;
+    unresolvedToolRefs.push(...invalidTools.map((tool) => ({
+      path: ref.path,
+      server: server || 'composio',
+      tool,
+    })));
 
-    const candidateSchemas = invalidTools.length > 0 || String(ref.spec?.search || '').trim()
+    const candidateSchemas = String(ref.spec?.search || '').trim()
       ? filterSchemasByToolkit(
         await searchSchemasForRef({
           provider,
@@ -273,7 +284,7 @@ export const resolveConfigToolCatalog = async ({
           limit: Number(ref.spec?.limit || 25),
         }),
         isComposioServer(server) ? toolkits : [],
-        connectedToolkits,
+        availableToolkits,
       )
       : [];
     const candidateTools = candidateSchemas.map(getSchemaSlug).filter(Boolean);
@@ -281,21 +292,24 @@ export const resolveConfigToolCatalog = async ({
     const resolvedByToolkit = validExplicit.size === 0 && candidateTools.length === 0 && toolkits.length > 0
       ? await resolveToolkitSlugsForRef({ provider, mcp, toolkits })
       : [];
-    const tools = [...new Set([
+    const resolvedTools = [...new Set([
       ...[...validExplicit],
       ...candidateTools,
       ...asStringArray(resolvedByToolkit, { upper: true }),
     ])];
+    const tools = [...new Set([...explicitTools, ...resolvedTools])];
 
     ref.spec.toolkits = toolkits;
     ref.spec.server = serializeServer(server);
     ref.spec.tools = tools;
-    if (tools.length > 0) {
+    if (invalidTools.length > 0) {
+      unresolvedSpecs += 1;
+    } else if (resolvedTools.length > 0) {
       resolvedSpecs += 1;
     } else if (toolkits.length > 0 || explicitTools.length > 0 || String(ref.spec?.search || '').trim()) {
       unresolvedSpecs += 1;
     }
-    for (const slug of tools) allSlugs.add(getToolCatalogKey(server, slug));
+    for (const slug of resolvedTools) allSlugs.add(getToolCatalogKey(server, slug));
   }
 
   const schemasByKey = new Map<string, ProviderToolSchema | ComposioToolSchema>();
@@ -346,7 +360,9 @@ export const resolveConfigToolCatalog = async ({
       tool_specs_scanned: refs.length,
       tool_specs_resolved: resolvedSpecs,
       tool_specs_unresolved: unresolvedSpecs,
-      invalid_tools_removed: invalidToolsRemoved,
+      invalid_tools_removed: 0,
+      unresolved_tools: [...new Set(unresolvedToolRefs.map((ref) => ref.tool))],
+      unresolved_tool_refs: unresolvedToolRefs,
       input_args_removed: inputArgsRemoved,
       tool_count: allSlugs.size,
       catalog_size: Object.keys(catalog).length,

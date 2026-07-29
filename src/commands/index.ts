@@ -53,6 +53,7 @@ import { listAnthropicModels, validateAnthropicKey } from '../orchestrator/runti
 import { listDeepInfraModels, validateDeepInfraModel } from '../orchestrator/runtime/deepinfra.js';
 import { listXaiModels } from '../orchestrator/runtime/xai.js';
 import { listOpenAiModels } from '../orchestrator/runtime/openai.js';
+import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { runCrmSync } from '../orchestrator/crm/runner.js';
 import { getEnv, readGlobalEnv, writeGlobalEnv } from '../orchestrator/runtime/env.js';
 import { planRouteAction } from '../orchestrator/actions/plan-route/index.js';
@@ -588,6 +589,21 @@ export const refreshToolsCommand = async ({ list }) => {
   });
   const written = writeConfig(listDir, resolved.config);
 
+  if (resolved.stats.tool_specs_unresolved > 0) {
+    throw new AgentOutboundError({
+      code: 'TOOL_NOT_CONNECTED',
+      message: `${resolved.stats.tool_specs_unresolved} tool specification(s) could not be resolved.`,
+      retryable: false,
+      hint: 'Review tool_resolution.unresolved_tool_refs, then connect or correct each declared tool before retrying.',
+      fields: {
+        status: written.written ? 'tool_resolution_failed' : 'validation_failed',
+        path: written.path,
+        written: written.written,
+        errors: written.errors,
+        tool_resolution: resolved.stats,
+      },
+    });
+  }
 
   return {
     status: written.written ? 'updated' : 'validation_failed',

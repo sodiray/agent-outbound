@@ -305,6 +305,11 @@ const monidProviderError = (message: string) => {
   return error;
 };
 
+const discoveryQueryForSlug = (slug: string) => String(slug || '')
+  .replace(/^MONID__/, '')
+  .replace(/_+/g, ' ')
+  .trim();
+
 const numericCost = (value: unknown) => (
   value === null || value === undefined || value === ''
     ? Number.NaN
@@ -389,13 +394,17 @@ export class MonidProvider implements ToolProvider {
 
   private async json(argv: string[], label: string) {
     try {
-      return asRecord(await executeJsonCommand({
+      const payload = asRecord(await executeJsonCommand({
         command: this.command,
         argv,
         env: { NO_COLOR: '1' },
         timeoutMs: this.commandTimeoutMs,
         label,
       }));
+      if (payload.error) {
+        throw new Error(formatErrorMessage(payload.error));
+      }
+      return payload;
     } catch (error) {
       throw monidProviderError(`${label} failed: ${formatErrorMessage(error)}`);
     }
@@ -455,43 +464,65 @@ export class MonidProvider implements ToolProvider {
     return unique.map(toSearchSchema);
   }
 
+  private async discoverRefs(slugs: string[]) {
+    const wanted = new Set(slugs.map((slug) => slug.toUpperCase()));
+    const responses = await Promise.all(slugs.map((slug) => this.json(
+      ['discover', '-q', discoveryQueryForSlug(slug), '-l', '50', '-j'],
+      `Monid discover "${slug}"`,
+    )));
+    responses
+      .flatMap((response) => asArray(response.results))
+      .map(toolRefFrom)
+      .filter((ref): ref is MonidToolRef => Boolean(ref) && wanted.has(ref.slug))
+      .forEach((ref) => this.registerRef(ref));
+  }
+
   async getSchemas(slugs: string[]): Promise<ProviderToolSchema[]> {
     const wanted = [...new Set(slugs.map((slug) => String(slug || '').trim().toUpperCase()).filter(Boolean))];
+    const undiscovered = wanted.filter((slug) => (
+      !this.schemasBySlug.has(slug) && !this.refsBySlug.has(slug)
+    ));
+    if (undiscovered.length > 0) await this.discoverRefs(undiscovered);
     const missingRefs = wanted.filter((slug) => !this.schemasBySlug.has(slug))
       .map((slug) => this.refsBySlug.get(slug))
       .filter((ref): ref is MonidToolRef => Boolean(ref));
     const inspected = await Promise.all(missingRefs.map(async (ref) => {
-      const payload = await this.json(
-        ['inspect', '-p', ref.provider, '-e', ref.endpoint, '-j'],
-        `Monid inspect ${ref.provider}${ref.endpoint}`,
-      );
-      const provider = String(payload.provider || ref.provider).trim();
-      const endpoint = String(payload.endpoint || ref.endpoint).trim();
-      const actualRef = {
-        ...ref,
-        provider,
-        endpoint,
-        name: String(payload.name || payload.providerName || ref.name),
-        description: String(payload.description || payload.summary || ref.description),
-      };
-      const flattened = flattenInputSchema(payload);
-      const schema: ProviderToolSchema = {
-        slug: ref.slug,
-        server: 'monid',
-        toolkit: provider.toUpperCase(),
-        provider,
-        endpoint,
-        name: actualRef.name,
-        description: actualRef.description,
-        input_schema: flattened.inputSchema,
-        parameter_locations: flattened.parameterLocations,
-        parameter_collisions: flattened.parameterCollisions,
-      };
-      this.registerRef(actualRef);
-      this.schemasBySlug.set(ref.slug, schema);
-      return schema;
+      try {
+        const payload = await this.json(
+          ['inspect', '-p', ref.provider, '-e', ref.endpoint, '-j'],
+          `Monid inspect ${ref.provider}${ref.endpoint}`,
+        );
+        const provider = String(payload.provider || ref.provider).trim();
+        const endpoint = String(payload.endpoint || ref.endpoint).trim();
+        const actualRef = {
+          ...ref,
+          provider,
+          endpoint,
+          name: String(payload.name || payload.providerName || ref.name),
+          description: String(payload.description || payload.summary || ref.description),
+        };
+        const flattened = flattenInputSchema(payload);
+        const schema: ProviderToolSchema = {
+          slug: ref.slug,
+          server: 'monid',
+          toolkit: provider.toUpperCase(),
+          provider,
+          endpoint,
+          name: actualRef.name,
+          description: actualRef.description,
+          input_schema: flattened.inputSchema,
+          parameter_locations: flattened.parameterLocations,
+          parameter_collisions: flattened.parameterCollisions,
+        };
+        this.registerRef(actualRef);
+        this.schemasBySlug.set(ref.slug, schema);
+        return schema;
+      } catch {
+        return null;
+      }
     }));
-    if (inspected.length > 0) this.registerSchemas(inspected);
+    const schemas = inspected.filter((schema): schema is ProviderToolSchema => Boolean(schema));
+    if (schemas.length > 0) this.registerSchemas(schemas);
     return wanted
       .map((slug) => this.schemasBySlug.get(slug))
       .filter((schema): schema is ProviderToolSchema => Boolean(schema));
