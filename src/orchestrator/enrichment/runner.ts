@@ -99,6 +99,10 @@ export const writeStaleness = ({ db, recordId, stepId, depHash, cacheTtlSeconds,
 export const readStaleness = ({ db, recordId, stepId }) =>
   db.prepare('SELECT * FROM staleness WHERE record_id = ? AND step_id = ?').get(recordId, stepId);
 
+const clearStaleness = ({ db, recordId, stepId }) => {
+  db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
+};
+
 export const ttlToSeconds = (ttl) => {
   const raw = String(ttl || '').trim().toLowerCase();
   if (!raw) return 0;
@@ -600,31 +604,30 @@ export const executeEnrichmentStepOnRecords = async ({
         error,
       });
       if (isBudgetExceededError(error)) throw error;
+      const detail = formatErrorMessage(error);
       if (enrichStepUsesEmptyOnError(stepConfig)) {
         const outputs = emptyOutputsFor(outputZod);
         const patch = applyOutputs({
           step: { ...step, config: stepConfig, __list_dir: listDir },
           outputs,
         });
-        patch[statusColumn] = 'empty';
+        patch[statusColumn] = 'failed';
         const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
-        const merged = { ...currentRow, ...patch };
+        const merged = {
+          ...currentRow,
+          ...patch,
+          retry_count: Number(currentRow.retry_count || 0) + 1,
+          last_error: detail,
+        };
         upsertRecord({ db, row: merged });
-        writeStaleness({
-          db,
-          recordId,
-          stepId: id,
-          depHash,
-          cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
-          cacheTtl: String(stepConfig?.cache || ''),
-        });
-        summary.processed += 1;
+        clearStaleness({ db, recordId, stepId: id });
+        summary.failed += 1;
+        summary.errors.push({ record_id: recordId, error: detail });
         summary.record_ids.push(recordId);
-        emitActivity({ event: 'row_complete', phase: 'pipeline', step: id, row: rowLabel, outcome: 'empty' });
+        emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail });
         return;
       }
-      const firstDetail = formatErrorMessage(error);
-      emitActivity({ event: 'row_retry', phase: 'pipeline', step: id, row: rowLabel, detail: firstDetail });
+      emitActivity({ event: 'row_retry', phase: 'pipeline', step: id, row: rowLabel, detail });
       try {
         await runAttempt(2);
         return;
@@ -640,6 +643,7 @@ export const executeEnrichmentStepOnRecords = async ({
         const detail = formatErrorMessage(retryError);
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: detail });
+        clearStaleness({ db, recordId, stepId: id });
         upsertRecord({
           db,
           row: {
@@ -863,6 +867,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           cacheTtlSeconds: number;
           cacheTtl: string;
           skippedWhen?: boolean;
+          failedError?: string;
         }> = [];
         const failures: Array<{ recordId: string; rowLabel: string; error: string }> = [];
         const snapshot = [...recordState.values()];
@@ -978,13 +983,17 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             });
             if (isBudgetExceededError(error)) throw error;
             const neutralStepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+            const detail = formatErrorMessage(error);
             if (enrichStepUsesEmptyOnError(neutralStepConfig)) {
               const outputs = emptyOutputsFor(outputZod);
               const patch = applyOutputs({
                 step: { ...step, __list_dir: listDir },
                 outputs,
               });
-              patch[statusColumn] = 'empty';
+              patch[statusColumn] = 'failed';
+              patch.retry_count = Number(record.retry_count || 0) + 1;
+              patch.last_error = detail;
+              markStepFailure(recordId, id);
               patches.push({
                 recordId,
                 rowLabel,
@@ -993,10 +1002,11 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 cacheTtlSeconds: ttlToSeconds(neutralStepConfig?.cache),
                 cacheTtl: String(neutralStepConfig?.cache || ''),
                 skippedWhen: false,
+                failedError: detail,
               });
+              emitActivity({ event: 'error', phase: 'enrichment', step: id, row: rowLabel, detail });
               return;
             }
-            const detail = formatErrorMessage(error);
             markStepFailure(recordId, id);
             failures.push({ recordId, rowLabel, error: detail });
             emitActivity({ event: 'error', phase: 'enrichment', step: id, row: rowLabel, detail });
@@ -1016,7 +1026,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             const merged = { ...currentRow, ...item.patch };
             upsertRecord({ db, row: merged });
             upsertPrimaryContactIfPresent({ db, record: merged });
-            if (!item.skippedWhen) {
+            if (item.failedError) {
+              clearStaleness({ db, recordId: item.recordId, stepId: result.id });
+            } else if (!item.skippedWhen) {
               writeStaleness({
                 db,
                 recordId: item.recordId,
@@ -1029,6 +1041,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             recordState.set(item.recordId, merged);
             if (item.skippedWhen) {
               summary.skipped_when += 1;
+            } else if (item.failedError) {
+              summary.failed += 1;
+              summary.errors.push({ step: result.id, record_id: item.recordId, error: item.failedError });
             } else {
               summary.processed += 1;
               emitActivity({ event: 'row_complete', phase: 'enrichment', step: result.id, row: item.rowLabel });
@@ -1046,10 +1061,12 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         for (const failure of result.failures) {
           summary.failed += 1;
           summary.errors.push({ step: result.id, record_id: failure.recordId, error: failure.error });
+          clearStaleness({ db, recordId: failure.recordId, stepId: result.id });
           const currentRow = recordState.get(failure.recordId);
           if (currentRow) {
             const updated = {
               ...currentRow,
+              [`${result.id}__status`]: 'failed',
               retry_count: Number(currentRow.retry_count || 0) + 1,
               last_error: failure.error,
             };
