@@ -1479,10 +1479,14 @@ export const listOverridesForRecord = ({ db, recordId, includeCleared = false })
 export const listActiveOverrides = ({ db }) =>
   db.prepare("SELECT * FROM overrides WHERE cleared_at IS NULL OR cleared_at = '' ORDER BY created_at DESC").all();
 
-export const clearOverrides = ({ db, recordId, stepId = null, clearedBy = '' }) => {
+export const clearOverrides = ({ db, recordId, stepId = null, kind = null, createdBy = null, clearedBy = '' }) => {
   const now = nowIso();
   const active = listOverridesForRecord({ db, recordId });
-  const matched = active.filter((o) => stepId === null || String(o.step_id || '') === String(stepId || ''));
+  const matched = active.filter((override) => (
+    (stepId === null || String(override.step_id || '') === String(stepId || ''))
+    && (kind === null || String(override.kind || '') === String(kind || ''))
+    && (createdBy === null || String(override.created_by || '') === String(createdBy || ''))
+  ));
   const update = db.prepare("UPDATE overrides SET cleared_at = ?, cleared_by = ? WHERE id = ?");
   matched.forEach((o) => update.run(now, String(clearedBy || ''), o.id));
   return matched;

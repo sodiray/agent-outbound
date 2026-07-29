@@ -13,6 +13,7 @@ import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.j
 import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides } from '../runtime/db.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
+import { countAwaitingReviewRecords } from './review.js';
 import {
   pipelineStepId,
   filterDefHash,
@@ -314,44 +315,6 @@ const hasActiveReviewVerdict = ({ db, recordId, stepId }: { db: any; recordId: s
   LIMIT 1
 `).get(recordId, stepId, stepId));
 
-const countAwaitingReview = ({ db, stepIds }: { db: any; stepIds: string[] }) => {
-  if (stepIds.length === 0) return 0;
-  const placeholders = stepIds.map(() => '?').join(', ');
-  return Number(db.prepare(`
-    SELECT COUNT(DISTINCT event.record_id) AS n
-    FROM pipeline_events event
-    JOIN records record ON record._row_id = event.record_id
-    WHERE event.kind = 'review'
-      AND event.step_id IN (${placeholders})
-      AND event.passed = 0
-      AND event.reason = 'awaiting_review'
-      AND ${inPlayWhere('record')}
-      AND record.sequence_status != 'opted_out'
-      AND NOT EXISTS (
-        SELECT 1
-        FROM pipeline_events passed
-        WHERE passed.record_id = event.record_id
-          AND passed.step_id = event.step_id
-          AND passed.kind = 'review'
-          AND passed.passed = 1
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM overrides verdict
-        WHERE verdict.record_id = event.record_id
-          AND (verdict.cleared_at IS NULL OR verdict.cleared_at = '')
-          AND (
-            (verdict.kind = 'keep' AND (verdict.step_id = event.step_id OR verdict.step_id = ''))
-            OR (
-              verdict.kind = 'drop'
-              AND verdict.step_id = ''
-              AND verdict.created_by = 'review:' || event.step_id
-            )
-          )
-      )
-  `).get(...stepIds)?.n || 0);
-};
-
 type KeepDirective = { keepAll: boolean; keepSteps: Set<string> };
 
 const initializeResolved = ({
@@ -376,6 +339,10 @@ const initializeResolved = ({
       const step = steps.find((entry) => entry.id === stepId);
       if (!step) return true;
       if (step.kind === 'enrich') return !force;
+      if (step.kind === 'review') {
+        if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
+        return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
+      }
       if (step.kind !== 'filter') return true;
       if (reapply) return false;
       const staleStepId = filterStalenessStepId(step.id);
@@ -721,10 +688,7 @@ export const runPipelineDataflow = async ({
     });
 
     summary.survivors = Number(db.prepare(`SELECT COUNT(*) AS n FROM records WHERE ${inPlayWhere()}`).get()?.n || 0);
-    summary.awaiting_review = countAwaitingReview({
-      db,
-      stepIds: steps.filter((step) => step.kind === 'review').map((step) => step.id),
-    });
+    summary.awaiting_review = countAwaitingReviewRecords({ db, config });
     const funnel = {
       records_in: summary.records_in,
       by_step: summary.by_step,

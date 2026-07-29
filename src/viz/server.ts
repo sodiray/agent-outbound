@@ -7,7 +7,19 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { buildMeta, getCounts, getProgress, getRecordDetail, getTerritories, getTerritoryNotesForViz, insertTerritoryNoteForViz, queryRecords } from './data.js';
+import {
+  applyReviewDecisionsForViz,
+  buildMeta,
+  clearReviewDecisionForViz,
+  getCounts,
+  getProgress,
+  getRecordDetail,
+  getReviewQueueForViz,
+  getTerritories,
+  getTerritoryNotesForViz,
+  insertTerritoryNoteForViz,
+  queryRecords,
+} from './data.js';
 
 const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 const uiDistDir = resolve(moduleDir, 'ui/dist');
@@ -112,6 +124,44 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         c.req.param('id'),
         String(body?.body || ''),
         String(body?.by || ''),
+      ));
+    } catch (error) {
+      return c.json({ error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.get('/api/review/:stageId', (c) => {
+    try {
+      return c.json(getReviewQueueForViz(
+        listDir,
+        c.req.param('stageId'),
+        Number(c.req.query('limit') || 100),
+        Number(c.req.query('offset') || 0),
+      ));
+    } catch (error) {
+      return c.json({ error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.post('/api/review/:stageId/decisions', async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      return c.json(applyReviewDecisionsForViz(
+        listDir,
+        c.req.param('stageId'),
+        body?.decisions,
+      ));
+    } catch (error) {
+      return c.json({ error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.delete('/api/review/decisions/:rowId', (c) => {
+    try {
+      return c.json(clearReviewDecisionForViz(
+        listDir,
+        c.req.param('rowId'),
+        String(c.req.query('stage') || ''),
       ));
     } catch (error) {
       return c.json({ error: String(error?.message || error) }, 500);

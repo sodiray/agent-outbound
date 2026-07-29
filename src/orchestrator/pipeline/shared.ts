@@ -3,6 +3,7 @@ import { evaluateFieldCheckGroup } from '../lib/conditions.js';
 import { countEnrichWorkForStep, readStaleness } from '../enrichment/runner.js';
 import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
+import { isRecordAwaitingReview } from './review.js';
 
 const MATERIAL_FILTER_FIELDS = ['type', 'match', 'condition', 'conditions', 'value', 'operator', 'field', 'on_fail', 'model'] as const;
 
@@ -114,7 +115,11 @@ export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: 
     }
 
     if (kind === 'review') {
-      const evalRows = active.filter((record) => !hasPassedStep({ db, recordId: getRecordRowId(record), stepId }));
+      const evalRows = active.filter((record) => {
+        const recordId = getRecordRowId(record);
+        return !hasPassedStep({ db, recordId, stepId })
+          || isRecordAwaitingReview({ db, recordId, stageId: stepId });
+      });
       const skippedPassed = active.length - evalRows.length;
       const matchingRows = evalRows.filter((record) => {
         if (!step?.when || typeof step.when !== 'object') return true;

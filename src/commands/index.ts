@@ -1953,6 +1953,14 @@ export {
 } from './overrides.js';
 
 export {
+  reviewClearCommand,
+  reviewDropCommand,
+  reviewListCommand,
+  reviewPassCommand,
+  reviewStagesCommand,
+} from './review.js';
+
+export {
   draftsApproveCommand,
   draftsEditCommand,
   draftsListCommand,

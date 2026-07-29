@@ -36,6 +36,11 @@ import {
   overrideClearCommand,
   overrideListCommand,
   overrideShowCommand,
+  reviewClearCommand,
+  reviewDropCommand,
+  reviewListCommand,
+  reviewPassCommand,
+  reviewStagesCommand,
   pipelineShowCommand,
   queryCommand,
   refreshToolsCommand,
@@ -230,6 +235,11 @@ const printHelp = () => {
   process.stdout.write(`  override clear <list> <record> [--step STEP_ID]                             # remove human overrides on a lead\n`);
   process.stdout.write(`  override list <list>                                                        # active keep/drop overrides\n`);
   process.stdout.write(`  override show <list> <record>                                               # decision history for one lead\n`);
+  process.stdout.write(`  review stages <list>                                                        # configured review stages and awaiting counts\n`);
+  process.stdout.write(`  review list <list> --stage ID [--limit N] [--offset N]                      # records awaiting a stage verdict\n`);
+  process.stdout.write(`  review pass <list> <record> --stage ID [--reason TEXT]                      # approve a record at a review stage\n`);
+  process.stdout.write(`  review drop <list> <record> --stage ID --reason TEXT                        # drop a record from a review stage\n`);
+  process.stdout.write(`  review clear <list> <record> --stage ID                                     # clear a review verdict\n`);
   process.stdout.write(`  pipeline show <list> [--format json|summary]\n`);
   process.stdout.write(`  pipeline report <list> [--json] [--run latest]\n`);
   process.stdout.write(`  route show <list> --date YYYY-MM-DD [--include enrichment,contacts,prior-touches]\n`);
@@ -844,6 +854,52 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown override subcommand: ${sub}`);
+  }
+
+  if (command === 'review') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'stages') {
+      const list = String(argv.shift() || '');
+      setResponseContext({ command: 'review stages', list });
+      print(reviewStagesCommand({ list }));
+      return;
+    }
+    if (sub === 'list') {
+      const list = String(argv.shift() || '');
+      const stage = consumeFlag(argv, '--stage', '');
+      const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
+      const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
+      setResponseContext({ command: 'review list', list });
+      print(reviewListCommand({ list, stage, limit, offset }));
+      return;
+    }
+    if (sub === 'pass') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const stage = consumeFlag(argv, '--stage', '');
+      const reason = consumeFlag(argv, '--reason', '');
+      setResponseContext({ command: 'review pass', list });
+      print(reviewPassCommand({ list, ref, stage, reason }));
+      return;
+    }
+    if (sub === 'drop') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const stage = consumeFlag(argv, '--stage', '');
+      const reason = consumeFlag(argv, '--reason', '');
+      setResponseContext({ command: 'review drop', list });
+      print(reviewDropCommand({ list, ref, stage, reason }));
+      return;
+    }
+    if (sub === 'clear') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const stage = consumeFlag(argv, '--stage', '');
+      setResponseContext({ command: 'review clear', list });
+      print(reviewClearCommand({ list, ref, stage }));
+      return;
+    }
+    throw new Error(`Unknown review subcommand: ${sub}`);
   }
 
   if (command === 'record') {

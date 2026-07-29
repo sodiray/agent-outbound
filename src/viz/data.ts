@@ -1,9 +1,32 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
-import { getAssetsForRow, getBriefForRecord, getTerritoryNotes, insertTerritoryNote, listFieldOverridesForRecord, listInteractionsForRecord, listOverridesForRecord, OVERRIDE_GATE, openListDb } from '../orchestrator/runtime/db.js';
+import {
+  getAssetsForRow,
+  getBriefForRecord,
+  getRecordById,
+  getTerritoryNotes,
+  insertTerritoryNote,
+  listFieldOverridesForRecord,
+  listInteractionsForRecord,
+  listOverridesForRecord,
+  OVERRIDE_GATE,
+  openListDb,
+  reconcileOverrides,
+} from '../orchestrator/runtime/db.js';
 import { LEAD_STATUSES, leadStatus, leadStatusCaseSql } from '../orchestrator/runtime/status.js';
 import { getEnv } from '../orchestrator/runtime/env.js';
+import {
+  clearReviewDecision,
+  getReviewQueue,
+  getReviewStages,
+  insertReviewDecision,
+  requireReviewStage,
+  reviewDecisionResult,
+  reviewRecordDecisionState,
+  reviewRecordLabel,
+  type ReviewDecision,
+} from '../orchestrator/pipeline/review.js';
 
 const NUMERIC_COLUMNS = new Set([
   'priority_rank',
@@ -483,6 +506,94 @@ export const insertTerritoryNoteForViz = (listDir: string, territoryId: string, 
   }
 };
 
+export const getReviewQueueForViz = (listDir: string, stageId: string, limit = 100, offset = 0) => {
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    const { config } = readConfig(listDir);
+    return getReviewQueue({ db, config, stageId, limit, offset });
+  } finally {
+    db.close();
+  }
+};
+
+export const applyReviewDecisionsForViz = (listDir: string, stageId: string, decisions: unknown) => {
+  if (!Array.isArray(decisions)) throw new Error('Review decisions body must contain a decisions array.');
+  if (decisions.length > 500) throw new Error('Review decision batches are capped at 500 rows.');
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    const { config } = readConfig(listDir);
+    const stage = requireReviewStage({ config, stageId });
+    const write = db.transaction(() => {
+      const outcomes = (decisions as ReviewDecision[]).map((input, index) => {
+        try {
+          return {
+            ok: true,
+            index,
+            decision: insertReviewDecision({
+              db,
+              config,
+              ref: String(input?.row_id || ''),
+              stageId: stage.id,
+              verdict: String(input?.verdict || ''),
+              reason: String(input?.reason || ''),
+            }),
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            index,
+            row_id: String(input?.row_id || ''),
+            verdict: String(input?.verdict || ''),
+            error: String((error as Error)?.message || error),
+          };
+        }
+      });
+      reconcileOverrides({ db });
+      return outcomes.map((outcome: any) => outcome.ok
+        ? { ok: true, index: outcome.index, ...reviewDecisionResult({ db, decision: outcome.decision }) }
+        : outcome);
+    });
+    const results = write();
+    return {
+      stage,
+      requested: decisions.length,
+      applied: results.filter((result: any) => result.ok).length,
+      failed: results.filter((result: any) => !result.ok).length,
+      results,
+    };
+  } finally {
+    db.close();
+  }
+};
+
+export const clearReviewDecisionForViz = (listDir: string, rowId: string, stageId: string) => {
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    const { config } = readConfig(listDir);
+    const write = db.transaction(() => {
+      const result = clearReviewDecision({ db, config, ref: rowId, stageId });
+      reconcileOverrides({ db });
+      const record = getRecordById({ db, id: String(result.record._row_id) }) || result.record;
+      return {
+        status: result.cleared.length > 0 ? 'review_cleared' : 'noop',
+        stage: result.stage,
+        cleared_count: result.cleared.length,
+        cleared: result.cleared.map((override: any) => ({
+          id: String(override.id || ''),
+          kind: String(override.kind || ''),
+          step_id: String(override.step_id || ''),
+          reason: String(override.reason || ''),
+        })),
+        record: reviewRecordLabel(record),
+        state: reviewRecordDecisionState(record),
+      };
+    });
+    return write();
+  } finally {
+    db.close();
+  }
+};
+
 export const buildMeta = (listDir: string) => {
   const db = openListDb({ listDir, readonly: true });
   try {
@@ -556,6 +667,7 @@ export const buildMeta = (listDir: string) => {
       columns,
       filters,
       territories,
+      review_stages: getReviewStages({ db, config }),
       mapsApiKey: getEnv('GOOGLE_MAPS_API_KEY'),
       scoreMinimum: Number(config?.score?.minimum ?? 0),
     };
