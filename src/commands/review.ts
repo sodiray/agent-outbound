@@ -64,7 +64,7 @@ const reviewVerdictCommand = ({
     const decision = insertReviewDecision({ db, config, ref, stageId: stage, verdict, reason });
     reconcileOverrides({ db });
     return {
-      status: verdict === 'pass' ? 'review_passed' : 'review_dropped',
+      status: verdict === 'pass' ? 'review_approved' : 'review_rejected',
       stage: decision.stage,
       override: decision.override,
       ...reviewDecisionResult({ db, decision }),

@@ -3,6 +3,9 @@ import type {
   MetaResponse,
   RecordDetail,
   RecordsResponse,
+  RejectedRecordsResponse,
+  RejectedRestoreResponse,
+  RejectedSourcesResponse,
   ReviewDecisionBatchResponse,
   ReviewDecisionInput,
   ReviewQueueResponse,
@@ -103,3 +106,28 @@ export const clearReviewDecision = (stageId: string, rowId: string) => {
     { method: 'DELETE' },
   );
 };
+
+export const fetchRejectedSources = () => getJson<RejectedSourcesResponse>('/api/rejected/sources');
+
+export const fetchRejectedRecords = ({
+  source = '',
+  limit = 50,
+  offset = 0,
+}: {
+  source?: string;
+  limit?: number;
+  offset?: number;
+}) => {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (source) params.set('source', source);
+  return getJson<RejectedRecordsResponse>(`/api/rejected?${params.toString()}`);
+};
+
+export const restoreRejectedRecord = (rowId: string) => requestJson<RejectedRestoreResponse>(
+  `/api/rejected/${encodeURIComponent(rowId)}/restore`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  },
+);

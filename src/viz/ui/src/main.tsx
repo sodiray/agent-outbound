@@ -4,6 +4,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { App } from './App.js';
 import { MapRoute } from './MapRoute.js';
 import { ReviewRoute } from './ReviewRoute.js';
+import { RejectedRoute } from './RejectedRoute.js';
 import './styles.css';
 
 createRoot(document.getElementById('root') as HTMLElement).render(
@@ -13,6 +14,7 @@ createRoot(document.getElementById('root') as HTMLElement).render(
         <Route path="/" element={<App />} />
         <Route path="/map" element={<MapRoute />} />
         <Route path="/review" element={<ReviewRoute />} />
+        <Route path="/rejected" element={<RejectedRoute />} />
       </Routes>
     </BrowserRouter>
   </React.StrictMode>,

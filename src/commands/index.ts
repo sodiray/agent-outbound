@@ -1961,6 +1961,12 @@ export {
 } from './review.js';
 
 export {
+  rejectedListCommand,
+  rejectedRestoreCommand,
+  rejectedSourcesCommand,
+} from './rejected.js';
+
+export {
   draftsApproveCommand,
   draftsEditCommand,
   draftsListCommand,

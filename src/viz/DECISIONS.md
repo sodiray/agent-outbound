@@ -8,14 +8,14 @@
 - Implemented server-side table filtering/sorting against the locked API contract. Enum filters are single-select because the API accepts one `filter.<key>` value per key; range filters use min/max number inputs.
 - Default table columns are identity, priority, fit, trigger, and one status chip column for each filter/enrich pipeline step that exposes a `<step>__status` column. Additional columns are toggleable through the column picker.
 - Detail drawer fetches `GET /api/records/:rowId` on demand and shows score axes, reasoning, criteria definitions/weights, priority blend math, per-step metadata, outputs, status filtering, and timeline.
-- Updated `src/cli.ts` so `view` installs the isolated UI dependencies with `npm install --no-audit --no-fund` when `src/viz/ui/node_modules` is missing, then runs `npm run build` when `dist/index.html` is missing or `--build` is passed.
+- Updated `src/cli.ts` so `view` installs the isolated UI dependencies with `npm install --no-audit --no-fund` when `src/viz/ui/node_modules` is missing, then rebuilds and copies the UI when the served `dist/viz/ui/dist/index.html` bundle is missing, stale, or `--build` is passed.
 
 ## Assumptions
 
 - The backend continues to serve `/api/meta`, `/api/records`, and `/api/records/:rowId` exactly as documented in `/Users/rayepps/projects/mission/plans/outbound-viz.md`.
 - The source record may use either `business_name` or `name` and either `address` or `formattedAddress`; the table/detail UI checks both.
 - `_created_at` is available for the Newest preset. If a list lacks `_created_at`, the backend currently falls back to its default sort handling rather than the UI selecting `sourced_at`.
-- The built static files are intended to be committed or otherwise present under `src/viz/ui/dist` for the Hono static server.
+- `src/viz/ui/dist` is ignored intermediate output. The root asset-copy step places that bundle under `dist/viz/ui/dist`, where the compiled Hono server reads it.
 
 ## Known gaps / risks
 

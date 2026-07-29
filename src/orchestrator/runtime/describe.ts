@@ -1,5 +1,6 @@
 export type CommandDefinition = {
   name: string;
+  aliases?: string[];
   description: string;
   mutating: boolean;
   flags: Array<{
@@ -178,8 +179,9 @@ const CATALOG: CommandDefinition[] = [
     examples: ['agent-outbound review list my-list --stage sourced_review --limit 100 --offset 0'],
   },
   {
-    name: 'review pass',
-    description: 'Record a keep verdict scoped to one review stage.',
+    name: 'review approve',
+    aliases: ['review pass'],
+    description: 'Approve a record at one review stage.',
     mutating: true,
     flags: [
       { name: '--stage', type: 'string', required: true, description: 'Configured review stage id.' },
@@ -187,11 +189,12 @@ const CATALOG: CommandDefinition[] = [
     ],
     input_schema: { list: 'string', record: 'string', stage: 'string', reason: 'optional string' },
     output_schema: { ...COMMON_OUTPUT, result: { status: 'string', stage: 'object', override: 'object', record: 'object', state: 'object' } },
-    examples: ['agent-outbound review pass my-list rec_123 --stage sourced_review'],
+    examples: ['agent-outbound review approve my-list rec_123 --stage sourced_review'],
   },
   {
-    name: 'review drop',
-    description: 'Record a blanket drop verdict authored at one review stage.',
+    name: 'review reject',
+    aliases: ['review drop'],
+    description: 'Reject a record with a blanket override authored at one review stage.',
     mutating: true,
     flags: [
       { name: '--stage', type: 'string', required: true, description: 'Configured review stage id.' },
@@ -199,7 +202,7 @@ const CATALOG: CommandDefinition[] = [
     ],
     input_schema: { list: 'string', record: 'string', stage: 'string', reason: 'string' },
     output_schema: { ...COMMON_OUTPUT, result: { status: 'string', stage: 'object', override: 'object', record: 'object', state: 'object' } },
-    examples: ['agent-outbound review drop my-list rec_123 --stage sourced_review --reason "Not a viable lead"'],
+    examples: ['agent-outbound review reject my-list rec_123 --stage sourced_review --reason "Not a viable lead"'],
   },
   {
     name: 'review clear',
@@ -211,6 +214,39 @@ const CATALOG: CommandDefinition[] = [
     input_schema: { list: 'string', record: 'string', stage: 'string' },
     output_schema: { ...COMMON_OUTPUT, result: { status: 'string', stage: 'object', cleared_count: 'number', record: 'object', state: 'object' } },
     examples: ['agent-outbound review clear my-list rec_123 --stage sourced_review'],
+  },
+  {
+    name: 'rejected sources',
+    description: 'List rejection sources and their current record counts.',
+    mutating: false,
+    flags: [],
+    input_schema: { list: 'string' },
+    output_schema: { ...COMMON_OUTPUT, result: { total: 'number', sources: 'array' } },
+    examples: ['agent-outbound rejected sources my-list'],
+  },
+  {
+    name: 'rejected list',
+    description: 'List rejected records, optionally filtered by rejection source.',
+    mutating: false,
+    flags: [
+      { name: '--source', type: 'string', required: false, description: 'Disqualification source id.' },
+      { name: '--limit', type: 'number', default: 100, description: 'Page size, capped at 500.' },
+      { name: '--offset', type: 'number', default: 0, description: 'Stable page offset.' },
+    ],
+    input_schema: { list: 'string', source: 'optional string', limit: 'optional number', offset: 'optional number' },
+    output_schema: { ...COMMON_OUTPUT, result: { source: 'string', total: 'number', limit: 'number', offset: 'number', records: 'array' } },
+    examples: ['agent-outbound rejected list my-list --source address_gate --limit 100 --offset 0'],
+  },
+  {
+    name: 'rejected restore',
+    description: 'Restore a rejected record by clearing its drop override or adding a scoped keep override.',
+    mutating: true,
+    flags: [
+      { name: '--reason', type: 'string', required: false, description: 'Required when overriding a gate or score rejection.' },
+    ],
+    input_schema: { list: 'string', record: 'string', reason: 'optional string' },
+    output_schema: { ...COMMON_OUTPUT, result: { status: 'string', mechanism: 'string', source: 'string', restored: 'boolean', record: 'object', state: 'object' } },
+    examples: ['agent-outbound rejected restore my-list rec_123 --reason "Reviewed and approved"'],
   },
   {
     name: 'route show',
@@ -470,5 +506,8 @@ const CATALOG: CommandDefinition[] = [
 export const listCommandDefinitions = ({ command = '' }: { command?: string } = {}) => {
   const normalized = String(command || '').trim().toLowerCase();
   if (!normalized) return CATALOG;
-  return CATALOG.filter((item) => item.name.toLowerCase() === normalized);
+  return CATALOG.filter((item) => (
+    item.name.toLowerCase() === normalized
+    || (item.aliases || []).some((alias) => alias.toLowerCase() === normalized)
+  ));
 };

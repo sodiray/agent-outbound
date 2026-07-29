@@ -10,6 +10,7 @@ import { listConnectedToolkits } from '../orchestrator/runtime/mcp.js';
 import { getDbPath, getSnapshotsDir, resolveListDir } from '../orchestrator/runtime/paths.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { assertConfigModelReferences } from '../orchestrator/lib/model-validation.js';
+import { reviewStageFieldWarnings } from '../orchestrator/pipeline/review.js';
 import { normalizeConfig } from '../schemas/config.js';
 
 type SnapshotManifest = {
@@ -239,6 +240,13 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
   const scoreDescription = String(config?.score?.description || '').trim();
   const scoreCriteria = Array.isArray(config?.score?.criteria) ? config.score.criteria : [];
   if (!scoreDescription && scoreCriteria.length === 0) errors.push('score.description or score.criteria must be provided.');
+
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    warnings.push(...reviewStageFieldWarnings({ db, config }));
+  } finally {
+    db.close();
+  }
 
   const outputOwners = new Map<string, string>();
   const enrichSteps = (Array.isArray(config?.pipeline) ? config.pipeline : []).filter((step: any) => String(step?.kind || '') === 'enrich');

@@ -759,6 +759,7 @@ export const MapRoute = () => {
         <nav className="route-nav" aria-label="Primary">
           <Link to="/">Table</Link>
           <Link to="/review">Review</Link>
+          <Link to="/rejected">Rejected</Link>
         </nav>
       </header>
       <div className="map-canvas">

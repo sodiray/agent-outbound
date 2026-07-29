@@ -15,18 +15,21 @@ import {
   getCounts,
   getProgress,
   getRecordDetail,
+  getRejectedRecordsForViz,
+  getRejectedSourcesForViz,
   getReviewQueueForViz,
   getTerritories,
   getTerritoryNotesForViz,
   insertTerritoryNoteForViz,
   queryRecords,
+  restoreRejectedRecordForViz,
 } from './data.js';
 
 const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 const uiDistDir = resolve(moduleDir, 'ui/dist');
 const uiIndexPath = resolve(uiDistDir, 'index.html');
 
-const reviewErrorResponse = (c: Context, error: unknown) => {
+const apiErrorResponse = (c: Context, error: unknown) => {
   const message = String(error instanceof Error ? error.message : error);
   if (error instanceof AgentOutboundError && error.code === 'NOT_FOUND') {
     return c.json({ error: message }, 404);
@@ -151,7 +154,7 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         Number(c.req.query('offset') || 0),
       ));
     } catch (error) {
-      return reviewErrorResponse(c, error);
+      return apiErrorResponse(c, error);
     }
   });
 
@@ -164,7 +167,7 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         body?.decisions,
       ));
     } catch (error) {
-      return reviewErrorResponse(c, error);
+      return apiErrorResponse(c, error);
     }
   });
 
@@ -176,7 +179,41 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         String(c.req.query('stage') || ''),
       ));
     } catch (error) {
-      return reviewErrorResponse(c, error);
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.get('/api/rejected/sources', (c) => {
+    try {
+      return c.json(getRejectedSourcesForViz(listDir));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.get('/api/rejected', (c) => {
+    try {
+      return c.json(getRejectedRecordsForViz(
+        listDir,
+        String(c.req.query('source') || ''),
+        Number(c.req.query('limit') || 100),
+        Number(c.req.query('offset') || 0),
+      ));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.post('/api/rejected/:rowId/restore', async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      return c.json(restoreRejectedRecordForViz(
+        listDir,
+        c.req.param('rowId'),
+        String(body?.reason || ''),
+      ));
+    } catch (error) {
+      return apiErrorResponse(c, error);
     }
   });
 
@@ -216,8 +253,9 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
     app.use('/*', serveStatic({ root: staticRoot }));
     app.get('*', (c) => c.html(readFileSync(uiIndexPath, 'utf8')));
   } else {
-    app.get('/', (c) => c.html('<!doctype html><html><head><meta charset="utf-8"><title>Agent Outbound Viz</title></head><body><h1>UI not built yet — run with --build</h1><p>The JSON API is available under /api.</p></body></html>'));
-    app.get('*', (c) => c.html('<!doctype html><html><head><meta charset="utf-8"><title>Agent Outbound Viz</title></head><body><h1>UI not built yet — run with --build</h1><p>The JSON API is available under /api.</p></body></html>'));
+    const missingUiHtml = '<!doctype html><html><head><meta charset="utf-8"><title>Agent Outbound Viz</title></head><body><h1>UI bundle is missing from dist/viz/ui/dist</h1><p>Build src/viz/ui, then run the root build to copy the bundle into dist.</p><pre>npm --prefix src/viz/ui run build &amp;&amp; npm run build</pre><p>The JSON API is available under /api.</p></body></html>';
+    app.get('/', (c) => c.html(missingUiHtml));
+    app.get('*', (c) => c.html(missingUiHtml));
   }
 
   const finalPort = await findFreePort(port);

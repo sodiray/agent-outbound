@@ -1337,6 +1337,7 @@ export const App = () => {
         <nav className="route-nav" aria-label="Primary">
           <Link to="/map">Map</Link>
           <Link to="/review">Review</Link>
+          <Link to="/rejected">Rejected</Link>
         </nav>
       </header>
       <section className="toolbar">

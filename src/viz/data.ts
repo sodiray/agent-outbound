@@ -22,12 +22,18 @@ import {
   getReviewQueue,
   getReviewStages,
   insertReviewDecision,
-  requireReviewStage,
+  requireResolvedReviewStage,
   reviewDecisionResult,
   reviewRecordDecisionState,
   reviewRecordLabel,
   type ReviewDecision,
 } from '../orchestrator/pipeline/review.js';
+import {
+  DEFAULT_REJECTED_RESTORE_REASON,
+  getRejectedRecords,
+  getRejectedSources,
+  restoreRejectedRecord,
+} from '../orchestrator/pipeline/rejected.js';
 
 const NUMERIC_COLUMNS = new Set([
   'priority_rank',
@@ -535,7 +541,7 @@ export const applyReviewDecisionsForViz = (listDir: string, stageId: string, dec
   const db = openListDb({ listDir, readonly: false });
   try {
     const { config } = readConfig(listDir);
-    const stage = requireReviewStage({ config, stageId });
+    const stage = requireResolvedReviewStage({ db, config, stageId });
     const write = db.transaction(() => {
       const outcomes = (decisions as ReviewDecision[]).map((input, index) => {
         try {
@@ -602,6 +608,51 @@ export const clearReviewDecisionForViz = (listDir: string, rowId: string, stageI
       };
     });
     return write();
+  } finally {
+    db.close();
+  }
+};
+
+export const getRejectedSourcesForViz = (listDir: string) => {
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    const { config } = readConfig(listDir);
+    return getRejectedSources({ db, config });
+  } finally {
+    db.close();
+  }
+};
+
+export const getRejectedRecordsForViz = (
+  listDir: string,
+  source = '',
+  limit = 100,
+  offset = 0,
+) => {
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    const { config } = readConfig(listDir);
+    return getRejectedRecords({ db, config, source, limit, offset });
+  } finally {
+    db.close();
+  }
+};
+
+export const restoreRejectedRecordForViz = (
+  listDir: string,
+  rowId: string,
+  reason = DEFAULT_REJECTED_RESTORE_REASON,
+) => {
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    const { config } = readConfig(listDir);
+    return db.transaction(() => restoreRejectedRecord({
+      db,
+      config,
+      ref: rowId,
+      reason: String(reason || DEFAULT_REJECTED_RESTORE_REASON),
+      createdBy: 'rejected:viz',
+    }))();
   } finally {
     db.close();
   }

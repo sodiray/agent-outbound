@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   clearReviewDecision,
@@ -10,34 +10,29 @@ import type {
   MetaResponse,
   RecordRow,
   RecordValue,
-  ReviewDecisionInput,
-  ReviewDecisionResult,
-  ReviewVerdict,
 } from './types.js';
 
-type PendingDecision = ReviewDecisionInput & {
-  stage_id: string;
-  record: RecordRow;
-};
+type ReviewActionVerdict = 'approve' | 'reject';
 
-type DecisionHistoryItem = PendingDecision & {
-  state: 'pending' | 'submitted';
+type DecisionHistoryItem = {
+  sequence: number;
+  stage_id: string;
+  row_id: string;
+  verdict: ReviewActionVerdict;
+  record: RecordRow;
+  state: 'saving' | 'saved';
 };
 
 type DecisionFailure = {
   stage_id: string;
   row_id: string;
   business_name: string;
+  action: string;
   error: string;
+  detail: string;
 };
 
-type ReconciledDecision = {
-  decision: PendingDecision;
-  result: ReviewDecisionResult;
-};
-
-const DEFAULT_DROP_REASON = 'reviewed: not a fit';
-const BATCH_SIZE = 500;
+const DEFAULT_REJECT_REASON = 'reviewed: not a fit';
 
 const rowId = (record: RecordRow) => String(record._row_id ?? '');
 const decisionKey = ({ stage_id, row_id }: { stage_id: string; row_id: string }) => `${stage_id}:${row_id}`;
@@ -48,11 +43,19 @@ const labelFor = (key: string) => key
   .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
   .join(' ') || key;
 
+const hasDisplayValue = (value: RecordValue | undefined) => (
+  value !== null
+  && value !== undefined
+  && (typeof value !== 'string' || value.trim() !== '')
+);
+
 const displayValue = (value: RecordValue | undefined) => {
-  if (value === null || value === undefined || value === '') return 'n/a';
+  if (!hasDisplayValue(value)) return '';
   if (typeof value === 'boolean') return value ? 'yes' : 'no';
   return String(value);
 };
+
+const recordName = (record: RecordRow) => displayValue(record.business_name) || 'Unnamed lead';
 
 const isWebsiteField = (field: string) => field.toLowerCase().includes('website');
 
@@ -61,15 +64,31 @@ const websiteHref = (value: string) => {
   return `https://${value}`;
 };
 
-const chunkDecisions = (decisions: PendingDecision[]) => Array.from(
-  { length: Math.ceil(decisions.length / BATCH_SIZE) },
-  (_, index) => decisions.slice(index * BATCH_SIZE, (index + 1) * BATCH_SIZE),
-);
-
 const isTypingTarget = (target: EventTarget | null) => {
   if (!(target instanceof HTMLElement)) return false;
   return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'].includes(target.tagName);
 };
+
+const restoreRecordInOrder = ({
+  records,
+  record,
+  order,
+}: {
+  records: RecordRow[];
+  record: RecordRow;
+  order: string[];
+}) => {
+  if (records.some((candidate) => rowId(candidate) === rowId(record))) return records;
+  const rank = new Map(order.map((id, index) => [id, index]));
+  return [...records, record].sort((left, right) => (
+    (rank.get(rowId(left)) ?? Number.MAX_SAFE_INTEGER)
+    - (rank.get(rowId(right)) ?? Number.MAX_SAFE_INTEGER)
+  ));
+};
+
+const actionLabel = (verdict: ReviewActionVerdict) => verdict === 'approve' ? 'Approve' : 'Reject';
+const actionPastTense = (verdict: ReviewActionVerdict) => verdict === 'approve' ? 'Approved' : 'Rejected';
+const actionInProgress = (verdict: ReviewActionVerdict) => verdict === 'approve' ? 'Approving' : 'Rejecting';
 
 export const ReviewRoute = () => {
   const [meta, setMeta] = useState<MetaResponse | null>(null);
@@ -77,15 +96,18 @@ export const ReviewRoute = () => {
   const [queues, setQueues] = useState<Record<string, RecordRow[]>>({});
   const [loadingStageId, setLoadingStageId] = useState('');
   const [cursor, setCursor] = useState(0);
-  const [pending, setPending] = useState<PendingDecision[]>([]);
   const [history, setHistory] = useState<DecisionHistoryItem[]>([]);
   const [failures, setFailures] = useState<DecisionFailure[]>([]);
-  const [dropReason, setDropReason] = useState(DEFAULT_DROP_REASON);
-  const [submitting, setSubmitting] = useState(false);
   const [undoing, setUndoing] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const cardRefs = useRef<Record<string, HTMLElement | null>>({});
+  const rowRefs = useRef<Record<string, HTMLElement | null>>({});
+  const queueOrder = useRef<Record<string, string[]>>({});
+  const loadedStages = useRef(new Set<string>());
+  const inFlightDecisions = useRef(new Set<string>());
+  const undoingRef = useRef(false);
+  const actionSequence = useRef(0);
+  const latestActionSequence = useRef(0);
 
   useEffect(() => {
     fetchMeta()
@@ -101,13 +123,15 @@ export const ReviewRoute = () => {
   }, []);
 
   useEffect(() => {
-    if (!activeStageId) return undefined;
+    if (!activeStageId || loadedStages.current.has(activeStageId)) return undefined;
     const request = { cancelled: false };
     setLoadingStageId(activeStageId);
     setError('');
     fetchReviewQueue(activeStageId)
       .then((queue) => {
         if (request.cancelled) return;
+        loadedStages.current.add(activeStageId);
+        queueOrder.current[activeStageId] = queue.records.map(rowId);
         setQueues((current) => ({ ...current, [activeStageId]: queue.records }));
         setMeta((current) => current
           ? {
@@ -130,149 +154,163 @@ export const ReviewRoute = () => {
   }, [activeStageId]);
 
   const activeStage = meta?.review_stages.find((stage) => stage.id === activeStageId) || null;
-  const activePending = pending.filter((decision) => decision.stage_id === activeStageId);
-  const pendingIds = useMemo(
-    () => new Set(activePending.map((decision) => decision.row_id)),
-    [activePending],
-  );
   const activeRecords = queues[activeStageId] || [];
-  const visibleRecords = activeRecords.filter((record) => !pendingIds.has(rowId(record)));
-  const selectedRecord = visibleRecords[cursor] || null;
+  const selectedRecord = activeRecords[cursor] || null;
   const activeFailures = failures.filter((failure) => failure.stage_id === activeStageId);
+  const visibleFields = (activeStage?.fields || [])
+    .filter((field) => field !== '_row_id' && field !== 'business_name');
+  const lastDecision = history.at(-1);
 
   useEffect(() => {
-    setCursor((current) => Math.max(0, Math.min(current, visibleRecords.length - 1)));
-  }, [visibleRecords.length]);
+    setCursor((current) => Math.max(0, Math.min(current, activeRecords.length - 1)));
+  }, [activeRecords.length]);
 
   useEffect(() => {
     if (!selectedRecord) return;
-    cardRefs.current[rowId(selectedRecord)]?.scrollIntoView({ block: 'nearest' });
+    rowRefs.current[rowId(selectedRecord)]?.scrollIntoView({ block: 'nearest' });
   }, [selectedRecord]);
 
-  const selectVerdict = (verdict: ReviewVerdict, record: RecordRow | null = selectedRecord) => {
-    if (!record || !activeStage) return;
-    const decision: PendingDecision = {
-      stage_id: activeStage.id,
-      row_id: rowId(record),
-      verdict,
-      reason: verdict === 'drop' ? (dropReason.trim() || DEFAULT_DROP_REASON) : undefined,
-      record,
-    };
-    setPending((current) => [...current, decision]);
-    setHistory((current) => [...current, { ...decision, state: 'pending' }]);
-    setFailures((current) => current.filter((failure) => decisionKey(failure) !== decisionKey(decision)));
-    setMessage(`${verdict === 'pass' ? 'Passed' : 'Dropped'} ${displayValue(record.business_name)}. Pending submission.`);
-  };
-
-  const refreshStage = async (stageId: string) => {
-    const [nextMeta, queue] = await Promise.all([fetchMeta(), fetchReviewQueue(stageId)]);
-    setMeta(nextMeta);
-    setQueues((current) => ({ ...current, [stageId]: queue.records }));
-  };
-
-  const undoLast = async () => {
-    const last = history.at(-1);
-    if (!last || submitting || undoing) {
-      if (!last) setMessage('Nothing to undo.');
-      return;
-    }
-    setFailures((current) => current.filter((failure) => decisionKey(failure) !== decisionKey(last)));
-    if (last.state === 'pending') {
-      setActiveStageId(last.stage_id);
-      setPending((current) => current.filter((decision) => decisionKey(decision) !== decisionKey(last)));
-      setHistory((current) => current.slice(0, -1));
-      setMessage(`Undid pending ${last.verdict} for ${displayValue(last.record.business_name)}.`);
-      return;
-    }
-    setUndoing(true);
-    setError('');
-    try {
-      await clearReviewDecision(last.stage_id, last.row_id);
-      setHistory((current) => current.slice(0, -1));
-      await refreshStage(last.stage_id);
-      setActiveStageId(last.stage_id);
-      setMessage(`Undid submitted ${last.verdict} for ${displayValue(last.record.business_name)}.`);
-    } catch (nextError) {
-      setError(String((nextError as Error)?.message || nextError));
-    } finally {
-      setUndoing(false);
-    }
-  };
-
-  const submitChunks = async (
-    chunks: PendingDecision[][],
-    reconciled: ReconciledDecision[] = [],
-  ): Promise<ReconciledDecision[]> => {
-    const [chunk, ...remaining] = chunks;
-    if (!chunk) return reconciled;
-    try {
-      const response = await submitReviewDecisions(activeStageId, chunk.map(({ row_id, verdict, reason }) => ({
-        row_id,
-        verdict,
-        reason,
-      })));
-      const next = response.results.map((result) => ({
-        decision: chunk[result.index],
-        result,
-      })).filter((item) => item.decision);
-      return submitChunks(remaining, [...reconciled, ...next]);
-    } catch (nextError) {
-      const failed = chunk.map((decision, index) => ({
-        decision,
-        result: {
-          ok: false,
-          index,
-          row_id: decision.row_id,
-          verdict: decision.verdict,
-          error: String((nextError as Error)?.message || nextError),
-        },
-      }));
-      return submitChunks(remaining, [...reconciled, ...failed]);
-    }
-  };
-
-  const submitPending = async () => {
-    if (activePending.length === 0 || submitting || undoing) return;
-    setSubmitting(true);
-    setError('');
-    setMessage('');
-    const reconciled = await submitChunks(chunkDecisions(activePending));
-    const applied = reconciled.filter(({ result }) => result.ok);
-    const failed = reconciled.filter(({ result }) => !result.ok);
-    const appliedKeys = new Set(applied.map(({ decision }) => decisionKey(decision)));
-    const failedKeys = new Set(failed.map(({ decision }) => decisionKey(decision)));
-    const attemptedKeys = new Set(activePending.map((decision) => decisionKey(decision)));
-    setPending((current) => current.filter((decision) => !attemptedKeys.has(decisionKey(decision))));
-    setQueues((current) => ({
-      ...current,
-      [activeStageId]: (current[activeStageId] || []).filter((record) => (
-        !appliedKeys.has(decisionKey({ stage_id: activeStageId, row_id: rowId(record) }))
-      )),
-    }));
-    setHistory((current) => current
-      .filter((item) => !failedKeys.has(decisionKey(item)))
-      .map((item) => appliedKeys.has(decisionKey(item)) ? { ...item, state: 'submitted' } : item));
-    setFailures((current) => [
-      ...current.filter((failure) => failure.stage_id !== activeStageId),
-      ...failed.map(({ decision, result }) => ({
-        stage_id: decision.stage_id,
-        row_id: decision.row_id,
-        business_name: displayValue(decision.record.business_name),
-        error: String(result.error || 'The decision was not applied.'),
-      })),
-    ]);
+  const adjustAwaitingCount = (stageId: string, delta: number) => {
     setMeta((current) => current
       ? {
         ...current,
         review_stages: current.review_stages.map((stage) => (
-          stage.id === activeStageId
-            ? { ...stage, awaiting_count: Math.max(0, stage.awaiting_count - applied.length) }
+          stage.id === stageId
+            ? { ...stage, awaiting_count: Math.max(0, stage.awaiting_count + delta) }
             : stage
         )),
       }
       : current);
-    setMessage(`${applied.length} decision${applied.length === 1 ? '' : 's'} submitted${failed.length > 0 ? `; ${failed.length} failed and returned to the queue` : ''}.`);
-    setSubmitting(false);
+  };
+
+  const restoreRecord = (stageId: string, record: RecordRow) => {
+    setQueues((current) => ({
+      ...current,
+      [stageId]: restoreRecordInOrder({
+        records: current[stageId] || [],
+        record,
+        order: queueOrder.current[stageId] || [],
+      }),
+    }));
+  };
+
+  const removeRecord = (stageId: string, recordId: string) => {
+    setQueues((current) => ({
+      ...current,
+      [stageId]: (current[stageId] || []).filter((record) => rowId(record) !== recordId),
+    }));
+  };
+
+  const applyDecision = async (
+    verdict: ReviewActionVerdict,
+    record: RecordRow | null = selectedRecord,
+  ) => {
+    if (!record || !activeStage || undoingRef.current) return;
+    const stageId = activeStage.id;
+    const recordId = rowId(record);
+    const key = decisionKey({ stage_id: stageId, row_id: recordId });
+    if (inFlightDecisions.current.has(key)) return;
+
+    const sequence = actionSequence.current + 1;
+    actionSequence.current = sequence;
+    latestActionSequence.current = sequence;
+    const action: DecisionHistoryItem = {
+      sequence,
+      stage_id: stageId,
+      row_id: recordId,
+      verdict,
+      record,
+      state: 'saving',
+    };
+    inFlightDecisions.current.add(key);
+    removeRecord(stageId, recordId);
+    adjustAwaitingCount(stageId, -1);
+    setHistory((current) => [...current, action]);
+    setFailures((current) => current.filter((failure) => decisionKey(failure) !== key));
+    setError('');
+    setMessage(`${actionInProgress(verdict)} ${recordName(record)}…`);
+
+    try {
+      const response = await submitReviewDecisions(stageId, [{
+        row_id: recordId,
+        verdict,
+        reason: verdict === 'reject' ? DEFAULT_REJECT_REASON : undefined,
+      }]);
+      const result = response.results[0];
+      if (!result?.ok) throw new Error(String(result?.error || 'The decision was not applied.'));
+      inFlightDecisions.current.delete(key);
+      setHistory((current) => current.map((item) => (
+        item.sequence === sequence ? { ...item, state: 'saved' } : item
+      )));
+      if (latestActionSequence.current === sequence) {
+        setMessage(`${actionPastTense(verdict)} ${recordName(record)}.`);
+      }
+    } catch (nextError) {
+      inFlightDecisions.current.delete(key);
+      restoreRecord(stageId, record);
+      adjustAwaitingCount(stageId, 1);
+      setHistory((current) => current.filter((item) => item.sequence !== sequence));
+      setFailures((current) => [
+        ...current.filter((failure) => decisionKey(failure) !== key),
+        {
+          stage_id: stageId,
+          row_id: recordId,
+          business_name: recordName(record),
+          action: actionLabel(verdict),
+          error: String((nextError as Error)?.message || nextError),
+          detail: 'The lead was restored to its original place.',
+        },
+      ]);
+      if (latestActionSequence.current === sequence) setMessage('');
+    }
+  };
+
+  const undoLast = async () => {
+    const last = history.at(-1);
+    if (!last) {
+      setMessage('Nothing to undo.');
+      return;
+    }
+    if (last.state === 'saving') {
+      setMessage('Wait for the current decision to finish before undoing it.');
+      return;
+    }
+    if (undoingRef.current) return;
+
+    const key = decisionKey(last);
+    undoingRef.current = true;
+    setUndoing(true);
+    setError('');
+    setFailures((current) => current.filter((failure) => decisionKey(failure) !== key));
+    setHistory((current) => current.filter((item) => item.sequence !== last.sequence));
+    restoreRecord(last.stage_id, last.record);
+    adjustAwaitingCount(last.stage_id, 1);
+    setActiveStageId(last.stage_id);
+    setMessage(`Undoing ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordName(last.record)}…`);
+
+    try {
+      await clearReviewDecision(last.stage_id, last.row_id);
+      setMessage(`Undid ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordName(last.record)}.`);
+    } catch (nextError) {
+      removeRecord(last.stage_id, last.row_id);
+      adjustAwaitingCount(last.stage_id, -1);
+      setHistory((current) => [...current, last].sort((left, right) => left.sequence - right.sequence));
+      setFailures((current) => [
+        ...current.filter((failure) => decisionKey(failure) !== key),
+        {
+          stage_id: last.stage_id,
+          row_id: last.row_id,
+          business_name: displayValue(last.record.business_name),
+          action: 'Undo',
+          error: String((nextError as Error)?.message || nextError),
+          detail: 'The decision remains in effect.',
+        },
+      ]);
+      setMessage('');
+    } finally {
+      undoingRef.current = false;
+      setUndoing(false);
+    }
   };
 
   useEffect(() => {
@@ -280,7 +318,7 @@ export const ReviewRoute = () => {
       if (isTypingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === 'j' || event.key === 'J' || event.key === 'ArrowDown') {
         event.preventDefault();
-        setCursor((current) => Math.min(current + 1, Math.max(0, visibleRecords.length - 1)));
+        setCursor((current) => Math.min(current + 1, Math.max(0, activeRecords.length - 1)));
         return;
       }
       if (event.key === 'k' || event.key === 'K' || event.key === 'ArrowUp') {
@@ -290,12 +328,12 @@ export const ReviewRoute = () => {
       }
       if (event.key === ' ' || event.key === 'Enter') {
         event.preventDefault();
-        selectVerdict('pass');
+        void applyDecision('approve');
         return;
       }
       if (event.key === 'x' || event.key === 'X') {
         event.preventDefault();
-        selectVerdict('drop');
+        void applyDecision('reject');
         return;
       }
       if (event.key === 'u' || event.key === 'U') {
@@ -321,6 +359,7 @@ export const ReviewRoute = () => {
         <nav className="route-nav" aria-label="Primary">
           <Link to="/">Table</Link>
           <Link to="/map">Map</Link>
+          <Link to="/rejected">Rejected</Link>
         </nav>
       </header>
 
@@ -332,8 +371,8 @@ export const ReviewRoute = () => {
         </div>
         <div className="review-shortcuts" aria-label="Keyboard shortcuts">
           <span><kbd>J</kbd>/<kbd>K</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd> move</span>
-          <span><kbd>Space</kbd>/<kbd>Enter</kbd> pass</span>
-          <span><kbd>X</kbd> drop</span>
+          <span><kbd>Space</kbd>/<kbd>Enter</kbd> approve</span>
+          <span><kbd>X</kbd> reject</span>
           <span><kbd>U</kbd> undo</span>
         </div>
       </section>
@@ -360,9 +399,6 @@ export const ReviewRoute = () => {
               >
                 <span>{stage.label}</span>
                 <strong>{stage.awaiting_count}</strong>
-                {pending.some((decision) => decision.stage_id === stage.id)
-                  ? <small>{pending.filter((decision) => decision.stage_id === stage.id).length} pending</small>
-                  : null}
               </button>
             ))}
           </nav>
@@ -374,35 +410,15 @@ export const ReviewRoute = () => {
                   <h2>{activeStage.label}</h2>
                   {activeStage.description ? <p>{activeStage.description}</p> : null}
                 </div>
-                <span>{visibleRecords.length} undecided</span>
-              </div>
-
-              <div className="review-controls">
-                <label>
-                  <span>Default drop reason</span>
-                  <input
-                    value={dropReason}
-                    onChange={(event) => setDropReason(event.target.value)}
-                    placeholder={DEFAULT_DROP_REASON}
-                  />
-                </label>
-                <div className="review-controls__actions">
-                  <span>{activePending.length} pending</span>
+                <div className="review-stage__actions">
+                  <span>{activeRecords.length} awaiting</span>
                   <button
                     className="review-undo"
                     type="button"
                     onClick={() => void undoLast()}
-                    disabled={history.length === 0 || submitting || undoing}
+                    disabled={!lastDecision || lastDecision.state === 'saving' || undoing}
                   >
                     {undoing ? 'Undoing…' : 'Undo last'}
-                  </button>
-                  <button
-                    className="review-submit"
-                    type="button"
-                    onClick={() => void submitPending()}
-                    disabled={activePending.length === 0 || submitting || undoing}
-                  >
-                    {submitting ? 'Submitting…' : `Submit ${activePending.length || ''} decision${activePending.length === 1 ? '' : 's'}`}
                   </button>
                 </div>
               </div>
@@ -411,10 +427,10 @@ export const ReviewRoute = () => {
               {message ? <div className="review-message" role="status">{message}</div> : null}
               {activeFailures.length > 0 ? (
                 <div className="review-failures" role="alert">
-                  <strong>{activeFailures.length} decision{activeFailures.length === 1 ? '' : 's'} failed</strong>
+                  <strong>{activeFailures.length} request{activeFailures.length === 1 ? '' : 's'} failed</strong>
                   {activeFailures.map((failure) => (
                     <span key={decisionKey(failure)}>
-                      {failure.business_name} ({failure.row_id}): {failure.error}
+                      {failure.action} failed for {failure.business_name} ({failure.row_id}): {failure.error} {failure.detail}
                     </span>
                   ))}
                 </div>
@@ -422,43 +438,37 @@ export const ReviewRoute = () => {
 
               {loadingStageId === activeStageId && !queues[activeStageId] ? (
                 <div className="review-empty">Loading {activeStage.label}…</div>
-              ) : visibleRecords.length === 0 ? (
+              ) : activeRecords.length === 0 ? (
                 <div className="review-empty">
-                  <h2>{activePending.length > 0 ? 'All visible leads decided' : 'Nothing awaiting review'}</h2>
-                  <p>{activePending.length > 0 ? 'Submit the pending batch to record these decisions.' : 'This stage is clear.'}</p>
+                  <h2>Nothing awaiting review</h2>
+                  <p>This stage is clear.</p>
                 </div>
               ) : (
-                <div className="review-card-list">
-                  {visibleRecords.map((record, index) => {
+                <div className="review-row-list">
+                  {activeRecords.map((record, index) => {
                     const id = rowId(record);
                     const selected = index === cursor;
+                    const rowFields = visibleFields.filter((field) => hasDisplayValue(record[field]));
                     return (
                       <article
-                        className={`review-card ${selected ? 'is-selected' : ''}`}
+                        className={`review-row ${selected ? 'is-selected' : ''} ${rowFields.length === 0 ? 'has-no-fields' : ''}`}
                         key={id}
-                        ref={(node) => { cardRefs.current[id] = node; }}
+                        ref={(node) => { rowRefs.current[id] = node; }}
                         data-review-row={id}
                         onClick={() => setCursor(index)}
                       >
-                        <div className="review-card__identity">
-                          <span className="review-card__position">{index + 1}</span>
-                          <div>
-                            <h3>{displayValue(record.business_name)}</h3>
-                            <span>{id}</span>
-                          </div>
-                          <div className="review-card__actions">
-                            <button type="button" onClick={() => { setCursor(index); selectVerdict('pass', record); }}>Pass</button>
-                            <button className="is-drop" type="button" onClick={() => { setCursor(index); selectVerdict('drop', record); }}>Drop</button>
-                          </div>
+                        <div className="review-row__identity">
+                          <span className="review-row__position">{index + 1}</span>
+                          <h3 title={recordName(record)}>{recordName(record)}</h3>
                         </div>
-                        <dl className="review-card__fields">
-                          {activeStage.fields.map((field) => {
+                        <dl className="review-row__fields">
+                          {rowFields.map((field) => {
                             const value = displayValue(record[field]);
                             return (
                               <div key={field}>
                                 <dt>{labelFor(field)}</dt>
                                 <dd>
-                                  {isWebsiteField(field) && value !== 'n/a'
+                                  {isWebsiteField(field)
                                     ? <a href={websiteHref(value)} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>{value}</a>
                                     : value}
                                 </dd>
@@ -466,6 +476,10 @@ export const ReviewRoute = () => {
                             );
                           })}
                         </dl>
+                        <div className="review-row__actions">
+                          <button type="button" onClick={() => { setCursor(index); void applyDecision('approve', record); }}>Approve</button>
+                          <button className="is-reject" type="button" onClick={() => { setCursor(index); void applyDecision('reject', record); }}>Reject</button>
+                        </div>
                       </article>
                     );
                   })}

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
@@ -41,6 +41,9 @@ import {
   reviewListCommand,
   reviewPassCommand,
   reviewStagesCommand,
+  rejectedListCommand,
+  rejectedRestoreCommand,
+  rejectedSourcesCommand,
   pipelineShowCommand,
   queryCommand,
   refreshToolsCommand,
@@ -237,9 +240,12 @@ const printHelp = () => {
   process.stdout.write(`  override show <list> <record>                                               # decision history for one lead\n`);
   process.stdout.write(`  review stages <list>                                                        # configured review stages and awaiting counts\n`);
   process.stdout.write(`  review list <list> --stage ID [--limit N] [--offset N]                      # records awaiting a stage verdict\n`);
-  process.stdout.write(`  review pass <list> <record> --stage ID [--reason TEXT]                      # approve a record at a review stage\n`);
-  process.stdout.write(`  review drop <list> <record> --stage ID --reason TEXT                        # drop a record from a review stage\n`);
+  process.stdout.write(`  review approve <list> <record> --stage ID [--reason TEXT]                   # approve a record at a review stage (alias: pass)\n`);
+  process.stdout.write(`  review reject <list> <record> --stage ID --reason TEXT                      # reject a record at a review stage (alias: drop)\n`);
   process.stdout.write(`  review clear <list> <record> --stage ID                                     # clear a review verdict\n`);
+  process.stdout.write(`  rejected sources <list>                                                     # rejection sources and counts\n`);
+  process.stdout.write(`  rejected list <list> [--source ID] [--limit N] [--offset N]                 # rejected records, optionally filtered by source\n`);
+  process.stdout.write(`  rejected restore <list> <record> [--reason TEXT]                            # restore a rejected record; reason required for gate/score rejects\n`);
   process.stdout.write(`  pipeline show <list> [--format json|summary]\n`);
   process.stdout.write(`  pipeline report <list> [--json] [--run latest]\n`);
   process.stdout.write(`  route show <list> --date YYYY-MM-DD [--include enrichment,contacts,prior-touches]\n`);
@@ -873,21 +879,21 @@ const run = async () => {
       print(reviewListCommand({ list, stage, limit, offset }));
       return;
     }
-    if (sub === 'pass') {
+    if (sub === 'approve' || sub === 'pass') {
       const list = String(argv.shift() || '');
       const ref = String(argv.shift() || '');
       const stage = consumeFlag(argv, '--stage', '');
       const reason = consumeFlag(argv, '--reason', '');
-      setResponseContext({ command: 'review pass', list });
+      setResponseContext({ command: `review ${sub}`, list });
       print(reviewPassCommand({ list, ref, stage, reason }));
       return;
     }
-    if (sub === 'drop') {
+    if (sub === 'reject' || sub === 'drop') {
       const list = String(argv.shift() || '');
       const ref = String(argv.shift() || '');
       const stage = consumeFlag(argv, '--stage', '');
       const reason = consumeFlag(argv, '--reason', '');
-      setResponseContext({ command: 'review drop', list });
+      setResponseContext({ command: `review ${sub}`, list });
       print(reviewDropCommand({ list, ref, stage, reason }));
       return;
     }
@@ -900,6 +906,34 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown review subcommand: ${sub}`);
+  }
+
+  if (command === 'rejected') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'sources') {
+      const list = String(argv.shift() || '');
+      setResponseContext({ command: 'rejected sources', list });
+      print(rejectedSourcesCommand({ list }));
+      return;
+    }
+    if (sub === 'list') {
+      const list = String(argv.shift() || '');
+      const source = consumeFlag(argv, '--source', '');
+      const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
+      const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
+      setResponseContext({ command: 'rejected list', list });
+      print(rejectedListCommand({ list, source, limit, offset }));
+      return;
+    }
+    if (sub === 'restore') {
+      const list = String(argv.shift() || '');
+      const ref = String(argv.shift() || '');
+      const reason = consumeFlag(argv, '--reason', '');
+      setResponseContext({ command: 'rejected restore', list });
+      print(rejectedRestoreCommand({ list, ref, reason }));
+      return;
+    }
+    throw new Error(`Unknown rejected subcommand: ${sub}`);
   }
 
   if (command === 'record') {
@@ -2017,10 +2051,20 @@ const run = async () => {
     const dbPath = getDbPath(listDir);
     if (!existsSync(dbPath)) throw new Error(`List DB does not exist: ${dbPath}`);
 
-    const uiDir = join(process.cwd(), 'src/viz/ui');
-    const uiIndex = join(uiDir, 'dist/index.html');
-    const runUiCommand = (name: string, commandName: string, commandArgs: string[]) => new Promise<void>((resolveCommand, rejectCommand) => {
-      const child = spawn(commandName, commandArgs, { cwd: uiDir, stdio: 'inherit' });
+    const rootDir = process.cwd();
+    const uiDir = join(rootDir, 'src/viz/ui');
+    const serverUiIndex = join(rootDir, 'dist/viz/ui/dist/index.html');
+    const newestUiSourceMtime = (dir: string): number => readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => !['dist', 'node_modules'].includes(entry.name))
+      .map((entry) => {
+        const path = join(dir, entry.name);
+        return entry.isDirectory() ? newestUiSourceMtime(path) : statSync(path).mtimeMs;
+      })
+      .reduce((latest, mtime) => Math.max(latest, mtime), 0);
+    const uiBundleMissing = !existsSync(serverUiIndex);
+    const uiBundleStale = !uiBundleMissing && newestUiSourceMtime(uiDir) > statSync(serverUiIndex).mtimeMs;
+    const runBuildCommand = (name: string, commandName: string, commandArgs: string[], cwd: string) => new Promise<void>((resolveCommand, rejectCommand) => {
+      const child = spawn(commandName, commandArgs, { cwd, stdio: 'inherit' });
       child.on('error', rejectCommand);
       child.on('exit', (code) => {
         if (code === 0) {
@@ -2030,12 +2074,13 @@ const run = async () => {
         rejectCommand(new Error(`${name} failed with exit code ${code}`));
       });
     });
-    if (build || !existsSync(uiIndex)) {
+    if (build || uiBundleMissing || uiBundleStale) {
       if (!existsSync(uiDir)) throw new Error(`Viz UI project does not exist: ${uiDir}`);
       if (!existsSync(join(uiDir, 'node_modules'))) {
-        await runUiCommand('npm install', 'npm', ['install', '--no-audit', '--no-fund']);
+        await runBuildCommand('npm install', 'npm', ['install', '--no-audit', '--no-fund'], uiDir);
       }
-      await runUiCommand('npm run build', 'npm', ['run', 'build']);
+      await runBuildCommand('npm run build', 'npm', ['run', 'build'], uiDir);
+      await runBuildCommand('asset copy', process.execPath, ['scripts/copy-assets.mjs'], rootDir);
     }
 
     const { startViewServer } = await import('./viz/server.js');

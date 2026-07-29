@@ -23,11 +23,22 @@ export type ReviewDecision = {
 
 const quoteIdent = (value: string) => `"${String(value).replaceAll('"', '""')}"`;
 
-const recordColumns = (db: any) => new Set(
+const recordColumns = (db: any): Set<string> => new Set<string>(
   db.prepare('PRAGMA table_info(records)').all()
     .map((column: any) => String(column?.name || '').trim())
     .filter(Boolean),
 );
+
+const resolveReviewStageFields = ({
+  stage,
+  availableColumns,
+}: {
+  stage: ReviewStage;
+  availableColumns: Set<string>;
+}) => ({
+  ...stage,
+  fields: [...new Set(stage.fields)].filter((field) => availableColumns.has(field)),
+});
 
 export const configuredReviewStages = (config: any): ReviewStage[] => (
   Array.isArray(config?.pipeline) ? config.pipeline : []
@@ -58,6 +69,19 @@ export const requireReviewStage = ({ config, stageId }: { config: any; stageId: 
     retryable: false,
   });
 };
+
+export const requireResolvedReviewStage = ({
+  db,
+  config,
+  stageId,
+}: {
+  db: any;
+  config: any;
+  stageId: string;
+}) => resolveReviewStageFields({
+  stage: requireReviewStage({ config, stageId }),
+  availableColumns: recordColumns(db),
+});
 
 const awaitingReviewWhere = () => `
   event.kind = 'review'
@@ -137,11 +161,24 @@ export const countAwaitingReviewRecords = ({ db, config }: { db: any; config: an
   `).get(...stageIds)?.n || 0);
 };
 
-export const getReviewStages = ({ db, config }: { db: any; config: any }) => configuredReviewStages(config)
-  .map((stage) => ({
-    ...stage,
-    awaiting_count: countAwaitingReviewAtStage({ db, stageId: stage.id }),
-  }));
+export const reviewStageFieldWarnings = ({ db, config }: { db: any; config: any }) => {
+  const availableColumns = recordColumns(db);
+  return configuredReviewStages(config).flatMap((stage) => {
+    const missing = [...new Set(stage.fields)].filter((field) => !availableColumns.has(field));
+    if (missing.length === 0) return [];
+    return [`Review step "${stage.id}" fields do not exist on records: ${missing.map((field) => `"${field}"`).join(', ')}.`];
+  });
+};
+
+export const getReviewStages = ({ db, config }: { db: any; config: any }) => {
+  const availableColumns = recordColumns(db);
+  return configuredReviewStages(config)
+    .map((stage) => resolveReviewStageFields({ stage, availableColumns }))
+    .map((stage) => ({
+      ...stage,
+      awaiting_count: countAwaitingReviewAtStage({ db, stageId: stage.id }),
+    }));
+};
 
 export const getReviewQueue = ({
   db,
@@ -156,7 +193,8 @@ export const getReviewQueue = ({
   limit?: number;
   offset?: number;
 }) => {
-  const stage = requireReviewStage({ config, stageId });
+  const availableColumns = recordColumns(db);
+  const stage = requireResolvedReviewStage({ db, config, stageId });
   const requestedLimit = Number(limit);
   const requestedOffset = Number(offset);
   const pageLimit = Number.isFinite(requestedLimit)
@@ -165,7 +203,6 @@ export const getReviewQueue = ({
   const pageOffset = Number.isFinite(requestedOffset)
     ? Math.max(0, Math.floor(requestedOffset))
     : 0;
-  const availableColumns = recordColumns(db);
   const fields = [...new Set(['_row_id', 'business_name', ...stage.fields])]
     .filter((field) => availableColumns.has(field));
   const rows = db.prepare(`
@@ -234,12 +271,18 @@ export const insertReviewDecision = ({
   verdict: string;
   reason?: string;
 }) => {
-  const stage = requireReviewStage({ config, stageId });
-  const normalizedVerdict = String(verdict || '').trim().toLowerCase();
-  if (!['pass', 'drop'].includes(normalizedVerdict)) {
+  const stage = requireResolvedReviewStage({ db, config, stageId });
+  const requestedVerdict = String(verdict || '').trim().toLowerCase();
+  const normalizedVerdict = ({
+    approve: 'pass',
+    pass: 'pass',
+    reject: 'drop',
+    drop: 'drop',
+  } as const)[requestedVerdict as 'approve' | 'pass' | 'reject' | 'drop'];
+  if (!normalizedVerdict) {
     throw new AgentOutboundError({
       code: 'INVALID_ARGUMENT',
-      message: `Unknown review verdict "${normalizedVerdict}". Expected pass or drop.`,
+      message: `Unknown review verdict "${requestedVerdict}". Expected approve/pass or reject/drop.`,
       retryable: false,
     });
   }
@@ -247,7 +290,7 @@ export const insertReviewDecision = ({
   if (normalizedVerdict === 'drop' && !normalizedReason) {
     throw new AgentOutboundError({
       code: 'INVALID_ARGUMENT',
-      message: 'A review drop requires a reason.',
+      message: 'A review reject requires a reason.',
       retryable: false,
     });
   }
@@ -276,7 +319,7 @@ export const clearReviewDecision = ({
   stageId: string;
   clearedBy?: string;
 }) => {
-  const stage = requireReviewStage({ config, stageId });
+  const stage = requireResolvedReviewStage({ db, config, stageId });
   const record = resolveRecordRef({ db, ref });
   const passOverrides = clearOverrides({
     db,

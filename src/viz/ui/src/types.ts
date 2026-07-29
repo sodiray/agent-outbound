@@ -106,10 +106,11 @@ export type ReviewQueueResponse = {
 };
 
 export type ReviewVerdict = 'pass' | 'drop';
+export type ReviewVerdictInput = ReviewVerdict | 'approve' | 'reject';
 
 export type ReviewDecisionInput = {
   row_id: string;
-  verdict: ReviewVerdict;
+  verdict: ReviewVerdictInput;
   reason?: string;
 };
 
@@ -128,6 +129,52 @@ export type ReviewDecisionBatchResponse = {
   applied: number;
   failed: number;
   results: ReviewDecisionResult[];
+};
+
+export type RejectedSource = {
+  id: string;
+  label: string;
+  count: number;
+};
+
+export type RejectedSourcesResponse = {
+  total: number;
+  sources: RejectedSource[];
+};
+
+export type RejectedRecord = RecordRow & {
+  rejection_source: string;
+  rejection_source_label: string;
+  rejection_reason: string;
+  rejected_at: string;
+  override_reason: string;
+  override_created_by: string;
+  review_stage_id: string;
+  review_stage_label: string;
+};
+
+export type RejectedRecordsResponse = {
+  source: string;
+  total: number;
+  limit: number;
+  offset: number;
+  identity_fields: string[];
+  records: RejectedRecord[];
+};
+
+export type RejectedRestoreResponse = {
+  status: string;
+  mechanism: 'review_override_cleared' | 'manual_drop_override_cleared' | 'keep_override_created';
+  source: string;
+  review_stage_id: string;
+  restored: boolean;
+  record: { row_id: string; business_name: string };
+  state: {
+    in_play: boolean;
+    disqualified_at: string;
+    disqualified_gate: string;
+    disqualify_reason: string;
+  };
 };
 
 export type OverrideKind = 'keep' | 'drop';
