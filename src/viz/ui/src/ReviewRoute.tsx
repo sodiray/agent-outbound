@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
+import { APIProvider, Map as GoogleMap, Marker } from '@vis.gl/react-google-maps';
 import { Link } from 'react-router-dom';
 import {
   clearReviewDecision,
   fetchMeta,
+  fetchRecordDetail,
   fetchReviewQueue,
   submitReviewDecisions,
 } from './api.js';
+import { DetailDrawer } from './DetailDrawer.js';
 import type {
   MetaResponse,
+  RecordDetail,
   RecordRow,
   RecordValue,
 } from './types.js';
@@ -55,7 +59,9 @@ const displayValue = (value: RecordValue | undefined) => {
   return String(value);
 };
 
-const recordName = (record: RecordRow) => displayValue(record.business_name) || 'Unnamed lead';
+const recordName = (record: RecordRow) => (
+  displayValue(record.business_name) || displayValue(record.name) || 'Unnamed lead'
+);
 
 const isWebsiteField = (field: string) => field.toLowerCase().includes('website');
 
@@ -66,7 +72,212 @@ const websiteHref = (value: string) => {
 
 const isTypingTarget = (target: EventTarget | null) => {
   if (!(target instanceof HTMLElement)) return false;
-  return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'].includes(target.tagName);
+  return target.isContentEditable
+    || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+    || Boolean(target.closest('.close-button, .scrim, .review-undo, .review-detail-undo'));
+};
+
+const coordinateValue = (value: RecordValue | undefined) => {
+  if (!hasDisplayValue(value)) return null;
+  const coordinate = Number(value);
+  return Number.isFinite(coordinate) ? coordinate : null;
+};
+
+const recordCoordinates = (record: RecordRow) => {
+  const lat = coordinateValue(record.latitude);
+  const lng = coordinateValue(record.longitude);
+  if (lat === null || lng === null || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  if (lat === 0 && lng === 0) return null;
+  return { lat, lng };
+};
+
+const rawDisplayValue = (value: RecordValue | undefined) => {
+  if (!hasDisplayValue(value)) return '';
+  const text = String(value).trim();
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed === null) return '';
+    if (Array.isArray(parsed) && parsed.length === 0) return '';
+    if (!Array.isArray(parsed) && typeof parsed === 'object' && Object.keys(parsed).length === 0) return '';
+    return JSON.stringify(parsed, null, 2);
+  } catch {
+    return text;
+  }
+};
+
+const DetailFieldTable = ({
+  record,
+  fields,
+}: {
+  record: RecordRow;
+  fields: string[];
+}) => {
+  const visibleFields = fields.filter((field) => (
+    field !== '_row_id'
+    && field !== 'business_name'
+    && field !== 'name'
+    && hasDisplayValue(record[field])
+  ));
+  if (visibleFields.length === 0) return null;
+  return (
+    <table className="review-detail-fields">
+      <tbody>
+        {visibleFields.map((field) => {
+          const value = displayValue(record[field]);
+          return (
+            <tr key={field}>
+              <th scope="row">{labelFor(field)}</th>
+              <td>
+                {isWebsiteField(field)
+                  ? <a href={websiteHref(value)} target="_blank" rel="noreferrer">{value}</a>
+                  : value}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+};
+
+const ReviewDetail = ({
+  rowIdValue,
+  mapsApiKey,
+  deciding,
+  undoLabel,
+  canUndo,
+  onApprove,
+  onReject,
+  onUndo,
+}: {
+  rowIdValue: string;
+  mapsApiKey: string;
+  deciding: boolean;
+  undoLabel: string;
+  canUndo: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+  onUndo: () => void;
+}) => {
+  const [detail, setDetail] = useState<RecordDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const request = { cancelled: false };
+    setLoading(true);
+    setError('');
+    setDetail(null);
+    fetchRecordDetail(rowIdValue)
+      .then((nextDetail) => {
+        if (!request.cancelled) setDetail(nextDetail);
+      })
+      .catch((nextError: Error) => {
+        if (!request.cancelled) setError(nextError.message);
+      })
+      .finally(() => {
+        if (!request.cancelled) setLoading(false);
+      });
+    return () => {
+      request.cancelled = true;
+    };
+  }, [rowIdValue]);
+
+  const record = detail?.record || null;
+  const coordinates = record ? recordCoordinates(record) : null;
+  const address = record
+    ? displayValue(record.address) || displayValue(record.formattedAddress)
+    : '';
+  const sourcedFields = detail?.field_classification.sourced || [];
+  const enrichedFields = detail?.field_classification.enriched || [];
+  const rawFields = detail?.field_classification.raw || [];
+  const hasSourcedFields = Boolean(record && sourcedFields.some((field) => (
+    field !== 'business_name' && field !== 'name' && hasDisplayValue(record[field])
+  )));
+  const hasEnrichedFields = Boolean(record && enrichedFields.some((field) => (
+    field !== 'business_name' && field !== 'name' && hasDisplayValue(record[field])
+  )));
+  const rawValues = record
+    ? rawFields.map((field) => ({ field, value: rawDisplayValue(record[field]) })).filter((item) => item.value)
+    : [];
+
+  return (
+    <>
+      {loading ? <div className="drawer-loading">Loading detail...</div> : null}
+      {error ? <div className="error-banner">{error}</div> : null}
+      {detail && record ? (
+        <>
+          <header className="detail-header review-detail-header">
+            <div>
+              <p className="eyebrow">Awaiting review</p>
+              <h2>{recordName(record)}</h2>
+              {address ? <p>{address}</p> : null}
+            </div>
+            <div className="review-detail-action-stack">
+              <div className="review-detail-actions">
+                <button type="button" onClick={onApprove} disabled={deciding}>
+                  {deciding ? 'Saving…' : 'Approve'}
+                </button>
+                <button className="is-reject" type="button" onClick={onReject} disabled={deciding}>
+                  Reject
+                </button>
+              </div>
+              <button
+                className="review-detail-undo"
+                type="button"
+                onClick={onUndo}
+                disabled={!canUndo}
+              >
+                {undoLabel}
+              </button>
+            </div>
+          </header>
+          {mapsApiKey && coordinates ? (
+            <section className="detail-section">
+              <div className="section-title">Location</div>
+              <div className="review-detail-map">
+                <APIProvider apiKey={mapsApiKey}>
+                  <GoogleMap
+                    defaultCenter={coordinates}
+                    defaultZoom={10}
+                    disableDefaultUI
+                    gestureHandling="cooperative"
+                  >
+                    <Marker position={coordinates} />
+                  </GoogleMap>
+                </APIProvider>
+              </div>
+            </section>
+          ) : null}
+          {hasSourcedFields ? (
+            <section className="detail-section">
+              <div className="section-title">What we know</div>
+              <DetailFieldTable record={record} fields={sourcedFields} />
+            </section>
+          ) : null}
+          {hasEnrichedFields ? (
+            <section className="detail-section">
+              <div className="section-title">Enriched</div>
+              <DetailFieldTable record={record} fields={enrichedFields} />
+            </section>
+          ) : null}
+          {rawValues.length > 0 ? (
+            <section className="detail-section">
+              <div className="section-title">Raw data</div>
+              <div className="review-detail-raw">
+                {rawValues.map((item) => (
+                  <div key={item.field}>
+                    <strong>{labelFor(item.field)}</strong>
+                    <pre>{item.value}</pre>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+        </>
+      ) : null}
+    </>
+  );
 };
 
 const restoreRecordInOrder = ({
@@ -101,6 +312,7 @@ export const ReviewRoute = () => {
   const [undoing, setUndoing] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [panelRecord, setPanelRecord] = useState<RecordRow | null>(null);
   const rowRefs = useRef<Record<string, HTMLElement | null>>({});
   const queueOrder = useRef<Record<string, string[]>>({});
   const loadedStages = useRef(new Set<string>());
@@ -158,8 +370,25 @@ export const ReviewRoute = () => {
   const selectedRecord = activeRecords[cursor] || null;
   const activeFailures = failures.filter((failure) => failure.stage_id === activeStageId);
   const visibleFields = (activeStage?.fields || [])
-    .filter((field) => field !== '_row_id' && field !== 'business_name');
+    .filter((field) => field !== '_row_id' && field !== 'business_name' && field !== 'name');
   const lastDecision = history.at(-1);
+  const panelUndoLabel = !lastDecision
+    ? 'Nothing to undo'
+    : lastDecision.state === 'saving'
+      ? `${actionInProgress(lastDecision.verdict)} ${recordName(lastDecision.record)}…`
+      : `Undo: ${actionPastTense(lastDecision.verdict)} ${recordName(lastDecision.record)}`;
+  const panelDecision = panelRecord
+    ? history.find((item) => (
+      item.stage_id === activeStageId
+      && item.row_id === rowId(panelRecord)
+      && item.state === 'saving'
+    ))
+    : null;
+  const drawerFailure = (
+    panelRecord
+      ? activeFailures.find((failure) => failure.row_id === rowId(panelRecord))
+      : null
+  ) || activeFailures.at(-1);
 
   useEffect(() => {
     setCursor((current) => Math.max(0, Math.min(current, activeRecords.length - 1)));
@@ -203,13 +432,21 @@ export const ReviewRoute = () => {
 
   const applyDecision = async (
     verdict: ReviewActionVerdict,
-    record: RecordRow | null = selectedRecord,
+    record: RecordRow | null = panelRecord || selectedRecord,
   ) => {
     if (!record || !activeStage || undoingRef.current) return;
     const stageId = activeStage.id;
     const recordId = rowId(record);
     const key = decisionKey({ stage_id: stageId, row_id: recordId });
     if (inFlightDecisions.current.has(key)) return;
+    const decisionIndex = activeRecords.findIndex((candidate) => rowId(candidate) === recordId);
+    const remainingRecords = activeRecords.filter((candidate) => rowId(candidate) !== recordId);
+    const nextIndex = Math.max(0, Math.min(
+      decisionIndex < 0 ? cursor : decisionIndex,
+      remainingRecords.length - 1,
+    ));
+    const nextRecord = remainingRecords[nextIndex] || null;
+    const decisionCameFromPanel = rowId(panelRecord || {}) === recordId;
 
     const sequence = actionSequence.current + 1;
     actionSequence.current = sequence;
@@ -245,10 +482,15 @@ export const ReviewRoute = () => {
       if (latestActionSequence.current === sequence) {
         setMessage(`${actionPastTense(verdict)} ${recordName(record)}.`);
       }
+      if (decisionCameFromPanel) {
+        setCursor(nextIndex);
+        setPanelRecord(nextRecord);
+      }
     } catch (nextError) {
       inFlightDecisions.current.delete(key);
       restoreRecord(stageId, record);
       adjustAwaitingCount(stageId, 1);
+      setCursor(Math.max(0, decisionIndex));
       setHistory((current) => current.filter((item) => item.sequence !== sequence));
       setFailures((current) => [
         ...current.filter((failure) => decisionKey(failure) !== key),
@@ -278,6 +520,16 @@ export const ReviewRoute = () => {
     if (undoingRef.current) return;
 
     const key = decisionKey(last);
+    const panelBeforeUndo = panelRecord;
+    const stageBeforeUndo = activeStageId;
+    const cursorBeforeUndo = cursor;
+    const currentRecords = queues[last.stage_id] || [];
+    const restoredRecords = restoreRecordInOrder({
+      records: currentRecords,
+      record: last.record,
+      order: queueOrder.current[last.stage_id] || [],
+    });
+    const restoredIndex = Math.max(0, restoredRecords.findIndex((record) => rowId(record) === last.row_id));
     undoingRef.current = true;
     setUndoing(true);
     setError('');
@@ -286,6 +538,8 @@ export const ReviewRoute = () => {
     restoreRecord(last.stage_id, last.record);
     adjustAwaitingCount(last.stage_id, 1);
     setActiveStageId(last.stage_id);
+    setCursor(restoredIndex);
+    if (panelRecord) setPanelRecord(last.record);
     setMessage(`Undoing ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordName(last.record)}…`);
 
     try {
@@ -295,6 +549,9 @@ export const ReviewRoute = () => {
       removeRecord(last.stage_id, last.row_id);
       adjustAwaitingCount(last.stage_id, -1);
       setHistory((current) => [...current, last].sort((left, right) => left.sequence - right.sequence));
+      setActiveStageId(stageBeforeUndo);
+      setCursor(cursorBeforeUndo);
+      setPanelRecord(panelBeforeUndo);
       setFailures((current) => [
         ...current.filter((failure) => decisionKey(failure) !== key),
         {
@@ -318,12 +575,22 @@ export const ReviewRoute = () => {
       if (isTypingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === 'j' || event.key === 'J' || event.key === 'ArrowDown') {
         event.preventDefault();
-        setCursor((current) => Math.min(current + 1, Math.max(0, activeRecords.length - 1)));
+        if (panelDecision) return;
+        setCursor((current) => {
+          const next = Math.min(current + 1, Math.max(0, activeRecords.length - 1));
+          if (panelRecord) setPanelRecord(activeRecords[next] || null);
+          return next;
+        });
         return;
       }
       if (event.key === 'k' || event.key === 'K' || event.key === 'ArrowUp') {
         event.preventDefault();
-        setCursor((current) => Math.max(0, current - 1));
+        if (panelDecision) return;
+        setCursor((current) => {
+          const next = Math.max(0, current - 1);
+          if (panelRecord) setPanelRecord(activeRecords[next] || null);
+          return next;
+        });
         return;
       }
       if (event.key === ' ' || event.key === 'Enter') {
@@ -395,6 +662,7 @@ export const ReviewRoute = () => {
                 onClick={() => {
                   setActiveStageId(stage.id);
                   setCursor(0);
+                  setPanelRecord(null);
                 }}
               >
                 <span>{stage.label}</span>
@@ -444,51 +712,109 @@ export const ReviewRoute = () => {
                   <p>This stage is clear.</p>
                 </div>
               ) : (
-                <div className="review-row-list">
-                  {activeRecords.map((record, index) => {
-                    const id = rowId(record);
-                    const selected = index === cursor;
-                    const rowFields = visibleFields.filter((field) => hasDisplayValue(record[field]));
-                    return (
-                      <article
-                        className={`review-row ${selected ? 'is-selected' : ''} ${rowFields.length === 0 ? 'has-no-fields' : ''}`}
-                        key={id}
-                        ref={(node) => { rowRefs.current[id] = node; }}
-                        data-review-row={id}
-                        onClick={() => setCursor(index)}
-                      >
-                        <div className="review-row__identity">
-                          <span className="review-row__position">{index + 1}</span>
-                          <h3 title={recordName(record)}>{recordName(record)}</h3>
-                        </div>
-                        <dl className="review-row__fields">
-                          {rowFields.map((field) => {
-                            const value = displayValue(record[field]);
-                            return (
-                              <div key={field}>
-                                <dt>{labelFor(field)}</dt>
-                                <dd>
-                                  {isWebsiteField(field)
-                                    ? <a href={websiteHref(value)} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>{value}</a>
+                <div className="review-table-shell">
+                  <table className="review-table">
+                    <thead>
+                      <tr>
+                        <th className="review-table__position" scope="col">#</th>
+                        <th scope="col">Business name</th>
+                        {visibleFields.map((field) => <th scope="col" key={field}>{labelFor(field)}</th>)}
+                        <th className="review-table__actions" scope="col">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {activeRecords.map((record, index) => {
+                        const id = rowId(record);
+                        const selected = index === cursor;
+                        return (
+                          <tr
+                            className={selected ? 'is-selected' : ''}
+                            key={id}
+                            ref={(node) => { rowRefs.current[id] = node; }}
+                            data-review-row={id}
+                            onClick={() => {
+                              setCursor(index);
+                              setPanelRecord(record);
+                            }}
+                          >
+                            <td className="review-table__position">{index + 1}</td>
+                            <td className="review-table__identity" title={recordName(record)}>{recordName(record)}</td>
+                            {visibleFields.map((field) => {
+                              const value = displayValue(record[field]);
+                              return (
+                                <td key={field} title={value}>
+                                  {value && isWebsiteField(field)
+                                    ? (
+                                      <a
+                                        href={websiteHref(value)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(event) => event.stopPropagation()}
+                                      >
+                                        {value}
+                                      </a>
+                                    )
                                     : value}
-                                </dd>
-                              </div>
-                            );
-                          })}
-                        </dl>
-                        <div className="review-row__actions">
-                          <button type="button" onClick={() => { setCursor(index); void applyDecision('approve', record); }}>Approve</button>
-                          <button className="is-reject" type="button" onClick={() => { setCursor(index); void applyDecision('reject', record); }}>Reject</button>
-                        </div>
-                      </article>
-                    );
-                  })}
+                                </td>
+                              );
+                            })}
+                            <td className="review-table__actions">
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setCursor(index);
+                                  void applyDecision('approve', record);
+                                }}
+                              >
+                                Approve
+                              </button>
+                              <button
+                                className="is-reject"
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setCursor(index);
+                                  void applyDecision('reject', record);
+                                }}
+                              >
+                                Reject
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </section>
           ) : null}
         </>
       )}
+      <DetailDrawer
+        open={Boolean(panelRecord)}
+        onClose={() => setPanelRecord(null)}
+        ariaLabel="Review lead detail"
+      >
+        {drawerFailure ? (
+          <div className="error-banner" role="alert">
+            {drawerFailure.action} failed for {drawerFailure.business_name}: {drawerFailure.error} {drawerFailure.detail}
+          </div>
+        ) : null}
+        {panelRecord ? (
+          <ReviewDetail
+            rowIdValue={rowId(panelRecord)}
+            mapsApiKey={meta.mapsApiKey}
+            deciding={Boolean(panelDecision)}
+            undoLabel={panelUndoLabel}
+            canUndo={Boolean(lastDecision && lastDecision.state === 'saved' && !undoing)}
+            onApprove={() => void applyDecision('approve', panelRecord)}
+            onReject={() => void applyDecision('reject', panelRecord)}
+            onUndo={() => void undoLast()}
+          />
+        ) : null}
+      </DetailDrawer>
     </main>
   );
 };

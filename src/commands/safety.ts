@@ -12,6 +12,7 @@ import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { assertConfigModelReferences } from '../orchestrator/lib/model-validation.js';
 import { reviewStageFieldWarnings } from '../orchestrator/pipeline/review.js';
 import { normalizeConfig } from '../schemas/config.js';
+import { inspectFieldCheckValueFiles } from '../orchestrator/lib/field-check-values.js';
 
 type SnapshotManifest = {
   id: string;
@@ -231,6 +232,8 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
   const errors = [...(Array.isArray(loaded?.errors) ? loaded.errors : [])];
   const warnings: string[] = [...(Array.isArray(loaded?.warnings) ? loaded.warnings : [])];
   const config = loaded?.config || {};
+  const valueFiles = inspectFieldCheckValueFiles({ config, listDir });
+  errors.push(...valueFiles.map((valueFile) => valueFile.error).filter(Boolean));
   try {
     assertConfigModelReferences(config);
   } catch (error) {
@@ -279,6 +282,7 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
     ok: errors.length === 0,
     errors,
     warnings,
+    value_files: valueFiles,
   };
 };
 

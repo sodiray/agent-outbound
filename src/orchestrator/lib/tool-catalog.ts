@@ -217,6 +217,29 @@ export const resolveConfigToolCatalog = async ({
   const catalog: ToolCatalog = {
     ...readToolCatalog(listDir),
   };
+  const providerServers = [...new Set(refs
+    .map((ref) => normalizeServer(ref.spec?.server))
+    .filter((server) => server && !isComposioServer(server)))];
+  providerServers.forEach((server) => {
+    const provider = getProviderForRef(server, listDir);
+    const prefix = `${server}:`;
+    const schemas = Object.entries(catalog)
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, entry]) => ({
+        slug: key.slice(prefix.length),
+        server,
+        name: key.slice(prefix.length),
+        description: String(entry.description || ''),
+        input_schema: entry.parameters && typeof entry.parameters === 'object'
+          ? entry.parameters
+          : { type: 'object', properties: {} },
+        provider: String(entry.provider || ''),
+        endpoint: String(entry.endpoint || ''),
+        parameter_locations: entry.parameter_locations,
+        parameter_collisions: entry.parameter_collisions,
+      }));
+    provider?.registerSchemas?.(schemas);
+  });
 
   const allSlugs = new Set<string>();
   let resolvedSpecs = 0;
@@ -299,6 +322,10 @@ export const resolveConfigToolCatalog = async ({
           : (candidate?.parameters && typeof candidate.parameters === 'object')
             ? candidate.parameters
             : { type: 'object', properties: {} },
+        provider: String(candidate?.provider || ''),
+        endpoint: String(candidate?.endpoint || ''),
+        parameter_locations: candidate?.parameter_locations,
+        parameter_collisions: candidate?.parameter_collisions,
       };
     }
   }

@@ -3,6 +3,7 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { ActionRole } from './models.js';
 import { resolveRuntimeModel } from './models.js';
 import { loadTools, type ToolCatalog, type ToolSpec } from './tools.js';
+import { collectProviderToolUsage, type ProviderToolUsage } from './providers/usage.js';
 import { emitLive } from './activity.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 
@@ -29,6 +30,7 @@ const MAX_RETRIES = 1;
 const isTimeoutError = (error: any): boolean => {
   const name = String(error?.name || '');
   const message = String(error?.message || error || '').toLowerCase();
+  if (name === 'MonidProviderError') return false;
   return name === 'TimeoutError'
     || name === 'AbortError'
     || message.includes('timeout')
@@ -391,11 +393,12 @@ export const generateObjectWithTools = async ({
     resolved.providerId === 'deepinfra'
     || providerOptionsRequestReasoning(providerOptions)
   );
+  const providerToolUsage: { current: ProviderToolUsage | null } = { current: null };
 
   let result: any;
   try {
     if (hasTools) {
-      result = await callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
+      const execution = await collectProviderToolUsage(() => callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
         model: selectedModel,
         ...(toolSystem ? { system: toolSystem } : {}),
         prompt: basePrompt,
@@ -406,7 +409,9 @@ export const generateObjectWithTools = async ({
         abortSignal: signal,
         maxRetries: MAX_RETRIES,
         ...withProviderOptions,
-      }));
+      })));
+      result = execution.result;
+      providerToolUsage.current = execution.usage;
     } else {
       if (!preferPlainTextObject && resolved.providerId === 'deepinfra' && typeof aiSdk.generateObject === 'function') {
         try {
@@ -535,17 +540,30 @@ export const generateObjectWithTools = async ({
     throw new Error('No object generated: response did not match schema.');
   }
 
+  const modelToolCalls = Array.isArray(result?.steps)
+    ? result.steps.flatMap((step: any) => Array.isArray(step?.toolCalls)
+      ? step.toolCalls.map((call: any) => String(call?.toolName || '').trim()).filter(Boolean)
+      : [])
+    : [];
+  const providerToolCalls = providerToolUsage.current?.tool_calls || [];
+  const paidCallSlugs = providerToolCalls.map((call) => call.toUpperCase());
+  const toolCalls = [
+    ...modelToolCalls.filter((call) => !paidCallSlugs.some((slug) => call.toUpperCase().endsWith(slug))),
+    ...providerToolCalls,
+  ];
+  const modelUsdCost = resolved.provider.extractUsdCost(result);
+  const providerUsdCost = providerToolUsage.current?.usd_cost;
+  const usdCost = providerUsdCost === null || providerUsdCost === undefined
+    ? modelUsdCost
+    : Number(modelUsdCost || 0) + providerUsdCost;
   const usage = {
     input_tokens: Number(result?.usage?.inputTokens || result?.usage?.promptTokens || 0),
     output_tokens: Number(result?.usage?.outputTokens || result?.usage?.completionTokens || 0),
     cache_creation_tokens: Number(result?.usage?.cachedInputTokens || 0),
     cache_read_tokens: Number(result?.usage?.cacheReadInputTokens || 0),
-    usd_cost: resolved.provider.extractUsdCost(result),
-    tool_calls: Array.isArray(result?.steps)
-      ? result.steps.flatMap((step: any) => Array.isArray(step?.toolCalls)
-        ? step.toolCalls.map((call: any) => String(call?.toolName || '').trim()).filter(Boolean)
-        : [])
-      : [],
+    usd_cost: usdCost,
+    tool_calls: toolCalls,
+    tool_costs: providerToolUsage.current?.tool_costs || [],
   };
 
   const payload = {

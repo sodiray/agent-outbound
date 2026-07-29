@@ -5,6 +5,7 @@ import { getDefaultProvider, getProvider } from './providers/registry.js';
 import type { ProviderToolSchema, ToolProvider } from './providers/types.js';
 import { isCommandServerProvider } from '../lib/provider-registry.js';
 import { formatErrorMessage } from '../lib/error-format.js';
+import { isBudgetExceededError } from './contract.js';
 
 export type ToolSpec = {
   server?: string;
@@ -15,6 +16,10 @@ export type ToolSpec = {
 export type ToolCatalogEntry = {
   description?: string;
   parameters?: Record<string, unknown>;
+  provider?: string;
+  endpoint?: string;
+  parameter_locations?: ProviderToolSchema['parameter_locations'];
+  parameter_collisions?: ProviderToolSchema['parameter_collisions'];
 };
 
 export type ToolCatalog = Record<string, ToolCatalogEntry>;
@@ -77,6 +82,10 @@ const schemaFromCatalog = (server: string, slug: string, entry: ToolCatalogEntry
   input_schema: (entry?.parameters && typeof entry.parameters === 'object')
     ? entry.parameters
     : { type: 'object', properties: {} },
+  provider: String(entry?.provider || ''),
+  endpoint: String(entry?.endpoint || ''),
+  parameter_locations: entry?.parameter_locations,
+  parameter_collisions: entry?.parameter_collisions,
 });
 
 const loadToolsWithProvider = async (
@@ -112,6 +121,7 @@ const loadToolsWithProvider = async (
   } else {
     schemas = await provider.getSchemas(slugs);
   }
+  provider.registerSchemas?.(schemas);
 
   const tools: Record<string, Tool> = {};
 
@@ -127,6 +137,8 @@ const loadToolsWithProvider = async (
         try {
           return await provider.executeTool(schema.slug, (args || {}) as Record<string, unknown>);
         } catch (error) {
+          if (isBudgetExceededError(error)) throw error;
+          if (error instanceof Error && error.name === 'MonidProviderError') throw error;
           throw new Error(`${provider.id}:${schema.slug}: ${formatErrorMessage(error)}`);
         }
       },
@@ -159,7 +171,12 @@ export const toolSpecUsesLocalCommandServer = (
 export const toolSpecNeedsMcp = (
   spec: ToolSpec | undefined,
   options: { listDir?: string } = {},
-) => hasPinnedTools(spec) && !toolSpecUsesLocalCommandServer(spec, options);
+) => {
+  const server = normalizeServer(spec?.server);
+  return hasPinnedTools(spec)
+    && server !== 'monid'
+    && !toolSpecUsesLocalCommandServer(spec, options);
+};
 
 export const loadToolsForProvider = async (
   provider: ToolProvider,

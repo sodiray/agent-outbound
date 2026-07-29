@@ -74,6 +74,7 @@ export {
   mcpTestCommand,
 } from './mcp.js';
 export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand } from './leads.js';
+export { attioDomainsCommand } from './attio-domains.js';
 export { briefCommand, briefShowCommand } from './briefs.js';
 export { sourceTerritoryCommand } from './source-territory.js';
 export { automationsCommand, automationsShowCommand } from './automations.js';
@@ -597,7 +598,7 @@ export const refreshToolsCommand = async ({ list }) => {
   };
 };
 
-export const sourceCommand = async ({ list, limit = 0, dryRun = false, sample = 0 }) => {
+export const sourceCommand = async ({ list, limit = 0, dryRun = false, sample = 0, redensify = false }) => {
   const listDir = resolveListDir(list);
   const { config } = readConfig(listDir);
   assertPhaseModelReferences({ config, phase: 'source' });
@@ -616,6 +617,7 @@ export const sourceCommand = async ({ list, limit = 0, dryRun = false, sample = 
         query: String(search?.query || ''),
         max_results: Number(search?.max_results || 0),
       })),
+      redensify: Boolean(redensify),
       note: 'Dry-run performs no writes.',
     };
   }
@@ -626,17 +628,17 @@ export const sourceCommand = async ({ list, limit = 0, dryRun = false, sample = 
       listDir,
       sampledCount: sampleN,
       totalCount: Math.max(sampleN, estimatedTotal || sampleN),
-      run: () => runSourcing({ listDir, limit: sampleN }),
+      run: () => runSourcing({ listDir, limit: sampleN, redensify }),
     });
   }
   const autoSnapshot = estimatedTotal >= threshold
     ? snapshotCreateCommand({ list: listDir, label: `auto-before-source-${new Date().toISOString()}` })
     : null;
   try {
-    const sourced = await runSourcing({ listDir, limit: Number(limit || 0) });
+    const sourced = await runSourcing({ listDir, limit: Number(limit || 0), redensify });
     return {
-      status: 'ok',
       ...sourced,
+      status: sourced.status === 'partial' ? 'partial' : 'ok',
       auto_snapshot: autoSnapshot,
     };
   } catch (error) {

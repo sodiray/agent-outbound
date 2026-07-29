@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
+import { getTargetColumnsForStepConfig } from '../orchestrator/lib/step-columns.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import {
   getAssetsForRow,
@@ -200,6 +201,43 @@ const LIFECYCLE_COLUMNS = new Set([
 
 const LOW_CARDINALITY_FILTERS = new Set(['city', 'state', 'primary_type', 'vertical']);
 const COST_PREFIXES = ['pipeline_enrich', 'pipeline_filter_batch', 'pipeline_filter', 'scoring', 'score'];
+const RAW_RECORD_FIELDS = new Set(['extra_json']);
+const INTERNAL_RECORD_FIELDS = new Set([
+  'id',
+  'needs_review',
+  'review_reason',
+  'review_flagged_at',
+  'parent_row_id',
+  'duplicate_of',
+  'duplicate_status',
+  'source_filter_result',
+  'source_filter_failures',
+  'disqualified_at',
+  'disqualified_gate',
+  'disqualify_reason',
+  'retry_count',
+  'last_error',
+]);
+const RECORD_DETAIL_FIELD_ALIASES = [
+  ['business_name', 'name'],
+  ['address', 'formattedAddress'],
+  ['website', 'websiteUri'],
+  ['phone', 'nationalPhoneNumber'],
+  ['postal_code', 'zip'],
+  ['google_place_id', 'place_id', 'placeId'],
+  ['latitude', 'lat'],
+  ['longitude', 'lng'],
+  ['google_maps_url', 'googleMapsUrl', 'googleMapsUri'],
+  ['business_status', 'businessStatus'],
+  ['user_rating_count', 'userRatingCount'],
+  ['primary_type', 'primaryType'],
+];
+const RECORD_DETAIL_FIELD_ALIAS_META = new Map(
+  RECORD_DETAIL_FIELD_ALIASES.flatMap((fields, groupIndex) => (
+    fields.map((field, fieldIndex) => [field, { group: `alias:${groupIndex}`, rank: fieldIndex }] as const)
+  )),
+);
+const SUCCESSFUL_ENRICH_STATUSES = new Set(['ok', 'done', 'complete', 'completed', 'success']);
 
 const quoteIdent = (value: string) => `"${String(value).replaceAll('"', '""')}"`;
 const labelFor = (key: string) => key.replace(/__status$/, '').replace(/^_+/, '').split('_').filter(Boolean).map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`).join(' ') || key;
@@ -224,6 +262,119 @@ const tableColumns = (db: any, table: string) => {
 };
 const hasTableColumn = (db: any, table: string, column: string) => tableColumns(db, table).includes(column);
 const outputEntries = (step: any) => Object.entries(step?.outputs || {});
+const hasRecordDetailValue = (value: any) => (
+  value !== null
+  && value !== undefined
+  && (typeof value !== 'string' || value.trim() !== '')
+);
+const canonicalizeRecordDetailFields = (record: any) => RECORD_DETAIL_FIELD_ALIASES.reduce(
+  (current, [canonical, ...aliases]) => {
+    if (hasRecordDetailValue(current[canonical])) return current;
+    const alias = aliases.find((field) => hasRecordDetailValue(current[field]));
+    return alias ? { ...current, [canonical]: current[alias] } : current;
+  },
+  { ...record },
+);
+const fieldAliasMeta = (field: string) => {
+  const explicit = RECORD_DETAIL_FIELD_ALIAS_META.get(field);
+  if (explicit) return explicit;
+  const normalized = field.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const snakeCaseRank = /^[a-z0-9]+(?:_[a-z0-9]+)+$/.test(field) ? 0 : 1;
+  return { group: `normalized:${normalized}`, rank: snakeCaseRank };
+};
+const dedupeRecordDetailFields = ({ fields, record }: { fields: string[]; record: any }) => {
+  const winners = new Map<string, { field: string; rank: number }>();
+  for (const field of fields) {
+    if (!hasRecordDetailValue(record[field])) continue;
+    const alias = fieldAliasMeta(field);
+    const current = winners.get(alias.group);
+    if (!current || alias.rank < current.rank) winners.set(alias.group, { field, rank: alias.rank });
+  }
+  const selected = new Set([...winners.values()].map((winner) => winner.field));
+  return fields.filter((field) => selected.has(field));
+};
+const isInternalRecordDetailField = (key: string) => (
+  key.startsWith('_')
+  || key.endsWith('__status')
+  || key === 'created_at'
+  || key === 'updated_at'
+  || INTERNAL_RECORD_FIELDS.has(key)
+  || HIDDEN_SCORE_COLUMNS.has(key)
+  || SCORE_COLUMNS.has(key)
+  || LIFECYCLE_COLUMNS.has(key)
+  || /(?:^|_)(?:embedding|dedup)(?:_|$)/i.test(key)
+  || /^(?:attio|crm)_/i.test(key)
+  || /(?:_last_synced_at|_sync_hash)$/i.test(key)
+);
+const sourceOutputTargets = (config: any) => {
+  const source = config?.source && typeof config.source === 'object' ? config.source : {};
+  const searches = Array.isArray(source.searches) ? source.searches : [];
+  const strategies = Array.isArray(source.strategies) ? source.strategies : [];
+  const mappedFields = [...searches, ...strategies].flatMap((entry) => {
+    const outputMap = entry?.output_map && typeof entry.output_map === 'object'
+      ? entry.output_map
+      : {};
+    return [...Object.keys(outputMap), ...Object.values(outputMap).map((value) => String(value || ''))];
+  });
+  return new Set(mappedFields.filter((field) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(field)));
+};
+const isUnattributedTypeDefault = (value: any) => (
+  (typeof value === 'number' && value === 0)
+  || value === false
+);
+const recordDetailFieldClassification = ({
+  config,
+  record,
+  recordColumns,
+}: {
+  config: any;
+  record: any;
+  recordColumns: string[];
+}) => {
+  const producers = new Map<string, Set<string>>();
+  for (const step of (Array.isArray(config?.pipeline) ? config.pipeline : [])) {
+    if (String(step?.kind || '') !== 'enrich') continue;
+    const stepId = String(step?.id || '').trim();
+    if (!stepId) continue;
+    const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+    const legacyColumnKeys = stepConfig?.columns && typeof stepConfig.columns === 'object'
+      ? Object.keys(stepConfig.columns)
+      : [];
+    const fields = [
+      ...legacyColumnKeys,
+      ...getTargetColumnsForStepConfig(stepConfig).map((column) => column.name),
+    ];
+    for (const field of fields) {
+      if (!producers.has(field)) producers.set(field, new Set());
+      producers.get(field)?.add(stepId);
+    }
+  }
+  const producerRan = (field: string) => [...(producers.get(field) || [])].some((stepId) => (
+    SUCCESSFUL_ENRICH_STATUSES.has(String(record[`${stepId}__status`] || '').trim().toLowerCase())
+  ));
+  const raw = recordColumns.filter((key) => RAW_RECORD_FIELDS.has(key));
+  const sourcedTargets = sourceOutputTargets(config);
+  const displayFields = recordColumns.filter((key) => (
+    !RAW_RECORD_FIELDS.has(key) && !isInternalRecordDetailField(key)
+  ));
+  return {
+    sourced: dedupeRecordDetailFields({
+      fields: displayFields.filter((key) => (
+        !producerRan(key)
+        && (
+          sourcedTargets.has(key)
+          || (!producers.has(key) && !isUnattributedTypeDefault(record[key]))
+        )
+      )),
+      record,
+    }),
+    enriched: dedupeRecordDetailFields({
+      fields: displayFields.filter((key) => producers.has(key) && producerRan(key)),
+      record,
+    }),
+    raw,
+  };
+};
 const sourceToolServer = (config: any) => {
   const strategy = Array.isArray(config?.source?.strategies) ? config.source.strategies.find((item: any) => item?.tool?.server) : null;
   return String(strategy?.tool?.server || config?.source?.tool?.server || '');
@@ -860,8 +1011,9 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
   const db = openListDb({ listDir, readonly: true });
   try {
     const { config } = readConfig(listDir);
-    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
-    if (!record) throw new Error(`Record not found: ${rowId}`);
+    const storedRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+    if (!storedRecord) throw new Error(`Record not found: ${rowId}`);
+    const record = canonicalizeRecordDetailFields(storedRecord);
     const pipelineEvents = tableExists(db, 'pipeline_events')
       ? normalizedRows(db.prepare('SELECT * FROM pipeline_events WHERE record_id = ? ORDER BY occurred_at ASC').all(rowId))
       : [];
@@ -909,7 +1061,12 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
     overrides.filter((o) => o.active && o.kind === 'keep').forEach((o) => {
       activeKeepByStep.set(o.step_id || '*', o);
     });
-    const recordColumns = new Set(getRecordColumns(db).map((column) => column.key));
+    const recordColumnNames = [...new Set([
+      ...getRecordColumns(db).map((column) => column.key),
+      ...Object.keys(record),
+    ])];
+    const recordColumns = new Set(recordColumnNames);
+    const fieldClassification = recordDetailFieldClassification({ config, record, recordColumns: recordColumnNames });
     const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
     const orderedSteps = [{ id: 'source', kind: 'source' }, ...pipeline.map((step: any) => ({ id: String(step.id || ''), kind: String(step.kind || '') }))];
     const dropGate = String(record.disqualified_gate || '');
@@ -1070,7 +1227,19 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
         updated_at: String(asset.updated_at || ''),
       };
     });
-    return { record, lead_status: leadStatus(record), manual_fields: manualFields, interactions, brief, assets, steps, score, timeline, overrides };
+    return {
+      record,
+      field_classification: fieldClassification,
+      lead_status: leadStatus(record),
+      manual_fields: manualFields,
+      interactions,
+      brief,
+      assets,
+      steps,
+      score,
+      timeline,
+      overrides,
+    };
   } finally {
     db.close();
   }

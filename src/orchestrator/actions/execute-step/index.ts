@@ -14,6 +14,8 @@ import {
   recordWithDefault,
 } from '../schema-helpers.js';
 import { formatErrorMessage } from '../../lib/error-format.js';
+import { attachProviderToolUsage, providerToolUsageFromError } from '../../runtime/providers/usage.js';
+import { isBudgetExceededError } from '../../runtime/contract.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
@@ -298,7 +300,11 @@ export const executeStepAction = async ({
       provider: result.provider,
     };
   } catch (error) {
+    if (isBudgetExceededError(error)) throw error;
     const detail = formatErrorMessage(error);
-    throw new Error(`execute-step failed (${stepId || 'step'}): ${detail}`);
+    throw attachProviderToolUsage(
+      new Error(`execute-step failed (${stepId || 'step'}): ${detail}`),
+      providerToolUsageFromError(error),
+    );
   }
 };

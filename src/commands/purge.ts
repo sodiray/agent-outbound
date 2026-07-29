@@ -66,7 +66,7 @@ export const purgeCommand = async ({ list, dryRun = false }: { list: string; dry
     const protectedRecords: Array<{ row_id: string; business_name: string; rule: string; reasons: string[] }> = [];
 
     for (const record of records) {
-      const rule = matchExcludeRule({ row: record, rules });
+      const rule = matchExcludeRule({ row: record, rules, listDir });
       if (!rule) continue;
       const ruleName = String(rule.description || 'excluded');
       const reasons = isProtected({ db, record });

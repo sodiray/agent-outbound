@@ -6,6 +6,23 @@ const KM_PER_DEG_LAT = 110.574;
 const isFinitePoint = (point: GeoPoint) => Number.isFinite(point.lat) && Number.isFinite(point.lng);
 const usableRing = (ring: GeoPoint[]) => (Array.isArray(ring) ? ring.filter(isFinitePoint) : []);
 const degToRad = (value: number) => value * Math.PI / 180;
+const lngKmPerDegree = (lat: number) => 111.320 * Math.cos(degToRad(lat));
+
+export const GEO_SUBDIVISION_RADIUS_FACTOR = 0.71;
+
+export const metersToLat = (meters: number) => meters / 1000 / KM_PER_DEG_LAT;
+export const metersToLng = (meters: number, lat: number) => meters / 1000 / (lngKmPerDegree(lat) || 111.320);
+
+export const subdivisionChildCenters = ({ center, radiusM }: { center: GeoPoint; radiusM: number }) => {
+  const latOffset = metersToLat(radiusM / 2);
+  const lngOffset = metersToLng(radiusM / 2, center.lat);
+  return [
+    { lat: center.lat - latOffset, lng: center.lng - lngOffset },
+    { lat: center.lat - latOffset, lng: center.lng + lngOffset },
+    { lat: center.lat + latOffset, lng: center.lng - lngOffset },
+    { lat: center.lat + latOffset, lng: center.lng + lngOffset },
+  ];
+};
 
 const distanceM = (a: GeoPoint, b: GeoPoint) => {
   const dLat = degToRad(b.lat - a.lat);
@@ -54,7 +71,7 @@ export const polygonAreaKm2 = (ring: GeoPoint[]): number => {
   const points = usableRing(ring);
   if (points.length < 3) return 0;
   const centroid = polygonCentroid(points);
-  const kmPerDegLng = 111.320 * Math.cos(degToRad(centroid.lat));
+  const kmPerDegLng = lngKmPerDegree(centroid.lat);
   const area = points.reduce((sum, point, index) => {
     const next = points[(index + 1) % points.length];
     const x1 = point.lng * kmPerDegLng;
@@ -70,8 +87,8 @@ export const circleIntersectsPolygon = (center: GeoPoint, radiusM: number, ring:
   if (!isFinitePoint(center) || !Number.isFinite(radiusM) || radiusM < 0) return false;
   const bbox = polygonBbox(ring);
   if (![bbox.minLat, bbox.maxLat, bbox.minLng, bbox.maxLng].every(Number.isFinite)) return false;
-  const latGrow = radiusM / 1000 / KM_PER_DEG_LAT;
-  const lngGrow = radiusM / 1000 / (111.320 * Math.cos(degToRad(center.lat)) || 111.320);
+  const latGrow = metersToLat(radiusM);
+  const lngGrow = metersToLng(radiusM, center.lat);
   const inGrownBbox = center.lat >= bbox.minLat - latGrow
     && center.lat <= bbox.maxLat + latGrow
     && center.lng >= bbox.minLng - lngGrow

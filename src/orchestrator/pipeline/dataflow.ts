@@ -4,6 +4,7 @@ import { validatePipelineGraph } from '../lib/pipeline-graph.js';
 import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
+import { prepareFieldCheckValueFiles } from '../lib/field-check-values.js';
 import { countEnrichWorkForStep, enrichmentStepNeedsMcp, readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { closeMcpClient, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
@@ -292,8 +293,8 @@ const refreshRecord = ({ db, record }: { db: any; record: DataflowRecord }) => (
   db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(getRecordRowId(record), getRecordRowId(record)) || record
 );
 
-const enrichWork = ({ db, step, stepId, record, force }: { db: any; step: any; stepId: string; record: DataflowRecord; force: boolean }) => (
-  countEnrichWorkForStep({ db, step, stepId, rows: [record], force })
+const enrichWork = ({ db, listDir, step, stepId, record, force }: { db: any; listDir: string; step: any; stepId: string; record: DataflowRecord; force: boolean }) => (
+  countEnrichWorkForStep({ db, listDir, step, stepId, rows: [record], force })
 );
 
 const hasAwaitingReviewEvent = ({ db, recordId, stepId }: { db: any; recordId: string; stepId: string }) => Boolean(db.prepare(`
@@ -319,6 +320,7 @@ type KeepDirective = { keepAll: boolean; keepSteps: Set<string> };
 
 const initializeResolved = ({
   db,
+  listDir,
   rows,
   steps,
   force,
@@ -326,6 +328,7 @@ const initializeResolved = ({
   overridesByRecord = new Map<string, KeepDirective>(),
 }: {
   db: any;
+  listDir: string;
   rows: DataflowRecord[];
   steps: DataflowStep[];
   force: boolean;
@@ -352,13 +355,13 @@ const initializeResolved = ({
           db,
           recordId,
           stepId: staleStepId,
-          depHash: filterDefHash(step.step),
+          depHash: filterDefHash(step.step, { listDir }),
           cacheTtl: '',
           cacheTtlSeconds: 0,
         });
         return true;
       }
-      return isFilterDefFresh({ cached, stepConfig: step.step });
+      return isFilterDefFresh({ cached, stepConfig: step.step, listDir });
     }));
     // Force-resolve gates the human has chosen to keep this record past, even under
     // --reapply. Review gates execute once so their pass event is persisted.
@@ -376,14 +379,14 @@ const initializeResolved = ({
     steps
       .filter((entry) => entry.kind === 'enrich' && !initial.has(entry.id))
       .forEach((entry) => {
-        const work = enrichWork({ db, step: entry.step, stepId: entry.id, record: row, force });
+        const work = enrichWork({ db, listDir, step: entry.step, stepId: entry.id, record: row, force });
         if (Number(work.would_enrich || 0) === 0) initial.add(entry.id);
       });
     return [recordId, initial] as [string, Set<string>];
   }));
 };
 
-const makeApplicable = ({ db, force }: { db: any; force: boolean }) => (recordState: RecordState, step: DataflowStep) => {
+const makeApplicable = ({ db, listDir, force }: { db: any; listDir: string; force: boolean }) => (recordState: RecordState, step: DataflowStep) => {
   if (!defaultApplicable(recordState, step)) return false;
   if (step.kind === 'review') {
     const recordId = getRecordRowId(recordState.record);
@@ -391,7 +394,7 @@ const makeApplicable = ({ db, force }: { db: any; force: boolean }) => (recordSt
     return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
   }
   if (step.kind !== 'enrich') return true;
-  const work = enrichWork({ db, step: step.step, stepId: step.id, record: recordState.record, force });
+  const work = enrichWork({ db, listDir, step: step.step, stepId: step.id, record: recordState.record, force });
   return Number(work.would_enrich || 0) > 0;
 };
 
@@ -435,6 +438,7 @@ export const runPipelineDataflow = async ({
 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
+  prepareFieldCheckValueFiles({ config, listDir });
   assertPhaseModelReferences({ config, phase: 'pipeline' });
   const graph = validatePipelineGraph(config, { listDir });
   graph.warnings.forEach((warning) => console.warn(warning));
@@ -451,7 +455,7 @@ export const runPipelineDataflow = async ({
     // whatever the steps write; upsertRecord also enforces these per-write.
     if (!dryRun) reconcileFieldOverrides({ db });
     const rows = readInPlayRows({ db, where, limit });
-    if (dryRun) return simulatePipeline({ db, steps: steps.map((entry) => ({ ...entry.step, id: entry.id })), baseRows: rows, force, reapply });
+    if (dryRun) return simulatePipeline({ db, listDir, steps: steps.map((entry) => ({ ...entry.step, id: entry.id })), baseRows: rows, force, reapply });
     const overridesByRecord = overridesByRecordMap({ db });
 
     const largestBatch = largestBatchSize(steps);
@@ -475,7 +479,7 @@ export const runPipelineDataflow = async ({
       skipped_passed: 0,
       errors: unsupportedStepErrors(steps) as any[],
     };
-    const resolvedByRecord = initializeResolved({ db, rows, steps, force, reapply, overridesByRecord });
+    const resolvedByRecord = initializeResolved({ db, listDir, rows, steps, force, reapply, overridesByRecord });
     summary.skipped_passed = rows.reduce((total, row) => total + steps.filter((step) => (
       step.kind === 'filter'
       && resolvedByRecord.get(getRecordRowId(row))?.has(step.id)
@@ -514,7 +518,7 @@ export const runPipelineDataflow = async ({
       steps,
       concurrency: globalConcurrency,
       initialResolvedByRecord: resolvedByRecord,
-      isApplicable: makeApplicable({ db, force }),
+      isApplicable: makeApplicable({ db, listDir, force }),
       loadStep: async (step, record, inFlight) => {
         emitActivity({ event: 'step_start', phase: 'pipeline', step: step.id, kind: step.kind, rows: 1 });
         tickProgress(db, runId, { activeStep: step.id, stepIndex: step.index, stepTotal: steps.length, message: `${step.kind} · ${step.id}` });
@@ -658,7 +662,7 @@ export const runPipelineDataflow = async ({
           db,
           recordId,
           stepId: filterStalenessStepId(step.id),
-          depHash: filterDefHash(step.step),
+          depHash: filterDefHash(step.step, { listDir }),
           cacheTtl: '',
           cacheTtlSeconds: 0,
         });

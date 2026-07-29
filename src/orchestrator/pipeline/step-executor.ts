@@ -1,5 +1,6 @@
 import { executeEnrichmentStepOnRecords } from '../enrichment/runner.js';
 import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/conditions.js';
+import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 import { getRecordRowId } from '../lib/record.js';
 
 export type StepExecutionOutcome = {
@@ -46,15 +47,24 @@ const outcomeFor = (value: { passed?: unknown; reason?: unknown; errored?: unkno
   errored: Boolean(value.errored),
 });
 
-const executeFieldCheckBatch = async (step: PipelineStepLike, rows: Array<Record<string, unknown>>) => {
+const executeFieldCheckBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  rows: Array<Record<string, unknown>>,
+) => {
+  const conditions = Array.isArray(step.conditions) ? step.conditions : [];
+  const resolvedConditions = conditions.some((condition) => String((condition as Record<string, unknown>)?.value_file || '').trim())
+    ? resolveFieldCheckConditions({ conditions, listDir: ctx.listDir })
+    : conditions;
   const outcomes = new Map<string, StepExecutionOutcome>();
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     try {
       outcomes.set(recordId, outcomeFor(evaluateFieldCheckGroup({
         row,
-        conditions: Array.isArray(step.conditions) ? step.conditions : [],
+        conditions: resolvedConditions,
         match: step.match || 'all',
+        listDir: ctx.listDir,
       })));
     } catch (error) {
       outcomes.set(recordId, {
@@ -132,6 +142,7 @@ const executeReviewBatch = async (
       row,
       conditions: Array.isArray(predicate.conditions) ? predicate.conditions : [],
       match: String(predicate.match || 'all'),
+      listDir: ctx.listDir,
     }).passed;
   });
   const recordIds = matchingRows.map((row) => getRecordRowId(row));
@@ -175,7 +186,7 @@ export const executeStepBatch = async (
   const kind = textValue(step.kind);
   if (kind === 'filter') {
     const filterType = textValue(step.type, 'semantic').toLowerCase();
-    if (filterType === 'field_check') return executeFieldCheckBatch(step, rows);
+    if (filterType === 'field_check') return executeFieldCheckBatch(ctx, step, rows);
     if (filterType === 'semantic') return executeSemanticFilterBatch(ctx, step, rows);
     throw new Error(`unsupported_pipeline_filter_type:${filterType}`);
   }

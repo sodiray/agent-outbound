@@ -7,6 +7,7 @@ import { Writable } from 'node:stream';
 import {
   DEEPINFRA_RECOMMENDED_MODELS,
   aiUsageCommand,
+  attioDomainsCommand,
   assetsCommand,
   authConnectCommand,
   authLoginCommand,
@@ -211,6 +212,7 @@ const printHelp = () => {
   process.stdout.write(`  list info <list>\n`);
   process.stdout.write(`  lists\n`);
   process.stdout.write(`  describe [--command NAME]\n`);
+  process.stdout.write(`  attio-domains [--out contacted-domains.txt] [--list LIST]\n`);
   process.stdout.write(`  query <list> --sql "SELECT ..."\n`);
   process.stdout.write(`  schema <list> [--table NAME] [--format json|markdown]\n`);
   process.stdout.write(`  export <list> --to FILE --select "col1,col2" [--where SQL] [--format csv|jsonl|parquet]\n`);
@@ -260,7 +262,7 @@ const printHelp = () => {
   process.stdout.write(`  config author <list> --request TEXT [--force]\n`);
   process.stdout.write(`  config infer-deps <list> [--write]\n`);
   process.stdout.write(`  refresh-tools <list>\n`);
-  process.stdout.write(`  source <list> [--limit N] [--more N] [--dry-run] [--sample N]\n`);
+  process.stdout.write(`  source <list> [--limit N] [--more N] [--redensify] [--dry-run] [--sample N]\n`);
   process.stdout.write(`  source-territory <list> <territoryId> [--r0 350] [--floor 60] [--dry-run] [--max-calls 400] [--concurrency 5]\n`);
   process.stdout.write(`  remove <list> --row ROW_ID\n`);
   process.stdout.write(`  remove <list> --where SQL\n`);
@@ -747,6 +749,14 @@ const run = async () => {
     const targetCommand = consumeFlag(argv, '--command', '');
     setResponseContext({ command: 'describe', list: '' });
     print(describeCommand({ command: targetCommand }));
+    return;
+  }
+
+  if (command === 'attio-domains') {
+    const out = consumeFlag(argv, '--out', 'contacted-domains.txt');
+    const list = consumeFlag(argv, '--list', '');
+    setResponseContext({ command: 'attio-domains', list });
+    print(await attioDomainsCommand({ out, list }));
     return;
   }
 
@@ -1526,6 +1536,7 @@ const run = async () => {
     const limit = toNumber(consumeFlag(argv, '--limit', '0'), 0);
     const more = toNumber(consumeFlag(argv, '--more', '0'), 0);
     const dryRun = hasFlag(argv, '--dry-run');
+    const redensify = hasFlag(argv, '--redensify');
     const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
     if (more > 0) {
       const delegatedMore = await callServeAction('source_more', { list, more }, list);
@@ -1537,13 +1548,13 @@ const run = async () => {
       return;
     }
     const delegated = await callServeAction('source', {
-      list, limit, dryRun, sample,
+      list, limit, dryRun, sample, redensify,
     }, list);
     if (delegated) {
       print(delegated);
       return;
     }
-    print(await sourceCommand({ list, limit, dryRun, sample }));
+    print(await sourceCommand({ list, limit, dryRun, sample, redensify }));
     return;
   }
 

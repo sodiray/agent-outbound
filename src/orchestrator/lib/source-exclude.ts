@@ -18,12 +18,13 @@ export const normalizeExcludeRules = (rules: unknown): SourceExcludeRule[] => (
 
 // First exclusion rule the row matches, or null. Deterministic only — this
 // layer never calls a model, so it can run on every sourced row for free.
-export const matchExcludeRule = ({ row, rules }: { row: any; rules: SourceExcludeRule[] }) => {
+export const matchExcludeRule = ({ row, rules, listDir = '' }: { row: any; rules: SourceExcludeRule[]; listDir?: string }) => {
   for (const rule of rules) {
     const outcome = evaluateFieldCheckGroup({
       row,
       conditions: rule.conditions || [],
       match: rule.match || 'all',
+      listDir,
     });
     if (outcome.passed) return rule;
   }

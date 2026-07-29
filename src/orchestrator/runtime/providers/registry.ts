@@ -1,5 +1,6 @@
 import { ComposioProvider } from './composio.js';
 import { CommandProvider } from './command.js';
+import { MonidProvider } from './monid.js';
 import { registryServerEntry } from '../../lib/provider-registry.js';
 import type { ToolProvider } from './types.js';
 
@@ -9,11 +10,16 @@ type ProviderLookupOptions = {
 
 export class ProviderRegistry {
   private composioProvider: ComposioProvider | null = null;
+  private monidProvider: MonidProvider | null = null;
   private providersByList = new Map<string, Map<string, ToolProvider>>();
 
   getProvider(id = '', options: ProviderLookupOptions = {}): ToolProvider {
     const normalized = String(id || '').trim().toLowerCase();
     if (!normalized || normalized === 'composio') return this.getDefaultProvider();
+    if (normalized === 'monid') {
+      if (!this.monidProvider) this.monidProvider = new MonidProvider();
+      return this.monidProvider;
+    }
     const listDir = String(options.listDir || '').trim();
     if (!listDir) {
       throw new Error(`Unknown tool provider "${id}". A list directory is required for custom providers.`);
@@ -50,6 +56,7 @@ export class ProviderRegistry {
     const customProviders = [...this.providersByList.values()].flatMap((byName) => [...byName.values()]);
     await Promise.all(customProviders.map((provider) => provider.close?.()));
     this.providersByList.clear();
+    this.monidProvider = null;
     if (!this.composioProvider) return;
     await this.composioProvider.close?.();
     this.composioProvider = null;

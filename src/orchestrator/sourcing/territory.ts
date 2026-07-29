@@ -1,5 +1,14 @@
 import { assignTerritories } from '../territories/assign.js';
-import { circleIntersectsPolygon, pointInPolygon, polygonBbox, type GeoPoint } from '../lib/geo.js';
+import {
+  circleIntersectsPolygon,
+  GEO_SUBDIVISION_RADIUS_FACTOR,
+  metersToLat,
+  metersToLng,
+  pointInPolygon,
+  polygonBbox,
+  subdivisionChildCenters,
+  type GeoPoint,
+} from '../lib/geo.js';
 import { readConfig } from '../lib/config.js';
 import { makeRecordId } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
@@ -18,11 +27,6 @@ import {
   processAndInsertRows,
 } from './runner.js';
 
-const KM_PER_DEG_LAT = 110.574;
-const degToRad = (value: number) => value * Math.PI / 180;
-const lngKmPerDegree = (lat: number) => 111.320 * Math.cos(degToRad(lat));
-const metersToLat = (meters: number) => meters / 1000 / KM_PER_DEG_LAT;
-const metersToLng = (meters: number, lat: number) => meters / 1000 / (lngKmPerDegree(lat) || 111.320);
 const finiteNumber = (value: any) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -203,17 +207,6 @@ const withIds = (rows: any[]) => rows.map((row) => {
   return { ...row, _row_id: id, id };
 });
 
-const childCenters = ({ center, radiusM }: { center: GeoPoint; radiusM: number }) => {
-  const latOffset = metersToLat(radiusM / 2);
-  const lngOffset = metersToLng(radiusM / 2, center.lat);
-  return [
-    { lat: center.lat - latOffset, lng: center.lng - lngOffset },
-    { lat: center.lat - latOffset, lng: center.lng + lngOffset },
-    { lat: center.lat + latOffset, lng: center.lng - lngOffset },
-    { lat: center.lat + latOffset, lng: center.lng + lngOffset },
-  ];
-};
-
 const nearbyParams = ({ sourceConfig, center, radiusM, types = [] }: { sourceConfig: any; center: GeoPoint; radiusM: number; types?: string[] }) => ({
   tool: sourceConfig.tool,
   lat: center.lat,
@@ -346,8 +339,10 @@ export const sourceTerritory = async ({ listDir, territoryId, opts = {} }: { lis
     if (rows.length < 20) return rows;
     state.saturatedCircles += 1;
     if (radiusM > floor) {
-      const childRows = await Promise.all(childCenters({ center, radiusM })
-        .map((child) => harvest({ center: child, radiusM: radiusM * 0.6 })));
+      // For the child matching a point's quadrant, d² <= R²/2; 0.71R is greater
+      // than R/√2, so the four child circles cover the entire parent disc.
+      const childRows = await Promise.all(subdivisionChildCenters({ center, radiusM })
+        .map((child) => harvest({ center: child, radiusM: radiusM * GEO_SUBDIVISION_RADIUS_FACTOR })));
       return childRows.flat();
     }
     const typeRows = await COMMERCIAL_TYPES.reduce(async (promise, type) => {

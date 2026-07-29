@@ -133,6 +133,7 @@ const GeoTilesStrategySchema = SourceStrategyBaseSchema.extend({
   kind: z.literal('geo_tiles'),
   tiles: z.array(GeoTileSchema).optional(),
   tiles_from: z.string().optional(),
+  floor_m: z.coerce.number().positive().default(60),
   rank: z.enum(['distance', 'popularity']).default('distance'),
   types: z.array(z.string()).default([]),
   excluded_types: z.array(z.string()).default([]),
@@ -159,6 +160,22 @@ const FieldCheckConditionSchema = z.object({
   field: z.string(),
   operator: z.enum(['is_not_empty', 'is_empty', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'matches', 'not_matches', 'in', 'not_in']),
   value: z.any().optional(),
+  value_file: z.string().min(1).optional(),
+}).superRefine((condition, ctx) => {
+  if (condition.value !== undefined && condition.value_file !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'field_check condition cannot specify both value and value_file.',
+      path: ['value_file'],
+    });
+  }
+  if (condition.value_file !== undefined && condition.operator !== 'in' && condition.operator !== 'not_in') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'field_check value_file requires operator "in" or "not_in".',
+      path: ['value_file'],
+    });
+  }
 });
 
 const FieldCheckPredicateSchema = z.object({

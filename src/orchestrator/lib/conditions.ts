@@ -3,6 +3,7 @@ import { getRecordRowId } from './record.js';
 import { recordCostEvent } from './costs.js';
 import { evaluateConditionAction } from '../actions/evaluate-condition/index.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
+import { resolveFieldCheckConditions } from './field-check-values.js';
 
 // Coerce a single verdict value into { passed, reason }. Models return verdicts
 // in several shapes: a bare boolean, a "YES"/"NO" string, or an object.
@@ -130,9 +131,13 @@ export const evaluateFieldCheck = ({ row, condition }: { row: any; condition: an
   }
   if (operator === 'in' || operator === 'not_in') {
     const values = Array.isArray(target) ? target : [];
-    const normalizedActual = String(actual ?? '').trim().toLowerCase();
+    const normalizeMembershipValue = (value: unknown) => String(value ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/^www\./, '');
+    const normalizedActual = normalizeMembershipValue(actual);
     const matched = values
-      .map((value) => String(value ?? '').trim().toLowerCase())
+      .map(normalizeMembershipValue)
       .filter(Boolean)
       .includes(normalizedActual);
     const passed = operator === 'in' ? matched : !matched;
@@ -167,8 +172,22 @@ export const evaluateFieldCheck = ({ row, condition }: { row: any; condition: an
   return { passed: false, reason: `unsupported_operator:${operator}` };
 };
 
-export const evaluateFieldCheckGroup = ({ row, conditions, match = 'all' }: { row: any; conditions: any[]; match?: string }) => {
-  const checks = (Array.isArray(conditions) ? conditions : []).map((condition) => evaluateFieldCheck({ row, condition }));
+export const evaluateFieldCheckGroup = ({
+  row,
+  conditions,
+  match = 'all',
+  listDir = '',
+}: {
+  row: any;
+  conditions: any[];
+  match?: string;
+  listDir?: string;
+}) => {
+  const configured = Array.isArray(conditions) ? conditions : [];
+  const resolved = configured.some((condition) => String(condition?.value_file || '').trim())
+    ? resolveFieldCheckConditions({ conditions: configured, listDir })
+    : configured;
+  const checks = resolved.map((condition) => evaluateFieldCheck({ row, condition }));
   if (checks.length === 0) {
     console.warn('field_check filter has no conditions; treating it as a no-op.');
     return { passed: true, reason: 'no_conditions' };

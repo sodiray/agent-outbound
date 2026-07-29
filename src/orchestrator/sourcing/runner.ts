@@ -3,10 +3,14 @@ import { isAbsolute, join } from 'node:path';
 import {
   clearSearchState,
   ensureRecordColumns,
+  getSearchTask,
   getSearchState,
+  listRecoverableGeoTileTasks,
   listPendingSearchTasks,
   logSourcingEvent,
   openListDb,
+  rearmDoneGeoTileTasks,
+  rearmErroredGeoTileTasks,
   upsertRecord,
   upsertSearchState,
   upsertSearchTask,
@@ -27,6 +31,18 @@ import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { loadTools } from '../runtime/tools.js';
 import { matchExcludeRule, normalizeExcludeRules, type SourceExcludeRule } from '../lib/source-exclude.js';
 import { assignTerritories } from '../territories/assign.js';
+import {
+  GEO_SUBDIVISION_RADIUS_FACTOR,
+  subdivisionChildCenters,
+} from '../lib/geo.js';
+
+const GEO_TILE_RESULT_CAP = 20;
+const GEO_TILE_DEFAULT_FLOOR_M = 60;
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const isQuotaError = (error: any) => {
+  const message = String((error as any)?.message || error);
+  return message.includes('429') || message.includes('RESOURCE_EXHAUSTED');
+};
 
 const mergeExcludedByRule = (summary: any, excludedByRule: Record<string, number>) => {
   for (const [rule, count] of Object.entries(excludedByRule || {})) {
@@ -201,9 +217,42 @@ const loadTiles = ({ listDir, strategy }: { listDir: string; strategy: any }) =>
   ));
 };
 
-const taskIdFor = ({ kind, params }: { kind: string; params: any }) => (
-  `search_task_${stableHash({ kind, params }).slice(0, 32)}`
+const taskIdFor = ({ kind, params }: { kind: string; params: any }) => {
+  const { floor_m: _floorM, ...identityParams } = params || {};
+  return `search_task_${stableHash({ kind, params: identityParams }).slice(0, 32)}`;
+};
+
+const taskParamsFor = (task: any) => (
+  typeof task?.params === 'string' ? JSON.parse(task.params || '{}') : task?.params || {}
 );
+
+export const densificationChildrenFor = (task: any) => {
+  if (String(task?.kind || '') !== 'geo_tiles') return [];
+  const params = taskParamsFor(task);
+  const center = {
+    lat: Number(params?.lat),
+    lng: Number(params?.lng),
+  };
+  const radiusM = Number(params?.radius_m);
+  const floorM = Math.max(1, Number(params?.floor_m || GEO_TILE_DEFAULT_FLOOR_M));
+  if (![center.lat, center.lng, radiusM].every(Number.isFinite)) return [];
+  if (radiusM <= floorM) return [];
+  const childRadiusM = Math.max(floorM, radiusM * GEO_SUBDIVISION_RADIUS_FACTOR);
+  return subdivisionChildCenters({ center, radiusM }).map((childCenter) => {
+    const childParams = {
+      ...params,
+      lat: childCenter.lat,
+      lng: childCenter.lng,
+      radius_m: childRadiusM,
+      floor_m: floorM,
+    };
+    return {
+      id: taskIdFor({ kind: 'geo_tiles', params: childParams }),
+      kind: 'geo_tiles',
+      params: childParams,
+    };
+  });
+};
 
 export const expandSourceStrategies = ({ listDir, strategies }: { listDir: string; strategies: any[] }) => {
   const tasks: any[] = [];
@@ -245,6 +294,7 @@ export const expandSourceStrategies = ({ listDir, strategies }: { listDir: strin
           excluded_types: Array.isArray(strategy?.excluded_types) ? strategy.excluded_types : [],
           max_results: Number(strategy?.max_results || 100),
           output_map: strategy?.output_map || {},
+          floor_m: Number(strategy?.floor_m || GEO_TILE_DEFAULT_FLOOR_M),
         };
         tasks.push({ id: taskIdFor({ kind, params }), kind, params });
       }
@@ -417,8 +467,18 @@ export const loadExistingDedupValues = ({ db, dedupKey }: { db: any; dedupKey: s
 };
 
 const strategyStatusFor = ({ kind, totalSeen, maxResults }: { kind: string; totalSeen: number; maxResults: number }) => {
-  if (kind === 'geo_tiles') return totalSeen >= 20 ? 'saturated' : 'done';
+  if (kind === 'geo_tiles') return totalSeen >= GEO_TILE_RESULT_CAP ? 'saturated' : 'done';
   return totalSeen >= Number(maxResults || 100) ? 'capped' : 'done';
+};
+
+const enqueueDensificationChildren = ({ db, task }: { db: any; task: any }) => {
+  const children = densificationChildrenFor(task);
+  const enqueued = children.filter((child) => {
+    const existing = getSearchTask({ db, id: child.id });
+    upsertSearchTask({ db, task: child });
+    return !existing;
+  });
+  return { children, enqueued };
 };
 
 const refreshEmbeddingsAndLinks = async ({
@@ -521,7 +581,7 @@ export const processAndInsertRows = async ({
   // records and never spend embedding/dedup calls.
   const excludedByRule: Record<string, number> = {};
   const keptRows = (rows || []).filter((row) => {
-    const rule = matchExcludeRule({ row, rules: excludeRules });
+    const rule = matchExcludeRule({ row, rules: excludeRules, listDir });
     if (!rule) return true;
     const key = String(rule.description || 'excluded');
     excludedByRule[key] = (excludedByRule[key] || 0) + 1;
@@ -570,9 +630,9 @@ export const processAndInsertRows = async ({
         identityFields,
         aiConfig,
       });
+      shape.duplicate_status = dedup.duplicate_status;
       if (dedup.duplicate_of) {
         shape.duplicate_of = dedup.duplicate_of;
-        shape.duplicate_status = dedup.duplicate_status;
         deduped += 1;
       }
 
@@ -610,6 +670,7 @@ export const processAndInsertRows = async ({
     filtered: filtered + excludedCount,
     excludedByRule,
     errors,
+    truncated: rowsToProcess.length < keptRows.length,
   };
 };
 
@@ -645,7 +706,7 @@ const parsePaginationJson = (text: string) => {
   }
 };
 
-export const runSourcing = async ({ listDir, limit = 0 }) => {
+export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) {
     throw new Error(`Invalid config: ${errors.join('; ')}`);
@@ -668,12 +729,25 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
   emitActivity({ event: 'phase_start', phase: 'sourcing', searches: searches.length, strategies: strategies.length });
 
   const summary: any = {
+    status: 'ok',
     searches_run: 0,
     strategies_expanded: 0,
     search_tasks_created: 0,
     search_tasks_run: 0,
     search_tasks_pending: 0,
     search_calls_made: 0,
+    search_call_budget_hit: false,
+    search_retries: 0,
+    search_tasks_errored: 0,
+    tiles_saturated: 0,
+    tiles_rearmed_saturated: 0,
+    tiles_rearmed_error: 0,
+    tiles_rearmed_done: 0,
+    tiles_errored: 0,
+    tiles_pending: 0,
+    tiles_saturated_at_floor: 0,
+    densification_children_enqueued: 0,
+    tile_errors: [],
     found_total: 0,
     inserted_total: 0,
     inserted_ids: [],
@@ -742,29 +816,113 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
         upsertSearchTask({ db, task });
       }
 
-      const seenDedupValues = loadExistingDedupValues({ db, dedupKey });
-      const pendingTasks = listPendingSearchTasks({ db });
-      summary.search_tasks_pending = pendingTasks.length;
-      tickProgress(db, runId, { stepTotal: pendingTasks.length, done: summary.inserted_total });
-      let callsMade = 0;
+      if (redensify) {
+        summary.tiles_rearmed_done = Number(rearmDoneGeoTileTasks({ db }).changes || 0);
+      }
+      const recoverableTasks = listRecoverableGeoTileTasks({ db });
+      const saturatedTasks = recoverableTasks.filter((task: any) => task.status === 'saturated');
+      const errorTasks = recoverableTasks.filter((task: any) => task.status === 'error');
+      summary.tiles_rearmed_saturated = saturatedTasks.length;
+      summary.tiles_rearmed_error = errorTasks.length;
+      rearmErroredGeoTileTasks({ db });
+      for (const task of saturatedTasks) {
+        const densification = enqueueDensificationChildren({ db, task });
+        summary.densification_children_enqueued += densification.enqueued.length;
+        if (densification.children.length === 0) summary.tiles_saturated_at_floor += 1;
+      }
 
-      for (const task of pendingTasks) {
-        if (maxCalls !== null && callsMade >= maxCalls) break;
+      const seenDedupValues = loadExistingDedupValues({ db, dedupKey });
+      const taskQueue = listPendingSearchTasks({ db });
+      const queuedTaskIds = new Set(taskQueue.map((task: any) => String(task.id || '')));
+      const strategyState = {
+        callsMade: 0,
+        queueIndex: 0,
+        budgetHit: false,
+      };
+      summary.search_tasks_pending = taskQueue.length;
+      tickProgress(db, runId, { stepTotal: taskQueue.length, done: summary.inserted_total });
+
+      const executeWithRetry = async (task: any): Promise<any> => {
+        const attempt = async (attemptIndex: number, failures: string[]): Promise<any> => {
+          if (maxCalls !== null && strategyState.callsMade >= maxCalls) {
+            strategyState.budgetHit = true;
+            return { budgetHit: true, failures };
+          }
+          strategyState.callsMade += 1;
+          summary.search_calls_made = strategyState.callsMade;
+          const taskHeartbeat = setInterval(() => heartbeat(db, runId), 3000);
+          try {
+            const result = await executeStrategyTask({
+              mcp,
+              listDir,
+              task,
+              toolCatalog,
+            });
+            return { result, failures };
+          } catch (error) {
+            const message = String((error as any)?.message || error);
+            const nextFailures = [...failures, message];
+            if (isQuotaError(error) && attemptIndex < 3) {
+              if (maxCalls !== null && strategyState.callsMade >= maxCalls) {
+                strategyState.budgetHit = true;
+                return { budgetHit: true, failures: nextFailures };
+              }
+              summary.search_retries += 1;
+              await sleep(1000 * (2 ** attemptIndex));
+              return attempt(attemptIndex + 1, nextFailures);
+            }
+            return { error, failures: nextFailures };
+          } finally {
+            clearInterval(taskHeartbeat);
+          }
+        };
+        return attempt(0, []);
+      };
+
+      while (strategyState.queueIndex < taskQueue.length) {
+        const task = taskQueue[strategyState.queueIndex];
+        strategyState.queueIndex += 1;
+        if (maxCalls !== null && strategyState.callsMade >= maxCalls) {
+          strategyState.budgetHit = true;
+          break;
+        }
         if (Number(limit || 0) > 0 && Number(summary.inserted_total || 0) >= Number(limit || 0)) break;
-        callsMade += 1;
-        summary.search_calls_made = callsMade;
         summary.search_tasks_run += 1;
         emitActivity({ event: 'step_start', phase: 'sourcing_task', step: task.id });
-        tickProgress(db, runId, { stepIndex: summary.search_tasks_run, stepTotal: pendingTasks.length, activeStep: String(task.id), message: `Sourcing tile ${summary.search_tasks_run}/${pendingTasks.length}`, done: summary.inserted_total });
+        tickProgress(db, runId, { stepIndex: summary.search_tasks_run, stepTotal: taskQueue.length, activeStep: String(task.id), message: `Sourcing tile ${summary.search_tasks_run}/${taskQueue.length}`, done: summary.inserted_total });
+
+        const execution = await executeWithRetry(task);
+        if (execution.budgetHit) break;
+        if (execution.error) {
+          const message = String((execution.error as any)?.message || execution.error);
+          const params = taskParamsFor(task);
+          summary.errors.push(message);
+          summary.search_tasks_errored += 1;
+          if (task.kind === 'geo_tiles') {
+            summary.tiles_errored += 1;
+            summary.tile_errors.push({
+              task_id: String(task.id || ''),
+              lat: Number(params?.lat),
+              lng: Number(params?.lng),
+              radius_m: Number(params?.radius_m),
+              error_count: execution.failures.length,
+              error: message,
+            });
+          }
+          updateSearchTaskResult({
+            db,
+            id: task.id,
+            status: 'error',
+            pagesFetched: 0,
+            totalSeen: 0,
+            newUnique: 0,
+          });
+          emitActivity({ event: 'error', phase: 'sourcing_task', step: task.id, message });
+          continue;
+        }
 
         try {
-          const taskHeartbeat = setInterval(() => heartbeat(db, runId), 3000);
-          const taskResult = await executeStrategyTask({
-            mcp,
-            listDir,
-            task,
-            toolCatalog,
-          }).finally(() => clearInterval(taskHeartbeat));
+          const taskResult = execution.result;
           const rows = Array.isArray(taskResult.rows) ? taskResult.rows : [];
           const mappedRows = rows.map((row: any) => {
             const mapped = mapStrategyRow({ row, outputMap: taskResult.params?.output_map || {} });
@@ -801,15 +959,30 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
           mergeExcludedByRule(summary, processed.excludedByRule);
           summary.errors.push(...processed.errors);
 
-          const params = typeof task?.params === 'string' ? JSON.parse(task.params || '{}') : task.params || {};
+          const params = taskParamsFor(task);
+          const incomplete = processed.truncated || processed.errors.length > 0;
+          const status = incomplete
+            ? 'pending'
+            : strategyStatusFor({ kind: task.kind, totalSeen: rows.length, maxResults: Number(params?.max_results || 100) });
           updateSearchTaskResult({
             db,
             id: task.id,
-            status: strategyStatusFor({ kind: task.kind, totalSeen: rows.length, maxResults: Number(params?.max_results || 100) }),
+            status,
             pagesFetched: task.kind === 'keyword_geo' ? Number(params?.max_pages || 1) : 1,
             totalSeen: rows.length,
             newUnique: processed.insertedIds.length,
           });
+          if (task.kind === 'geo_tiles' && status === 'saturated') {
+            summary.tiles_saturated += 1;
+            const densification = enqueueDensificationChildren({ db, task });
+            summary.densification_children_enqueued += densification.enqueued.length;
+            if (densification.children.length === 0) summary.tiles_saturated_at_floor += 1;
+            for (const child of densification.enqueued) {
+              if (queuedTaskIds.has(child.id)) continue;
+              queuedTaskIds.add(child.id);
+              taskQueue.push(getSearchTask({ db, id: child.id }));
+            }
+          }
           emitActivity({ event: 'step_complete', phase: 'sourcing_task', step: task.id, rows: rows.length });
         } catch (error) {
           const message = String((error as any)?.message || error);
@@ -817,15 +990,18 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
           updateSearchTaskResult({
             db,
             id: task.id,
-            status: 'error',
-            pagesFetched: 0,
+            status: 'pending',
+            pagesFetched: 1,
             totalSeen: 0,
             newUnique: 0,
           });
           emitActivity({ event: 'error', phase: 'sourcing_task', step: task.id, message });
         }
       }
-      summary.search_tasks_pending = listPendingSearchTasks({ db }).length;
+      const remainingTasks = listPendingSearchTasks({ db });
+      summary.search_call_budget_hit = strategyState.budgetHit;
+      summary.search_tasks_pending = remainingTasks.length;
+      summary.tiles_pending = remainingTasks.filter((task: any) => task.kind === 'geo_tiles').length;
     }
 
     if (allRows.length > 0 && !(Number(limit || 0) > 0 && Number(summary.inserted_total || 0) >= Number(limit || 0))) {
@@ -853,6 +1029,7 @@ export const runSourcing = async ({ listDir, limit = 0 }) => {
     }
 
     summary.territories = assignTerritories({ listDir, config, db, rowIds: summary.inserted_ids });
+    summary.status = summary.errors.length > 0 ? 'partial' : 'ok';
     logSourcingEvent({ listDir, payload: summary });
     emitActivity({
       event: 'phase_complete',

@@ -309,7 +309,7 @@ export const runGenerateStep = async ({
     const rowLabel = String(record.business_name || recordId);
     const existing = findAsset({ db, rowId: recordId, stepId: id });
 
-    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate });
+    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) {
       summary.skipped_when += 1;
       summary.record_ids.push(recordId);

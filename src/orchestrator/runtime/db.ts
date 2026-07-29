@@ -2244,6 +2244,34 @@ export const listPendingSearchTasks = ({ db }) => (
   db.prepare("SELECT * FROM search_tasks WHERE status = 'pending' ORDER BY id").all()
 );
 
+export const getSearchTask = ({ db, id }) => (
+  db.prepare('SELECT * FROM search_tasks WHERE id = ? LIMIT 1').get(String(id || ''))
+);
+
+export const listRecoverableGeoTileTasks = ({ db }) => (
+  db.prepare(`
+    SELECT * FROM search_tasks
+    WHERE kind = 'geo_tiles' AND status IN ('saturated', 'error')
+    ORDER BY id
+  `).all()
+);
+
+export const rearmErroredGeoTileTasks = ({ db }) => (
+  db.prepare(`
+    UPDATE search_tasks
+    SET status = 'pending'
+    WHERE kind = 'geo_tiles' AND status = 'error'
+  `).run()
+);
+
+export const rearmDoneGeoTileTasks = ({ db }) => (
+  db.prepare(`
+    UPDATE search_tasks
+    SET status = 'pending'
+    WHERE kind = 'geo_tiles' AND status = 'done'
+  `).run()
+);
+
 export const updateSearchTaskResult = ({
   db,
   id,

@@ -36,6 +36,30 @@ const CATALOG: CommandDefinition[] = [
     examples: ['agent-outbound describe', 'agent-outbound describe --command query'],
   },
   {
+    name: 'attio-domains',
+    description: 'Export normalized company domains from Attio for file-backed field_check gates.',
+    mutating: true,
+    flags: [
+      { name: '--out', type: 'string', default: 'contacted-domains.txt', description: 'Output path, relative to --list when provided.' },
+      { name: '--list', type: 'string', required: false, description: 'Optional list directory used to resolve a relative output path.' },
+    ],
+    input_schema: { out: 'optional string', list: 'optional string' },
+    output_schema: {
+      ...COMMON_OUTPUT,
+      result: {
+        out: 'string',
+        companies_scanned: 'number',
+        companies_with_no_usable_domain: 'number',
+        unique_domains_written: 'number',
+        freemail_entries_rejected: 'number',
+      },
+    },
+    examples: [
+      'agent-outbound attio-domains',
+      'agent-outbound attio-domains --list my-list --out contacted-domains.txt',
+    ],
+  },
+  {
     name: 'query',
     description: 'Run read-only SQL against one list database.',
     mutating: false,
@@ -315,7 +339,7 @@ const CATALOG: CommandDefinition[] = [
       { name: '--file', type: 'string', required: false, description: 'Validate this file instead of current config.' },
     ],
     input_schema: { list: 'string', file: 'optional string' },
-    output_schema: { ...COMMON_OUTPUT, result: { ok: 'boolean', errors: 'string[]', warnings: 'string[]' } },
+    output_schema: { ...COMMON_OUTPUT, result: { ok: 'boolean', errors: 'string[]', warnings: 'string[]', value_files: 'array of { config_path, value_file, resolved_path, entry_count, error }' } },
     examples: ['agent-outbound config validate my-list', 'agent-outbound config validate my-list --file ./proposed.yaml'],
   },
   {

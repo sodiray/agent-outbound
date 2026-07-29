@@ -4,10 +4,11 @@ import { countEnrichWorkForStep, readStaleness } from '../enrichment/runner.js';
 import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { isRecordAwaitingReview } from './review.js';
+import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 
 const MATERIAL_FILTER_FIELDS = ['type', 'match', 'condition', 'conditions', 'value', 'operator', 'field', 'on_fail', 'model'] as const;
 
-export const filterMaterialConfig = (stepConfig: any): Record<string, any> => {
+export const filterMaterialConfig = (stepConfig: any, { listDir = '' }: { listDir?: string } = {}): Record<string, any> => {
   const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};
   const material: Record<string, any> = {};
   for (const field of [...MATERIAL_FILTER_FIELDS].sort()) {
@@ -15,15 +16,23 @@ export const filterMaterialConfig = (stepConfig: any): Record<string, any> => {
       material[field] = cfg[field];
     }
   }
+  if (listDir && Array.isArray(material.conditions)) {
+    material.conditions = resolveFieldCheckConditions({
+      conditions: material.conditions,
+      listDir,
+    });
+  }
   return material;
 };
 
-export const filterDefHash = (stepConfig: any) => stableHash({ config: filterMaterialConfig(stepConfig) });
+export const filterDefHash = (stepConfig: any, { listDir = '' }: { listDir?: string } = {}) => (
+  stableHash({ config: filterMaterialConfig(stepConfig, { listDir }) })
+);
 
 export const filterStalenessStepId = (stepId: string) => `filter:${stepId}`;
 
-export const isFilterDefFresh = ({ cached, stepConfig }: { cached: any; stepConfig: any }) => (
-  !cached || String(cached.dep_hash || '') === filterDefHash(stepConfig)
+export const isFilterDefFresh = ({ cached, stepConfig, listDir = '' }: { cached: any; stepConfig: any; listDir?: string }) => (
+  !cached || String(cached.dep_hash || '') === filterDefHash(stepConfig, { listDir })
 );
 
 export const pipelineStepId = (step: any, index: number) => (
@@ -83,7 +92,7 @@ export const writeFilterFailure = ({ db, record, stepId, reason, drop }: { db: a
   return softDrop ? 'review_flagged' : (drop ? 'dropped' : 'flagged');
 };
 
-export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: any; steps: any[]; baseRows: any[]; force: boolean; reapply: boolean }) => {
+export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply }: { db: any; listDir: string; steps: any[]; baseRows: any[]; force: boolean; reapply: boolean }) => {
   const state = {
     removed: new Set<string>(),
     parked: new Set<string>(),
@@ -101,7 +110,7 @@ export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: 
     ));
 
     if (kind === 'enrich') {
-      const work = countEnrichWorkForStep({ db, step, stepId, rows: active, force });
+      const work = countEnrichWorkForStep({ db, listDir, step, stepId, rows: active, force });
       const estCost = avgStepCostUsd({ db, stepId }) * work.would_enrich;
       state.estTotalCostUsd += estCost;
       state.stepReports.push({
@@ -127,6 +136,7 @@ export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: 
           row: record,
           conditions: Array.isArray(step.when.conditions) ? step.when.conditions : [],
           match: step.when.match || 'all',
+          listDir,
         }).passed;
       });
       const skippedWhen = evalRows.length - matchingRows.length;
@@ -182,7 +192,7 @@ export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: 
       const recordId = getRecordRowId(record);
       if (!hasPassedStep({ db, recordId, stepId })) return true;
       const cached = readStaleness({ db, recordId, stepId: filterStalenessStepId(stepId) });
-      return !isFilterDefFresh({ cached, stepConfig: step });
+      return !isFilterDefFresh({ cached, stepConfig: step, listDir });
     });
     const skippedPassed = active.length - evalRows.length;
 
@@ -192,6 +202,7 @@ export const simulatePipeline = ({ db, steps, baseRows, force, reapply }: { db: 
           row: record,
           conditions: Array.isArray(step?.conditions) ? step.conditions : [],
           match: step?.match || 'all',
+          listDir,
         });
         if (outcome.passed || onFail !== 'drop') return acc;
         if (isRecordCommitted(record)) return { ...acc, wouldDropCommitted: acc.wouldDropCommitted + 1 };

@@ -244,6 +244,10 @@ is additive at the margin, not a replacement.
 - **Batch decisions client-side**, one POST. The queue is 2000 records deep.
 - **Review before Monid.** The gate is what makes the spend affordable.
 - **Monid registers globally** like `composio`; budgets stay per-list.
+- **Sourcing always calls Google Places DIRECTLY, never through Monid.** Not a
+  cost heuristic — direct Places calls bill our GCP account and that is
+  deliberately what we want. Monid is only for endpoints we have no integration
+  for. The same protection applies to Firecrawl, Smarty, Adyntel and Anchor.
 - **Voice / SMS is out of scope.** No channel work in this plan.
 
 ## Scope note

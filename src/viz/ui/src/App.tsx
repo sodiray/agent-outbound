@@ -5,6 +5,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { fetchMeta, fetchProgress, fetchRecordDetail, fetchRecords } from './api.js';
 import type { ProgressRun } from './api.js';
 import { InfoTooltip } from './InfoTooltip.js';
+import { DetailDrawer } from './DetailDrawer.js';
 import { Markdown } from './markdown.js';
 import type {
   ActiveFilter,
@@ -1020,14 +1021,6 @@ const DetailPanel = ({
     return () => window.clearInterval(intervalId);
   }, [rowIdValue]);
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
   const record = detail?.record;
   const score = detail?.score;
   const scoreValue = numberValue(score?.value);
@@ -1035,10 +1028,7 @@ const DetailPanel = ({
   const overrides = Array.isArray(detail?.overrides) ? detail.overrides : [];
 
   return (
-    <div className={`drawer-root ${rowIdValue ? 'is-open' : ''}`} aria-hidden={!rowIdValue}>
-      <button className="scrim" type="button" aria-label="Close detail panel" onClick={onClose} />
-      <aside className="detail-panel" aria-label="Record detail">
-        <button className="close-button" type="button" onClick={onClose} aria-label="Close">×</button>
+    <DetailDrawer open={Boolean(rowIdValue)} onClose={onClose}>
         {loading ? <div className="drawer-loading">Loading detail...</div> : null}
         {detail && record ? (
           <>
@@ -1093,8 +1083,7 @@ const DetailPanel = ({
             ) : null}
           </>
         ) : null}
-      </aside>
-    </div>
+    </DetailDrawer>
   );
 };
 

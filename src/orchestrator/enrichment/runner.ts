@@ -18,8 +18,34 @@ import { evaluateFieldCheckGroup } from '../lib/conditions.js';
 import { nullableBoolean, nullableNumber, nullableString } from '../actions/schema-helpers.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
+import { providerToolUsageFromError } from '../runtime/providers/usage.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
 import { executeToolCallAction } from './actions/tool-call.js';
+
+const recordErroredProviderToolCost = ({
+  db,
+  listDir,
+  recordId,
+  stepId,
+  error,
+}: {
+  db: any;
+  listDir: string;
+  recordId: string;
+  stepId: string;
+  error: unknown;
+}) => {
+  const usage = providerToolUsageFromError(error);
+  if (!usage) return;
+  recordCostEvent({
+    db,
+    listDir,
+    recordId,
+    stepId,
+    provider: usage.provider,
+    usage,
+  });
+};
 
 export const parseExtra = (value) => {
   try {
@@ -272,12 +298,13 @@ export const whenPredicateForStep = ({ step, stepConfig }: { step: any; stepConf
       : null
 );
 
-export const shouldRunForRecord = ({ record, predicate }: { record: any; predicate: any }) => {
+export const shouldRunForRecord = ({ record, predicate, listDir = '' }: { record: any; predicate: any; listDir?: string }) => {
   if (!predicate) return { passed: true, reason: '' };
   return evaluateFieldCheckGroup({
     row: record,
     conditions: Array.isArray(predicate?.conditions) ? predicate.conditions : [],
     match: predicate?.match || 'all',
+    listDir,
   });
 };
 
@@ -343,7 +370,7 @@ const resolveStepId = (step: any, index: number) => {
 // how many would actually re-run vs be skipped (fresh cache or `when` mismatch).
 // Mirrors the per-record staleness logic in executeEnrichmentStepOnRecords so the
 // dry-run impact preview is accurate. (Pipeline enrich uses empty depValues.)
-export const countEnrichWorkForStep = ({ db, step, stepId = '', rows = [], force = false }: { db: any; step: any; stepId?: string; rows?: any[]; force?: boolean }) => {
+export const countEnrichWorkForStep = ({ db, listDir = '', step, stepId = '', rows = [], force = false }: { db: any; listDir?: string; step: any; stepId?: string; rows?: any[]; force?: boolean }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
@@ -354,7 +381,7 @@ export const countEnrichWorkForStep = ({ db, step, stepId = '', rows = [], force
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
   const result = { would_enrich: 0, skip_fresh: 0, skip_when: 0 };
   for (const record of rows || []) {
-    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate });
+    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) { result.skip_when += 1; continue; }
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
     if (
@@ -477,7 +504,7 @@ export const executeEnrichmentStepOnRecords = async ({
   await mapWithConcurrency<any, void>((rows || []) as any[], async (record) => {
     const recordId = getRecordRowId(record);
     const rowLabel = String(record?.business_name || recordId);
-    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate });
+    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) {
       upsertRecord({
         db,
@@ -528,7 +555,6 @@ export const executeEnrichmentStepOnRecords = async ({
       const outputs = result.outputs || {};
       const outcome = outputOutcomeFor({ outputs, expectedOutputs });
 
-      if (outcome === 'ok') outputZod.parse(outputs);
       recordCostEvent({
         db,
         listDir,
@@ -538,6 +564,7 @@ export const executeEnrichmentStepOnRecords = async ({
         provider: String((result as any)?.provider || ''),
         usage: result.usage,
       });
+      if (outcome === 'ok') outputZod.parse(outputs);
 
       const patch = applyOutputs({
         step: { ...step, config: stepConfig, __list_dir: listDir },
@@ -565,6 +592,13 @@ export const executeEnrichmentStepOnRecords = async ({
     try {
       await runAttempt(1);
     } catch (error) {
+      recordErroredProviderToolCost({
+        db,
+        listDir,
+        recordId,
+        stepId: `pipeline_enrich:${id}`,
+        error,
+      });
       if (isBudgetExceededError(error)) throw error;
       if (enrichStepUsesEmptyOnError(stepConfig)) {
         const outputs = emptyOutputsFor(outputZod);
@@ -595,6 +629,13 @@ export const executeEnrichmentStepOnRecords = async ({
         await runAttempt(2);
         return;
       } catch (retryError) {
+        recordErroredProviderToolCost({
+          db,
+          listDir,
+          recordId,
+          stepId: `pipeline_enrich:${id}`,
+          error: retryError,
+        });
         if (isBudgetExceededError(retryError)) throw retryError;
         const detail = formatErrorMessage(retryError);
         summary.failed += 1;
@@ -836,7 +877,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             return;
           }
 
-          const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate });
+          const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
           if (!whenOutcome.passed) {
             patches.push({
               recordId,
@@ -902,7 +943,6 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               throw new Error(`Step "${id}" returned no outputs for declared outputs.`);
             }
 
-            if (outcome === 'ok') outputZod.parse(outputs);
             recordCostEvent({
               db,
               listDir,
@@ -912,6 +952,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               provider: String((result as any)?.provider || ''),
               usage: result.usage,
             });
+            if (outcome === 'ok') outputZod.parse(outputs);
 
             const patch = applyOutputs({
               step: { ...step, __list_dir: listDir },
@@ -928,6 +969,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               skippedWhen: false,
             });
           } catch (error) {
+            recordErroredProviderToolCost({
+              db,
+              listDir,
+              recordId,
+              stepId: `enrich:${id}`,
+              error,
+            });
             if (isBudgetExceededError(error)) throw error;
             const neutralStepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
             if (enrichStepUsesEmptyOnError(neutralStepConfig)) {

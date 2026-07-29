@@ -176,17 +176,17 @@ export const aiDedupLink = async ({ db, row, identityFields, threshold = 0.85, a
 
     if (!confirmed.same) continue;
 
-    const status = Number(confirmed.confidence || 0) >= 0.7 ? 'confirmed' : 'needs_review';
     const canonical = resolveCanonicalRowId({ db, startRowId: String(candidate.row_id || '') });
     if (canonical && sourceRowId && canonical === sourceRowId) continue;
+    const confidence = Number(confirmed.confidence || 0);
 
     return {
-      duplicate_of: canonical,
-      duplicate_status: status,
+      duplicate_of: confidence >= 0.7 ? canonical : '',
+      duplicate_status: confidence >= 0.7 ? 'confirmed' : 'needs_review',
       identity_hash: identityHash,
       embedding,
       reasoning: String(confirmed.reasoning || ''),
-      confidence: Number(confirmed.confidence || 0),
+      confidence,
       similarity: Number(candidate.similarity || 0),
       usage: confirmed.usage || null,
       model: String(confirmed.model || ''),

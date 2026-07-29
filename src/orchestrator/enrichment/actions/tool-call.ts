@@ -1,5 +1,6 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { loadTools } from '../../runtime/tools.js';
+import { collectProviderToolUsage } from '../../runtime/providers/usage.js';
 
 type ToolCallActionInput = {
   mcp?: Client | null;
@@ -74,7 +75,8 @@ export const executeToolCallAction = async ({
     if (!isBlankValue(value)) args[argName] = value;
   }
 
-  const result = await toolDef.execute(args);
+  const execution = await collectProviderToolUsage(() => toolDef.execute(args));
+  const result = execution.result;
 
   const outputMap = (stepConfig?.output_map && typeof stepConfig.output_map === 'object' ? stepConfig.output_map : {}) as Record<string, string>;
   const outputs: Record<string, unknown> = {};
@@ -83,5 +85,9 @@ export const executeToolCallAction = async ({
     if (value !== undefined) outputs[outputName] = value;
   }
 
-  return { outputs };
+  return {
+    outputs,
+    usage: execution.usage || undefined,
+    provider: execution.usage?.provider || '',
+  };
 };

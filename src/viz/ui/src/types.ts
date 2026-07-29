@@ -272,6 +272,11 @@ export type LeadAsset = {
 
 export type RecordDetail = {
   record: RecordRow;
+  field_classification: {
+    sourced: string[];
+    enriched: string[];
+    raw: string[];
+  };
   lead_status: string;
   manual_fields: ManualField[];
   interactions: Interaction[];
