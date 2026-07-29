@@ -3,10 +3,11 @@ import { createServer } from 'node:net';
 import { relative, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import {
   applyReviewDecisionsForViz,
   buildMeta,
@@ -24,6 +25,17 @@ import {
 const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 const uiDistDir = resolve(moduleDir, 'ui/dist');
 const uiIndexPath = resolve(uiDistDir, 'index.html');
+
+const reviewErrorResponse = (c: Context, error: unknown) => {
+  const message = String(error instanceof Error ? error.message : error);
+  if (error instanceof AgentOutboundError && error.code === 'NOT_FOUND') {
+    return c.json({ error: message }, 404);
+  }
+  if (error instanceof AgentOutboundError && error.code === 'INVALID_ARGUMENT') {
+    return c.json({ error: message }, 400);
+  }
+  return c.json({ error: message }, 500);
+};
 
 const isPortFree = (port: number) => new Promise<boolean>((resolvePort) => {
   const server = createServer();
@@ -139,7 +151,7 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         Number(c.req.query('offset') || 0),
       ));
     } catch (error) {
-      return c.json({ error: String(error?.message || error) }, 500);
+      return reviewErrorResponse(c, error);
     }
   });
 
@@ -152,7 +164,7 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         body?.decisions,
       ));
     } catch (error) {
-      return c.json({ error: String(error?.message || error) }, 500);
+      return reviewErrorResponse(c, error);
     }
   });
 
@@ -164,7 +176,7 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         String(c.req.query('stage') || ''),
       ));
     } catch (error) {
-      return c.json({ error: String(error?.message || error) }, 500);
+      return reviewErrorResponse(c, error);
     }
   });
 

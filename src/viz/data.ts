@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
+import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import {
   getAssetsForRow,
   getBriefForRecord,
@@ -517,8 +518,20 @@ export const getReviewQueueForViz = (listDir: string, stageId: string, limit = 1
 };
 
 export const applyReviewDecisionsForViz = (listDir: string, stageId: string, decisions: unknown) => {
-  if (!Array.isArray(decisions)) throw new Error('Review decisions body must contain a decisions array.');
-  if (decisions.length > 500) throw new Error('Review decision batches are capped at 500 rows.');
+  if (!Array.isArray(decisions)) {
+    throw new AgentOutboundError({
+      code: 'INVALID_ARGUMENT',
+      message: 'Review decisions body must contain a decisions array.',
+      retryable: false,
+    });
+  }
+  if (decisions.length > 500) {
+    throw new AgentOutboundError({
+      code: 'INVALID_ARGUMENT',
+      message: 'Review decision batches are capped at 500 rows.',
+      retryable: false,
+    });
+  }
   const db = openListDb({ listDir, readonly: false });
   try {
     const { config } = readConfig(listDir);

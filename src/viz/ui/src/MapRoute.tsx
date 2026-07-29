@@ -756,7 +756,10 @@ export const MapRoute = () => {
           <span className="topbar__name">{meta.list.name}</span>
           <span className="topbar__path">{meta.list.dir}</span>
         </div>
-        <Link to="/">← Table</Link>
+        <nav className="route-nav" aria-label="Primary">
+          <Link to="/">Table</Link>
+          <Link to="/review">Review</Link>
+        </nav>
       </header>
       <div className="map-canvas">
         {meta.mapsApiKey ? (

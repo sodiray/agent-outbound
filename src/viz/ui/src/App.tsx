@@ -1334,7 +1334,10 @@ export const App = () => {
             </span>
           </span>
         </div>
-        <Link to="/map" className="map-nav-link">Map</Link>
+        <nav className="route-nav" aria-label="Primary">
+          <Link to="/map">Map</Link>
+          <Link to="/review">Review</Link>
+        </nav>
       </header>
       <section className="toolbar">
         <div className="preset-row">

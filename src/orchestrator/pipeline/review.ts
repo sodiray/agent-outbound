@@ -65,7 +65,7 @@ const awaitingReviewWhere = () => `
   AND event.passed = 0
   AND event.reason = 'awaiting_review'
   AND ${inPlayWhere('record')}
-  AND record.sequence_status != 'opted_out'
+  AND COALESCE(record.sequence_status, '') != 'opted_out'
   AND NOT EXISTS (
     SELECT 1
     FROM overrides verdict
@@ -119,7 +119,7 @@ export const countAwaitingReviewRecords = ({ db, config }: { db: any; config: an
       AND event.passed = 0
       AND event.reason = 'awaiting_review'
       AND ${inPlayWhere('record')}
-      AND record.sequence_status != 'opted_out'
+      AND COALESCE(record.sequence_status, '') != 'opted_out'
       AND NOT EXISTS (
         SELECT 1
         FROM overrides verdict
@@ -247,7 +247,7 @@ export const insertReviewDecision = ({
   if (normalizedVerdict === 'drop' && !normalizedReason) {
     throw new AgentOutboundError({
       code: 'INVALID_ARGUMENT',
-      message: 'review drop requires --reason.',
+      message: 'A review drop requires a reason.',
       retryable: false,
     });
   }

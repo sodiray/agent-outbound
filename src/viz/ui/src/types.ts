@@ -72,6 +72,14 @@ export type Territory = {
   qualified_count: number;
 };
 
+export type ReviewStage = {
+  id: string;
+  label: string;
+  description: string;
+  fields: string[];
+  awaiting_count: number;
+};
+
 export type MetaResponse = {
   list: { name: string; dir: string };
   counts: { total: number; qualified: number; disqualified: number; by_status: LeadStatusCounts };
@@ -79,6 +87,7 @@ export type MetaResponse = {
   columns: ColumnMeta[];
   filters: FilterMeta[];
   territories: Territory[];
+  review_stages: ReviewStage[];
   mapsApiKey: string;
   scoreMinimum: number;
 };
@@ -86,6 +95,39 @@ export type MetaResponse = {
 export type RecordsResponse = {
   total: number;
   records: RecordRow[];
+};
+
+export type ReviewQueueResponse = {
+  stage: ReviewStage;
+  total: number;
+  limit: number;
+  offset: number;
+  records: RecordRow[];
+};
+
+export type ReviewVerdict = 'pass' | 'drop';
+
+export type ReviewDecisionInput = {
+  row_id: string;
+  verdict: ReviewVerdict;
+  reason?: string;
+};
+
+export type ReviewDecisionResult = {
+  ok: boolean;
+  index: number;
+  row_id?: string;
+  verdict?: ReviewVerdict;
+  override_id?: string;
+  error?: string;
+};
+
+export type ReviewDecisionBatchResponse = {
+  stage: ReviewStage;
+  requested: number;
+  applied: number;
+  failed: number;
+  results: ReviewDecisionResult[];
 };
 
 export type OverrideKind = 'keep' | 'drop';
