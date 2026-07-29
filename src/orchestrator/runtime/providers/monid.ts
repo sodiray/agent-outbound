@@ -278,11 +278,20 @@ const blockedControlNames = (run: Record<string, unknown>) => {
   });
 };
 
+const parseJsonPayload = (value: unknown) => {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return value;
+  }
+};
+
 const outputPayload = (run: Record<string, unknown>) => {
   const providerResponse = asRecord(run.providerResponse);
-  if (providerResponse.data !== undefined) return providerResponse.data;
-  if (run.output !== undefined) return run.output;
-  if (providerResponse.error !== undefined) return providerResponse.error;
+  if (providerResponse.data !== undefined) return parseJsonPayload(providerResponse.data);
+  if (run.output !== undefined) return parseJsonPayload(run.output);
+  if (providerResponse.error !== undefined) return parseJsonPayload(providerResponse.error);
   return null;
 };
 
@@ -294,6 +303,63 @@ const monidProviderError = (message: string) => {
   const error = new Error(message);
   error.name = 'MonidProviderError';
   return error;
+};
+
+const numericCost = (value: unknown) => (
+  value === null || value === undefined || value === ''
+    ? Number.NaN
+    : Number(value)
+);
+
+const resolvedRunCost = (run: Record<string, unknown>) => {
+  const cost = asRecord(run.cost);
+  const amount = asRecord(cost.amount);
+  const directCost = numericCost(cost.value);
+  if (Number.isFinite(directCost)) {
+    return {
+      usdCost: directCost,
+      currency: String(cost.currency || amount.currency || 'USD').toUpperCase(),
+    };
+  }
+
+  const nestedCost = numericCost(amount.value);
+  if (Number.isFinite(nestedCost)) {
+    return {
+      usdCost: nestedCost,
+      currency: String(amount.currency || cost.currency || 'USD').toUpperCase(),
+    };
+  }
+
+  const billing = asRecord(run.billing);
+  const reportedCost = asRecord(billing.reportedCost);
+  const reportedValue = numericCost(reportedCost.value);
+  if (Number.isFinite(reportedValue)) {
+    const unit = String(reportedCost.unit || 'USD').trim().toUpperCase();
+    if (unit !== 'MICRO_DOLLAR' && unit !== 'USD') {
+      throw monidProviderError(`Monid run "${String(run.runId || '')}" returned unsupported reported cost unit "${unit}".`);
+    }
+    return {
+      usdCost: unit === 'MICRO_DOLLAR' ? reportedValue / 1_000_000 : reportedValue,
+      currency: String(reportedCost.currency || billing.currency || 'USD').toUpperCase(),
+    };
+  }
+
+  const price = asRecord(run.price);
+  const priceAmount = asRecord(price.amount);
+  const catalogRate = numericCost(priceAmount.value);
+  const billedUnits = run.billedUnits === null
+    || run.billedUnits === undefined
+    || run.billedUnits === ''
+    ? 1
+    : numericCost(run.billedUnits);
+  const estimatedCost = catalogRate * billedUnits;
+  if (!Number.isFinite(estimatedCost)) return null;
+
+  // This is the catalog rate, not a reported charge, so it is only a last-resort estimate.
+  return {
+    usdCost: estimatedCost,
+    currency: String(priceAmount.currency || price.currency || 'USD').toUpperCase(),
+  };
 };
 
 export class MonidProvider implements ToolProvider {
@@ -461,24 +527,11 @@ export class MonidProvider implements ToolProvider {
   }
 
   private completedResult(slug: string, run: Record<string, unknown>) {
-    const cost = asRecord(run.cost);
-    const amount = asRecord(cost.amount);
-    const directCost = cost.value === null || cost.value === undefined || cost.value === ''
-      ? Number.NaN
-      : Number(cost.value);
-    const nestedCost = amount.value === null || amount.value === undefined || amount.value === ''
-      ? Number.NaN
-      : Number(amount.value);
-    const useDirectCost = Number.isFinite(directCost);
-    const usdCost = useDirectCost ? directCost : nestedCost;
-    if (!Number.isFinite(usdCost)) {
-      throw monidProviderError(`Monid run "${String(run.runId || '')}" completed without numeric cost.value or cost.amount.value.`);
+    const resolvedCost = resolvedRunCost(run);
+    if (!resolvedCost) {
+      throw monidProviderError(`Monid run "${String(run.runId || '')}" completed without a finite numeric cost.`);
     }
-    const currency = String(
-      useDirectCost
-        ? (cost.currency || amount.currency || 'USD')
-        : (amount.currency || cost.currency || 'USD'),
-    ).toUpperCase();
+    const { usdCost, currency } = resolvedCost;
     if (currency !== 'USD') {
       throw monidProviderError(`Monid run "${String(run.runId || '')}" returned unsupported cost currency "${currency}".`);
     }
