@@ -181,6 +181,35 @@ export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply 
       return;
     }
 
+    if (kind === 'assign') {
+      const rules = Array.isArray(step?.rules) ? step.rules : [];
+      const deterministic = rules.every((rule: any) => String(rule?.type || 'field_check') === 'field_check');
+      const idle = active.filter((record) => String(record?.sequence_status || 'idle') === 'idle');
+      const bySequence = deterministic
+        ? idle.reduce((counts: Record<string, number>, record) => {
+          const matched = rules.find((rule: any) => evaluateFieldCheckGroup({
+            row: record,
+            conditions: Array.isArray(rule?.conditions) ? rule.conditions : [],
+            match: rule?.match || 'all',
+            listDir,
+          }).passed);
+          const sequence = String(matched?.sequence || step?.fallback || '');
+          return { ...counts, [sequence]: Number(counts[sequence] || 0) + 1 };
+        }, {})
+        : {};
+      state.stepReports.push({
+        id: stepId,
+        kind,
+        type: deterministic ? 'field_check' : 'semantic',
+        would_evaluate: idle.length,
+        would_skip_launched: active.length - idle.length,
+        by_sequence: deterministic ? bySequence : null,
+        note: deterministic ? undefined : 'semantic assignments are not simulated',
+        est_cost_usd: 0,
+      });
+      return;
+    }
+
     if (kind !== 'filter') {
       state.stepReports.push({ id: stepId, kind, type: kind, note: `unsupported_pipeline_step_kind:${kind}` });
       return;

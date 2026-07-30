@@ -78,6 +78,7 @@ export type ReviewStage = {
   description: string;
   fields: string[];
   awaiting_count: number;
+  sequence_counts: Array<{ sequence_name: string; count: number }>;
 };
 
 export type MetaResponse = {

@@ -84,6 +84,7 @@ export const rowToRecordShape = ({ listName, row }) => {
     trigger_score: Number(row.trigger_score || 0),
     priority_rank: Number(recordScore(row) || 0),
     sequence_name: String(row.sequence_name || 'default'),
+    routed_by: String(row.routed_by || ''),
     sequence_status: String(row.sequence_status || 'idle'),
     sequence_step: Number(row.sequence_step || 0),
     next_action_date: String(row.next_action_date || ''),

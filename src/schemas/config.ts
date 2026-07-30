@@ -4,7 +4,7 @@ import {
   normalizeWorkingDayToken,
   SEQUENCE_WORKING_DAY_VALUES,
 } from '../orchestrator/lib/working-days.js';
-import { validatePipelineGraph } from '../orchestrator/lib/pipeline-graph.js';
+import { validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib/pipeline-graph.js';
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 
 export const ProviderModelSchema = z.string().trim().superRefine((value, ctx) => {
@@ -209,6 +209,30 @@ const PipelineFilterStepSchema = z.object({
   reasoning: z.boolean().optional(),
 }).partial({ description: true, depends_on: true, runs_after: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
 
+const PipelineAssignRuleSchema = z.object({
+  id: z.string().default(''),
+  sequence: z.string().min(1),
+  type: z.enum(['field_check', 'semantic']).default('field_check'),
+  match: FieldCheckPredicateSchema.shape.match,
+  conditions: FieldCheckPredicateSchema.shape.conditions,
+  description: z.string().default(''),
+  condition: z.string().default(''),
+  model: ProviderModelSchema.optional(),
+  reasoning: z.boolean().optional(),
+}).partial({ id: true, type: true, match: true, conditions: true, description: true, condition: true, model: true, reasoning: true });
+
+const PipelineAssignStepSchema = z.object({
+  kind: z.literal('assign'),
+  id: z.string().min(1),
+  description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
+  target: z.literal('sequence_name'),
+  fallback: z.string().min(1),
+  rules: z.array(PipelineAssignRuleSchema).default([]),
+  batch_size: z.coerce.number().int().min(1).max(200).default(10),
+}).partial({ description: true, depends_on: true, runs_after: true, rules: true, batch_size: true });
+
 const PipelineReviewStepSchema = z.object({
   kind: z.literal('review'),
   id: z.string().min(1),
@@ -298,6 +322,7 @@ export const PipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
   PipelineGenerateStepSchema,
   PipelineFilterStepSchema,
+  PipelineAssignStepSchema,
   PipelineReviewStepSchema,
 ]);
 
@@ -411,6 +436,7 @@ const WorkingDaysSchema = z.preprocess((value) => {
   .transform((days) => Array.from(new Set(days))));
 
 const SequenceSchema = z.object({
+  manual: z.boolean().default(false),
   start_when: z.string().default(''),
   reply_check: StepConfigSchema.default({}),
   on_reply: z.enum(['pause', 'continue', 'stop']).default('pause'),
@@ -699,11 +725,13 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
       sequences: withSequenceDefaults,
     };
   const graph = validatePipelineGraph(config, options);
+  const router = validateRouterConfig(parsed.data);
+  const errors = [...new Set([...graph.errors, ...router.errors])];
 
   return {
-    error: graph.errors.join('\n'),
-    errors: graph.errors,
-    warnings: [...graph.warnings, ...territoryWarnings],
+    error: errors.join('\n'),
+    errors,
+    warnings: [...new Set([...graph.warnings, ...router.warnings, ...territoryWarnings])],
     config,
   };
 };

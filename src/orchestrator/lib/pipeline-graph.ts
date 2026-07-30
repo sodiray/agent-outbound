@@ -93,7 +93,7 @@ const proseTextsForStep = (step: any, options: PipelineGraphOptions) => {
 
 const producedFieldsByStep = (config: any): Producer[] => {
   const entries = pipelineSteps(config).flatMap((step: any, index: number) => {
-    if (String(step?.kind || '') !== 'enrich') return [];
+    if (!['enrich', 'generate'].includes(String(step?.kind || ''))) return [];
     const id = stepId(step);
     if (!id) return [];
     const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
@@ -182,6 +182,9 @@ export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = 
       ...(String(step?.kind || '') === 'enrich' ? conditionFields(step?.when) : []),
       ...(String(step?.kind || '') === 'review' ? conditionFields(step?.when) : []),
       ...(String(step?.kind || '') === 'filter' ? conditionFields(step) : []),
+      ...(String(step?.kind || '') === 'assign'
+        ? (Array.isArray(step?.rules) ? step.rules.flatMap((rule: any) => conditionFields(rule)) : [])
+        : []),
       ...collectTokens(step?.prompt_args),
       ...collectTokens(step?.args),
     ];
@@ -193,6 +196,166 @@ export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = 
     return [id, deps] as [string, Set<string>];
   }).filter(([id]) => Boolean(id));
   return new Map(entries);
+};
+
+const BASE_RECORD_FIELDS = new Set([
+  '_row_id', 'id', '_created_at', '_updated_at', 'business_name', 'address', 'city', 'state', 'zip',
+  'postal_code', 'country', 'website', 'domain', 'google_place_id', 'parent_row_id', 'latitude',
+  'longitude', 'source', 'source_query', 'sourced_at', 'duplicate_of', 'duplicate_status',
+  'source_filter_result', 'source_filter_failures', 'disqualified_at', 'disqualified_gate',
+  'disqualify_reason', 'phone', 'email_primary', 'contact_name_primary', 'contact_title_primary',
+  'contact_name', 'contact_email', 'contact_title', 'email_verification_status',
+  'email_verification_confidence', 'email_verified_at', 'fit_score', 'trigger_score',
+  'trigger_score_peak', 'fit_reasoning', 'trigger_reasoning', 'fit_updated_at', 'trigger_updated_at',
+  'fit_score_updated_at', 'trigger_score_updated_at', 'priority_rank', 'sequence_name',
+  'sequence_status', 'sequence_step', 'sequence_step_attempts', 'next_action_date', 'launched_at',
+  'last_outreach_at', 'email_last_message_id', 'email_last_thread_id', 'email_last_draft_id',
+  'email_last_reply_at', 'email_reply_classification', 'reply_classification_latest',
+  'email_thread_id', 'disposition_latest', 'disposition_follow_up_at', 'mail_last_piece_id',
+  'mail_last_cost_cents', 'mail_last_expected_delivery', 'mail_last_delivered_at',
+  'mail_last_returned_at', 'visit_scheduled_date', 'visit_route_id', 'visit_route_position',
+  'sms_last_message_id', 'call_last_disposition', 'suppressed', 'suppressed_reason', 'suppressed_at',
+  'do_not_sms', 'dne_email', 'dnc_phone', 'dnk_visit', 'crm_company_id', 'crm_person_id',
+  'crm_deal_id', 'crm_last_synced_at', 'crm_sync_hash', 'workflow_signals', 'company_resolution',
+  'resolution_source', 'vertical', 'sub_vertical', 'size_tier', 'is_franchise', 'persona', 'outcome',
+  'outcome_notes', 'outcome_at', 'outcome_value', 'extra_json', 'retry_count', 'last_error',
+  'needs_review', 'review_reason', 'review_flagged_at', 'routed_by', 'created_at', 'updated_at',
+]);
+
+const sourceSuppliedFields = (config: any) => {
+  const source = config?.source || {};
+  const searches = Array.isArray(source?.searches) ? source.searches : [];
+  const strategies = Array.isArray(source?.strategies) ? source.strategies : [];
+  const mapped = [...searches, ...strategies].flatMap((entry: any) => {
+    const outputMap = entry?.output_map && typeof entry.output_map === 'object'
+      ? entry.output_map
+      : {};
+    return [...Object.keys(outputMap), ...Object.values(outputMap).map((value) => String(value || '').trim())];
+  });
+  const manual = searches.flatMap((search: any) => (
+    Array.isArray(search?.manual_results)
+      ? search.manual_results.flatMap((row: any) => Object.keys(row || {}))
+      : []
+  ));
+  return new Set([
+    ...BASE_RECORD_FIELDS,
+    ...stringArray(source?.identity),
+    ...mapped,
+    ...manual,
+  ].map((field) => String(field || '').trim()).filter(Boolean));
+};
+
+const stableValue = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map((entry) => stableValue(entry));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, stableValue(entry)]),
+  );
+};
+
+const conditionKey = (condition: any) => JSON.stringify(stableValue({
+  field: String(condition?.field || '').trim(),
+  operator: String(condition?.operator || '').trim(),
+  value: condition?.value,
+  value_file: condition?.value_file,
+}));
+
+const ruleName = (rule: any, index: number) => (
+  String(rule?.id || rule?.sequence || '').trim() || `rule_${index + 1}`
+);
+
+const shadowWarningsForStep = (step: any) => {
+  const rules = Array.isArray(step?.rules) ? step.rules : [];
+  return rules.flatMap((earlier: any, earlierIndex: number) => {
+    const earlierConditions = Array.isArray(earlier?.conditions) ? earlier.conditions : [];
+    if (earlierConditions.length === 0) return [];
+    const earlierKeys = new Set(earlierConditions.map((condition: any) => conditionKey(condition)));
+    return rules.slice(earlierIndex + 1).flatMap((later: any, offset: number) => {
+      const laterConditions = Array.isArray(later?.conditions) ? later.conditions : [];
+      if (String(later?.match || 'all') !== 'all' || earlierKeys.size >= laterConditions.length) return [];
+      const laterKeys = new Set(laterConditions.map((condition: any) => conditionKey(condition)));
+      const isStrictSubset = Array.from(earlierKeys).every((key) => laterKeys.has(key));
+      if (!isStrictSubset) return [];
+      const laterIndex = earlierIndex + offset + 1;
+      return [
+        `pipeline.${stepId(step)} rule "${ruleName(earlier, earlierIndex)}" shadows later rule "${ruleName(later, laterIndex)}": its conditions are a strict subset of the later rule's conditions (first match wins).`,
+      ];
+    });
+  });
+};
+
+export const validateRouterConfig = (config: any) => {
+  const steps = pipelineSteps(config);
+  const assignSteps = steps.filter((step: any) => String(step?.kind || '') === 'assign');
+  const sequences = config?.sequences && typeof config.sequences === 'object' ? config.sequences : {};
+  const sequenceNames = Object.keys(sequences);
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (sequenceNames.length > 1 && assignSteps.length === 0) {
+    errors.push(`Router configuration is ambiguous: sequences ${sequenceNames.map((name) => `"${name}"`).join(', ')} are defined, but pipeline has no kind: assign step.`);
+  }
+
+  if (assignSteps.length === 0) return { errors, warnings };
+
+  const definedSequences = new Set(sequenceNames);
+  const producers = producedFieldsByStep(config);
+  const suppliedFields = sourceSuppliedFields(config);
+
+  assignSteps.forEach((step: any) => {
+    const id = stepId(step);
+    const dependencies = new Set(stringArray(step?.depends_on));
+    const rules = Array.isArray(step?.rules) ? step.rules : [];
+    const fallback = String(step?.fallback || '').trim();
+    const fallbackSequence = sequences[fallback];
+    if (
+      fallbackSequence
+      && Array.isArray(fallbackSequence?.steps)
+      && fallbackSequence.steps.length > 0
+      && fallbackSequence?.manual !== true
+    ) {
+      errors.push(`pipeline.${id} fallback "${fallback}" has non-empty steps and must set sequences.${fallback}.manual: true.`);
+    }
+
+    rules.forEach((rule: any, ruleIndex: number) => {
+      const sequence = String(rule?.sequence || '').trim();
+      const name = ruleName(rule, ruleIndex);
+      if (!definedSequences.has(sequence)) {
+        errors.push(`pipeline.${id} rule "${name}" targets undefined sequence "${sequence}".`);
+      }
+
+      conditionFields(rule).forEach((field) => {
+        if (suppliedFields.has(field)) return;
+        const fieldProducers = producers.filter((producer) => producer.field === field);
+        const dependencyProducer = fieldProducers.find((producer) => dependencies.has(producer.stepId));
+        if (dependencyProducer) return;
+        const knownProducer = fieldProducers[0];
+        if (knownProducer) {
+          errors.push(`pipeline.${id} rule "${name}" reads field "${field}" produced by step "${knownProducer.stepId}", but depends_on does not include "${knownProducer.stepId}".`);
+          return;
+        }
+        errors.push(`pipeline.${id} rule "${name}" reads field "${field}", but no depends_on step produces it and no source supplies it.`);
+      });
+    });
+
+    warnings.push(...shadowWarningsForStep(step));
+  });
+
+  const reachable = new Set(assignSteps.flatMap((step: any) => (
+    Array.isArray(step?.rules)
+      ? step.rules.map((rule: any) => String(rule?.sequence || '').trim()).filter(Boolean)
+      : []
+  )));
+  sequenceNames.filter((name) => !reachable.has(name)).forEach((name) => {
+    warnings.push(`Sequence "${name}" is unreachable: no kind: assign rule targets it.`);
+  });
+
+  return {
+    errors: [...new Set(errors)],
+    warnings: [...new Set(warnings)],
+  };
 };
 
 const findCycle = (edges: Map<string, Set<string>>) => {

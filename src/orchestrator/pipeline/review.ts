@@ -113,6 +113,20 @@ export const countAwaitingReviewAtStage = ({ db, stageId }: { db: any; stageId: 
   WHERE ${awaitingReviewWhere()}
 `).get(String(stageId))?.n || 0);
 
+export const countAwaitingReviewBySequence = ({ db, stageId }: { db: any; stageId: string }) => db.prepare(`
+  SELECT
+    COALESCE(NULLIF(TRIM(record.sequence_name), ''), 'default') AS sequence_name,
+    COUNT(DISTINCT event.record_id) AS count
+  FROM pipeline_events event
+  JOIN records record ON record._row_id = event.record_id
+  WHERE ${awaitingReviewWhere()}
+  GROUP BY COALESCE(NULLIF(TRIM(record.sequence_name), ''), 'default')
+  ORDER BY count DESC, sequence_name ASC
+`).all(String(stageId)).map((row: any) => ({
+  sequence_name: String(row?.sequence_name || 'default'),
+  count: Number(row?.count || 0),
+}));
+
 export const isRecordAwaitingReview = ({
   db,
   recordId,
@@ -177,6 +191,7 @@ export const getReviewStages = ({ db, config }: { db: any; config: any }) => {
     .map((stage) => ({
       ...stage,
       awaiting_count: countAwaitingReviewAtStage({ db, stageId: stage.id }),
+      sequence_counts: countAwaitingReviewBySequence({ db, stageId: stage.id }),
     }));
 };
 
@@ -203,7 +218,7 @@ export const getReviewQueue = ({
   const pageOffset = Number.isFinite(requestedOffset)
     ? Math.max(0, Math.floor(requestedOffset))
     : 0;
-  const fields = [...new Set(['_row_id', 'business_name', ...stage.fields])]
+  const fields = [...new Set(['_row_id', 'business_name', 'sequence_name', 'routed_by', ...stage.fields])]
     .filter((field) => availableColumns.has(field));
   const rows = db.prepare(`
     WITH awaiting AS (
@@ -221,7 +236,11 @@ export const getReviewQueue = ({
   `).all(stage.id, pageLimit, pageOffset);
   const total = countAwaitingReviewAtStage({ db, stageId: stage.id });
   return {
-    stage: { ...stage, awaiting_count: total },
+    stage: {
+      ...stage,
+      awaiting_count: total,
+      sequence_counts: countAwaitingReviewBySequence({ db, stageId: stage.id }),
+    },
     total,
     limit: pageLimit,
     offset: pageOffset,

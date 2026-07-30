@@ -53,6 +53,11 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
   for (const [index, step] of asArray(config?.pipeline).entries()) {
     const kind = String(step?.kind || '');
     addExplicitRef(refs, `pipeline[${index}].model`, step?.model, kind === 'filter' ? 'evaluation' : 'research');
+    if (kind === 'assign') {
+      for (const [ruleIndex, rule] of asArray(step?.rules).entries()) {
+        addExplicitRef(refs, `pipeline[${index}].rules[${ruleIndex}].model`, rule?.model, 'evaluation');
+      }
+    }
   }
   addExplicitRef(refs, 'score.model', config?.score?.model, 'evaluation');
   for (const [index, criterion] of asArray(config?.score?.criteria).entries()) {
@@ -81,7 +86,15 @@ const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source'
   if (phase === 'pipeline') {
     for (const [index, step] of asArray(config?.pipeline).entries()) {
       const kind = String(step?.kind || '');
-      addResolvedRef(refs, `pipeline[${index}]`, step?.model, kind === 'filter' ? 'evaluation' : 'research', aiConfig);
+      if (kind !== 'assign') {
+        addResolvedRef(refs, `pipeline[${index}]`, step?.model, kind === 'filter' ? 'evaluation' : 'research', aiConfig);
+      }
+      if (kind === 'assign') {
+        for (const [ruleIndex, rule] of asArray(step?.rules).entries()) {
+          if (String(rule?.type || 'field_check') !== 'semantic') continue;
+          addResolvedRef(refs, `pipeline[${index}].rules[${ruleIndex}]`, rule?.model, 'evaluation', aiConfig);
+        }
+      }
     }
     return refs;
   }

@@ -1477,6 +1477,26 @@ kbd {
   white-space: nowrap;
 }
 
+.review-sequence-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+}
+
+.review-sequence-counts span {
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  color: var(--muted);
+  padding: 0.15rem 0.45rem;
+  font-size: 0.72rem;
+}
+
+.review-sequence-counts strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
 .review-message {
   border: 1px solid rgba(62, 207, 111, 0.25);
   border-radius: 7px;

@@ -78,9 +78,54 @@ const parseTimeoutPolicy = (rawText) => {
   return 'skip_step';
 };
 
-const getSequence = (config, name = 'default') => {
+export const getSequence = (config, name = 'default') => {
   const sequences = config?.sequences || {};
-  return sequences[name] || sequences.default || { steps: [] };
+  if (!Object.prototype.hasOwnProperty.call(sequences, name)) {
+    throw new Error(`Unknown sequence "${name}".`);
+  }
+  const sequence = sequences[name];
+  if (!sequence) throw new Error(`Unknown sequence "${name}".`);
+  return sequence;
+};
+
+const recordSequenceName = (record) => String(record?.sequence_name || 'default').trim() || 'default';
+
+const holdingSequenceNames = (config) => new Set(
+  (Array.isArray(config?.pipeline) ? config.pipeline : [])
+    .filter((step) => String(step?.kind || '') === 'assign')
+    .map((step) => String(step?.fallback || '').trim())
+    .filter(Boolean),
+);
+
+const groupRecordsBySequence = ({ config, records }) => {
+  const grouped = (records || []).reduce((groups, record) => {
+    const name = recordSequenceName(record);
+    const current = groups.get(name) || [];
+    groups.set(name, [...current, record]);
+    return groups;
+  }, new Map());
+  return Array.from(grouped.entries()).map(([name, groupedRecords]) => {
+    const sequence = getSequence(config, name);
+    return {
+      name,
+      sequence,
+      steps: Array.isArray(sequence?.steps) ? sequence.steps : [],
+      timing: resolveWorkingDayConfig(sequence),
+      records: groupedRecords,
+    };
+  });
+};
+
+const sequenceScope = ({ sequenceName = '', holdingNames = new Set() }) => {
+  const filter = String(sequenceName || '').trim();
+  const holding = Array.from(holdingNames);
+  return {
+    sql: [
+      holding.length > 0 ? `AND COALESCE(sequence_name, 'default') NOT IN (${holding.map(() => '?').join(', ')})` : '',
+      filter ? "AND COALESCE(sequence_name, 'default') = ?" : '',
+    ].filter(Boolean).join(' '),
+    params: [...holding, ...(filter ? [filter] : [])],
+  };
 };
 
 const getStepDay = (step) => {
@@ -124,13 +169,23 @@ const getLaunchDecision = ({ sequence, firstStep, today }) => {
   return { timing, launchBaseDate, filtered };
 };
 
-export const collectDueRecords = ({ db, limit = 0 }) => db.prepare(`
-  SELECT * FROM records
-  WHERE ${inPlayWhere()}
-    AND (sequence_status IS NULL OR sequence_status NOT IN ('completed','opted_out'))
-  ORDER BY updated_at DESC
-  ${Number(limit || 0) > 0 ? `LIMIT ${Number(limit || 0)}` : ''}
-`).all();
+export const collectDueRecords = ({
+  db,
+  limit = 0,
+  sequenceName = '',
+  holdingNames = new Set(),
+}) => {
+  const scope = sequenceScope({ sequenceName, holdingNames });
+  const capped = Math.max(0, Number(limit || 0));
+  return db.prepare(`
+    SELECT * FROM records
+    WHERE ${inPlayWhere()}
+      AND (sequence_status IS NULL OR sequence_status NOT IN ('completed','opted_out'))
+      ${scope.sql}
+    ORDER BY updated_at DESC
+    ${capped > 0 ? 'LIMIT ?' : ''}
+  `).all(...scope.params, ...(capped > 0 ? [capped] : []));
+};
 
 const StepIntentSchema = z.object({
   uses_email: z.boolean().default(false),
@@ -493,32 +548,43 @@ const applyDeferPolicy = ({ record, step, stepNumber, today, steps, timing }) =>
   };
 };
 
-export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun = false, sample = 0 }) => {
+export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false, sample = 0 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   assertPhaseModelReferences({ config, phase: 'sequence' });
 
-  const sequence = getSequence(config, sequenceName);
-  const steps = Array.isArray(sequence?.steps) ? sequence.steps : [];
-  const timing = resolveWorkingDayConfig(sequence);
+  const sequenceFilter = String(sequenceName || '').trim();
+  const holdingNames = holdingSequenceNames(config);
+  if (sequenceFilter && !holdingNames.has(sequenceFilter)) getSequence(config, sequenceFilter);
 
   const db = openListDb({ listDir, readonly: false });
+  const today = todayIsoDate();
+  const sampleLimit = Math.max(0, Number(sample || 0));
+  const scope = sequenceScope({ sequenceName: sequenceFilter, holdingNames });
+  const sequenceState = (() => {
+    try {
+      const records = db.prepare(`
+        SELECT * FROM records
+        WHERE ${inPlayWhere()}
+          ${scope.sql}
+        ORDER BY updated_at DESC
+        ${sampleLimit > 0 ? 'LIMIT ?' : ''}
+      `).all(...scope.params, ...(sampleLimit > 0 ? [sampleLimit] : []));
+      return { records, groups: groupRecordsBySequence({ config, records }) };
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  })();
+  const records = sequenceState.records;
+  const sequenceGroups = sequenceState.groups;
   const globalSuppressionDb = openGlobalSuppressionDb({ readonly: false });
   const mcp = dryRun ? null : await getMcpClient();
   const toolCatalog = dryRun ? {} : readToolCatalog(listDir);
 
-  const today = todayIsoDate();
-  const sampleLimit = Math.max(0, Number(sample || 0));
-  const records = db.prepare(`
-    SELECT * FROM records
-    WHERE ${inPlayWhere()}
-    ORDER BY updated_at DESC
-    ${sampleLimit > 0 ? `LIMIT ${sampleLimit}` : ''}
-  `).all();
-
   const summary = {
     records: records.length,
-    steps: steps.length,
+    steps: sequenceGroups.reduce((total, group) => total + group.steps.length, 0),
     replies: 0,
     engaged: 0,
     opted_out: 0,
@@ -533,29 +599,31 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
     errors: [],
   };
 
-  emitActivity({ event: 'phase_start', phase: 'sequence', rows: records.length, steps: steps.length });
+  emitActivity({ event: 'phase_start', phase: 'sequence', rows: records.length, steps: summary.steps });
 
   try {
     if (dryRun) {
-      let due = 0;
-      let completed = 0;
-      for (const record of records) {
-        if (record.sequence_status === 'completed' || record.sequence_status === 'opted_out') continue;
-        const { step } = resolveDueStep({ record, steps, today });
-        if (step) due += 1;
-        if (Number(record.sequence_step || 0) >= steps.length && steps.length > 0) completed += 1;
-      }
+      const dryRunCounts = sequenceGroups.reduce((counts, group) => (
+        group.records.reduce((groupCounts, record) => {
+          if (record.sequence_status === 'completed' || record.sequence_status === 'opted_out') return groupCounts;
+          const { step } = resolveDueStep({ record, steps: group.steps, today });
+          return {
+            due: groupCounts.due + (step ? 1 : 0),
+            completed: groupCounts.completed
+              + (Number(record.sequence_step || 0) >= group.steps.length && group.steps.length > 0 ? 1 : 0),
+          };
+        }, counts)
+      ), { due: 0, completed: 0 });
       emitActivity({ event: 'phase_complete', phase: 'sequence', processed: 0, skipped: records.length, failed: 0 });
       return {
         ...summary,
         dry_run: true,
-        due_records: due,
-        completed_records: completed,
+        due_records: dryRunCounts.due,
+        completed_records: dryRunCounts.completed,
         note: 'Dry-run executes no writes and does not dispatch routes/messages.',
       };
     }
 
-    const stepIntentCache = new Map();
     const visitCandidates = [];
     const pendingVisitExecutions = [];
 
@@ -572,9 +640,21 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
 
     await runDeliveryPoll({ mcp, db, listDir, config });
 
-    const freshRecords = collectDueRecords({ db, limit: sampleLimit });
+    const freshRecords = collectDueRecords({
+      db,
+      limit: sampleLimit,
+      sequenceName: sequenceFilter,
+      holdingNames,
+    });
+    const freshGroups = groupRecordsBySequence({ config, records: freshRecords });
 
-    await mapWithConcurrency<any, void>(freshRecords as any[], async (record) => {
+    for (const group of freshGroups) {
+      const activeSequenceName = group.name;
+      const sequence = group.sequence;
+      const steps = group.steps;
+      const timing = group.timing;
+      const stepIntentCache = new Map();
+      await mapWithConcurrency<any, void>(group.records as any[], async (record) => {
       const recordId = getRecordRowId(record);
       if (record.sequence_status === 'opted_out' || record.sequence_status === 'completed') {
         summary.skipped += 1;
@@ -660,6 +740,8 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
         });
         pendingVisitExecutions.push({
           recordId,
+          sequenceName: activeSequenceName,
+          sequence,
           stepNumber,
           step: {
             ...step,
@@ -695,9 +777,9 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
           : (stepIntent.uses_phone
             ? ((stepIntent.uses_sms || stepDescriptionText.includes('sms') || stepDescriptionText.includes('text')) ? 'sms' : 'call')
             : 'manual'));
-      let sequenceIntent: 'send' | 'draft' = 'send';
-      if (stepIntent.uses_email && step?.draft_approval_required !== false) {
-        const readyDraft = db.prepare(`
+      const approvalRequired = stepIntent.uses_email && step?.draft_approval_required !== false;
+      const readyDraft = approvalRequired
+        ? db.prepare(`
           SELECT draft_id
           FROM drafts
           WHERE row_id = ?
@@ -706,8 +788,10 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
             AND status = 'ready'
           ORDER BY updated_at DESC
           LIMIT 1
-        `).get(recordId, sequenceName, stepNumber);
-        const pendingDraft = db.prepare(`
+        `).get(recordId, activeSequenceName, stepNumber)
+        : null;
+      const pendingDraft = approvalRequired && !readyDraft
+        ? db.prepare(`
           SELECT draft_id
           FROM drafts
           WHERE row_id = ?
@@ -716,18 +800,15 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
             AND status = 'pending_approval'
           ORDER BY updated_at DESC
           LIMIT 1
-        `).get(recordId, sequenceName, stepNumber);
-        if (readyDraft) {
-          sequenceIntent = 'send';
-        } else if (pendingDraft) {
-          summary.awaiting_approval += 1;
-          summary.skipped += 1;
-          upsertRecord({ db, row: { ...record, last_error: 'Awaiting draft approval.' } });
-          return;
-        } else {
-          sequenceIntent = 'draft';
-        }
+        `).get(recordId, activeSequenceName, stepNumber)
+        : null;
+      if (pendingDraft) {
+        summary.awaiting_approval += 1;
+        summary.skipped += 1;
+        upsertRecord({ db, row: { ...record, last_error: 'Awaiting draft approval.' } });
+        return;
       }
+      const sequenceIntent: 'send' | 'draft' = approvalRequired && !readyDraft ? 'draft' : 'send';
 
       const result = await executeChannelStep({
         mcp,
@@ -736,7 +817,7 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
         toolCatalog,
         db,
         record,
-        sequenceName,
+        sequenceName: activeSequenceName,
         stepNumber,
         step: {
           ...executableStep,
@@ -760,7 +841,8 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, step: step.id || stepNumber, error: result.reason || 'failed' });
       }
-    }, 3);
+      }, 3);
+    }
 
     const routeSummary = await planVisitRoutesIfNeeded({
       mcp,
@@ -791,10 +873,10 @@ export const runSequencer = async ({ listDir, sequenceName = 'default', dryRun =
         toolCatalog,
         db,
         record: liveRecord,
-        sequenceName,
+        sequenceName: pending.sequenceName,
         stepNumber: pending.stepNumber,
         step: pending.step,
-        sequence,
+        sequence: pending.sequence,
         aiConfig: config?.ai || {},
         dryRun,
         channelHint: pending.channelHint,
@@ -879,43 +961,51 @@ export const getSequenceStatus = ({ listDir }) => {
   }
 };
 
-export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 50 }) => {
+export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   assertPhaseModelReferences({ config, phase: 'sequence' });
 
-  const sequence = getSequence(config, sequenceName);
-  const firstStep = (sequence.steps || [])[0];
-  if (!firstStep) throw new Error(`Sequence "${sequenceName}" has no steps.`);
-
+  const sequenceFilter = String(sequenceName || '').trim();
+  const holdingNames = holdingSequenceNames(config);
+  if (sequenceFilter && !holdingNames.has(sequenceFilter)) getSequence(config, sequenceFilter);
   const db = openListDb({ listDir, readonly: false });
-  const mcp = await getMcpClient();
-  const toolCatalog = readToolCatalog(listDir);
-  const records = db.prepare(`
-    SELECT * FROM records
-    WHERE sequence_status = 'idle' AND ${inPlayWhere()}
-    ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
-    LIMIT ?
-  `).all(Number(limit));
-
-  const summary = { drafted: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
-  const launchIntent = await classifyStepIntent({
-    db,
-    listDir,
-    step: firstStep,
-    cache: new Map(),
-    aiConfig: config?.ai || {},
-  });
-  const launchChannelHint = launchIntent.uses_email
-    ? 'email'
-    : (launchIntent.uses_mail
-      ? 'mail'
-      : (launchIntent.uses_sms ? 'sms' : (launchIntent.uses_call ? 'call' : (launchIntent.uses_visit ? 'visit' : 'manual'))));
-  const launchMode = launchIntent.uses_email ? 'draft' : 'send';
-  const launchToday = todayIsoDate();
-
   try {
-    for (const record of records) {
+    const scope = sequenceScope({ sequenceName: sequenceFilter, holdingNames });
+    const records = db.prepare(`
+      SELECT * FROM records
+      WHERE sequence_status = 'idle' AND ${inPlayWhere()}
+        ${scope.sql}
+      ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
+      LIMIT ?
+    `).all(...scope.params, Number(limit));
+    const groups = groupRecordsBySequence({ config, records });
+    const mcp = await getMcpClient();
+    const toolCatalog = readToolCatalog(listDir);
+    const summary = { drafted: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
+    const launchToday = todayIsoDate();
+    for (const group of groups) {
+      const activeSequenceName = group.name;
+      const sequence = group.sequence;
+      const firstStep = group.steps[0];
+      if (!firstStep) {
+        summary.skipped += group.records.length;
+        continue;
+      }
+      const launchIntent = await classifyStepIntent({
+        db,
+        listDir,
+        step: firstStep,
+        cache: new Map(),
+        aiConfig: config?.ai || {},
+      });
+      const launchChannelHint = launchIntent.uses_email
+        ? 'email'
+        : (launchIntent.uses_mail
+          ? 'mail'
+          : (launchIntent.uses_sms ? 'sms' : (launchIntent.uses_call ? 'call' : (launchIntent.uses_visit ? 'visit' : 'manual'))));
+      const launchMode = launchIntent.uses_email ? 'draft' : 'send';
+      for (const record of group.records) {
       const recordId = getRecordRowId(record);
       try {
         if (launchMode !== 'draft') {
@@ -932,7 +1022,7 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
               db,
               row: {
                 ...record,
-                sequence_name: sequenceName,
+                sequence_name: activeSequenceName,
                 sequence_step: advancement.sequenceStep,
                 launched_at: toLaunchTimestamp(launchDecision.launchBaseDate),
                 next_action_date: advancement.nextActionDate,
@@ -949,7 +1039,7 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
               db,
               row: {
                 ...record,
-                sequence_name: sequenceName,
+                sequence_name: activeSequenceName,
                 next_action_date: launchDecision.filtered.date,
                 sequence_status: 'idle',
                 last_error: `Launch shifted to ${launchDecision.filtered.date} by non_working_day_policy.`,
@@ -985,7 +1075,7 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
           toolCatalog,
           db,
           record,
-          sequenceName,
+          sequenceName: activeSequenceName,
           stepNumber: 1,
           step: {
             ...executableStep,
@@ -1027,6 +1117,7 @@ export const launchDraft = async ({ listDir, sequenceName = 'default', limit = 5
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: String(error?.message || error) });
       }
+      }
     }
 
     return summary;
@@ -1039,152 +1130,164 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   assertPhaseModelReferences({ config, phase: 'sequence' });
-  const sequence = getSequence(config, 'default');
-  const firstStep = (sequence.steps || [])[0];
-  if (!firstStep) throw new Error('Default sequence has no step 1 to send.');
 
   const db = openListDb({ listDir, readonly: false });
-  const mcp = await getMcpClient();
-  const toolCatalog = readToolCatalog(listDir);
   try {
-    const launchIntent = await classifyStepIntent({
-      db,
-      listDir,
-      step: firstStep,
-      cache: new Map(),
-      aiConfig: config?.ai || {},
-    });
-    const launchChannelHint = launchIntent.uses_email
-      ? 'email'
-      : (launchIntent.uses_mail
-        ? 'mail'
-        : (launchIntent.uses_sms ? 'sms' : (launchIntent.uses_call ? 'call' : (launchIntent.uses_visit ? 'visit' : 'manual'))));
-    const launchFilterSql = launchIntent.uses_email
-      ? `sequence_status = 'idle'
-         AND EXISTS (
-           SELECT 1 FROM drafts d
-           WHERE d.row_id = records._row_id
-             AND d.sequence_name = 'default'
-             AND d.step_number = 1
-             AND d.status = 'ready'
-         )`
-      : "sequence_status = 'idle'";
-
+    const holdingNames = holdingSequenceNames(config);
+    const scope = sequenceScope({ holdingNames });
     const rows = db.prepare(`
       SELECT * FROM records
-      WHERE ${inPlayWhere()} AND (${launchFilterSql})
+      WHERE ${inPlayWhere()} AND sequence_status = 'idle'
+        ${scope.sql}
       ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
       LIMIT ?
-    `).all(Number(limit));
-
-    let sent = 0;
-    let scheduled = 0;
-    let skipped = 0;
-    let failed = 0;
-    const errorsOut = [];
+    `).all(...scope.params, Number(limit));
+    const groups = groupRecordsBySequence({ config, records: rows });
+    const mcp = await getMcpClient();
+    const toolCatalog = readToolCatalog(listDir);
+    const summary = { sent: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
     const launchToday = todayIsoDate();
-    for (const row of rows) {
-      try {
-        const launchDecision = getLaunchDecision({ sequence, firstStep, today: launchToday });
-        if ('skip' in launchDecision.filtered) {
-          const advancement = computeNextScheduledAction({
-            steps: sequence.steps || [],
-            completedStepNumber: 1,
-            launchedAtDate: launchDecision.launchBaseDate,
-            workingDays: launchDecision.timing.workingDays,
-            policy: launchDecision.timing.policy,
-          });
-          upsertRecord({
-            db,
-            row: {
-              ...row,
-              sequence_name: 'default',
-              sequence_step: advancement.sequenceStep,
-              launched_at: toLaunchTimestamp(launchDecision.launchBaseDate),
-              next_action_date: advancement.nextActionDate,
-              sequence_status: advancement.completed ? 'completed' : 'active',
-              last_error: 'Launch step skipped by non_working_day_policy.',
-            },
-          });
-          skipped += 1 + advancement.skippedStepNumbers.length;
-          continue;
-        }
+    for (const group of groups) {
+      const activeSequenceName = group.name;
+      const sequence = group.sequence;
+      const firstStep = group.steps[0];
+      if (!firstStep) {
+        summary.skipped += group.records.length;
+        continue;
+      }
+      const launchIntent = await classifyStepIntent({
+        db,
+        listDir,
+        step: firstStep,
+        cache: new Map(),
+        aiConfig: config?.ai || {},
+      });
+      const launchChannelHint = launchIntent.uses_email
+        ? 'email'
+        : (launchIntent.uses_mail
+          ? 'mail'
+          : (launchIntent.uses_sms ? 'sms' : (launchIntent.uses_call ? 'call' : (launchIntent.uses_visit ? 'visit' : 'manual'))));
 
-        if (launchDecision.filtered.date > launchToday) {
-          upsertRecord({
-            db,
-            row: {
-              ...row,
-              sequence_name: 'default',
-              next_action_date: launchDecision.filtered.date,
-              sequence_status: 'idle',
-              last_error: `Launch shifted to ${launchDecision.filtered.date} by non_working_day_policy.`,
-            },
-          });
-          scheduled += 1;
-          continue;
-        }
-
-        const templateResolved = resolveStepTemplate({ config, step: firstStep, record: row }) || null;
-        const executableStep = templateResolved
-          ? {
-            ...firstStep,
-            description: templateResolved.rendered_description || String(firstStep?.description || ''),
-            config: {
-              ...(firstStep?.config || {}),
-              template_context: {
-                template_id: templateResolved.template_id,
-                template_version: templateResolved.template_version,
-                subject: templateResolved.subject,
-                body: templateResolved.body,
-                variables: templateResolved.variables,
-              },
-            },
+      for (const row of group.records) {
+        try {
+          const readyDraft = launchIntent.uses_email
+            ? db.prepare(`
+              SELECT draft_id
+              FROM drafts
+              WHERE row_id = ?
+                AND sequence_name = ?
+                AND step_number = 1
+                AND status = 'ready'
+              ORDER BY updated_at DESC
+              LIMIT 1
+            `).get(getRecordRowId(row), activeSequenceName)
+            : null;
+          if (launchIntent.uses_email && !readyDraft) {
+            summary.skipped += 1;
+            continue;
           }
-          : firstStep;
 
-        const result = await executeChannelStep({
-          mcp,
-          listDir,
-          listName: config?.list?.name || '',
-          toolCatalog,
-          db,
-          record: row,
-          sequenceName: 'default',
-          stepNumber: 1,
-          step: {
-            ...executableStep,
-            day: getStepDay(executableStep),
-          },
-          sequence,
-          aiConfig: config?.ai || {},
-          dryRun: false,
-          intent: 'send',
-          channelHint: launchChannelHint,
-        });
+          const launchDecision = getLaunchDecision({ sequence, firstStep, today: launchToday });
+          if ('skip' in launchDecision.filtered) {
+            const advancement = computeNextScheduledAction({
+              steps: sequence.steps || [],
+              completedStepNumber: 1,
+              launchedAtDate: launchDecision.launchBaseDate,
+              workingDays: launchDecision.timing.workingDays,
+              policy: launchDecision.timing.policy,
+            });
+            upsertRecord({
+              db,
+              row: {
+                ...row,
+                sequence_name: activeSequenceName,
+                sequence_step: advancement.sequenceStep,
+                launched_at: toLaunchTimestamp(launchDecision.launchBaseDate),
+                next_action_date: advancement.nextActionDate,
+                sequence_status: advancement.completed ? 'completed' : 'active',
+                last_error: 'Launch step skipped by non_working_day_policy.',
+              },
+            });
+            summary.skipped += 1 + advancement.skippedStepNumbers.length;
+            continue;
+          }
 
-        if (result.status === 'sent') {
-          sent += 1;
-          skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
-        } else {
-          failed += 1;
-          errorsOut.push({ record_id: getRecordRowId(row), error: result.reason || result.status });
+          if (launchDecision.filtered.date > launchToday) {
+            upsertRecord({
+              db,
+              row: {
+                ...row,
+                sequence_name: activeSequenceName,
+                next_action_date: launchDecision.filtered.date,
+                sequence_status: 'idle',
+                last_error: `Launch shifted to ${launchDecision.filtered.date} by non_working_day_policy.`,
+              },
+            });
+            summary.scheduled += 1;
+            continue;
+          }
+
+          const templateResolved = resolveStepTemplate({ config, step: firstStep, record: row }) || null;
+          const executableStep = templateResolved
+            ? {
+              ...firstStep,
+              description: templateResolved.rendered_description || String(firstStep?.description || ''),
+              config: {
+                ...(firstStep?.config || {}),
+                template_context: {
+                  template_id: templateResolved.template_id,
+                  template_version: templateResolved.template_version,
+                  subject: templateResolved.subject,
+                  body: templateResolved.body,
+                  variables: templateResolved.variables,
+                },
+              },
+            }
+            : firstStep;
+
+          const result = await executeChannelStep({
+            mcp,
+            listDir,
+            listName: config?.list?.name || '',
+            toolCatalog,
+            db,
+            record: row,
+            sequenceName: activeSequenceName,
+            stepNumber: 1,
+            step: {
+              ...executableStep,
+              day: getStepDay(executableStep),
+            },
+            sequence,
+            aiConfig: config?.ai || {},
+            dryRun: false,
+            intent: 'send',
+            channelHint: launchChannelHint,
+          });
+
+          if (result.status === 'sent') {
+            summary.sent += 1;
+            summary.skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
+          } else {
+            summary.failed += 1;
+            summary.errors.push({ record_id: getRecordRowId(row), error: result.reason || result.status });
+          }
+        } catch (error) {
+          if (isBudgetExceededError(error)) throw error;
+          summary.failed += 1;
+          summary.errors.push({ record_id: getRecordRowId(row), error: String(error?.message || error) });
         }
-      } catch (error) {
-        if (isBudgetExceededError(error)) throw error;
-        failed += 1;
-        errorsOut.push({ record_id: getRecordRowId(row), error: String(error?.message || error) });
       }
     }
 
-    return { sent, scheduled, skipped, failed, errors: errorsOut, requested_limit: Number(limit) };
+    return { ...summary, requested_limit: Number(limit) };
   } finally {
     db.close();
   }
 };
 
 export const followupSend = async ({ listDir, limit = 50 }) => {
-  const result = await runSequencer({ listDir, sequenceName: 'default', dryRun: false });
+  const result = await runSequencer({ listDir, dryRun: false });
   return {
     ...result,
     requested_limit: Number(limit),

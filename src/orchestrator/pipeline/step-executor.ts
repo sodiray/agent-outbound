@@ -2,6 +2,7 @@ import { executeEnrichmentStepOnRecords } from '../enrichment/runner.js';
 import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/conditions.js';
 import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 import { getRecordRowId } from '../lib/record.js';
+import { upsertRecord } from '../runtime/db.js';
 
 export type StepExecutionOutcome = {
   passed: boolean;
@@ -177,6 +178,117 @@ const executeReviewBatch = async (
   }));
 };
 
+const assignRuleName = (rule: Record<string, unknown>, index: number) => (
+  textValue(rule.id) || textValue(rule.sequence) || `rule_${index + 1}`
+);
+
+const executeAssignBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+) => {
+  const rules = Array.isArray(step.rules) ? step.rules as Array<Record<string, unknown>> : [];
+  const fallback = textValue(step.fallback);
+  const outcomes = new Map<string, StepExecutionOutcome>();
+  const idleRows = rows.filter((row) => {
+    const recordId = getRecordRowId(row);
+    const status = textValue(row.sequence_status, 'idle');
+    if (status === 'idle') return true;
+    outcomes.set(recordId, { passed: true, reason: `sequence_status_not_idle:${status}` });
+    return false;
+  });
+  const remaining = new Map(idleRows.map((row) => [getRecordRowId(row), row]));
+
+  const assignRows = (
+    matchedRows: Array<Record<string, unknown>>,
+    sequence: string,
+    routedBy: string,
+  ) => {
+    matchedRows.forEach((row) => {
+      const recordId = getRecordRowId(row);
+      try {
+        upsertRecord({
+          db: ctx.db,
+          row: {
+            ...row,
+            sequence_name: sequence,
+            routed_by: routedBy,
+          },
+        });
+        outcomes.set(recordId, { passed: true, reason: `assigned:${sequence}:${routedBy}` });
+      } catch (error) {
+        outcomes.set(recordId, {
+          passed: false,
+          reason: String((error as Error)?.message || error),
+          errored: true,
+        });
+      }
+      remaining.delete(recordId);
+    });
+  };
+
+  for (const [ruleIndex, rule] of rules.entries()) {
+    const candidates = Array.from(remaining.values());
+    if (candidates.length === 0) break;
+    const sequence = textValue(rule.sequence);
+    const routedBy = assignRuleName(rule, ruleIndex);
+    const type = textValue(rule.type, 'field_check').toLowerCase();
+    if (type === 'semantic') {
+      const semanticOutcomes = await evaluateSemanticFilterBatches({
+        db: ctx.db,
+        listDir: ctx.listDir,
+        filter: {
+          ...rule,
+          id: `${stepId}:${routedBy}`,
+        },
+        rows: candidates,
+        aiConfig: ctx.aiConfig || ctx.config?.ai || {},
+        batchSize: Number(step.batch_size || 10),
+      });
+      const matched = candidates.filter((row) => {
+        const result = semanticOutcomes.get(getRecordRowId(row));
+        return result?.passed && !result.errored;
+      });
+      candidates.forEach((row) => {
+        const recordId = getRecordRowId(row);
+        const result = semanticOutcomes.get(recordId);
+        if (!result?.errored) return;
+        outcomes.set(recordId, {
+          passed: false,
+          reason: String(result.reason || 'semantic_assignment_failed'),
+          errored: true,
+        });
+        remaining.delete(recordId);
+      });
+      assignRows(matched, sequence, routedBy);
+      continue;
+    }
+    if (type !== 'field_check') {
+      candidates.forEach((row) => {
+        const recordId = getRecordRowId(row);
+        outcomes.set(recordId, {
+          passed: false,
+          reason: `unsupported_assign_rule_type:${type}`,
+          errored: true,
+        });
+        remaining.delete(recordId);
+      });
+      continue;
+    }
+    const matched = candidates.filter((row) => evaluateFieldCheckGroup({
+      row,
+      conditions: Array.isArray(rule.conditions) ? rule.conditions : [],
+      match: textValue(rule.match, 'all'),
+      listDir: ctx.listDir,
+    }).passed);
+    assignRows(matched, sequence, routedBy);
+  }
+
+  assignRows(Array.from(remaining.values()), fallback, 'fallback');
+  return outcomes;
+};
+
 export const executeStepBatch = async (
   ctx: StepExecutionContext,
   step: PipelineStepLike,
@@ -192,6 +304,7 @@ export const executeStepBatch = async (
   }
 
   if (kind === 'enrich') return executeEnrichBatch(ctx, step, stepId, rows);
+  if (kind === 'assign') return executeAssignBatch(ctx, step, stepId, rows);
   if (kind === 'review') return executeReviewBatch(ctx, step, stepId, rows);
 
   throw new Error(`unsupported_pipeline_step_kind:${kind || 'unknown'}`);

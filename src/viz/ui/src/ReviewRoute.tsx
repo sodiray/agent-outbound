@@ -349,7 +349,7 @@ export const ReviewRoute = () => {
           ? {
             ...current,
             review_stages: current.review_stages.map((stage) => (
-              stage.id === activeStageId ? { ...stage, awaiting_count: queue.total } : stage
+              stage.id === activeStageId ? { ...stage, ...queue.stage } : stage
             )),
           }
           : current);
@@ -399,13 +399,27 @@ export const ReviewRoute = () => {
     rowRefs.current[rowId(selectedRecord)]?.scrollIntoView({ block: 'nearest' });
   }, [selectedRecord]);
 
-  const adjustAwaitingCount = (stageId: string, delta: number) => {
+  const adjustAwaitingCount = (stageId: string, delta: number, record: RecordRow) => {
+    const sequenceName = displayValue(record.sequence_name) || 'default';
     setMeta((current) => current
       ? {
         ...current,
         review_stages: current.review_stages.map((stage) => (
           stage.id === stageId
-            ? { ...stage, awaiting_count: Math.max(0, stage.awaiting_count + delta) }
+            ? {
+              ...stage,
+              awaiting_count: Math.max(0, stage.awaiting_count + delta),
+              sequence_counts: stage.sequence_counts.some((entry) => entry.sequence_name === sequenceName)
+                ? stage.sequence_counts
+                  .map((entry) => (
+                    entry.sequence_name === sequenceName
+                      ? { ...entry, count: Math.max(0, entry.count + delta) }
+                      : entry
+                  ))
+                  .filter((entry) => entry.count > 0)
+                : [...stage.sequence_counts, { sequence_name: sequenceName, count: Math.max(0, delta) }]
+                  .filter((entry) => entry.count > 0),
+            }
             : stage
         )),
       }
@@ -461,7 +475,7 @@ export const ReviewRoute = () => {
     };
     inFlightDecisions.current.add(key);
     removeRecord(stageId, recordId);
-    adjustAwaitingCount(stageId, -1);
+    adjustAwaitingCount(stageId, -1, record);
     setHistory((current) => [...current, action]);
     setFailures((current) => current.filter((failure) => decisionKey(failure) !== key));
     setError('');
@@ -489,7 +503,7 @@ export const ReviewRoute = () => {
     } catch (nextError) {
       inFlightDecisions.current.delete(key);
       restoreRecord(stageId, record);
-      adjustAwaitingCount(stageId, 1);
+      adjustAwaitingCount(stageId, 1, record);
       setCursor(Math.max(0, decisionIndex));
       setHistory((current) => current.filter((item) => item.sequence !== sequence));
       setFailures((current) => [
@@ -536,7 +550,7 @@ export const ReviewRoute = () => {
     setFailures((current) => current.filter((failure) => decisionKey(failure) !== key));
     setHistory((current) => current.filter((item) => item.sequence !== last.sequence));
     restoreRecord(last.stage_id, last.record);
-    adjustAwaitingCount(last.stage_id, 1);
+    adjustAwaitingCount(last.stage_id, 1, last.record);
     setActiveStageId(last.stage_id);
     setCursor(restoredIndex);
     if (panelRecord) setPanelRecord(last.record);
@@ -547,7 +561,7 @@ export const ReviewRoute = () => {
       setMessage(`Undid ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordName(last.record)}.`);
     } catch (nextError) {
       removeRecord(last.stage_id, last.row_id);
-      adjustAwaitingCount(last.stage_id, -1);
+      adjustAwaitingCount(last.stage_id, -1, last.record);
       setHistory((current) => [...current, last].sort((left, right) => left.sequence - right.sequence));
       setActiveStageId(stageBeforeUndo);
       setCursor(cursorBeforeUndo);
@@ -677,6 +691,13 @@ export const ReviewRoute = () => {
                 <div>
                   <h2>{activeStage.label}</h2>
                   {activeStage.description ? <p>{activeStage.description}</p> : null}
+                  <div className="review-sequence-counts" aria-label="Awaiting review by sequence">
+                    {activeStage.sequence_counts.map((entry) => (
+                      <span key={entry.sequence_name}>
+                        {entry.sequence_name}: <strong>{entry.count}</strong>
+                      </span>
+                    ))}
+                  </div>
                 </div>
                 <div className="review-stage__actions">
                   <span>{activeRecords.length} awaiting</span>

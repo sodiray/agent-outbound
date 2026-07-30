@@ -47,6 +47,7 @@ const CORE_RECORD_COLUMNS = new Set([
   'trigger_score_updated_at',
   'priority_rank',
   'sequence_name',
+  'routed_by',
   'sequence_status',
   'sequence_step',
   'sequence_step_attempts',

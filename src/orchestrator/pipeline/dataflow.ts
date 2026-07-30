@@ -75,6 +75,10 @@ const stringArray = (value: unknown) => Array.isArray(value)
 
 const stepTier = (step: any) => {
   const kind = String(step?.kind || '').trim().toLowerCase();
+  if (kind === 'assign') {
+    const rules = Array.isArray(step?.rules) ? step.rules : [];
+    return rules.some((rule: any) => String(rule?.type || 'field_check').trim().toLowerCase() === 'semantic') ? 1 : 0;
+  }
   if (kind === 'filter' && String(step?.type || 'semantic').trim().toLowerCase() === 'field_check') return 0;
   if (kind === 'review') return 1;
   if (kind === 'filter') return 1;
@@ -111,7 +115,7 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
     cost: kind === 'review' ? 0 : (db ? avgStepCostUsd({ db, stepId: id }) : Number(step?.cost || 0)),
     dropGate: kind === 'review' || (kind === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag'),
     deps: [...new Set([...stringArray(step?.depends_on), ...stringArray(step?.runs_after), ...reviewDeps])],
-    executable: kind === 'filter' || kind === 'enrich' || kind === 'review',
+    executable: kind === 'filter' || kind === 'enrich' || kind === 'assign' || kind === 'review',
   };
 });
 
@@ -576,6 +580,26 @@ export const runPipelineDataflow = async ({
           tickProgress(db, runId, { done: progressState.done, target: rows.length });
           emitActivity({ event: 'error', phase: 'pipeline', step: step.id, row: recordId, detail: error, errored: true });
           return { record: refreshRecord({ db, record: recordState.record }), resolved: false, errored: true };
+        }
+
+        if (step.kind === 'assign') {
+          insertPipelineEvent({
+            db,
+            event: {
+              event_id: randomUUID(),
+              record_id: recordId,
+              step_id: step.id,
+              kind: step.kind,
+              passed: true,
+              reason: String(outcome.reason || ''),
+              occurred_at: now,
+            },
+          });
+          summary.processed += 1;
+          progressState.done += 1;
+          tickProgress(db, runId, { done: progressState.done, target: rows.length });
+          emitActivity({ event: 'step_complete', phase: 'pipeline', step: step.id, kind: step.kind, processed: 1, rows: 1 });
+          return { record: refreshRecord({ db, record: recordState.record }) };
         }
 
         if (step.kind === 'review') {

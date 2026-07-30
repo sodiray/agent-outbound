@@ -108,6 +108,15 @@ const conditionReferences = (config: Record<string, unknown>) => {
       ? record.when as Record<string, unknown>
       : {};
     const whenConditions = Array.isArray(when.conditions) ? when.conditions : [];
+    const rules = Array.isArray(record.rules) ? record.rules : [];
+    const ruleConditions = rules.flatMap((rule, ruleIndex) => {
+      const ruleRecord = rule && typeof rule === 'object' ? rule as Record<string, unknown> : {};
+      const conditions = Array.isArray(ruleRecord.conditions) ? ruleRecord.conditions : [];
+      return conditions.map((condition, conditionIndex) => ({
+        condition,
+        configPath: `pipeline.${stepId}.rules[${ruleIndex}].conditions[${conditionIndex}]`,
+      }));
+    });
     return [
       ...directConditions.map((condition, conditionIndex) => ({
         condition,
@@ -117,6 +126,7 @@ const conditionReferences = (config: Record<string, unknown>) => {
         condition,
         configPath: `pipeline.${stepId}.when.conditions[${conditionIndex}]`,
       })),
+      ...ruleConditions,
     ];
   });
 

@@ -78,6 +78,7 @@ const SCHEMA_SQL = `
     trigger_score_updated_at TEXT DEFAULT '',
     priority_rank REAL DEFAULT 0,
     sequence_name TEXT DEFAULT 'default',
+    routed_by TEXT DEFAULT '',
     sequence_status TEXT DEFAULT 'idle',
     sequence_step INTEGER DEFAULT 0,
     sequence_step_attempts INTEGER DEFAULT 0,
@@ -630,6 +631,7 @@ const ensureRecordCompatibility = (db) => {
   try { db.exec("ALTER TABLE records ADD COLUMN needs_review INTEGER DEFAULT 0"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN review_reason TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN review_flagged_at TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN routed_by TEXT DEFAULT ''"); } catch {}
   // Idempotent filters: fast lookup of "has this record already passed this step?".
   try { db.exec("CREATE INDEX IF NOT EXISTS idx_pipeline_events_record_step ON pipeline_events(record_id, step_id)"); } catch {}
   // Backfill fit_score for records scored by the single-score path, which for a
@@ -1168,7 +1170,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       'business_name', 'address', 'city', 'state', 'zip', 'postal_code', 'country', 'website', 'domain', 'phone',
       'email_primary', 'contact_name_primary', 'contact_title_primary', 'fit_score', 'trigger_score',
       'fit_reasoning', 'trigger_reasoning',
-      'priority_rank', 'sequence_name', 'sequence_status', 'sequence_step', 'next_action_date',
+      'priority_rank', 'sequence_name', 'routed_by', 'sequence_status', 'sequence_step', 'next_action_date',
       'last_outreach_at', 'email_last_message_id', 'email_last_thread_id', 'email_last_draft_id',
       'email_thread_id', 'contact_name', 'contact_email', 'contact_title',
       'email_verification_status', 'email_verification_confidence', 'email_verified_at',
@@ -1258,7 +1260,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     '_row_id', '_created_at', '_updated_at', 'id', 'business_name', 'address', 'city', 'state', 'zip',
     'postal_code', 'country', 'website', 'domain', 'phone', 'email_primary', 'contact_name_primary',
     'contact_title_primary', 'fit_score', 'trigger_score', 'priority_rank', 'fit_reasoning', 'trigger_reasoning',
-    'sequence_name', 'sequence_status', 'sequence_step', 'next_action_date', 'last_outreach_at',
+    'sequence_name', 'routed_by', 'sequence_status', 'sequence_step', 'next_action_date', 'last_outreach_at',
     'email_last_message_id', 'email_last_thread_id', 'email_last_draft_id', 'email_last_reply_at',
     'email_reply_classification', 'reply_classification_latest', 'disposition_latest', 'disposition_follow_up_at',
     'email_thread_id', 'contact_name', 'contact_email', 'contact_title', 'email_verification_status',
@@ -1289,7 +1291,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       id, business_name, address, city, state, zip, postal_code, country, website, domain, phone,
       email_primary, contact_name_primary, contact_title_primary, fit_score, trigger_score, priority_rank,
       fit_reasoning, trigger_reasoning,
-      sequence_name, sequence_status, sequence_step, next_action_date, last_outreach_at, email_last_message_id,
+      sequence_name, routed_by, sequence_status, sequence_step, next_action_date, last_outreach_at, email_last_message_id,
       email_last_thread_id, email_last_draft_id, email_last_reply_at, email_reply_classification,
       reply_classification_latest, disposition_latest, disposition_follow_up_at,
       email_thread_id, contact_name, contact_email, contact_title,
@@ -1313,7 +1315,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       @id, @business_name, @address, @city, @state, @zip, @postal_code, @country, @website, @domain, @phone,
       @email_primary, @contact_name_primary, @contact_title_primary, @fit_score, @trigger_score, @priority_rank,
       @fit_reasoning, @trigger_reasoning,
-      @sequence_name, @sequence_status, @sequence_step, @next_action_date, @last_outreach_at, @email_last_message_id,
+      @sequence_name, @routed_by, @sequence_status, @sequence_step, @next_action_date, @last_outreach_at, @email_last_message_id,
       @email_last_thread_id, @email_last_draft_id, @email_last_reply_at, @email_reply_classification,
       @reply_classification_latest, @disposition_latest, @disposition_follow_up_at,
       @email_thread_id, @contact_name, @contact_email, @contact_title,
@@ -1356,6 +1358,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     trigger_reasoning: row.trigger_reasoning || '',
     priority_rank: scoreValueForWrite(row.priority_rank),
     sequence_name: row.sequence_name || 'default',
+    routed_by: row.routed_by || '',
     sequence_status: row.sequence_status || 'idle',
     sequence_step: Number(row.sequence_step || 0),
     next_action_date: row.next_action_date || '',

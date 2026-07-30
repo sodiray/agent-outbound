@@ -1674,7 +1674,7 @@ const run = async () => {
     const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
 
     if (sub === 'draft') {
-      const sequenceName = consumeFlag(argv, '--sequence', 'default');
+      const sequenceName = consumeFlag(argv, '--sequence', '');
       const delegated = await callServeAction('launch_draft', {
         list, limit, sequenceName, dryRun, sample,
       }, list);
@@ -1720,7 +1720,7 @@ const run = async () => {
     if (sub === 'run') {
       const allLists = hasFlag(argv, '--all-lists');
       const list = allLists ? '' : String(argv.shift() || '');
-      const sequenceName = consumeFlag(argv, '--sequence', 'default');
+      const sequenceName = consumeFlag(argv, '--sequence', '');
       const dryRun = hasFlag(argv, '--dry-run');
       const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
       const delegated = !allLists

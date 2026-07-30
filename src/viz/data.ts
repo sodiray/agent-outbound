@@ -152,6 +152,7 @@ const LIFECYCLE_COLUMNS = new Set([
   'disqualified_gate',
   'disqualify_reason',
   'sequence_name',
+  'routed_by',
   'sequence_status',
   'sequence_step',
   'sequence_step_attempts',

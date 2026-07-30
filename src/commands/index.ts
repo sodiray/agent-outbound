@@ -1233,7 +1233,7 @@ export const generateCommand = async ({ list, where = '', step = '', force = fal
   };
 };
 
-export const sequenceRunCommand = async ({ list, allLists = false, sequenceName = 'default', dryRun = false, sample = 0 }) => {
+export const sequenceRunCommand = async ({ list, allLists = false, sequenceName = '', dryRun = false, sample = 0 }) => {
   if (allLists) {
     const dirs = listDirsFromCwd();
     const runs = [];
@@ -1280,7 +1280,7 @@ export const sequenceStatusCommand = ({ list }) => {
   return getSequenceStatus({ listDir });
 };
 
-export const launchDraftCommand = async ({ list, sequenceName = 'default', limit = 50, dryRun = false, sample = 0 }) => {
+export const launchDraftCommand = async ({ list, sequenceName = '', limit = 50, dryRun = false, sample = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'sequence' });
