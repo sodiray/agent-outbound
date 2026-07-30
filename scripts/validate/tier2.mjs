@@ -51,8 +51,13 @@ const check = (name, fn) => {
 
 // Lanes are distinguished by records.source. The LinkedIn lane writes a source
 // containing 'linkedin' or 'harvest'; the Places lane 'places' or 'google'.
-const LI = "(lower(source) LIKE '%linkedin%' OR lower(source) LIKE '%harvest%')";
-const GP = "(lower(source) LIKE '%place%' OR lower(source) LIKE '%google%' OR lower(source) LIKE '%maps%')";
+const LI = "(lower(COALESCE(source,'')) LIKE '%linkedin%' OR lower(COALESCE(source,'')) LIKE '%harvest%')";
+// The Places lane is defined as "not the LinkedIn lane" rather than by a positive
+// source label, because only the LinkedIn lane sets records.source. That is a
+// pre-existing gap — Places-sourced records have always had an empty source, and
+// it only became visible once a lane started labelling itself. Stated explicitly
+// rather than hidden behind a LIKE that would silently match nothing.
+const GP = `NOT ${LI}`;
 const AWAITING = `_row_id IN (SELECT record_id FROM pipeline_events WHERE reason = 'awaiting_review')`;
 
 console.log(`\nTier 2 — ${listDir}\n${'='.repeat(60)}`);

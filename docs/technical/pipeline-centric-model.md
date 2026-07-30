@@ -459,6 +459,43 @@ Run on a **scratch list, not `treasure-valley`**, so nothing touches the 81 lead
 - Then a dry-run sequence execution: assert step ordering and wait dates, and assert **zero outbox
   rows and zero provider calls** — that no send fired in a dry run.
 
+### Tier 2 — result, run 2026-07-30
+
+**PASS — 10 checks, 0 failed, 0 absent.** Run on `.outbound/tier2-scratch`, never on treasure-valley.
+
+Sourced 10 LinkedIn profiles ($0.15 Monid) and 45 Places records (3 calls, GCP). The central claim
+holds:
+
+```
+linkedin: n=4 website=4 resolved=4  |  places: n=15 website=15 resolved=15
+```
+
+Both lanes reach review structurally indistinguishable — same fields populated, both carrying a real
+Google `primary_type`. Zero stubs got past the resolution gate. Every LinkedIn-sourced lead in review
+carries at least one contact; Places-sourced ones may carry none, which is the intended asymmetry.
+Routing split into `eng_firms=2`, `dental=1`, `unrouted=16`, every routed lead naming its rule. The
+gates rejected on the LinkedIn lane (`company_resolved_gate=5`, `has_website_gate=1`), so they are
+demonstrably not inert on that lane. A dry run emitted zero drafts and zero channel events.
+
+**4 of 10 LinkedIn leads reached review**, closely matching the ~40% usable rate predicted from the
+Tier 1 sample. The loss is visible and diagnosable rather than silent, which was the design goal.
+
+### Three defects Tier 2 found that no other tier could
+
+- **An errored source task is never retried, and the retry reports success.** The first run failed
+  because the scratch list had no `mcp.json`, leaving two `search_tasks` rows in `status='error'`. The
+  second run then reported `0 calls, 0 results, 0 inserted, 0 errors` — a completely clean summary
+  while doing nothing at all. Errored tasks must return to `pending` (this is the same fix already
+  applied to truncated/errored `geo_tiles` rows; `keyword_geo` and the new lane did not inherit it).
+- **`records.source` is only set by the LinkedIn lane.** Places-sourced records have always had an
+  empty `source`; it became visible only once a lane started labelling itself. Lane attribution should
+  be uniform, and until it is, any query that identifies a lane by a positive `source` match silently
+  matches nothing.
+- **The schema accepts a strategy the tool cannot execute.** `keyword_geo` with `MAPS_NEARBY_SEARCH`
+  validates cleanly, then fails at the tool boundary with `nearby search requires --lat, --lng, and
+  --radius-m`, because a text geo is not a tile. Config validation cannot currently catch a
+  tool-argument mismatch — worth closing, since the failure arrives only after a run starts.
+
 ### The acceptance line
 
 The build is validated when all of the following hold, and not before:
