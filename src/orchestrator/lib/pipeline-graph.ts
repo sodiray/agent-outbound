@@ -348,7 +348,10 @@ export const validateRouterConfig = (config: any) => {
       ? step.rules.map((rule: any) => String(rule?.sequence || '').trim()).filter(Boolean)
       : []
   )));
-  sequenceNames.filter((name) => !reachable.has(name)).forEach((name) => {
+  const fallbacks = new Set(
+    assignSteps.map((step: any) => String(step?.fallback || '').trim()).filter(Boolean),
+  );
+  sequenceNames.filter((name) => !reachable.has(name) && !fallbacks.has(name)).forEach((name) => {
     warnings.push(`Sequence "${name}" is unreachable: no kind: assign rule targets it.`);
   });
 

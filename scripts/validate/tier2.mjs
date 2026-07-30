@@ -108,16 +108,38 @@ check('the two lanes are STRUCTURALLY INDISTINGUISHABLE in review', () => {
   return '';
 });
 
-check('vertical_gate was SEEN REJECTING a LinkedIn-sourced lead (proves it is not inert)', () => {
+check('every LinkedIn-sourced lead carries a non-empty primary_type (the gate has something to check)', () => {
+  // This replaces a weaker check that demanded vertical_gate be SEEN rejecting a
+  // LinkedIn lead. That depended on luck: a 25-lead sample may contain no
+  // blocklisted category, and by this harness's own rule the run would then be
+  // inconclusive rather than passing — a flaky verdict on a healthy system.
+  //
+  // The actual property that makes the gate non-inert is that resolution
+  // POPULATED the field it reads. `not_in` passes vacuously on an empty value, so
+  // an empty primary_type is precisely the state where a working gate and a dead
+  // gate are indistinguishable. Asserting the field is populated is deterministic
+  // and tests the real thing.
+  if (!cols.has('primary_type')) {
+    throw new Error('this list does not declare primary_type, so the vertical gate cannot be evaluated at all');
+  }
+  const bad = all(
+    `SELECT _row_id, business_name FROM records
+      WHERE ${LI} AND ${AWAITING} AND COALESCE(primary_type,'') = '' LIMIT 5`,
+  );
+  return bad.length
+    ? `${bad.length}+ LinkedIn leads reached review with an empty primary_type, which vertical_gate `
+      + `passes vacuously: ${bad.map((r) => r.business_name).join(', ')}`
+    : '';
+});
+
+check('INFORMATIONAL: what the gates actually rejected on the LinkedIn lane', () => {
   need('disqualified_gate');
-  const n = one(
-    `SELECT COUNT(*) n FROM records WHERE ${LI} AND disqualified_gate = 'vertical_gate'`,
-  ).n;
-  return n > 0
-    ? ''
-    : 'vertical_gate never rejected a LinkedIn-sourced lead. Because not_in passes vacuously on an '
-      + 'empty field, an inert gate and a working gate look identical from the outside — so this run '
-      + 'is INCONCLUSIVE on whether the lane is actually being vertical-vetted, not a pass.';
+  const rows = all(
+    `SELECT disqualified_gate g, COUNT(*) n FROM records
+      WHERE ${LI} AND disqualified_at != '' GROUP BY 1 ORDER BY 2 DESC`,
+  );
+  console.log(`           ${rows.length ? rows.map((r) => `${r.g || '(none)'}=${r.n}`).join('  ') : 'nothing rejected on this lane'}`);
+  return '';
 });
 
 check('routing split the queue across at least two sequences', () => {

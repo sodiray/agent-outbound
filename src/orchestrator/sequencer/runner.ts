@@ -97,22 +97,56 @@ const holdingSequenceNames = (config) => new Set(
     .filter(Boolean),
 );
 
-const groupRecordsBySequence = ({ config, records }) => {
+const partitionRecordsBySequence = ({ config, records }) => {
   const grouped = (records || []).reduce((groups, record) => {
     const name = recordSequenceName(record);
     const current = groups.get(name) || [];
     groups.set(name, [...current, record]);
     return groups;
   }, new Map());
-  return Array.from(grouped.entries()).map(([name, groupedRecords]) => {
-    const sequence = getSequence(config, name);
-    return {
-      name,
-      sequence,
-      steps: Array.isArray(sequence?.steps) ? sequence.steps : [],
-      timing: resolveWorkingDayConfig(sequence),
-      records: groupedRecords,
-    };
+  const groups = [];
+  const invalid = [];
+  Array.from(grouped.entries()).forEach(([name, groupedRecords]) => {
+    try {
+      const sequence = getSequence(config, name);
+      groups.push({
+        name,
+        sequence,
+        steps: Array.isArray(sequence?.steps) ? sequence.steps : [],
+        timing: resolveWorkingDayConfig(sequence),
+        records: groupedRecords,
+      });
+    } catch (error) {
+      groupedRecords.forEach((record) => {
+        invalid.push({
+          record,
+          sequenceName: name,
+          error: String(error?.message || error),
+        });
+      });
+    }
+  });
+  return { groups, invalid };
+};
+
+const persistSequenceDataFailures = ({ db, failures, summary, persist = true }) => {
+  failures.forEach((failure) => {
+    const recordId = getRecordRowId(failure.record);
+    if (persist) {
+      upsertRecord({
+        db,
+        row: {
+          ...failure.record,
+          last_error: failure.error,
+        },
+      });
+    }
+    summary.failed += 1;
+    summary.errors.push({
+      record_id: recordId,
+      sequence_name: failure.sequenceName,
+      error: failure.error,
+    });
   });
 };
 
@@ -570,17 +604,17 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
         ORDER BY updated_at DESC
         ${sampleLimit > 0 ? 'LIMIT ?' : ''}
       `).all(...scope.params, ...(sampleLimit > 0 ? [sampleLimit] : []));
-      return { records, groups: groupRecordsBySequence({ config, records }) };
+      return { records, partition: partitionRecordsBySequence({ config, records }) };
     } catch (error) {
       db.close();
       throw error;
     }
   })();
   const records = sequenceState.records;
-  const sequenceGroups = sequenceState.groups;
-  const globalSuppressionDb = openGlobalSuppressionDb({ readonly: false });
-  const mcp = dryRun ? null : await getMcpClient();
-  const toolCatalog = dryRun ? {} : readToolCatalog(listDir);
+  const sequenceGroups = sequenceState.partition.groups;
+  const sequenceFailureIds = new Set(
+    sequenceState.partition.invalid.map((failure) => getRecordRowId(failure.record)),
+  );
 
   const summary = {
     records: records.length,
@@ -598,6 +632,29 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
     route_stops: 0,
     errors: [],
   };
+
+  persistSequenceDataFailures({
+    db,
+    failures: sequenceState.partition.invalid,
+    summary,
+    persist: !dryRun,
+  });
+  const globalSuppressionDb = dryRun ? null : (() => {
+    try {
+      return openGlobalSuppressionDb({ readonly: false });
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  })();
+  const mcp = dryRun
+    ? null
+    : await getMcpClient().catch((error) => {
+      db.close();
+      globalSuppressionDb?.close();
+      throw error;
+    });
+  const toolCatalog = dryRun ? {} : readToolCatalog(listDir);
 
   emitActivity({ event: 'phase_start', phase: 'sequence', rows: records.length, steps: summary.steps });
 
@@ -646,7 +703,17 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
       sequenceName: sequenceFilter,
       holdingNames,
     });
-    const freshGroups = groupRecordsBySequence({ config, records: freshRecords });
+    const freshPartition = partitionRecordsBySequence({ config, records: freshRecords });
+    const newSequenceFailures = freshPartition.invalid.filter(
+      (failure) => !sequenceFailureIds.has(getRecordRowId(failure.record)),
+    );
+    newSequenceFailures.forEach((failure) => sequenceFailureIds.add(getRecordRowId(failure.record)));
+    persistSequenceDataFailures({
+      db,
+      failures: newSequenceFailures,
+      summary,
+    });
+    const freshGroups = freshPartition.groups;
 
     for (const group of freshGroups) {
       const activeSequenceName = group.name;
@@ -911,7 +978,7 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
     return summary;
   } finally {
     db.close();
-    globalSuppressionDb.close();
+    globalSuppressionDb?.close();
   }
 };
 
@@ -979,10 +1046,13 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
       ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
       LIMIT ?
     `).all(...scope.params, Number(limit));
-    const groups = groupRecordsBySequence({ config, records });
+    const partition = partitionRecordsBySequence({ config, records });
+    const groups = partition.groups;
+    const summary = { drafted: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
+    persistSequenceDataFailures({ db, failures: partition.invalid, summary });
+    if (groups.length === 0) return summary;
     const mcp = await getMcpClient();
     const toolCatalog = readToolCatalog(listDir);
-    const summary = { drafted: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
     const launchToday = todayIsoDate();
     for (const group of groups) {
       const activeSequenceName = group.name;
@@ -1142,10 +1212,13 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
       ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
       LIMIT ?
     `).all(...scope.params, Number(limit));
-    const groups = groupRecordsBySequence({ config, records: rows });
+    const partition = partitionRecordsBySequence({ config, records: rows });
+    const groups = partition.groups;
+    const summary = { sent: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
+    persistSequenceDataFailures({ db, failures: partition.invalid, summary });
+    if (groups.length === 0) return { ...summary, requested_limit: Number(limit) };
     const mcp = await getMcpClient();
     const toolCatalog = readToolCatalog(listDir);
-    const summary = { sent: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
     const launchToday = todayIsoDate();
     for (const group of groups) {
       const activeSequenceName = group.name;
