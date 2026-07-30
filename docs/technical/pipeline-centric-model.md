@@ -190,6 +190,37 @@ visible rather than inferred.
   (`dental.wait_3d`) because `pipeline_events` is keyed by `step_id` — recursive in config, flat in
   the event log.
 
+  **Delivered.** A rule targets a sub-pipeline via `target: pipeline_name` + `rules[].pipeline`, and a
+  sub-pipeline is declared as `kind: pipeline` with its own `steps`. The original
+  `target: sequence_name` is untouched and still supported — this is an addition, not a replacement,
+  and an existing `sequence_name` is never reinterpreted.
+
+  ```yaml
+  - kind: assign
+    id: pipeline_assign
+    target: pipeline_name
+    fallback: unrouted
+    rules:
+      - {id: dental_rule, pipeline: dental, conditions: [{field: primary_type, operator: in, value: [dentist]}]}
+
+  - kind: pipeline
+    id: dental
+    steps:
+      - {kind: send_email, id: touch_one, side_effecting: true}
+      - {kind: wait, id: wait_3d, depends_on: [touch_one], after: 3d}
+      - {kind: filter, id: still_qualified, depends_on: [wait_3d], type: field_check,
+         conditions: [{field: acquired, operator: neq, value: true}]}
+      - {kind: send_email, id: touch_two, depends_on: [still_qualified], side_effecting: true}
+  ```
+
+  Local `depends_on` is rewritten to the namespaced form, and because a sub-pipeline id may not contain
+  a dot, splitting an event id at the first dot always recovers which sub-pipeline it belongs to.
+  Verified at runtime: two sub-pipelines both declaring `gate_a` and `wait_3d` produce
+  `dental.gate_a` / `cre.gate_a` and `dental.wait_3d` / `cre.wait_3d` as independent events, the waits
+  park with `reason: wake_at`, and the assign event records `assigned:dental:dental_rule`. Nesting is
+  rejected structurally — `pipeline` is not a member of the child-step union, so a sub-pipeline cannot
+  contain one.
+
 ---
 
 ## 3. Sequences as pipeline steps

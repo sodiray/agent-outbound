@@ -276,7 +276,8 @@ const PipelineFilterStepSchema = z.object({
 
 const PipelineAssignRuleSchema = z.object({
   id: z.string().default(''),
-  sequence: z.string().min(1),
+  sequence: z.string().min(1).optional(),
+  pipeline: z.string().min(1).optional(),
   type: z.enum(['field_check', 'semantic']).default('field_check'),
   match: FieldCheckPredicateSchema.shape.match,
   conditions: FieldCheckPredicateSchema.shape.conditions,
@@ -292,7 +293,7 @@ const PipelineAssignStepSchema = z.object({
   description: z.string().default(''),
   depends_on: z.array(z.string()).default([]),
   runs_after: z.array(z.string()).default([]),
-  target: z.literal('sequence_name'),
+  target: z.enum(['sequence_name', 'pipeline_name']),
   fallback: z.string().min(1),
   rules: z.array(PipelineAssignRuleSchema).default([]),
   batch_size: z.coerce.number().int().min(1).max(200).default(10),
@@ -436,7 +437,7 @@ const PipelineExitStepSchema = PipelineFilterStepSchema.omit({ kind: true }).ext
   kind: z.literal('exit'),
 });
 
-export const PipelineStepSchema = z.discriminatedUnion('kind', [
+const ExecutablePipelineStepSchemas = [
   PipelineEnrichmentStepSchema,
   PipelineGenerateStepSchema,
   PipelineFilterStepSchema,
@@ -448,6 +449,36 @@ export const PipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineLinkedinConnectStepSchema,
   PipelineManualTaskStepSchema,
   PipelineExitStepSchema,
+] as const;
+
+export const ExecutablePipelineStepSchema = z.discriminatedUnion('kind', ExecutablePipelineStepSchemas);
+
+const SubpipelineStepSchema = z.discriminatedUnion('kind', [
+  PipelineEnrichmentStepSchema,
+  PipelineFilterStepSchema,
+  PipelineReviewStepSchema,
+  PipelineWaitStepSchema,
+  PipelineSendEmailStepSchema,
+  PipelineSendSmsStepSchema,
+  PipelineLinkedinConnectStepSchema,
+  PipelineManualTaskStepSchema,
+  PipelineExitStepSchema,
+]);
+
+const PipelineSubpipelineStepSchema = z.object({
+  kind: z.literal('pipeline'),
+  id: z.string()
+    .trim()
+    .min(1)
+    .refine((value) => !value.includes('.'), 'Sub-pipeline ids cannot contain "." because event ids use "<subpipeline>.<step_id>".'),
+  description: z.string().default(''),
+  manual: z.boolean().default(false),
+  steps: z.array(SubpipelineStepSchema).default([]),
+}).partial({ description: true, manual: true, steps: true });
+
+export const PipelineStepSchema = z.discriminatedUnion('kind', [
+  ...ExecutablePipelineStepSchemas,
+  PipelineSubpipelineStepSchema,
 ]);
 
 export const SequenceStepSchema = z.preprocess((value) => {

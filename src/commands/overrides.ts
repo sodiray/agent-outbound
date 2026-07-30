@@ -11,6 +11,7 @@ import {
 } from '../orchestrator/runtime/db.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
+import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
 
 const recordLabel = (record: any) => ({
   row_id: String(record._row_id || record.id || ''),
@@ -37,7 +38,7 @@ const recordDecisionState = (record: any) => {
   };
 };
 
-const gateStepIds = (config: any) => (Array.isArray(config?.pipeline) ? config.pipeline : [])
+const gateStepIds = (config: any) => flattenPipelineSteps(config)
   .filter((step: any) => ['filter', 'review'].includes(String(step?.kind || '')))
   .map((step: any) => String(step?.id || '').trim())
   .filter(Boolean);

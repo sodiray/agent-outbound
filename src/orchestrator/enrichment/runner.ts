@@ -12,6 +12,7 @@ import { getMcpClient } from '../runtime/mcp.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
+import { stepStatusColumn } from '../lib/subpipelines.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { evaluateFieldCheckGroup } from '../lib/conditions.js';
@@ -516,7 +517,7 @@ export const executeEnrichmentStepOnRecords = async ({
   const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
   const concurrency = Number(stepConfig?.concurrency || 3);
   const targetColumns = getTargetColumnsForStepConfig(stepConfig || {});
-  const statusColumn = `${id}__status`;
+  const statusColumn = stepStatusColumn(id);
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
   if (targetColumns.length > 0 || statusColumn) {
     ensureRecordColumns({
@@ -895,7 +896,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
         const concurrency = Number(step?.config?.concurrency || 3);
         const targetColumns = getTargetColumnsForStepConfig(step?.config || {});
-        const statusColumn = `${id}__status`;
+        const statusColumn = stepStatusColumn(id);
         const whenPredicate = whenPredicateForStep({ step, stepConfig: step?.config || {} });
         ensureRecordColumns({ db, columns: [...targetColumns, { name: statusColumn, type: 'TEXT' }] });
 

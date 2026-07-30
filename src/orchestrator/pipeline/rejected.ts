@@ -8,6 +8,7 @@ import {
   resolveRecordRef,
 } from '../runtime/db.js';
 import { clearReviewDecision, configuredReviewStages } from './review.js';
+import { flattenPipelineSteps } from '../lib/subpipelines.js';
 
 export const DEFAULT_REJECTED_RESTORE_REASON = 'restored by operator from rejected view';
 
@@ -33,7 +34,7 @@ const humanizeId = (value: string) => String(value || '')
   .join(' ');
 
 const sourceLabels = (config: any) => {
-  const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
+  const pipeline = flattenPipelineSteps(config);
   return new Map<string, string>([
     ['score_minimum', 'Score minimum'],
     [OVERRIDE_GATE, 'Manual or review rejection'],

@@ -5,6 +5,7 @@ import {
   resolveConfiguredModelRef,
 } from '../runtime/models.js';
 import { assertSupportedModel } from '../runtime/model-store.js';
+import { flattenPipelineSteps } from './subpipelines.js';
 
 type ModelRef = {
   path: string;
@@ -50,7 +51,7 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
   for (const [index, search] of asArray(config?.source?.searches).entries()) {
     addExplicitRef(refs, `source.searches[${index}].model`, search?.model, 'research');
   }
-  for (const [index, step] of asArray(config?.pipeline).entries()) {
+  for (const [index, step] of flattenPipelineSteps(config).entries()) {
     const kind = String(step?.kind || '');
     addExplicitRef(refs, `pipeline[${index}].model`, step?.model, kind === 'filter' ? 'evaluation' : 'research');
     if (kind === 'assign') {
@@ -84,7 +85,7 @@ const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source'
     return refs;
   }
   if (phase === 'pipeline') {
-    for (const [index, step] of asArray(config?.pipeline).entries()) {
+    for (const [index, step] of flattenPipelineSteps(config).entries()) {
       const kind = String(step?.kind || '');
       if (kind !== 'assign') {
         addResolvedRef(refs, `pipeline[${index}]`, step?.model, kind === 'filter' ? 'evaluation' : 'research', aiConfig);

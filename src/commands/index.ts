@@ -59,6 +59,7 @@ import { getEnv, readGlobalEnv, writeGlobalEnv } from '../orchestrator/runtime/e
 import { planRouteAction } from '../orchestrator/actions/plan-route/index.js';
 import { getRecordRowId } from '../orchestrator/lib/record.js';
 import { diffUsageSnapshot, readUsageSnapshot, scaleUsageProjection } from '../orchestrator/lib/usage-projection.js';
+import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
 import { snapshotCreateCommand } from './safety.js';
 import { assertConfigModelReferences, assertPhaseModelReferences } from '../orchestrator/lib/model-validation.js';
 import {
@@ -966,7 +967,7 @@ const renderPipelineReport = (report: any) => {
 export const pipelineReportCommand = ({ list, run = 'latest' }) => {
   const listDir = resolveListDir(list);
   const { config } = readConfig(listDir);
-  const steps = (Array.isArray(config?.pipeline) ? config.pipeline : []).map((step: any, index: number) => ({
+  const steps = flattenPipelineSteps(config).map((step: any, index: number) => ({
     id: String(step?.id || '').trim() || `pipeline_step_${index + 1}`,
     kind: String(step?.kind || ''),
     dropGate: String(step?.kind || '') === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag',

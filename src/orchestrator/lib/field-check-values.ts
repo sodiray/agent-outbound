@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolveListPath } from '../runtime/paths.js';
+import { flattenPipelineSteps } from './subpipelines.js';
 
 type FieldCheckCondition = Record<string, unknown>;
 
@@ -99,7 +100,7 @@ const conditionReferences = (config: Record<string, unknown>) => {
     }));
   });
 
-  const pipeline = Array.isArray(config.pipeline) ? config.pipeline : [];
+  const pipeline = flattenPipelineSteps(config);
   const pipelineRefs = pipeline.flatMap((step, stepIndex) => {
     const record = step && typeof step === 'object' ? step as Record<string, unknown> : {};
     const stepId = String(record.id || '').trim() || String(stepIndex);

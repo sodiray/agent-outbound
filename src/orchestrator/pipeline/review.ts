@@ -7,6 +7,7 @@ import {
   OVERRIDE_GATE,
   resolveRecordRef,
 } from '../runtime/db.js';
+import { flattenPipelineSteps } from '../lib/subpipelines.js';
 
 export type ReviewStage = {
   id: string;
@@ -41,7 +42,7 @@ const resolveReviewStageFields = ({
 });
 
 export const configuredReviewStages = (config: any): ReviewStage[] => (
-  Array.isArray(config?.pipeline) ? config.pipeline : []
+  flattenPipelineSteps(config)
 )
   .filter((step: any) => String(step?.kind || '') === 'review')
   .map((step: any) => {

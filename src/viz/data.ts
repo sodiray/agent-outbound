@@ -2,6 +2,7 @@ import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
 import { getTargetColumnsForStepConfig } from '../orchestrator/lib/step-columns.js';
+import { flattenPipelineSteps, stepStatusColumn } from '../orchestrator/lib/subpipelines.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import {
   getAssetsForRow,
@@ -152,6 +153,7 @@ const LIFECYCLE_COLUMNS = new Set([
   'disqualified_gate',
   'disqualify_reason',
   'sequence_name',
+  'pipeline_name',
   'routed_by',
   'sequence_status',
   'sequence_step',
@@ -333,11 +335,13 @@ const recordDetailFieldClassification = ({
   recordColumns: string[];
 }) => {
   const producers = new Map<string, Set<string>>();
-  for (const step of (Array.isArray(config?.pipeline) ? config.pipeline : [])) {
+  for (const step of flattenPipelineSteps(config)) {
     if (String(step?.kind || '') !== 'enrich') continue;
     const stepId = String(step?.id || '').trim();
     if (!stepId) continue;
-    const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+    const stepConfig = (
+      step?.config && typeof step.config === 'object' ? step.config : step
+    ) as Record<string, unknown>;
     const legacyColumnKeys = stepConfig?.columns && typeof stepConfig.columns === 'object'
       ? Object.keys(stepConfig.columns)
       : [];
@@ -351,7 +355,7 @@ const recordDetailFieldClassification = ({
     }
   }
   const producerRan = (field: string) => [...(producers.get(field) || [])].some((stepId) => (
-    SUCCESSFUL_ENRICH_STATUSES.has(String(record[`${stepId}__status`] || '').trim().toLowerCase())
+    SUCCESSFUL_ENRICH_STATUSES.has(String(record[stepStatusColumn(stepId)] || '').trim().toLowerCase())
   ));
   const raw = recordColumns.filter((key) => RAW_RECORD_FIELDS.has(key));
   const sourcedTargets = sourceOutputTargets(config);
@@ -386,7 +390,7 @@ const sourceOutputKeys = (config: any) => {
 };
 const stepOutputMap = (config: any) => {
   const map = new Map<string, string>();
-  for (const step of Array.isArray(config?.pipeline) ? config.pipeline : []) {
+  for (const step of flattenPipelineSteps(config)) {
     for (const [field] of outputEntries(step)) {
       map.set(String(field), String(step.id || ''));
     }
@@ -581,7 +585,7 @@ const buildSteps = (config: any) => [
     description: String(config?.source?.description || 'Source records'),
     tool_server: sourceToolServer(config) || null,
   },
-  ...(Array.isArray(config?.pipeline) ? config.pipeline : []).map((step: any) => ({
+  ...flattenPipelineSteps(config).map((step: any) => ({
     id: String(step.id || ''),
     kind: String(step.kind || ''),
     description: String(step.description || step.condition || step.type || ''),
@@ -982,7 +986,7 @@ export const queryRecords = (listDir: string, params: any = {}) => {
           ...Object.fromEntries(criteria.map((id) => [criterionKey(id), verdicts.get(id) || ''])),
         };
       });
-    const pipelineStepIds = (Array.isArray(config?.pipeline) ? config.pipeline : []).map((step: any) => String(step?.id || '')).filter(Boolean);
+    const pipelineStepIds = flattenPipelineSteps(config).map((step: any) => String(step?.id || '')).filter(Boolean);
     const stepOrder = new Map(pipelineStepIds.map((id, i) => [id, i]));
     const rowIds = records.map((record: any) => String(record._row_id)).filter(Boolean);
     const events = tableExists(db, 'pipeline_events') && rowIds.length > 0
@@ -1068,7 +1072,7 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
     ])];
     const recordColumns = new Set(recordColumnNames);
     const fieldClassification = recordDetailFieldClassification({ config, record, recordColumns: recordColumnNames });
-    const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
+    const pipeline = flattenPipelineSteps(config);
     const orderedSteps = [{ id: 'source', kind: 'source' }, ...pipeline.map((step: any) => ({ id: String(step.id || ''), kind: String(step.kind || '') }))];
     const dropGate = String(record.disqualified_gate || '');
     const dropIndex = dropGate ? orderedSteps.findIndex((step) => step.id === dropGate) : -1;
@@ -1093,7 +1097,7 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
       const id = String(step.id || '');
       const index = pipelineIndex + 1;
       const events = pipelineEvents.filter((event) => String(event.step_id || '') === id);
-      const statusColumn = `${id}__status`;
+      const statusColumn = stepStatusColumn(id);
       const isDropGate = Boolean(dropGate && id === dropGate);
       const explicitStatus = recordColumns.has(statusColumn) && String(record[statusColumn] || '')
         ? String(record[statusColumn] || '')

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { flattenPipelineSteps } from './subpipelines.js';
 import {
   fetchToolSchemas,
   getToolCatalogKey,
@@ -174,7 +175,7 @@ export const collectConfigToolRefs = (config: any): ToolRef[] => {
     addToolRef(refs, `source.searches[${i}].tool`, searches[i]);
   }
 
-  const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
+  const pipeline = flattenPipelineSteps(config);
   for (let i = 0; i < pipeline.length; i += 1) {
     const step = ensureObject(pipeline[i]);
     if (String(step?.kind || '') === 'enrich') {

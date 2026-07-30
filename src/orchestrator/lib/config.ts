@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { normalizeConfig } from '../../schemas/config.js';
+import { flattenPipelineSteps } from './subpipelines.js';
 export {
   inferPipelineEdges,
   mergeInferredPipelineDependencies,
@@ -226,7 +227,7 @@ export const applyConfigChanges = (config, changes = []) => {
 
 export const getDependentsOfStep = (config: any, stepId: string) => {
   const targetId = String(stepId || '').trim();
-  const steps = Array.isArray(config?.pipeline) ? config.pipeline : [];
+  const steps = flattenPipelineSteps(config);
   const dependents: Array<{ stepId: string; description: string; dependencyRef: string }> = [];
   for (const step of steps) {
     const id = String(step?.id || '').trim();

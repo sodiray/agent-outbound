@@ -3,6 +3,12 @@ import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/c
 import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 import { getRecordRowId } from '../lib/record.js';
 import { upsertRecord } from '../runtime/db.js';
+import {
+  flattenPipelineSteps,
+  PIPELINE_ROUTE_TARGET,
+  stepSubpipelineName,
+  SUBPIPELINE_STEP_INDEX_FIELD,
+} from '../lib/subpipelines.js';
 import { executePipelineSequenceAction } from './sequence-step-runtime.js';
 
 export type StepExecutionOutcome = {
@@ -180,7 +186,7 @@ const executeReviewBatch = async (
 };
 
 const assignRuleName = (rule: Record<string, unknown>, index: number) => (
-  textValue(rule.id) || textValue(rule.sequence) || `rule_${index + 1}`
+  textValue(rule.id) || textValue(rule.sequence) || textValue(rule.pipeline) || `rule_${index + 1}`
 );
 
 const executeAssignBatch = async (
@@ -191,6 +197,8 @@ const executeAssignBatch = async (
 ) => {
   const rules = Array.isArray(step.rules) ? step.rules as Array<Record<string, unknown>> : [];
   const fallback = textValue(step.fallback);
+  const target = textValue(step.target, 'sequence_name');
+  const destinationKey = target === PIPELINE_ROUTE_TARGET ? 'pipeline' : 'sequence';
   const outcomes = new Map<string, StepExecutionOutcome>();
   const idleRows = rows.filter((row) => {
     const recordId = getRecordRowId(row);
@@ -203,7 +211,7 @@ const executeAssignBatch = async (
 
   const assignRows = (
     matchedRows: Array<Record<string, unknown>>,
-    sequence: string,
+    destination: string,
     routedBy: string,
   ) => {
     matchedRows.forEach((row) => {
@@ -213,11 +221,11 @@ const executeAssignBatch = async (
           db: ctx.db,
           row: {
             ...row,
-            sequence_name: sequence,
+            [target]: destination,
             routed_by: routedBy,
           },
         });
-        outcomes.set(recordId, { passed: true, reason: `assigned:${sequence}:${routedBy}` });
+        outcomes.set(recordId, { passed: true, reason: `assigned:${destination}:${routedBy}` });
       } catch (error) {
         outcomes.set(recordId, {
           passed: false,
@@ -232,7 +240,7 @@ const executeAssignBatch = async (
   for (const [ruleIndex, rule] of rules.entries()) {
     const candidates = Array.from(remaining.values());
     if (candidates.length === 0) break;
-    const sequence = textValue(rule.sequence);
+    const destination = textValue(rule[destinationKey]);
     const routedBy = assignRuleName(rule, ruleIndex);
     const type = textValue(rule.type, 'field_check').toLowerCase();
     if (type === 'semantic') {
@@ -262,7 +270,7 @@ const executeAssignBatch = async (
         });
         remaining.delete(recordId);
       });
-      assignRows(matched, sequence, routedBy);
+      assignRows(matched, destination, routedBy);
       continue;
     }
     if (type !== 'field_check') {
@@ -283,7 +291,7 @@ const executeAssignBatch = async (
       match: textValue(rule.match, 'all'),
       listDir: ctx.listDir,
     }).passed);
-    assignRows(matched, sequence, routedBy);
+    assignRows(matched, destination, routedBy);
   }
 
   assignRows(Array.from(remaining.values()), fallback, 'fallback');
@@ -303,15 +311,16 @@ const executeSequenceActionBatch = async (
   stepId: string,
   rows: Array<Record<string, unknown>>,
 ) => {
-  const pipeline = Array.isArray(ctx.config?.pipeline)
-    ? ctx.config.pipeline as Array<Record<string, unknown>>
-    : [];
+  const pipeline = flattenPipelineSteps(ctx.config);
   const configuredIndex = pipeline.findIndex((entry) => textValue(entry.id) === stepId);
-  const stepNumber = configuredIndex >= 0 ? configuredIndex + 1 : 1;
+  const nestedStepIndex = Number(step[SUBPIPELINE_STEP_INDEX_FIELD]);
+  const stepNumber = Number.isInteger(nestedStepIndex)
+    ? nestedStepIndex + 1
+    : (configuredIndex >= 0 ? configuredIndex + 1 : 1);
   const kind = textValue(step.kind);
   const entries = await Promise.all(rows.map(async (row) => {
     const recordId = getRecordRowId(row);
-    const sequenceName = textValue(row.sequence_name, 'default');
+    const sequenceName = stepSubpipelineName(step) || textValue(row.sequence_name, 'default');
     try {
       const result = await executePipelineSequenceAction({
         mcp: ctx.mcp,

@@ -1,6 +1,7 @@
 import { getDependentsOfStep } from './config.js';
 import { getTargetColumnsForStepConfig } from './step-columns.js';
 import { syncNextActionDateFromPipelineEvents } from '../runtime/db.js';
+import { flattenPipelineSteps } from './subpipelines.js';
 
 const CORE_RECORD_COLUMNS = new Set([
   '_row_id',
@@ -48,6 +49,7 @@ const CORE_RECORD_COLUMNS = new Set([
   'trigger_score_updated_at',
   'priority_rank',
   'sequence_name',
+  'pipeline_name',
   'routed_by',
   'sequence_status',
   'sequence_step',
@@ -119,9 +121,7 @@ const existingRecordColumns = (db: any) => {
 };
 
 const pipelineStepById = (config: unknown, stepId: string) => {
-  const pipeline = Array.isArray((config as { pipeline?: unknown })?.pipeline)
-    ? (config as { pipeline: unknown[] }).pipeline
-    : [];
+  const pipeline = flattenPipelineSteps(config);
   return pipeline.find((entry) => {
     if (!entry || typeof entry !== 'object') return false;
     return String((entry as Record<string, unknown>).id || '').trim() === stepId;

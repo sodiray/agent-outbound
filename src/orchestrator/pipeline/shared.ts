@@ -5,6 +5,10 @@ import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { isRecordAwaitingReview } from './review.js';
 import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
+import {
+  PIPELINE_ROUTE_TARGET,
+  stepSubpipelineName,
+} from '../lib/subpipelines.js';
 
 const MATERIAL_FILTER_FIELDS = ['type', 'match', 'condition', 'conditions', 'value', 'operator', 'field', 'on_fail', 'model'] as const;
 
@@ -93,9 +97,22 @@ export const writeFilterFailure = ({ db, record, stepId, reason, drop }: { db: a
 };
 
 export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply }: { db: any; listDir: string; steps: any[]; baseRows: any[]; force: boolean; reapply: boolean }) => {
+  const holdingPipelines = new Set(
+    steps
+      .filter((step) => (
+        String(step?.kind || '') === 'assign'
+        && String(step?.target || '') === PIPELINE_ROUTE_TARGET
+      ))
+      .map((step) => String(step?.fallback || '').trim())
+      .filter(Boolean),
+  );
   const state = {
     removed: new Set<string>(),
     parked: new Set<string>(),
+    selectedPipelines: new Map(baseRows.map((record) => [
+      getRecordRowId(record),
+      String(record?.pipeline_name || 'default').trim() || 'default',
+    ])),
     estTotalCostUsd: 0,
     stepReports: [] as any[],
   };
@@ -104,9 +121,17 @@ export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply 
   steps.forEach((step, index) => {
     const stepId = pipelineStepId(step, index);
     const kind = String(step?.kind || '');
+    const subpipeline = stepSubpipelineName(step);
     const active = baseRows.filter((record) => (
       !state.removed.has(getRecordRowId(record))
       && !state.parked.has(getRecordRowId(record))
+      && (
+        !subpipeline
+        || (
+          !holdingPipelines.has(subpipeline)
+          && state.selectedPipelines.get(getRecordRowId(record)) === subpipeline
+        )
+      )
     ));
 
     if (kind === 'enrich') {
@@ -185,6 +210,8 @@ export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply 
       const rules = Array.isArray(step?.rules) ? step.rules : [];
       const deterministic = rules.every((rule: any) => String(rule?.type || 'field_check') === 'field_check');
       const idle = active.filter((record) => String(record?.sequence_status || 'idle') === 'idle');
+      const target = String(step?.target || 'sequence_name');
+      const destinationKey = target === PIPELINE_ROUTE_TARGET ? 'pipeline' : 'sequence';
       const bySequence = deterministic
         ? idle.reduce((counts: Record<string, number>, record) => {
           const matched = rules.find((rule: any) => evaluateFieldCheckGroup({
@@ -193,8 +220,11 @@ export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply 
             match: rule?.match || 'all',
             listDir,
           }).passed);
-          const sequence = String(matched?.sequence || step?.fallback || '');
-          return { ...counts, [sequence]: Number(counts[sequence] || 0) + 1 };
+          const destination = String(matched?.[destinationKey] || step?.fallback || '');
+          if (target === PIPELINE_ROUTE_TARGET) {
+            state.selectedPipelines.set(getRecordRowId(record), destination);
+          }
+          return { ...counts, [destination]: Number(counts[destination] || 0) + 1 };
         }, {})
         : {};
       state.stepReports.push({
@@ -203,7 +233,7 @@ export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply 
         type: deterministic ? 'field_check' : 'semantic',
         would_evaluate: idle.length,
         would_skip_launched: active.length - idle.length,
-        by_sequence: deterministic ? bySequence : null,
+        [target === PIPELINE_ROUTE_TARGET ? 'by_pipeline' : 'by_sequence']: deterministic ? bySequence : null,
         note: deterministic ? undefined : 'semantic assignments are not simulated',
         est_cost_usd: 0,
       });

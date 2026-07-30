@@ -1,6 +1,16 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { getTargetColumnsForStepConfig } from './step-columns.js';
+import {
+  flattenPipelineSteps,
+  namespaceSubpipelineStepId,
+  PIPELINE_ROUTE_TARGET,
+  stepStatusColumn,
+  stepSubpipelineName,
+  SUBPIPELINE_KIND,
+  subpipelineDefinitions,
+  subpipelineName,
+} from './subpipelines.js';
 
 type PipelineGraphOptions = {
   listDir?: string;
@@ -18,6 +28,7 @@ type Producer = {
   stepId: string;
   index: number;
   action: string;
+  subpipeline: string;
 };
 
 const LINKEDIN_RESOLUTION_ACTION = 'linkedin_company_resolution';
@@ -36,9 +47,17 @@ const LINKEDIN_RESOLUTION_FIELDS = [
   'resolution_head_token',
 ];
 
-const pipelineSteps = (config: any) => Array.isArray(config?.pipeline) ? config.pipeline : [];
+const pipelineSteps = (config: any) => flattenPipelineSteps(config);
 
 const stepId = (step: any) => String(step?.id || '').trim();
+
+const configSteps = (value: unknown): Array<Record<string, unknown>> => (
+  Array.isArray(value)
+    ? value.filter((step): step is Record<string, unknown> => (
+      Boolean(step && typeof step === 'object' && !Array.isArray(step))
+    ))
+    : []
+);
 
 const stringArray = (value: unknown) => Array.isArray(value)
   ? value.map((entry) => String(entry || '').trim()).filter(Boolean)
@@ -124,7 +143,7 @@ const producedFieldsByStep = (config: any): Producer[] => {
     const actionOutputs = String(stepConfig?.action || '').trim().toLowerCase() === LINKEDIN_RESOLUTION_ACTION
       ? LINKEDIN_RESOLUTION_FIELDS
       : [];
-    return [...new Set([...outputs, ...columns, ...targetColumns, ...actionOutputs, `${id}__status`])]
+    return [...new Set([...outputs, ...columns, ...targetColumns, ...actionOutputs, stepStatusColumn(id)])]
       .map((field) => String(field || '').trim())
       .filter(Boolean)
       .map((field) => ({
@@ -132,6 +151,7 @@ const producedFieldsByStep = (config: any): Producer[] => {
         stepId: id,
         index,
         action: String(stepConfig?.action || '').trim().toLowerCase(),
+        subpipeline: stepSubpipelineName(step),
       }));
   });
   return entries;
@@ -141,16 +161,22 @@ const addDependencyForField = ({
   deps,
   producers,
   consumerIndex,
+  consumerSubpipeline,
   field,
 }: {
   deps: Set<string>;
   producers: ReturnType<typeof producedFieldsByStep>;
   consumerIndex: number;
+  consumerSubpipeline: string;
   field: string;
 }) => {
   producers
     .filter((producer) => (
       producer.field === field
+      && (
+        producer.subpipeline === consumerSubpipeline
+        || (!producer.subpipeline && Boolean(consumerSubpipeline))
+      )
       && (
         producer.index < consumerIndex
         || (
@@ -193,12 +219,19 @@ const positionalReviewDependencies = (config: any) => {
   const steps = pipelineSteps(config);
   const entries: Array<[string, Set<string>]> = steps.map((step: any, index: number) => {
     const id = stepId(step);
+    const scope = stepSubpipelineName(step);
     const deps = steps
       .slice(0, index)
-      .filter((candidate: any) => String(candidate?.kind || '') === 'review')
+      .filter((candidate: any) => (
+        String(candidate?.kind || '') === 'review'
+        && (
+          !stepSubpipelineName(candidate)
+          || stepSubpipelineName(candidate) === scope
+        )
+      ))
       .map((candidate: any) => stepId(candidate))
       .filter(Boolean);
-    return [id, new Set(deps)];
+    return [id, new Set(deps)] as [string, Set<string>];
   }).filter(([id]) => Boolean(id));
   return new Map(entries);
 };
@@ -209,6 +242,7 @@ export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = 
   const reviewDependencies = positionalReviewDependencies(config);
   const entries: Array<[string, Set<string>]> = pipelineSteps(config).map((step: any, index: number) => {
     const id = stepId(step);
+    const consumerSubpipeline = stepSubpipelineName(step);
     const deps = new Set<string>(reviewDependencies.get(id) || []);
     if (!id) return [id, deps] as [string, Set<string>];
 
@@ -222,10 +256,22 @@ export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = 
       ...collectTokens(step?.prompt_args),
       ...collectTokens(step?.args),
     ];
-    structuralFields.forEach((field) => addDependencyForField({ deps, producers, consumerIndex: index, field }));
+    structuralFields.forEach((field) => addDependencyForField({
+      deps,
+      producers,
+      consumerIndex: index,
+      consumerSubpipeline,
+      field,
+    }));
     proseHits
       .filter((hit) => hit.stepId === id)
-      .forEach((hit) => addDependencyForField({ deps, producers, consumerIndex: index, field: hit.field }));
+      .forEach((hit) => addDependencyForField({
+        deps,
+        producers,
+        consumerIndex: index,
+        consumerSubpipeline,
+        field: hit.field,
+      }));
     deps.delete(id);
     return [id, deps] as [string, Set<string>];
   }).filter(([id]) => Boolean(id));
@@ -242,7 +288,7 @@ const BASE_RECORD_FIELDS = new Set([
   'contact_name', 'contact_email', 'contact_title', 'email_verification_status',
   'email_verification_confidence', 'email_verified_at', 'fit_score', 'trigger_score',
   'trigger_score_peak', 'fit_reasoning', 'trigger_reasoning', 'fit_updated_at', 'trigger_updated_at',
-  'fit_score_updated_at', 'trigger_score_updated_at', 'priority_rank', 'sequence_name',
+  'fit_score_updated_at', 'trigger_score_updated_at', 'priority_rank', 'sequence_name', 'pipeline_name',
   'sequence_status', 'sequence_step', 'sequence_step_attempts', 'next_action_date', 'launched_at',
   'last_outreach_at', 'email_last_message_id', 'email_last_thread_id', 'email_last_draft_id',
   'email_last_reply_at', 'email_reply_classification', 'reply_classification_latest',
@@ -300,7 +346,7 @@ const conditionKey = (condition: any) => JSON.stringify(stableValue({
 }));
 
 const ruleName = (rule: any, index: number) => (
-  String(rule?.id || rule?.sequence || '').trim() || `rule_${index + 1}`
+  String(rule?.id || rule?.sequence || rule?.pipeline || '').trim() || `rule_${index + 1}`
 );
 
 const shadowWarningsForStep = (step: any) => {
@@ -325,42 +371,72 @@ const shadowWarningsForStep = (step: any) => {
 
 export const validateRouterConfig = (config: any) => {
   const steps = pipelineSteps(config);
-  const assignSteps = steps.filter((step: any) => String(step?.kind || '') === 'assign');
+  const assignSteps = steps.filter((step) => String(step?.kind || '') === 'assign');
+  const sequenceAssignSteps = assignSteps
+    .filter((step) => String(step?.target || 'sequence_name') === 'sequence_name');
+  const pipelineAssignSteps = assignSteps
+    .filter((step) => String(step?.target || '') === PIPELINE_ROUTE_TARGET);
   const sequences = config?.sequences && typeof config.sequences === 'object' ? config.sequences : {};
   const sequenceNames = Object.keys(sequences);
+  const subpipelines = subpipelineDefinitions(config);
+  const subpipelineNames = subpipelines.map((step) => subpipelineName(step)).filter(Boolean);
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  if (sequenceNames.length > 1 && assignSteps.length === 0) {
+  if (sequenceNames.length > 1 && sequenceAssignSteps.length === 0) {
     errors.push(`Router configuration is ambiguous: sequences ${sequenceNames.map((name) => `"${name}"`).join(', ')} are defined, but pipeline has no kind: assign step.`);
+  }
+  if (
+    subpipelineNames.length > 0
+    && pipelineAssignSteps.length === 0
+    && !(subpipelineNames.length === 1 && subpipelineNames[0] === 'default')
+  ) {
+    errors.push(`Router configuration is ambiguous: sub-pipelines ${subpipelineNames.map((name) => `"${name}"`).join(', ')} are defined, but pipeline has no kind: assign step targeting pipeline_name.`);
   }
 
   if (assignSteps.length === 0) return { errors, warnings };
 
   const definedSequences = new Set(sequenceNames);
+  const definedSubpipelines = new Set(subpipelineNames);
   const producers = producedFieldsByStep(config);
   const suppliedFields = sourceSuppliedFields(config);
 
   assignSteps.forEach((step: any) => {
     const id = stepId(step);
+    const target = String(step?.target || 'sequence_name');
+    const targetKey = target === PIPELINE_ROUTE_TARGET ? 'pipeline' : 'sequence';
+    const targetLabel = target === PIPELINE_ROUTE_TARGET ? 'sub-pipeline' : 'sequence';
+    const definitions = target === PIPELINE_ROUTE_TARGET ? definedSubpipelines : definedSequences;
+    const configuredTargets = target === PIPELINE_ROUTE_TARGET
+      ? new Map(subpipelines.map((subpipeline) => [subpipelineName(subpipeline), subpipeline]))
+      : new Map(Object.entries(sequences));
     const dependencies = new Set(stringArray(step?.depends_on));
     const rules = Array.isArray(step?.rules) ? step.rules : [];
     const fallback = String(step?.fallback || '').trim();
-    const fallbackSequence = sequences[fallback];
+    const fallbackTarget = configuredTargets.get(fallback) as Record<string, unknown> | undefined;
     if (
-      fallbackSequence
-      && Array.isArray(fallbackSequence?.steps)
-      && fallbackSequence.steps.length > 0
-      && fallbackSequence?.manual !== true
+      fallbackTarget
+      && Array.isArray(fallbackTarget?.steps)
+      && fallbackTarget.steps.length > 0
+      && fallbackTarget?.manual !== true
     ) {
-      errors.push(`pipeline.${id} fallback "${fallback}" has non-empty steps and must set sequences.${fallback}.manual: true.`);
+      const configPath = target === PIPELINE_ROUTE_TARGET
+        ? `pipeline.${fallback}`
+        : `sequences.${fallback}`;
+      errors.push(`pipeline.${id} fallback "${fallback}" has non-empty steps and must set ${configPath}.manual: true.`);
     }
 
     rules.forEach((rule: any, ruleIndex: number) => {
-      const sequence = String(rule?.sequence || '').trim();
+      const destination = String(rule?.[targetKey] || '').trim();
       const name = ruleName(rule, ruleIndex);
-      if (!definedSequences.has(sequence)) {
-        errors.push(`pipeline.${id} rule "${name}" targets undefined sequence "${sequence}".`);
+      const otherTargetKey = targetKey === 'pipeline' ? 'sequence' : 'pipeline';
+      if (String(rule?.[otherTargetKey] || '').trim()) {
+        errors.push(`pipeline.${id} rule "${name}" uses "${otherTargetKey}" but target is "${target}".`);
+      }
+      if (!destination) {
+        errors.push(`pipeline.${id} rule "${name}" must name a ${targetLabel} with "${targetKey}".`);
+      } else if (!definitions.has(destination)) {
+        errors.push(`pipeline.${id} rule "${name}" targets undefined ${targetLabel} "${destination}".`);
       }
 
       conditionFields(rule).forEach((field) => {
@@ -380,17 +456,34 @@ export const validateRouterConfig = (config: any) => {
     warnings.push(...shadowWarningsForStep(step));
   });
 
-  const reachable = new Set(assignSteps.flatMap((step: any) => (
+  const sequenceReachable = new Set(sequenceAssignSteps.flatMap((step) => (
     Array.isArray(step?.rules)
       ? step.rules.map((rule: any) => String(rule?.sequence || '').trim()).filter(Boolean)
       : []
   )));
-  const fallbacks = new Set(
-    assignSteps.map((step: any) => String(step?.fallback || '').trim()).filter(Boolean),
+  const sequenceFallbacks = new Set(
+    sequenceAssignSteps.map((step) => String(step?.fallback || '').trim()).filter(Boolean),
   );
-  sequenceNames.filter((name) => !reachable.has(name) && !fallbacks.has(name)).forEach((name) => {
-    warnings.push(`Sequence "${name}" is unreachable: no kind: assign rule targets it.`);
-  });
+  if (sequenceAssignSteps.length > 0) {
+    sequenceNames.filter((name) => !sequenceReachable.has(name) && !sequenceFallbacks.has(name)).forEach((name) => {
+      warnings.push(`Sequence "${name}" is unreachable: no kind: assign rule targets it.`);
+    });
+  }
+  const pipelineReachable = new Set(pipelineAssignSteps.flatMap((step) => (
+    Array.isArray(step?.rules)
+      ? step.rules.map((rule: Record<string, unknown>) => String(rule?.pipeline || '').trim()).filter(Boolean)
+      : []
+  )));
+  const pipelineFallbacks = new Set(
+    pipelineAssignSteps.map((step) => String(step?.fallback || '').trim()).filter(Boolean),
+  );
+  if (pipelineAssignSteps.length > 0) {
+    subpipelineNames
+      .filter((name) => !pipelineReachable.has(name) && !pipelineFallbacks.has(name))
+      .forEach((name) => {
+        warnings.push(`Sub-pipeline "${name}" is unreachable: no kind: assign rule targets it.`);
+      });
+  }
 
   return {
     errors: [...new Set(errors)],
@@ -432,6 +525,9 @@ const reachableDependencies = (edges: Map<string, Set<string>>, id: string) => {
 
 export const validatePipelineGraph = (config: any, options: PipelineGraphOptions = {}) => {
   const steps = pipelineSteps(config);
+  const rawSteps = configSteps(config?.pipeline);
+  const nestedPipelines = subpipelineDefinitions(config);
+  const topLevelIds = rawSteps.map((step) => stepId(step)).filter(Boolean);
   const ids = steps.map((step: any) => stepId(step)).filter(Boolean);
   const idSet = new Set(ids);
   const indexById = new Map(ids.map((id, index) => [id, index]));
@@ -443,7 +539,9 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
     .some((strategy) => String(strategy?.kind || '').trim() === 'linkedin_profile_search');
   const resolutionStepIds = steps
     .filter((step) => {
-      const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+      const stepConfig = (
+        step?.config && typeof step.config === 'object' ? step.config : step
+      ) as Record<string, unknown>;
       return String(stepConfig?.action || '').trim().toLowerCase() === LINKEDIN_RESOLUTION_ACTION;
     })
     .map((step) => stepId(step))
@@ -457,6 +555,39 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
       && String(condition?.value || '').trim() === 'resolved'
     ))
   ));
+
+  const duplicateIds = (values: string[]) => [...new Set(
+    values.filter((value, index) => values.indexOf(value) !== index),
+  )];
+  duplicateIds(topLevelIds).forEach((id) => {
+    errors.push(`pipeline step id "${id}" is defined more than once.`);
+  });
+  nestedPipelines.forEach((subpipeline) => {
+    const name = subpipelineName(subpipeline);
+    const children = configSteps(subpipeline?.steps);
+    const localIds = children.map((step) => stepId(step)).filter(Boolean);
+    children.forEach((child, index) => {
+      if (stepId(child)) return;
+      errors.push(`sub-pipeline "${name}" step ${index + 1} must have a non-empty id.`);
+    });
+    duplicateIds(localIds).forEach((id) => {
+      errors.push(`sub-pipeline "${name}" step id "${id}" is defined more than once.`);
+    });
+    children
+      .filter((step) => String(step?.kind || '') === SUBPIPELINE_KIND)
+      .forEach(() => {
+        errors.push(`sub-pipeline "${name}" cannot contain another sub-pipeline.`);
+      });
+    localIds.forEach((localId) => {
+      const namespacedId = namespaceSubpipelineStepId(name, localId);
+      if (topLevelIds.includes(namespacedId)) {
+        errors.push(`sub-pipeline step id "${namespacedId}" collides with top-level pipeline step id "${namespacedId}".`);
+      }
+    });
+  });
+  duplicateIds(ids).forEach((id) => {
+    errors.push(`resolved pipeline step id "${id}" is ambiguous because more than one step uses it.`);
+  });
 
   if (hasLinkedinSource && resolutionStepIds.length === 0) {
     errors.push(`source.linkedin_profile_search requires a pipeline enrich step with action "${LINKEDIN_RESOLUTION_ACTION}".`);
@@ -528,9 +659,28 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
 
 export const mergeInferredPipelineDependencies = (config: any, options: PipelineGraphOptions = {}) => {
   const inferred = inferPipelineEdges(config, options);
+  const flattenedById = new Map(pipelineSteps(config).map((step) => [stepId(step), step]));
+  const rawSteps = configSteps(config?.pipeline);
   return {
     ...(config || {}),
-    pipeline: pipelineSteps(config).map((step: any) => {
+    pipeline: rawSteps.map((step) => {
+      if (String(step?.kind || '') === SUBPIPELINE_KIND) {
+        const name = subpipelineName(step);
+        const children = configSteps(step?.steps);
+        return {
+          ...step,
+          steps: children.map((child) => {
+            const id = namespaceSubpipelineStepId(name, stepId(child));
+            const flattened = flattenedById.get(id);
+            const computed = Array.from(inferred.get(id) || []);
+            const runsAfter = stringArray(flattened?.runs_after);
+            return {
+              ...child,
+              depends_on: [...new Set([...computed, ...runsAfter])],
+            };
+          }),
+        };
+      }
       const id = stepId(step);
       const computed = Array.from(inferred.get(id) || []);
       const runsAfter = stringArray(step?.runs_after);

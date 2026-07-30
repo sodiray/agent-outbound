@@ -92,7 +92,10 @@ const recordSequenceName = (record) => String(record?.sequence_name || 'default'
 
 const holdingSequenceNames = (config) => new Set(
   (Array.isArray(config?.pipeline) ? config.pipeline : [])
-    .filter((step) => String(step?.kind || '') === 'assign')
+    .filter((step) => (
+      String(step?.kind || '') === 'assign'
+      && String(step?.target || 'sequence_name') === 'sequence_name'
+    ))
     .map((step) => String(step?.fallback || '').trim())
     .filter(Boolean),
 );

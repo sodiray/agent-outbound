@@ -13,6 +13,11 @@ import { emitActivity } from '../runtime/activity.js';
 import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
 import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides } from '../runtime/db.js';
 import { resolveWorkingDayConfig } from '../lib/working-days.js';
+import {
+  flattenPipelineSteps,
+  holdingSubpipelineNames,
+  stepSubpipelineName,
+} from '../lib/subpipelines.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
 import { computeWaitWakeAt } from './sequence-step-runtime.js';
@@ -108,6 +113,10 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
     .flatMap((candidate, candidateIndex) => (
       candidateIndex < index
       && String(candidate?.kind || '').trim().toLowerCase() === 'review'
+      && (
+        !stepSubpipelineName(candidate)
+        || stepSubpipelineName(candidate) === stepSubpipelineName(step)
+      )
         ? [pipelineStepId(candidate, candidateIndex)]
         : []
     ));
@@ -527,16 +536,29 @@ const initializeResolved = ({
   }));
 };
 
-const makeApplicable = ({ db, listDir, force }: { db: any; listDir: string; force: boolean }) => (recordState: RecordState, step: DataflowStep) => {
-  if (!defaultApplicable(recordState, step)) return false;
-  if (step.kind === 'review') {
-    const recordId = getRecordRowId(recordState.record);
-    if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
-    return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
-  }
-  if (step.kind !== 'enrich') return true;
-  const work = enrichWork({ db, listDir, step: step.step, stepId: step.id, record: recordState.record, force });
-  return Number(work.would_enrich || 0) > 0;
+const makeApplicable = ({ db, listDir, config, force }: { db: any; listDir: string; config: unknown; force: boolean }) => {
+  const holdingPipelines = holdingSubpipelineNames(config);
+  return (recordState: RecordState, step: DataflowStep) => {
+    if (!defaultApplicable(recordState, step)) return false;
+    const subpipeline = stepSubpipelineName(step.step);
+    if (
+      subpipeline
+      && (
+        holdingPipelines.has(subpipeline)
+        || String(recordState.record?.pipeline_name || 'default').trim() !== subpipeline
+      )
+    ) {
+      return false;
+    }
+    if (step.kind === 'review') {
+      const recordId = getRecordRowId(recordState.record);
+      if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
+      return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
+    }
+    if (step.kind !== 'enrich') return true;
+    const work = enrichWork({ db, listDir, step: step.step, stepId: step.id, record: recordState.record, force });
+    return Number(work.would_enrich || 0) > 0;
+  };
 };
 
 const createLazyExecutionContext = ({ db, listDir, config, force }: { db: any; listDir: string; config: any; force: boolean }) => {
@@ -588,7 +610,7 @@ export const runPipelineDataflow = async ({
   assertPhaseModelReferences({
     config: {
       ...config,
-      pipeline: (Array.isArray(config?.pipeline) ? config.pipeline : [])
+      pipeline: flattenPipelineSteps(config)
         .filter((step) => String(step?.kind || '') !== 'wait'),
     },
     phase: 'pipeline',
@@ -597,7 +619,7 @@ export const runPipelineDataflow = async ({
   graph.warnings.forEach((warning) => console.warn(warning));
   if (graph.errors.length > 0) throw new Error(`Invalid pipeline graph: ${graph.errors.join('; ')}`);
 
-  const rawSteps: any[] = Array.isArray(config?.pipeline) ? config.pipeline as any[] : [];
+  const rawSteps: any[] = flattenPipelineSteps(config);
   const db = openListDb({ listDir, readonly: dryRun });
   try {
     const steps = buildSteps({ db, steps: rawSteps }).filter((step) => step.kind !== 'generate');
@@ -671,7 +693,7 @@ export const runPipelineDataflow = async ({
       steps,
       concurrency: globalConcurrency,
       initialResolvedByRecord: resolvedByRecord,
-      isApplicable: makeApplicable({ db, listDir, force }),
+      isApplicable: makeApplicable({ db, listDir, config, force }),
       isTimeReady: makeTimeReadiness({ db, clock }),
       loadStep: async (step, record, inFlight) => {
         emitActivity({ event: 'step_start', phase: 'pipeline', step: step.id, kind: step.kind, rows: 1 });
