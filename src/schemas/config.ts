@@ -193,6 +193,23 @@ const SourceExcludeRuleSchema = z.object({
   conditions: z.array(FieldCheckConditionSchema).default([]),
 }).partial({ description: true, match: true, conditions: true });
 
+const WorkingDaySchema = z.preprocess((value) => normalizeWorkingDayToken(value), z.enum(SEQUENCE_WORKING_DAY_VALUES));
+
+const WorkingDaysSchema = z.preprocess((value) => {
+  if (value === undefined) return value;
+  if (!Array.isArray(value)) return value;
+  return value.map((entry) => normalizeWorkingDayToken(entry));
+}, z.array(WorkingDaySchema)
+  .min(1, 'working_days must include at least one day.')
+  .transform((days) => Array.from(new Set(days))));
+
+const PipelineSequenceStepBaseSchema = z.object({
+  id: z.string().min(1),
+  description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
+});
+
 const PipelineFilterStepSchema = z.object({
   kind: z.literal('filter'),
   id: z.string().default(''),
@@ -318,12 +335,71 @@ const PipelineGenerateStepSchema = z.object({
   prompt_args: PipelineEnrichmentStepSchema.shape.prompt_args,
 });
 
+const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
+  kind: z.literal('wait'),
+  after: z.string()
+    .trim()
+    .regex(/^(?:\d+(?:\.\d+)?|\.\d+)[dhw]$/i, 'wait.after must be a duration using d, h, or w (for example, 3d).')
+    .refine((value) => Number(value.slice(0, -1)) > 0, 'wait.after must be greater than zero.'),
+  working_days: WorkingDaysSchema.default([...SEQUENCE_WORKING_DAY_VALUES]),
+  non_working_day_policy: z.enum(NON_WORKING_DAY_POLICY_VALUES).default('shift_forward'),
+});
+
+const PipelineExternalStepFields = {
+  description: PipelineSequenceStepBaseSchema.shape.description,
+  depends_on: PipelineSequenceStepBaseSchema.shape.depends_on,
+  runs_after: PipelineSequenceStepBaseSchema.shape.runs_after,
+  side_effecting: z.literal(true, {
+    errorMap: () => ({ message: 'Externally emitting steps must declare side_effecting: true.' }),
+  }),
+  template: z.union([z.string(), z.array(z.string())]).optional(),
+  template_version: z.coerce.number().int().min(1).optional(),
+  variables: z.record(z.any()).default({}),
+  uses_asset: z.string().optional(),
+  draft_approval_required: z.boolean().optional(),
+  config: StepConfigSchema.default({}),
+};
+
+const PipelineSendEmailStepSchema = z.object({
+  kind: z.literal('send_email'),
+  id: z.string().min(1),
+  ...PipelineExternalStepFields,
+});
+
+const PipelineSendSmsStepSchema = z.object({
+  kind: z.literal('send_sms'),
+  id: z.string().min(1),
+  ...PipelineExternalStepFields,
+});
+
+const PipelineLinkedinConnectStepSchema = z.object({
+  kind: z.literal('linkedin_connect'),
+  id: z.string().min(1),
+  ...PipelineExternalStepFields,
+});
+
+const PipelineManualTaskStepSchema = PipelineSequenceStepBaseSchema.extend({
+  kind: z.literal('manual_task'),
+  side_effecting: z.boolean().default(false),
+  config: StepConfigSchema.default({}),
+});
+
+const PipelineExitStepSchema = PipelineFilterStepSchema.omit({ kind: true }).extend({
+  kind: z.literal('exit'),
+});
+
 export const PipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
   PipelineGenerateStepSchema,
   PipelineFilterStepSchema,
   PipelineAssignStepSchema,
   PipelineReviewStepSchema,
+  PipelineWaitStepSchema,
+  PipelineSendEmailStepSchema,
+  PipelineSendSmsStepSchema,
+  PipelineLinkedinConnectStepSchema,
+  PipelineManualTaskStepSchema,
+  PipelineExitStepSchema,
 ]);
 
 export const SequenceStepSchema = z.preprocess((value) => {
@@ -424,16 +500,6 @@ const CrmSchema = z.object({
     });
   }
 });
-
-const WorkingDaySchema = z.preprocess((value) => normalizeWorkingDayToken(value), z.enum(SEQUENCE_WORKING_DAY_VALUES));
-
-const WorkingDaysSchema = z.preprocess((value) => {
-  if (value === undefined) return value;
-  if (!Array.isArray(value)) return value;
-  return value.map((entry) => normalizeWorkingDayToken(entry));
-}, z.array(WorkingDaySchema)
-  .min(1, 'sequences.<name>.working_days must include at least one day.')
-  .transform((days) => Array.from(new Set(days))));
 
 const SequenceSchema = z.object({
   manual: z.boolean().default(false),

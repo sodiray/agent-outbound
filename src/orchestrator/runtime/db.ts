@@ -225,6 +225,8 @@ const SCHEMA_SQL = `
     kind TEXT NOT NULL,
     passed INTEGER NOT NULL,
     reason TEXT DEFAULT '',
+    wake_at TEXT DEFAULT '',
+    side_effecting INTEGER DEFAULT 0,
     occurred_at TEXT NOT NULL,
     FOREIGN KEY(record_id) REFERENCES records(_row_id) ON DELETE CASCADE
   );
@@ -648,6 +650,12 @@ const ensureRecordCompatibility = (db) => {
   } catch {}
 };
 
+const ensurePipelineEventCompatibility = (db) => {
+  try { db.exec("ALTER TABLE pipeline_events ADD COLUMN wake_at TEXT DEFAULT ''"); } catch {}
+  try { db.exec('ALTER TABLE pipeline_events ADD COLUMN side_effecting INTEGER DEFAULT 0'); } catch {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_pipeline_events_wake ON pipeline_events(record_id, wake_at)'); } catch {}
+};
+
 const ensureContactCompatibility = (db) => {
   try { db.exec("ALTER TABLE contacts ADD COLUMN first_name TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE contacts ADD COLUMN last_name TEXT DEFAULT ''"); } catch {}
@@ -887,6 +895,7 @@ const openDb = ({ dbPath, readonly = false }) => {
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN new_unique INTEGER DEFAULT 0"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_run_at TEXT DEFAULT ''"); } catch {}
     ensureRecordCompatibility(db);
+    ensurePipelineEventCompatibility(db);
     ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);
     ensureTerritoryCompatibility(db);
@@ -1087,10 +1096,49 @@ export const insertScoreEvent = ({ db, event }) => {
   });
 };
 
+export const syncNextActionDateFromPipelineEvents = ({
+  db,
+  recordId,
+}: {
+  db: {
+    prepare: (sql: string) => {
+      get: (...params: unknown[]) => { wake_at?: unknown } | undefined;
+      run: (...params: unknown[]) => unknown;
+    };
+  };
+  recordId: string;
+}) => {
+  const id = String(recordId || '').trim();
+  if (!id) return '';
+  const pending = db.prepare(`
+    SELECT MIN(event.wake_at) AS wake_at
+    FROM pipeline_events event
+    WHERE event.record_id = ?
+      AND event.passed = 0
+      AND event.reason = 'wake_at'
+      AND COALESCE(event.wake_at, '') != ''
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pipeline_events completed
+        WHERE completed.record_id = event.record_id
+          AND completed.step_id = event.step_id
+          AND completed.passed = 1
+      )
+  `).get(id);
+  const wakeAt = String(pending?.wake_at || '');
+  db.prepare('UPDATE records SET next_action_date = ?, updated_at = ? WHERE _row_id = ?')
+    .run(wakeAt, nowIso(), id);
+  return wakeAt;
+};
+
 export const insertPipelineEvent = ({ db, event }) => {
   db.prepare(`
-    INSERT INTO pipeline_events (event_id, record_id, step_id, kind, passed, reason, occurred_at)
-    VALUES (@event_id, @record_id, @step_id, @kind, @passed, @reason, @occurred_at)
+    INSERT INTO pipeline_events (
+      event_id, record_id, step_id, kind, passed, reason, wake_at, side_effecting, occurred_at
+    )
+    VALUES (
+      @event_id, @record_id, @step_id, @kind, @passed, @reason, @wake_at, @side_effecting, @occurred_at
+    )
   `).run({
     event_id: event.event_id || event.id,
     record_id: event.record_id || event.row_id,
@@ -1098,8 +1146,16 @@ export const insertPipelineEvent = ({ db, event }) => {
     kind: String(event.kind || ''),
     passed: event.passed ? 1 : 0,
     reason: String(event.reason || ''),
+    wake_at: String(event.wake_at || ''),
+    side_effecting: event.side_effecting ? 1 : 0,
     occurred_at: event.occurred_at || nowIso(),
   });
+  if (String(event.reason || '') === 'wake_at' || String(event.kind || '') === 'wait') {
+    syncNextActionDateFromPipelineEvents({
+      db,
+      recordId: String(event.record_id || event.row_id || ''),
+    });
+  }
 };
 
 export const inPlayWhere = (alias = '') => {

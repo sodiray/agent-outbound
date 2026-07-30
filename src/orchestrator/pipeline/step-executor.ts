@@ -3,6 +3,7 @@ import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/c
 import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 import { getRecordRowId } from '../lib/record.js';
 import { upsertRecord } from '../runtime/db.js';
+import { executePipelineSequenceAction } from './sequence-step-runtime.js';
 
 export type StepExecutionOutcome = {
   passed: boolean;
@@ -289,6 +290,74 @@ const executeAssignBatch = async (
   return outcomes;
 };
 
+const channelForPipelineKind = (kind: string) => ({
+  send_email: 'email',
+  send_sms: 'sms',
+  linkedin_connect: 'linkedin',
+  manual_task: 'manual',
+})[kind] || 'manual';
+
+const executeSequenceActionBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+) => {
+  const pipeline = Array.isArray(ctx.config?.pipeline)
+    ? ctx.config.pipeline as Array<Record<string, unknown>>
+    : [];
+  const configuredIndex = pipeline.findIndex((entry) => textValue(entry.id) === stepId);
+  const stepNumber = configuredIndex >= 0 ? configuredIndex + 1 : 1;
+  const kind = textValue(step.kind);
+  const entries = await Promise.all(rows.map(async (row) => {
+    const recordId = getRecordRowId(row);
+    const sequenceName = textValue(row.sequence_name, 'default');
+    try {
+      const result = await executePipelineSequenceAction({
+        mcp: ctx.mcp,
+        listDir: ctx.listDir,
+        listName: textValue((ctx.config?.list as Record<string, unknown> | undefined)?.name),
+        toolCatalog: ctx.toolCatalog,
+        db: ctx.db,
+        record: row,
+        config: ctx.config,
+        sequenceName,
+        stepNumber,
+        step,
+        sequence: { steps: [] },
+        aiConfig: ctx.aiConfig || ctx.config?.ai || {},
+        dryRun: false,
+        intent: 'send',
+        channelHint: channelForPipelineKind(kind),
+      });
+      const status = textValue(result?.status);
+      const reason = textValue(result?.reason);
+      const idempotentSkip = status === 'skipped' && /already sent/i.test(reason);
+      if (status === 'sent' || idempotentSkip) {
+        return [recordId, { passed: true, reason }] as const;
+      }
+      return [
+        recordId,
+        {
+          passed: false,
+          reason: reason || `pipeline_${kind}_did_not_complete`,
+          errored: true,
+        },
+      ] as const;
+    } catch (error) {
+      return [
+        recordId,
+        {
+          passed: false,
+          reason: String((error as Error)?.message || error),
+          errored: true,
+        },
+      ] as const;
+    }
+  }));
+  return new Map<string, StepExecutionOutcome>(entries);
+};
+
 export const executeStepBatch = async (
   ctx: StepExecutionContext,
   step: PipelineStepLike,
@@ -296,11 +365,22 @@ export const executeStepBatch = async (
   rows: Array<Record<string, unknown>>,
 ): Promise<Map<string, StepExecutionOutcome>> => {
   const kind = textValue(step.kind);
-  if (kind === 'filter') {
+  if (kind === 'filter' || kind === 'exit') {
     const filterType = textValue(step.type, 'semantic').toLowerCase();
     if (filterType === 'field_check') return executeFieldCheckBatch(ctx, step, rows);
     if (filterType === 'semantic') return executeSemanticFilterBatch(ctx, step, rows);
     throw new Error(`unsupported_pipeline_filter_type:${filterType}`);
+  }
+
+  if (kind === 'wait') {
+    return new Map(rows.map((row) => [
+      getRecordRowId(row),
+      { passed: true, reason: '' },
+    ]));
+  }
+
+  if (['send_email', 'send_sms', 'linkedin_connect', 'manual_task'].includes(kind)) {
+    return executeSequenceActionBatch(ctx, step, stepId, rows);
   }
 
   if (kind === 'enrich') return executeEnrichBatch(ctx, step, stepId, rows);

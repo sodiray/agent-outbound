@@ -12,8 +12,10 @@ import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
 import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides } from '../runtime/db.js';
+import { resolveWorkingDayConfig } from '../lib/working-days.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
+import { computeWaitWakeAt } from './sequence-step-runtime.js';
 import { countAwaitingReviewRecords } from './review.js';
 import {
   pipelineStepId,
@@ -65,6 +67,7 @@ type DataflowCoreOptions = {
   concurrency: number;
   initialResolvedByRecord?: Map<string, Set<string>>;
   isApplicable?: (recordState: RecordState, step: DataflowStep) => boolean;
+  isTimeReady?: (recordState: RecordState, step: DataflowStep) => boolean;
   onStepOutcome: (recordState: RecordState, step: DataflowStep, outcome: StepExecutionOutcome) => Promise<{ record?: DataflowRecord; dropped?: boolean; resolved?: boolean; errored?: boolean }>;
   loadStep: (step: DataflowStep, record: DataflowRecord, inFlight: () => number) => Promise<StepExecutionOutcome>;
 };
@@ -79,14 +82,16 @@ const stepTier = (step: any) => {
     const rules = Array.isArray(step?.rules) ? step.rules : [];
     return rules.some((rule: any) => String(rule?.type || 'field_check').trim().toLowerCase() === 'semantic') ? 1 : 0;
   }
-  if (kind === 'filter' && String(step?.type || 'semantic').trim().toLowerCase() === 'field_check') return 0;
+  if ((kind === 'filter' || kind === 'exit') && String(step?.type || 'semantic').trim().toLowerCase() === 'field_check') return 0;
   if (kind === 'review') return 1;
-  if (kind === 'filter') return 1;
+  if (kind === 'filter' || kind === 'exit') return 1;
   if (kind === 'enrich') return 2;
   return 3;
 };
 
 const stepBatchSize = (step: any) => Math.max(1, Math.floor(Number(step?.batch_size || 10)));
+
+const PIPELINE_ACTION_KINDS = new Set(['send_email', 'send_sms', 'linkedin_connect', 'manual_task']);
 
 const stepBatchWindowMs = (step: any) => {
   const configured = Number(step?.batch_window_ms ?? step?.window_ms);
@@ -113,9 +118,11 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
     kind,
     tier: stepTier(step),
     cost: kind === 'review' ? 0 : (db ? avgStepCostUsd({ db, stepId: id }) : Number(step?.cost || 0)),
-    dropGate: kind === 'review' || (kind === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag'),
+    dropGate: kind === 'review'
+      || kind === 'exit'
+      || (kind === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag'),
     deps: [...new Set([...stringArray(step?.depends_on), ...stringArray(step?.runs_after), ...reviewDeps])],
-    executable: kind === 'filter' || kind === 'enrich' || kind === 'assign' || kind === 'review',
+    executable: ['filter', 'enrich', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit'].includes(kind),
   };
 });
 
@@ -139,22 +146,39 @@ const dataReady = (recordState: RecordState, step: DataflowStep, applicable: (re
   && step.deps.every((dep) => recordState.resolved.has(dep))
 );
 
+export const timeReady = ({
+  recordState,
+  step,
+  applicable,
+  isTimeReady,
+}: {
+  recordState: RecordState;
+  step: DataflowStep;
+  applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
+}) => dataReady(recordState, step, applicable) && isTimeReady(recordState, step);
+
 const economicallyReady = ({
   recordState,
   step,
   steps,
   applicable,
+  isTimeReady,
 }: {
   recordState: RecordState;
   step: DataflowStep;
   steps: DataflowStep[];
   applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
 }) => {
-  if (!dataReady(recordState, step, applicable)) return false;
+  if (!timeReady({ recordState, step, applicable, isTimeReady })) return false;
   return !steps.some((candidate) => (
     candidate.dropGate
     && !recordState.resolved.has(candidate.id)
-    && (recordState.pending.has(candidate.id) || dataReady(recordState, candidate, applicable))
+    && (
+      recordState.pending.has(candidate.id)
+      || timeReady({ recordState, step: candidate, applicable, isTimeReady })
+    )
     && compareCost(candidate, step) < 0
   ));
 };
@@ -163,12 +187,20 @@ const nextStep = ({
   recordState,
   steps,
   applicable,
+  isTimeReady,
 }: {
   recordState: RecordState;
   steps: DataflowStep[];
   applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
 }) => steps
-  .filter((step) => economicallyReady({ recordState, step, steps, applicable }))
+  .filter((step) => economicallyReady({
+    recordState,
+    step,
+    steps,
+    applicable,
+    isTimeReady,
+  }))
   .sort(compareCost)[0] || null;
 
 const withAdvancePermit = async <T>(state: SchedulerState, limit: number, task: () => Promise<T>): Promise<T> => {
@@ -215,6 +247,7 @@ export const runDataflowCore = async ({
   concurrency,
   initialResolvedByRecord = new Map<string, Set<string>>(),
   isApplicable = defaultApplicable,
+  isTimeReady = () => true,
   onStepOutcome,
   loadStep,
 }: DataflowCoreOptions): Promise<DataflowCoreSummary> => {
@@ -251,7 +284,12 @@ export const runDataflowCore = async ({
   }));
   const advance = async (recordState: RecordState): Promise<void> => {
     const selected = await withAdvancePermit(state, concurrency, async () => {
-      const candidate = nextStep({ recordState, steps, applicable: isApplicable });
+      const candidate = nextStep({
+        recordState,
+        steps,
+        applicable: isApplicable,
+        isTimeReady,
+      });
       if (candidate) recordState.pending.add(candidate.id);
       return candidate;
     });
@@ -296,6 +334,105 @@ const readPassedPipelineEvents = ({ db, recordIds }: { db: any; recordIds: strin
 const refreshRecord = ({ db, record }: { db: any; record: DataflowRecord }) => (
   db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(getRecordRowId(record), getRecordRowId(record)) || record
 );
+
+type PipelineClock = string | Date | (() => string | Date);
+
+type TimeReadinessDb = {
+  prepare: (sql: string) => {
+    get: (...params: unknown[]) => Record<string, unknown> | undefined;
+  };
+};
+
+const clockIso = (clock?: PipelineClock) => {
+  const value = typeof clock === 'function' ? clock() : (clock || new Date());
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid pipeline clock value "${String(value)}".`);
+  return parsed.toISOString();
+};
+
+const existingWakeAt = ({
+  db,
+  recordId,
+  stepId,
+}: {
+  db: TimeReadinessDb;
+  recordId: string;
+  stepId: string;
+}) => {
+  const row = db.prepare(`
+    SELECT wake_at
+    FROM pipeline_events
+    WHERE record_id = ? AND step_id = ?
+      AND passed = 0 AND reason = 'wake_at' AND COALESCE(wake_at, '') != ''
+    ORDER BY occurred_at DESC
+    LIMIT 1
+  `).get(recordId, stepId);
+  return String(row?.wake_at || '');
+};
+
+const waitAnchorAt = ({
+  db,
+  recordState,
+  step,
+  now,
+}: {
+  db: TimeReadinessDb;
+  recordState: RecordState;
+  step: DataflowStep;
+  now: string;
+}) => {
+  if (step.deps.length === 0) {
+    return String(
+      recordState.record.created_at
+      || recordState.record._created_at
+      || now,
+    );
+  }
+  const placeholders = step.deps.map(() => '?').join(', ');
+  const row = db.prepare(`
+    SELECT MAX(occurred_at) AS occurred_at
+    FROM pipeline_events
+    WHERE record_id = ? AND passed = 1 AND step_id IN (${placeholders})
+  `).get(getRecordRowId(recordState.record), ...step.deps);
+  return String(row?.occurred_at || now);
+};
+
+const makeTimeReadiness = ({
+  db,
+  clock,
+}: {
+  db: TimeReadinessDb;
+  clock?: PipelineClock;
+}) => (recordState: RecordState, step: DataflowStep) => {
+  if (step.kind !== 'wait') return true;
+  const recordId = getRecordRowId(recordState.record);
+  const now = clockIso(clock);
+  const persistedWakeAt = existingWakeAt({ db, recordId, stepId: step.id });
+  const wakeAt = persistedWakeAt || (() => {
+    const timing = resolveWorkingDayConfig(step.step);
+    const scheduled = computeWaitWakeAt({
+      anchorAt: waitAnchorAt({ db, recordState, step, now }),
+      after: String(step.step?.after || ''),
+      workingDays: timing.workingDays,
+      policy: timing.policy,
+    });
+    insertPipelineEvent({
+      db,
+      event: {
+        event_id: randomUUID(),
+        record_id: recordId,
+        step_id: step.id,
+        kind: step.kind,
+        passed: false,
+        reason: 'wake_at',
+        wake_at: scheduled.wakeAt,
+        occurred_at: now,
+      },
+    });
+    return scheduled.wakeAt;
+  })();
+  return new Date(wakeAt).getTime() <= new Date(now).getTime();
+};
 
 const enrichWork = ({ db, listDir, step, stepId, record, force }: { db: any; listDir: string; step: any; stepId: string; record: DataflowRecord; force: boolean }) => (
   countEnrichWorkForStep({ db, listDir, step, stepId, rows: [record], force })
@@ -350,7 +487,7 @@ const initializeResolved = ({
         if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
         return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
       }
-      if (step.kind !== 'filter') return true;
+      if (step.kind !== 'filter' && step.kind !== 'exit') return true;
       if (reapply) return false;
       const staleStepId = filterStalenessStepId(step.id);
       const cached = readStaleness({ db, recordId, stepId: staleStepId });
@@ -406,7 +543,10 @@ const createLazyExecutionContext = ({ db, listDir, config, force }: { db: any; l
   const state: { mcp: any; toolCatalog: any } = { mcp: null, toolCatalog: null };
   return async (step: DataflowStep) => {
     if (step.kind === 'enrich' && enrichmentStepNeedsMcp(step.step, { listDir }) && !state.mcp) state.mcp = await getMcpClient();
-    if (step.kind === 'enrich' && !state.toolCatalog) state.toolCatalog = readToolCatalog(listDir);
+    if (PIPELINE_ACTION_KINDS.has(step.kind) && step.step?.config?.tool && !state.mcp) state.mcp = await getMcpClient();
+    if ((step.kind === 'enrich' || PIPELINE_ACTION_KINDS.has(step.kind)) && !state.toolCatalog) {
+      state.toolCatalog = readToolCatalog(listDir);
+    }
     return {
       db,
       listDir,
@@ -431,6 +571,7 @@ export const runPipelineDataflow = async ({
   force = false,
   reapply = false,
   concurrency,
+  clock,
 }: {
   listDir: string;
   where?: string;
@@ -439,11 +580,19 @@ export const runPipelineDataflow = async ({
   force?: boolean;
   reapply?: boolean;
   concurrency?: number;
+  clock?: PipelineClock;
 }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   prepareFieldCheckValueFiles({ config, listDir });
-  assertPhaseModelReferences({ config, phase: 'pipeline' });
+  assertPhaseModelReferences({
+    config: {
+      ...config,
+      pipeline: (Array.isArray(config?.pipeline) ? config.pipeline : [])
+        .filter((step) => String(step?.kind || '') !== 'wait'),
+    },
+    phase: 'pipeline',
+  });
   const graph = validatePipelineGraph(config, { listDir });
   graph.warnings.forEach((warning) => console.warn(warning));
   if (graph.errors.length > 0) throw new Error(`Invalid pipeline graph: ${graph.errors.join('; ')}`);
@@ -485,7 +634,7 @@ export const runPipelineDataflow = async ({
     };
     const resolvedByRecord = initializeResolved({ db, listDir, rows, steps, force, reapply, overridesByRecord });
     summary.skipped_passed = rows.reduce((total, row) => total + steps.filter((step) => (
-      step.kind === 'filter'
+      (step.kind === 'filter' || step.kind === 'exit')
       && resolvedByRecord.get(getRecordRowId(row))?.has(step.id)
       && hasPassedStep({ db, recordId: getRecordRowId(row), stepId: step.id })
     )).length, 0);
@@ -523,6 +672,7 @@ export const runPipelineDataflow = async ({
       concurrency: globalConcurrency,
       initialResolvedByRecord: resolvedByRecord,
       isApplicable: makeApplicable({ db, listDir, force }),
+      isTimeReady: makeTimeReadiness({ db, clock }),
       loadStep: async (step, record, inFlight) => {
         emitActivity({ event: 'step_start', phase: 'pipeline', step: step.id, kind: step.kind, rows: 1 });
         tickProgress(db, runId, { activeStep: step.id, stepIndex: step.index, stepTotal: steps.length, message: `${step.kind} · ${step.id}` });
@@ -530,7 +680,7 @@ export const runPipelineDataflow = async ({
       },
       onStepOutcome: async (recordState, step, outcome) => {
         const recordId = getRecordRowId(recordState.record);
-        const now = new Date().toISOString();
+        const now = clockIso(clock);
         if (step.kind === 'enrich') {
           if (outcome.errored) {
             const error = String(outcome.reason || 'failed');
@@ -660,6 +810,47 @@ export const runPipelineDataflow = async ({
           tickProgress(db, runId, { done: progressState.done, target: rows.length });
           emitActivity({ event: 'step_complete', phase: 'pipeline', step: step.id, kind: step.kind, awaiting_review: 1, rows: 1 });
           return { record: refreshRecord({ db, record: recordState.record }), resolved: false };
+        }
+
+        if (step.kind === 'wait' || PIPELINE_ACTION_KINDS.has(step.kind)) {
+          insertPipelineEvent({
+            db,
+            event: {
+              event_id: randomUUID(),
+              record_id: recordId,
+              step_id: step.id,
+              kind: step.kind,
+              passed: outcome.passed,
+              reason: String(outcome.reason || ''),
+              side_effecting: Boolean(step.step?.side_effecting),
+              occurred_at: now,
+            },
+          });
+          summary.processed += outcome.passed ? 1 : 0;
+          summary.failed += outcome.passed ? 0 : 1;
+          if (!outcome.passed) {
+            summary.errors.push({
+              step: step.id,
+              record_id: recordId,
+              error: String(outcome.reason || 'failed'),
+            });
+          }
+          progressState.done += 1;
+          tickProgress(db, runId, { done: progressState.done, target: rows.length });
+          emitActivity({
+            event: 'step_complete',
+            phase: 'pipeline',
+            step: step.id,
+            kind: step.kind,
+            processed: outcome.passed ? 1 : 0,
+            failed: outcome.passed ? 0 : 1,
+            rows: 1,
+          });
+          return {
+            record: refreshRecord({ db, record: recordState.record }),
+            resolved: outcome.passed,
+            errored: !outcome.passed,
+          };
         }
 
         // A human "keep" override on a failing drop gate converts the verdict to a

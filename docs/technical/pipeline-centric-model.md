@@ -226,6 +226,35 @@ needs all of it.
   difference. This is the highest-blast-radius behavior in the four items.
 - Sequence steps are a *flavor* — for UI and validation — not a separate execution path.
 
+### Two limitations of the side-effect guard, found during implementation
+
+Both are real and neither is closed. Recording them because a guard people believe is total is worse
+than one whose edges are known.
+
+- **The guard protects the code path, not the database.** It fires only for callers of
+  `clearStepState`. Repairing a stuck record with raw SQL against `pipeline_events` / `staleness`
+  bypasses it completely — and raw SQL is how stuck records have actually been repaired here before.
+  So the documented repair procedure must route *through* `clearStepState` with an explicit
+  `allowSideEffectingClear`, never around it. A guard that only covers the polite path is not a
+  guarantee.
+  What makes it survive config drift, at least: `side_effecting` is recorded on the
+  `pipeline_events` row itself, not read from the current config, so editing a step to drop the flag
+  cannot retroactively unprotect a send that already went out.
+- **There is an exactly-once gap the guard cannot close.** If the process dies after the provider
+  accepts a send but before its completed `pipeline_events` row is written, the send happened and
+  the pipeline does not know it. The next run re-sends. This is at-least-once delivery, and no
+  clearing guard can fix it — closing it needs either an outbox (persist intent before dispatch,
+  reconcile after) or provider-side idempotency keys. Until then, a crash mid-send can duplicate a
+  message to a customer.
+
+### A latent hazard worth naming
+
+`runDataflowCore` defaults `isTimeReady` to `() => true`. Today the only production caller,
+`runPipelineDataflow`, injects a real implementation — but a permissive default on a *timing* gate is
+the same shape as `not_in` passing vacuously on an empty field: a future caller that omits the
+parameter gets instantly-ready `wait` steps and sends that fire early, with nothing failing loudly.
+Prefer making it required so the compiler catches the omission.
+
 ---
 
 ## 4. The LinkedIn lane
