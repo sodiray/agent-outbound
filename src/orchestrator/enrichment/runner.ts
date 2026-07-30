@@ -398,6 +398,7 @@ export const countEnrichWorkForStep = ({ db, listDir = '', step, stepId = '', ro
 };
 
 export const executeEnrichmentAction = async ({
+  db,
   mcp,
   listDir,
   stepId,
@@ -409,6 +410,7 @@ export const executeEnrichmentAction = async ({
   outputSchema,
   toolCatalog,
 }: {
+  db?: Parameters<typeof upsertContact>[0]['db'];
   mcp: Client | null;
   listDir: string;
   stepId: string;
@@ -423,6 +425,7 @@ export const executeEnrichmentAction = async ({
   const action = String(stepConfig?.action || '').trim().toLowerCase();
   if (action === 'decision_makers') {
     return executeDecisionMakersAction({
+      db,
       mcp,
       listDir,
       stepId,
@@ -540,6 +543,7 @@ export const executeEnrichmentStepOnRecords = async ({
     const runAttempt = async (attempt: number) => {
       const inputRecord = mergedRecordForEnrichment({ db, record });
       const result = await executeEnrichmentAction({
+        db,
         mcp,
         listDir,
         stepId: id,
@@ -578,7 +582,9 @@ export const executeEnrichmentStepOnRecords = async ({
       const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
       const merged = { ...currentRow, ...patch };
       upsertRecord({ db, row: merged });
-      upsertPrimaryContactIfPresent({ db, record: merged });
+      if (String(stepConfig.action || '').trim().toLowerCase() !== 'decision_makers') {
+        upsertPrimaryContactIfPresent({ db, record: merged });
+      }
       writeStaleness({
         db,
         recordId,
@@ -834,6 +840,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
       const levelResults = await Promise.all(level.map(async (node) => {
         const step = node.step;
         const id = node.id;
+        const managesContacts = String(step?.config?.action || '').trim().toLowerCase() === 'decision_makers';
         const rawDependsOn = Array.isArray(step?.config?.depends_on) ? step.config.depends_on : [];
         const missingDeps = rawDependsOn
           .map((dep: any) => String(dep || '').trim())
@@ -846,7 +853,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           const detail = `Skipping "${id}": missing dependency ${missingDeps.map((dep) => `"${dep}"`).join(', ')}`;
           emitActivity({ event: 'warning', phase: 'enrichment', step: id, detail });
           summary.errors.push({ step: id, warning: detail });
-          return { id, patches: [], failures: [] };
+          return { id, patches: [], failures: [], managesContacts };
         }
         const declaredOutputs = getDeclaredOutputs(step?.config || {});
         const legacyColumns = getLegacyColumns(step?.config || {});
@@ -921,6 +928,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             const inputRecord = mergedRecordForEnrichment({ db, record });
             const stepConfig = step?.config || {};
             const result = await executeEnrichmentAction({
+              db,
               mcp: await mcpForStep(stepConfig),
               listDir,
               stepId: id,
@@ -1014,18 +1022,18 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         }, concurrency);
 
         emitActivity({ event: 'step_complete', phase: 'enrichment', step: id });
-        return { id, patches, failures };
+        return { id, patches, failures, managesContacts };
       }));
 
       for (const result of levelResults) {
         for (const item of result.patches) {
           try {
-            const currentRow = recordState.get(item.recordId)
-              || db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(item.recordId, item.recordId)
+            const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(item.recordId, item.recordId)
+              || recordState.get(item.recordId)
               || {};
             const merged = { ...currentRow, ...item.patch };
             upsertRecord({ db, row: merged });
-            upsertPrimaryContactIfPresent({ db, record: merged });
+            if (!result.managesContacts) upsertPrimaryContactIfPresent({ db, record: merged });
             if (item.failedError) {
               clearStaleness({ db, recordId: item.recordId, stepId: result.id });
             } else if (!item.skippedWhen) {

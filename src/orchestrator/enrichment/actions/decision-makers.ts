@@ -1,8 +1,12 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { z } from 'zod';
-import { generateObjectWithTools } from '../../runtime/llm.js';
+import {
+  listContactsByRecord,
+  syncPrimaryContactProjection,
+  upsertContact,
+} from '../../runtime/db.js';
 import { executeComposioTool } from '../../runtime/tools.js';
 import { getMcpClient } from '../../runtime/mcp.js';
+import { getRecordRowId } from '../../lib/record.js';
 
 type DecisionMakerCandidate = {
   first_name: string;
@@ -10,16 +14,19 @@ type DecisionMakerCandidate = {
   name: string;
   title: string;
   email: string;
+  phone: string;
   seniority: string;
   department: string;
   linkedin: string;
   confidence: number;
   source_domain: string;
   source_organization: string;
-  source: string;
+  source: 'hunter';
+  source_query: string;
 };
 
 type DecisionMakerActionInput = {
+  db?: Parameters<typeof upsertContact>[0]['db'];
   mcp?: Client | null;
   listDir: string;
   stepId: string;
@@ -34,12 +41,6 @@ type DecisionMakerActionResult = {
   model?: string;
   provider?: string;
 };
-
-const SelectionSchema = z.object({
-  selected_index: z.number().int().min(0).nullable().default(null),
-  confidence: z.number().int().min(0).max(100).default(0),
-  reason: z.string().default(''),
-});
 
 const PRODUCT_AND_LEGAL_TOKENS = new Set([
   'fiber',
@@ -185,10 +186,10 @@ const hunterData = (response: unknown) => {
 
 const hunterCandidatesFrom = ({
   response,
-  source,
+  sourceQuery,
 }: {
   response: unknown;
-  source: string;
+  sourceQuery: string;
 }) => {
   const data = hunterData(response);
   const organization = text(data.organization);
@@ -205,13 +206,15 @@ const hunterCandidatesFrom = ({
       name,
       title: text(item.position) || text(item.position_raw),
       email: text(item.value).toLowerCase(),
+      phone: text(item.phone_number) || text(item.phone),
       seniority: text(item.seniority),
       department: text(item.department),
-      linkedin: text(item.linkedin),
+      linkedin: text(item.linkedin) || text(item.linkedin_url),
       confidence: Number.isFinite(Number(item.confidence)) ? Number(item.confidence) : 0,
       source_domain: domain,
       source_organization: organization,
-      source,
+      source: 'hunter' as const,
+      source_query: sourceQuery,
     };
   }).filter((candidate) => candidate.name || candidate.email || candidate.title);
 };
@@ -221,7 +224,7 @@ const callHunterDomainSearch = async (
   args: Record<string, unknown>,
 ) => hunterCandidatesFrom({
   response: await executeComposioTool(mcp, 'HUNTER_DOMAIN_SEARCH', args),
-  source: Object.prototype.hasOwnProperty.call(args, 'company') ? 'company' : 'domain',
+  sourceQuery: text(args.domain) || text(args.company),
 });
 
 const guardedCompanySearch = async ({
@@ -276,63 +279,67 @@ const sourceDecisionMakerCandidates = async ({
   });
 };
 
-const chooseDecisionMaker = async ({
+const primaryContactOutputs = ({
+  primaryContact,
   candidates,
-  stepConfig,
-  aiConfig,
 }: {
+  primaryContact: Record<string, unknown>;
   candidates: DecisionMakerCandidate[];
-  stepConfig: Record<string, unknown>;
-  aiConfig: Record<string, unknown>;
 }) => {
-  const result = await generateObjectWithTools({
-    task: 'decision-maker-select',
-    model: text(stepConfig.model),
-    role: 'research',
-    aiConfig,
-    schema: SelectionSchema,
-    prompt: [
-      'Select the single best decision-maker for B2B outreach from these Hunter candidates.',
-      'Prefer owner, founder, CEO, president, general manager, VP, director, or clear commercial/operational authority.',
-      'Avoid junior, support-only, or purely technical roles unless no better authority exists.',
-      'Return the zero-based selected_index from the candidate array and a confidence from 0 to 100.',
-      '',
-      JSON.stringify(candidates.map((candidate, index) => ({ index, ...candidate })), null, 2),
-    ].join('\n'),
-  });
-  return result;
+  const fullName = text(primaryContact.full_name)
+    || text(primaryContact.name)
+    || [text(primaryContact.first_name), text(primaryContact.last_name)].filter(Boolean).join(' ');
+  const confidence = Number(primaryContact.confidence);
+  return {
+    decision_maker_name: fullName,
+    decision_maker_title: text(primaryContact.title),
+    decision_maker_email: text(primaryContact.email).toLowerCase(),
+    decision_maker_linkedin: text(primaryContact.linkedin_url),
+    decision_maker_confidence: Number.isFinite(confidence)
+      ? Math.max(0, Math.min(100, Math.round(confidence)))
+      : 0,
+    decision_maker_candidates: JSON.stringify(candidates),
+  };
 };
 
 export const executeDecisionMakersAction = async ({
+  db,
   mcp,
-  stepConfig,
   record,
-  aiConfig = {},
 }: DecisionMakerActionInput): Promise<DecisionMakerActionResult> => {
   const hunterMcp = mcp || await getMcpClient();
 
   const candidates = await sourceDecisionMakerCandidates({ mcp: hunterMcp, record });
   if (candidates.length === 0) return { outputs: emptyDecisionMakerOutputs() };
+  if (!db) throw new Error('The decision_makers enrichment action requires a database handle.');
 
-  const selectionResult = await chooseDecisionMaker({ candidates, stepConfig, aiConfig });
-  const selection = SelectionSchema.parse(selectionResult.object);
-  const selectedIndex = selection.selected_index;
-  const fallbackIndex = 0;
-  const finalIndex = selectedIndex === null || selectedIndex >= candidates.length ? fallbackIndex : selectedIndex;
-  const selected = candidates[finalIndex];
-  const confidence = selection.confidence || selected.confidence || 0;
+  const recordId = getRecordRowId(record);
+  const sourcedAt = new Date().toISOString();
+  candidates.forEach((candidate) => {
+    upsertContact({
+      db,
+      contact: {
+        record_id: recordId,
+        full_name: candidate.name,
+        first_name: candidate.first_name,
+        last_name: candidate.last_name,
+        title: candidate.title,
+        seniority: candidate.seniority,
+        email: candidate.email,
+        phone: candidate.phone,
+        linkedin_url: candidate.linkedin,
+        source: 'hunter',
+        source_query: candidate.source_query,
+        sourced_at: sourcedAt,
+        confidence: candidate.confidence,
+      },
+    });
+  });
+  syncPrimaryContactProjection({ db, recordId });
 
-  return {
-    outputs: {
-      decision_maker_name: selected.name,
-      decision_maker_title: selected.title,
-      decision_maker_email: selected.email,
-      decision_maker_linkedin: selected.linkedin,
-      decision_maker_confidence: Math.max(0, Math.min(100, Math.round(confidence))),
-      decision_maker_candidates: JSON.stringify(candidates),
-    },
-    usage: selectionResult.usage,
-    model: selectionResult.model,
-    provider: selectionResult.provider,
-  };
+  const primaryContact = listContactsByRecord({ db, recordId })
+    .find((contact) => Number(contact.is_primary) === 1);
+  if (!primaryContact) return { outputs: emptyDecisionMakerOutputs(candidates) };
+
+  return { outputs: primaryContactOutputs({ primaryContact, candidates }) };
 };
