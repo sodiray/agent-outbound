@@ -139,9 +139,23 @@ const GeoTilesStrategySchema = SourceStrategyBaseSchema.extend({
   excluded_types: z.array(z.string()).default([]),
 });
 
+const LinkedinProfileSearchStrategySchema = SourceStrategyBaseSchema.extend({
+  kind: z.literal('linkedin_profile_search'),
+  search: z.string().trim().min(1),
+  locations: z.array(z.string().trim().min(1)).min(1),
+  profile_scraper_mode: z.string().trim().min(1).default('Full'),
+  start_page: z.coerce.number().int().min(1).default(1),
+  take_pages: z.coerce.number().int().min(1).default(1),
+  profileScraperMode: z.string().trim().min(1).optional(),
+  startPage: z.coerce.number().int().min(1).optional(),
+  takePages: z.coerce.number().int().min(1).optional(),
+  maxItems: SourceMaxResultsSchema.optional(),
+});
+
 export const StrategySchema = z.discriminatedUnion('kind', [
   KeywordGeoStrategySchema,
   GeoTilesStrategySchema,
+  LinkedinProfileSearchStrategySchema,
 ]).superRefine((value, ctx) => {
   if (value.kind === 'keyword_geo') {
     exactlyOneOf('keywords', 'keywords_from', 'keyword_geo')(value, ctx);
@@ -154,6 +168,7 @@ export const StrategySchema = z.discriminatedUnion('kind', [
 
 const SourceBudgetSchema = z.object({
   max_calls: z.coerce.number().int().min(0).optional(),
+  max_results: z.coerce.number().int().min(0).optional(),
 }).partial().default({});
 
 const FieldCheckConditionSchema = z.object({

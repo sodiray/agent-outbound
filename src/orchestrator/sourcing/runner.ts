@@ -28,16 +28,22 @@ import { embed } from '../runtime/embeddings.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
-import { loadTools } from '../runtime/tools.js';
+import { loadTools, toolSpecNeedsMcp } from '../runtime/tools.js';
 import { matchExcludeRule, normalizeExcludeRules, type SourceExcludeRule } from '../lib/source-exclude.js';
 import { assignTerritories } from '../territories/assign.js';
 import {
   GEO_SUBDIVISION_RADIUS_FACTOR,
   subdivisionChildCenters,
 } from '../lib/geo.js';
+import { monidSyntheticSlug } from '../runtime/providers/monid.js';
 
 const GEO_TILE_RESULT_CAP = 20;
 const GEO_TILE_DEFAULT_FLOOR_M = 60;
+const LINKEDIN_PROFILE_SEARCH_SOURCE = 'harvestapi_linkedin';
+const LINKEDIN_PROFILE_SEARCH_TOOL = {
+  server: 'monid',
+  tools: [monidSyntheticSlug('apify', '/harvestapi/linkedin-profile-search-by-services')],
+};
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const isQuotaError = (error: any) => {
   const message = String((error as any)?.message || error);
@@ -298,6 +304,23 @@ export const expandSourceStrategies = ({ listDir, strategies }: { listDir: strin
         };
         tasks.push({ id: taskIdFor({ kind, params }), kind, params });
       }
+      continue;
+    }
+    if (kind === 'linkedin_profile_search') {
+      const params = {
+        strategy_id: strategy?.id || '',
+        tool: LINKEDIN_PROFILE_SEARCH_TOOL,
+        search: String(strategy?.search || '').trim(),
+        locations: asStringArray(strategy?.locations),
+        max_results: Number(strategy?.maxItems || strategy?.max_results || 100),
+        profile_scraper_mode: String(
+          strategy?.profileScraperMode || strategy?.profile_scraper_mode || 'Full',
+        ).trim(),
+        start_page: Number(strategy?.startPage || strategy?.start_page || 1),
+        take_pages: Number(strategy?.takePages || strategy?.take_pages || 1),
+        output_map: strategy?.output_map || {},
+      };
+      tasks.push({ id: taskIdFor({ kind, params }), kind, params });
     }
   }
   return tasks;
@@ -327,6 +350,8 @@ export const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record
   if (!mapped.place_id && row?.placeId) mapped.place_id = row.placeId;
   if (!mapped.place_id && row?.id) mapped.place_id = row.id;
   if (!mapped.google_place_id && mapped.place_id) mapped.google_place_id = mapped.place_id;
+  if (!mapped.company_resolution && mapped.place_id) mapped.company_resolution = 'resolved';
+  if (!mapped.resolution_source && mapped.place_id) mapped.resolution_source = 'places';
   if (mapped.lat === undefined && row?.location?.lat !== undefined) mapped.lat = row.location.lat;
   if (mapped.lng === undefined && row?.location?.lng !== undefined) mapped.lng = row.location.lng;
   if (mapped.lat === undefined && row?.location?.latitude !== undefined) mapped.lat = row.location.latitude;
@@ -334,6 +359,45 @@ export const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record
   if (mapped.latitude === undefined && mapped.lat !== undefined) mapped.latitude = mapped.lat;
   if (mapped.longitude === undefined && mapped.lng !== undefined) mapped.longitude = mapped.lng;
   return mapped;
+};
+
+const linkedinUrnFrom = (value: unknown) => {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw, 'https://www.linkedin.com');
+    return parsed.pathname.replace(/\/+$/u, '');
+  } catch {
+    return raw;
+  }
+};
+
+export const mapLinkedinProfileRow = ({
+  row,
+  params,
+}: {
+  row: Record<string, unknown>;
+  params: Record<string, unknown>;
+}) => {
+  const rawLocation = row.location;
+  const location = rawLocation && typeof rawLocation === 'object' && !Array.isArray(rawLocation)
+    ? String((rawLocation as Record<string, unknown>).linkedinText || '').trim()
+    : String(rawLocation || '').trim();
+  const linkedinUrn = linkedinUrnFrom(row.linkedinProfileUrl);
+  const sourcedAt = new Date().toISOString();
+  return {
+    business_name: '',
+    city: location,
+    source: LINKEDIN_PROFILE_SEARCH_SOURCE,
+    source_query: String(params.search || '').trim(),
+    sourced_at: sourcedAt,
+    company_resolution: '',
+    resolution_source: '',
+    linkedin_name: String(row.name || '').trim(),
+    linkedin_headline: String(row.position || '').trim(),
+    linkedin_location: location,
+    linkedin_urn: linkedinUrn,
+  };
 };
 
 export const extractRowsFromToolResult = (result: any) => {
@@ -349,6 +413,8 @@ export const extractRowsFromToolResult = (result: any) => {
   }
   if (Array.isArray(result?.data?.results)) return result.data.results;
   if (Array.isArray(result?.items)) return result.items;
+  if (Array.isArray(result?.profiles)) return result.profiles;
+  if (Array.isArray(result?.data?.profiles)) return result.data.profiles;
   if (Array.isArray(result?.data)) return result.data;
   return [];
 };
@@ -410,6 +476,17 @@ const executeStrategyTask = async ({
   const toolEntries = Object.entries(resolvedTools);
   if (toolEntries.length === 0) throw new Error(`source.strategy: no tool resolved for task ${task?.id || ''}.`);
   const [, toolDef] = toolEntries[0] as [string, any];
+  if (task.kind === 'linkedin_profile_search') {
+    const result = await toolDef.execute({
+      search: String(params.search || '').trim(),
+      locations: Array.isArray(params.locations) ? params.locations : [],
+      maxItems: Number(params.max_results || 100),
+      profileScraperMode: String(params.profile_scraper_mode || 'Full'),
+      startPage: Number(params.start_page || 1),
+      takePages: Number(params.take_pages || 1),
+    });
+    return { rows: extractRowsFromToolResult(result), params };
+  }
   const result = await toolDef.execute({
     query: params.query || '',
     max_results: Number(params.max_results || 100),
@@ -499,6 +576,13 @@ const refreshEmbeddingsAndLinks = async ({
   `).all();
 
   await mapWithConcurrency<any, void>(refreshRows as any[], async (row) => {
+    if (
+      String(row?.source || '').trim() === LINKEDIN_PROFILE_SEARCH_SOURCE
+      && (
+        String(row?.company_resolution || '').trim() !== 'resolved'
+        || String(row?.duplicate_of || '').trim() !== ''
+      )
+    ) return;
     const recordId = getRecordRowId(row);
     const identityText = buildIdentityString({ row, identityFields });
     const nextHash = buildIdentityHash({ row, identityFields });
@@ -624,6 +708,27 @@ export const processAndInsertRows = async ({
         },
       });
 
+      if (String(row?.source || '').trim() === LINKEDIN_PROFILE_SEARCH_SOURCE) {
+        const existing = db.prepare('SELECT * FROM records WHERE _row_id = ? LIMIT 1').get(getRecordRowId(shape));
+        const persisted = existing
+          ? {
+              ...shape,
+              ...existing,
+              source: row.source,
+              source_query: row.source_query,
+              sourced_at: row.sourced_at,
+              linkedin_name: row.linkedin_name,
+              linkedin_headline: row.linkedin_headline,
+              linkedin_location: row.linkedin_location,
+              linkedin_urn: row.linkedin_urn,
+            }
+          : shape;
+        upsertRecord({ db, row: persisted });
+        if (!existing) insertedIds.push(getRecordRowId(shape));
+        emitActivity({ event: 'row_complete', phase: 'sourcing', row: persisted.business_name || persisted.id });
+        return;
+      }
+
       const dedup = await aiDedupLink({
         db,
         row: shape,
@@ -721,8 +826,19 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
   const maxCalls = config?.source?.budget?.max_calls === undefined
     ? null
     : Math.max(0, Number(config.source.budget.max_calls || 0));
+  const maxResults = config?.source?.budget?.max_results === undefined
+    ? null
+    : Math.max(0, Number(config.source.budget.max_results || 0));
   const db = openListDb({ listDir, readonly: false });
-  const mcp = await getMcpClient();
+  const needsMcp = [
+    ...searches
+      .filter((search) => !Array.isArray(search?.manual_results) || search.manual_results.length === 0)
+      .map((search) => search?.tool),
+    ...strategies
+      .filter((strategy) => String(strategy?.kind || '') !== 'linkedin_profile_search')
+      .map((strategy) => strategy?.tool),
+  ].some((toolSpec) => toolSpecNeedsMcp(toolSpec, { listDir }));
+  const mcp = needsMcp ? await getMcpClient() : null;
   const toolCatalog = readToolCatalog(listDir);
   const identityFields = getIdentityFields(config);
 
@@ -737,6 +853,8 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
     search_tasks_pending: 0,
     search_calls_made: 0,
     search_call_budget_hit: false,
+    search_results_used: 0,
+    search_result_budget_hit: false,
     search_retries: 0,
     search_tasks_errored: 0,
     tiles_saturated: 0,
@@ -836,26 +954,53 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       const queuedTaskIds = new Set(taskQueue.map((task: any) => String(task.id || '')));
       const strategyState = {
         callsMade: 0,
+        callPricedCallsMade: 0,
+        resultsUsed: 0,
         queueIndex: 0,
-        budgetHit: false,
+        callBudgetHit: false,
+        resultBudgetHit: false,
       };
       summary.search_tasks_pending = taskQueue.length;
       tickProgress(db, runId, { stepTotal: taskQueue.length, done: summary.inserted_total });
 
       const executeWithRetry = async (task: any): Promise<any> => {
         const attempt = async (attemptIndex: number, failures: string[]): Promise<any> => {
-          if (maxCalls !== null && strategyState.callsMade >= maxCalls) {
-            strategyState.budgetHit = true;
-            return { budgetHit: true, failures };
+          const resultPriced = String(task?.kind || '') === 'linkedin_profile_search';
+          if (!resultPriced && maxCalls !== null && strategyState.callPricedCallsMade >= maxCalls) {
+            strategyState.callBudgetHit = true;
+            return { callBudgetHit: true, failures };
+          }
+          if (resultPriced && maxResults !== null && strategyState.resultsUsed >= maxResults) {
+            strategyState.resultBudgetHit = true;
+            return { resultBudgetHit: true, failures };
           }
           strategyState.callsMade += 1;
+          if (!resultPriced) strategyState.callPricedCallsMade += 1;
           summary.search_calls_made = strategyState.callsMade;
           const taskHeartbeat = setInterval(() => heartbeat(db, runId), 3000);
           try {
+            const params = taskParamsFor(task);
+            const configuredResultLimit = Number(params?.max_results || 100);
+            const budgetRemaining = maxResults === null
+              ? configuredResultLimit
+              : Math.max(0, maxResults - strategyState.resultsUsed);
+            const targetRemaining = Number(limit || 0) > 0
+              ? Math.max(0, Number(limit || 0) - Number(summary.inserted_total || 0))
+              : configuredResultLimit;
+            const remainingResults = Math.min(configuredResultLimit, budgetRemaining, targetRemaining);
+            const executionTask = resultPriced
+              ? {
+                  ...task,
+                  params: {
+                    ...params,
+                    max_results: remainingResults,
+                  },
+                }
+              : task;
             const result = await executeStrategyTask({
               mcp,
               listDir,
-              task,
+              task: executionTask,
               toolCatalog,
             });
             return { result, failures };
@@ -863,9 +1008,9 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
             const message = String((error as any)?.message || error);
             const nextFailures = [...failures, message];
             if (isQuotaError(error) && attemptIndex < 3) {
-              if (maxCalls !== null && strategyState.callsMade >= maxCalls) {
-                strategyState.budgetHit = true;
-                return { budgetHit: true, failures: nextFailures };
+              if (!resultPriced && maxCalls !== null && strategyState.callPricedCallsMade >= maxCalls) {
+                strategyState.callBudgetHit = true;
+                return { callBudgetHit: true, failures: nextFailures };
               }
               summary.search_retries += 1;
               await sleep(1000 * (2 ** attemptIndex));
@@ -882,8 +1027,13 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       while (strategyState.queueIndex < taskQueue.length) {
         const task = taskQueue[strategyState.queueIndex];
         strategyState.queueIndex += 1;
-        if (maxCalls !== null && strategyState.callsMade >= maxCalls) {
-          strategyState.budgetHit = true;
+        const resultPriced = String(task?.kind || '') === 'linkedin_profile_search';
+        if (!resultPriced && maxCalls !== null && strategyState.callPricedCallsMade >= maxCalls) {
+          strategyState.callBudgetHit = true;
+          break;
+        }
+        if (resultPriced && maxResults !== null && strategyState.resultsUsed >= maxResults) {
+          strategyState.resultBudgetHit = true;
           break;
         }
         if (Number(limit || 0) > 0 && Number(summary.inserted_total || 0) >= Number(limit || 0)) break;
@@ -892,7 +1042,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         tickProgress(db, runId, { stepIndex: summary.search_tasks_run, stepTotal: taskQueue.length, activeStep: String(task.id), message: `Sourcing tile ${summary.search_tasks_run}/${taskQueue.length}`, done: summary.inserted_total });
 
         const execution = await executeWithRetry(task);
-        if (execution.budgetHit) break;
+        if (execution.callBudgetHit || execution.resultBudgetHit) break;
         if (execution.error) {
           const message = String((execution.error as any)?.message || execution.error);
           const params = taskParamsFor(task);
@@ -923,10 +1073,34 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
 
         try {
           const taskResult = execution.result;
-          const rows = Array.isArray(taskResult.rows) ? taskResult.rows : [];
+          const rawRows = Array.isArray(taskResult.rows) ? taskResult.rows : [];
+          const remainingResultBudget = resultPriced && maxResults !== null
+            ? Math.max(0, maxResults - strategyState.resultsUsed)
+            : rawRows.length;
+          const rows = resultPriced
+            ? rawRows.slice(0, remainingResultBudget)
+            : rawRows;
+          if (resultPriced) {
+            strategyState.resultsUsed += rows.length;
+            summary.search_results_used = strategyState.resultsUsed;
+            if (
+              maxResults !== null
+              && (rawRows.length > rows.length || strategyState.resultsUsed >= maxResults)
+            ) {
+              strategyState.resultBudgetHit = true;
+            }
+          }
           const mappedRows = rows.map((row: any) => {
-            const mapped = mapStrategyRow({ row, outputMap: taskResult.params?.output_map || {} });
-            mapped._row_id = mapped._row_id || mapped.id || mapped.place_id || mapped.google_place_id || makeRecordId(mapped);
+            const mapped = resultPriced
+              ? mapLinkedinProfileRow({ row, params: taskResult.params || {} })
+              : mapStrategyRow({ row, outputMap: taskResult.params?.output_map || {} });
+            const linkedinRecordId = resultPriced && String(mapped.linkedin_urn || '').trim()
+              ? `linkedin_${stableHash({
+                  source: LINKEDIN_PROFILE_SEARCH_SOURCE,
+                  linkedin_urn: String(mapped.linkedin_urn),
+                }).slice(0, 32)}`
+              : '';
+            mapped._row_id = mapped._row_id || mapped.id || mapped.place_id || mapped.google_place_id || linkedinRecordId || makeRecordId(mapped);
             mapped.id = mapped._row_id;
             return mapped;
           });
@@ -968,7 +1142,11 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
             db,
             id: task.id,
             status,
-            pagesFetched: task.kind === 'keyword_geo' ? Number(params?.max_pages || 1) : 1,
+            pagesFetched: task.kind === 'keyword_geo'
+              ? Number(params?.max_pages || 1)
+              : task.kind === 'linkedin_profile_search'
+                ? Number(params?.take_pages || 1)
+                : 1,
             totalSeen: rows.length,
             newUnique: processed.insertedIds.length,
           });
@@ -999,7 +1177,8 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         }
       }
       const remainingTasks = listPendingSearchTasks({ db });
-      summary.search_call_budget_hit = strategyState.budgetHit;
+      summary.search_call_budget_hit = strategyState.callBudgetHit;
+      summary.search_result_budget_hit = strategyState.resultBudgetHit;
       summary.search_tasks_pending = remainingTasks.length;
       summary.tiles_pending = remainingTasks.filter((task: any) => task.kind === 'geo_tiles').length;
     }

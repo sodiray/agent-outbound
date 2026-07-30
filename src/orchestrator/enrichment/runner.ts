@@ -21,6 +21,7 @@ import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/to
 import { providerToolUsageFromError } from '../runtime/providers/usage.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
 import { executeToolCallAction } from './actions/tool-call.js';
+import { executeLinkedinCompanyResolutionAction } from './actions/linkedin-company-resolution.js';
 
 const recordErroredProviderToolCost = ({
   db,
@@ -444,6 +445,18 @@ export const executeEnrichmentAction = async ({
       toolCatalog,
     });
   }
+  if (action === 'linkedin_company_resolution') {
+    return executeLinkedinCompanyResolutionAction({
+      db,
+      listDir,
+      stepConfig,
+      record,
+      aiConfig,
+      identityFields: Array.isArray(context?.source_identity)
+        ? context.source_identity.map((field) => String(field || '').trim()).filter(Boolean)
+        : [],
+    });
+  }
   return executeStepAction({
     mcp,
     listDir,
@@ -554,6 +567,7 @@ export const executeEnrichmentStepOnRecords = async ({
         context: {
           phase: 'pipeline',
           step: id,
+          source_identity: Array.isArray(config?.source?.identity) ? config.source.identity : [],
           linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
         },
         outputSchema: outputZod,
@@ -939,6 +953,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               context: {
                 phase: 'enrichment',
                 step: id,
+                source_identity: Array.isArray(config?.source?.identity) ? config.source.identity : [],
                 linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
               },
               outputSchema: outputZod,

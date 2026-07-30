@@ -17,7 +17,24 @@ type Producer = {
   field: string;
   stepId: string;
   index: number;
+  action: string;
 };
+
+const LINKEDIN_RESOLUTION_ACTION = 'linkedin_company_resolution';
+const LINKEDIN_RESOLUTION_FIELDS = [
+  'business_name',
+  'place_id',
+  'google_place_id',
+  'primary_type',
+  'website',
+  'address',
+  'user_rating_count',
+  'company_resolution',
+  'resolution_source',
+  'resolution_reason',
+  'resolution_candidate_name',
+  'resolution_head_token',
+];
 
 const pipelineSteps = (config: any) => Array.isArray(config?.pipeline) ? config.pipeline : [];
 
@@ -104,10 +121,18 @@ const producedFieldsByStep = (config: any): Producer[] => {
       ? Object.keys(stepConfig.columns)
       : [];
     const targetColumns = getTargetColumnsForStepConfig(stepConfig).map((column) => column.name);
-    return [...new Set([...outputs, ...columns, ...targetColumns, `${id}__status`])]
+    const actionOutputs = String(stepConfig?.action || '').trim().toLowerCase() === LINKEDIN_RESOLUTION_ACTION
+      ? LINKEDIN_RESOLUTION_FIELDS
+      : [];
+    return [...new Set([...outputs, ...columns, ...targetColumns, ...actionOutputs, `${id}__status`])]
       .map((field) => String(field || '').trim())
       .filter(Boolean)
-      .map((field) => ({ field, stepId: id, index }));
+      .map((field) => ({
+        field,
+        stepId: id,
+        index,
+        action: String(stepConfig?.action || '').trim().toLowerCase(),
+      }));
   });
   return entries;
 };
@@ -124,7 +149,16 @@ const addDependencyForField = ({
   field: string;
 }) => {
   producers
-    .filter((producer) => producer.field === field && producer.index < consumerIndex)
+    .filter((producer) => (
+      producer.field === field
+      && (
+        producer.index < consumerIndex
+        || (
+          field === 'company_resolution'
+          && producer.action === LINKEDIN_RESOLUTION_ACTION
+        )
+      )
+    ))
     .forEach((producer) => deps.add(producer.stepId));
 };
 
@@ -200,7 +234,8 @@ export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = 
 
 const BASE_RECORD_FIELDS = new Set([
   '_row_id', 'id', '_created_at', '_updated_at', 'business_name', 'address', 'city', 'state', 'zip',
-  'postal_code', 'country', 'website', 'domain', 'google_place_id', 'parent_row_id', 'latitude',
+  'postal_code', 'country', 'website', 'domain', 'place_id', 'google_place_id', 'primary_type',
+  'user_rating_count', 'parent_row_id', 'latitude',
   'longitude', 'source', 'source_query', 'sourced_at', 'duplicate_of', 'duplicate_status',
   'source_filter_result', 'source_filter_failures', 'disqualified_at', 'disqualified_gate',
   'disqualify_reason', 'phone', 'email_primary', 'contact_name_primary', 'contact_title_primary',
@@ -217,7 +252,9 @@ const BASE_RECORD_FIELDS = new Set([
   'sms_last_message_id', 'call_last_disposition', 'suppressed', 'suppressed_reason', 'suppressed_at',
   'do_not_sms', 'dne_email', 'dnc_phone', 'dnk_visit', 'crm_company_id', 'crm_person_id',
   'crm_deal_id', 'crm_last_synced_at', 'crm_sync_hash', 'workflow_signals', 'company_resolution',
-  'resolution_source', 'vertical', 'sub_vertical', 'size_tier', 'is_franchise', 'persona', 'outcome',
+  'resolution_source', 'resolution_reason', 'resolution_candidate_name', 'resolution_head_token',
+  'linkedin_name', 'linkedin_headline', 'linkedin_location', 'linkedin_urn',
+  'vertical', 'sub_vertical', 'size_tier', 'is_franchise', 'persona', 'outcome',
   'outcome_notes', 'outcome_at', 'outcome_value', 'extra_json', 'retry_count', 'last_error',
   'needs_review', 'review_reason', 'review_flagged_at', 'routed_by', 'created_at', 'updated_at',
 ]);
@@ -390,6 +427,40 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
   const warnings: string[] = [];
   const explicitEdges = new Map<string, Set<string>>();
   const reviewDependencies = positionalReviewDependencies(config);
+  const hasLinkedinSource = (Array.isArray(config?.source?.strategies) ? config.source.strategies : [])
+    .some((strategy) => String(strategy?.kind || '').trim() === 'linkedin_profile_search');
+  const resolutionStepIds = steps
+    .filter((step) => {
+      const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+      return String(stepConfig?.action || '').trim().toLowerCase() === LINKEDIN_RESOLUTION_ACTION;
+    })
+    .map((step) => stepId(step))
+    .filter(Boolean);
+  const resolutionGates = steps.filter((step) => (
+    String(step?.kind || '').trim() === 'filter'
+    && String(step?.type || 'semantic').trim() === 'field_check'
+    && (Array.isArray(step?.conditions) ? step.conditions : []).some((condition) => (
+      String(condition?.field || '').trim() === 'company_resolution'
+      && String(condition?.operator || '').trim() === 'eq'
+      && String(condition?.value || '').trim() === 'resolved'
+    ))
+  ));
+
+  if (hasLinkedinSource && resolutionStepIds.length === 0) {
+    errors.push(`source.linkedin_profile_search requires a pipeline enrich step with action "${LINKEDIN_RESOLUTION_ACTION}".`);
+  }
+  if (hasLinkedinSource && config?.source?.budget?.max_results === undefined) {
+    errors.push('source.linkedin_profile_search requires source.budget.max_results because harvestapi is priced per result.');
+  }
+  if (hasLinkedinSource && resolutionGates.length === 0) {
+    errors.push('source.linkedin_profile_search requires a field_check gate asserting company_resolution eq resolved.');
+  }
+  resolutionGates.forEach((gate) => {
+    if (!hasLinkedinSource || resolutionStepIds.length === 0) return;
+    const dependencies = new Set(stringArray(gate?.depends_on));
+    if (resolutionStepIds.some((id) => dependencies.has(id))) return;
+    errors.push(`pipeline.${stepId(gate)} must declare depends_on: [${resolutionStepIds[0]}] so LinkedIn records resolve before the company gate runs.`);
+  });
 
   steps.forEach((step: any) => {
     const id = stepId(step);

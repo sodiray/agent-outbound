@@ -43,7 +43,10 @@ const SCHEMA_SQL = `
     country TEXT DEFAULT '',
     website TEXT DEFAULT '',
     domain TEXT DEFAULT '',
+    place_id TEXT DEFAULT '',
     google_place_id TEXT DEFAULT '',
+    primary_type TEXT DEFAULT '',
+    user_rating_count INTEGER DEFAULT 0,
     parent_row_id TEXT DEFAULT '',
     latitude REAL DEFAULT 0,
     longitude REAL DEFAULT 0,
@@ -119,6 +122,13 @@ const SCHEMA_SQL = `
     workflow_signals TEXT DEFAULT '{}',
     company_resolution TEXT DEFAULT '',
     resolution_source TEXT DEFAULT '',
+    resolution_reason TEXT DEFAULT '',
+    resolution_candidate_name TEXT DEFAULT '',
+    resolution_head_token TEXT DEFAULT '',
+    linkedin_name TEXT DEFAULT '',
+    linkedin_headline TEXT DEFAULT '',
+    linkedin_location TEXT DEFAULT '',
+    linkedin_urn TEXT DEFAULT '',
     vertical TEXT DEFAULT '',
     sub_vertical TEXT DEFAULT '',
     size_tier TEXT DEFAULT '',
@@ -606,8 +616,20 @@ const ensureSuppressionCompatibility = (db) => {
 };
 
 const ensureRecordCompatibility = (db) => {
+  try { db.exec("ALTER TABLE records ADD COLUMN place_id TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN primary_type TEXT DEFAULT ''"); } catch {}
+  try { db.exec('ALTER TABLE records ADD COLUMN user_rating_count INTEGER DEFAULT 0'); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN company_resolution TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN resolution_source TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN resolution_reason TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN resolution_candidate_name TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN resolution_head_token TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN linkedin_name TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN linkedin_headline TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN linkedin_location TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN linkedin_urn TEXT DEFAULT ''"); } catch {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_records_place_id ON records(place_id)'); } catch {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_records_google_place_id ON records(google_place_id)'); } catch {}
   try {
     const columns = new Set(
       db.prepare('PRAGMA table_info(records)').all().map((row) => String(row.name || ''))
