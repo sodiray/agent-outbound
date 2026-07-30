@@ -7,10 +7,12 @@ import {
   getSearchState,
   listRecoverableGeoTileTasks,
   listPendingSearchTasks,
+  listSearchTasks,
   logSourcingEvent,
   openListDb,
+  parkExhaustedSearchTasks,
   rearmDoneGeoTileTasks,
-  rearmErroredGeoTileTasks,
+  rearmErroredSearchTasks,
   upsertRecord,
   upsertSearchState,
   upsertSearchTask,
@@ -39,6 +41,9 @@ import { monidSyntheticSlug } from '../runtime/providers/monid.js';
 
 const GEO_TILE_RESULT_CAP = 20;
 const GEO_TILE_DEFAULT_FLOOR_M = 60;
+const SEARCH_TASK_MAX_ATTEMPTS = 3;
+const GEO_TILES_SOURCE = 'geo_tiles';
+const KEYWORD_GEO_SOURCE = 'keyword_geo';
 const LINKEDIN_PROFILE_SEARCH_SOURCE = 'harvestapi_linkedin';
 const LINKEDIN_PROFILE_SEARCH_TOOL = {
   server: 'monid',
@@ -231,6 +236,13 @@ const taskIdFor = ({ kind, params }: { kind: string; params: any }) => {
 const taskParamsFor = (task: any) => (
   typeof task?.params === 'string' ? JSON.parse(task.params || '{}') : task?.params || {}
 );
+
+const sourceForStrategyKind = (kind: string) => {
+  if (kind === 'geo_tiles') return GEO_TILES_SOURCE;
+  if (kind === 'keyword_geo') return KEYWORD_GEO_SOURCE;
+  if (kind === 'linkedin_profile_search') return LINKEDIN_PROFILE_SEARCH_SOURCE;
+  return '';
+};
 
 export const densificationChildrenFor = (task: any) => {
   if (String(task?.kind || '') !== 'geo_tiles') return [];
@@ -857,6 +869,11 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
     search_result_budget_hit: false,
     search_retries: 0,
     search_tasks_errored: 0,
+    search_tasks_retried: 0,
+    search_tasks_parked: 0,
+    search_tasks_parked_this_run: 0,
+    search_tasks_skipped: 0,
+    search_tasks_completed: 0,
     tiles_saturated: 0,
     tiles_rearmed_saturated: 0,
     tiles_rearmed_error: 0,
@@ -937,12 +954,16 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       if (redensify) {
         summary.tiles_rearmed_done = Number(rearmDoneGeoTileTasks({ db }).changes || 0);
       }
+      parkExhaustedSearchTasks({ db, maxAttempts: SEARCH_TASK_MAX_ATTEMPTS });
+      const retryableTasks = listSearchTasks({ db }).filter((task: any) => (
+        task.status === 'error' && Number(task.attempt_count || 0) < SEARCH_TASK_MAX_ATTEMPTS
+      ));
+      const retryableTaskIds = new Set(retryableTasks.map((task: any) => String(task.id || '')));
+      rearmErroredSearchTasks({ db, maxAttempts: SEARCH_TASK_MAX_ATTEMPTS });
       const recoverableTasks = listRecoverableGeoTileTasks({ db });
-      const saturatedTasks = recoverableTasks.filter((task: any) => task.status === 'saturated');
-      const errorTasks = recoverableTasks.filter((task: any) => task.status === 'error');
+      const saturatedTasks = recoverableTasks;
       summary.tiles_rearmed_saturated = saturatedTasks.length;
-      summary.tiles_rearmed_error = errorTasks.length;
-      rearmErroredGeoTileTasks({ db });
+      summary.tiles_rearmed_error = retryableTasks.filter((task: any) => task.kind === 'geo_tiles').length;
       for (const task of saturatedTasks) {
         const densification = enqueueDensificationChildren({ db, task });
         summary.densification_children_enqueued += densification.enqueued.length;
@@ -952,6 +973,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       const seenDedupValues = loadExistingDedupValues({ db, dedupKey });
       const taskQueue = listPendingSearchTasks({ db });
       const queuedTaskIds = new Set(taskQueue.map((task: any) => String(task.id || '')));
+      const attemptedTaskIds = new Set<string>();
       const strategyState = {
         callsMade: 0,
         callPricedCallsMade: 0,
@@ -962,6 +984,44 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       };
       summary.search_tasks_pending = taskQueue.length;
       tickProgress(db, runId, { stepTotal: taskQueue.length, done: summary.inserted_total });
+
+      const recordTaskFailure = ({
+        task,
+        message,
+        failureCount,
+      }: {
+        task: any;
+        message: string;
+        failureCount: number;
+      }) => {
+        const attemptCount = Number(task?.attempt_count || 0) + 1;
+        const parked = attemptCount >= SEARCH_TASK_MAX_ATTEMPTS;
+        const params = taskParamsFor(task);
+        summary.errors.push(message);
+        summary.search_tasks_errored += 1;
+        if (parked) summary.search_tasks_parked_this_run += 1;
+        if (task.kind === 'geo_tiles') {
+          summary.tiles_errored += 1;
+          summary.tile_errors.push({
+            task_id: String(task.id || ''),
+            lat: Number(params?.lat),
+            lng: Number(params?.lng),
+            radius_m: Number(params?.radius_m),
+            error_count: failureCount,
+            error: message,
+          });
+        }
+        updateSearchTaskResult({
+          db,
+          id: task.id,
+          status: parked ? 'failed' : 'error',
+          pagesFetched: 0,
+          totalSeen: 0,
+          newUnique: 0,
+          attemptCount,
+          lastError: message,
+        });
+      };
 
       const executeWithRetry = async (task: any): Promise<any> => {
         const attempt = async (attemptIndex: number, failures: string[]): Promise<any> => {
@@ -1037,6 +1097,8 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
           break;
         }
         if (Number(limit || 0) > 0 && Number(summary.inserted_total || 0) >= Number(limit || 0)) break;
+        attemptedTaskIds.add(String(task.id || ''));
+        if (retryableTaskIds.has(String(task.id || ''))) summary.search_tasks_retried += 1;
         summary.search_tasks_run += 1;
         emitActivity({ event: 'step_start', phase: 'sourcing_task', step: task.id });
         tickProgress(db, runId, { stepIndex: summary.search_tasks_run, stepTotal: taskQueue.length, activeStep: String(task.id), message: `Sourcing tile ${summary.search_tasks_run}/${taskQueue.length}`, done: summary.inserted_total });
@@ -1045,28 +1107,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         if (execution.callBudgetHit || execution.resultBudgetHit) break;
         if (execution.error) {
           const message = String((execution.error as any)?.message || execution.error);
-          const params = taskParamsFor(task);
-          summary.errors.push(message);
-          summary.search_tasks_errored += 1;
-          if (task.kind === 'geo_tiles') {
-            summary.tiles_errored += 1;
-            summary.tile_errors.push({
-              task_id: String(task.id || ''),
-              lat: Number(params?.lat),
-              lng: Number(params?.lng),
-              radius_m: Number(params?.radius_m),
-              error_count: execution.failures.length,
-              error: message,
-            });
-          }
-          updateSearchTaskResult({
-            db,
-            id: task.id,
-            status: 'error',
-            pagesFetched: 0,
-            totalSeen: 0,
-            newUnique: 0,
-          });
+          recordTaskFailure({ task, message, failureCount: execution.failures.length });
           emitActivity({ event: 'error', phase: 'sourcing_task', step: task.id, message });
           continue;
         }
@@ -1094,6 +1135,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
             const mapped = resultPriced
               ? mapLinkedinProfileRow({ row, params: taskResult.params || {} })
               : mapStrategyRow({ row, outputMap: taskResult.params?.output_map || {} });
+            mapped.source = sourceForStrategyKind(String(task.kind || ''));
             const linkedinRecordId = resultPriced && String(mapped.linkedin_urn || '').trim()
               ? `linkedin_${stableHash({
                   source: LINKEDIN_PROFILE_SEARCH_SOURCE,
@@ -1149,6 +1191,8 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
                 : 1,
             totalSeen: rows.length,
             newUnique: processed.insertedIds.length,
+            attemptCount: 0,
+            lastError: '',
           });
           if (task.kind === 'geo_tiles' && status === 'saturated') {
             summary.tiles_saturated += 1;
@@ -1164,22 +1208,22 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
           emitActivity({ event: 'step_complete', phase: 'sourcing_task', step: task.id, rows: rows.length });
         } catch (error) {
           const message = String((error as any)?.message || error);
-          summary.errors.push(message);
-          updateSearchTaskResult({
-            db,
-            id: task.id,
-            status: 'pending',
-            pagesFetched: 1,
-            totalSeen: 0,
-            newUnique: 0,
-          });
+          recordTaskFailure({ task, message, failureCount: 1 });
           emitActivity({ event: 'error', phase: 'sourcing_task', step: task.id, message });
         }
       }
       const remainingTasks = listPendingSearchTasks({ db });
+      const persistedTasks = listSearchTasks({ db });
       summary.search_call_budget_hit = strategyState.callBudgetHit;
       summary.search_result_budget_hit = strategyState.resultBudgetHit;
       summary.search_tasks_pending = remainingTasks.length;
+      summary.search_tasks_parked = persistedTasks.filter((task: any) => task.status === 'failed').length;
+      summary.search_tasks_skipped = persistedTasks.filter((task: any) => (
+        !attemptedTaskIds.has(String(task.id || ''))
+      )).length;
+      summary.search_tasks_completed = persistedTasks.filter((task: any) => (
+        ['done', 'capped', 'saturated'].includes(String(task.status || ''))
+      )).length;
       summary.tiles_pending = remainingTasks.filter((task: any) => task.kind === 'geo_tiles').length;
     }
 
@@ -1208,7 +1252,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
     }
 
     summary.territories = assignTerritories({ listDir, config, db, rowIds: summary.inserted_ids });
-    summary.status = summary.errors.length > 0 ? 'partial' : 'ok';
+    summary.status = summary.errors.length > 0 || summary.search_tasks_parked > 0 ? 'partial' : 'ok';
     logSourcingEvent({ listDir, payload: summary });
     emitActivity({
       event: 'phase_complete',
@@ -1218,7 +1262,10 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       filtered_out: summary.filtered_out,
       deduped_total: summary.deduped_total,
     });
-    endRun(db, runId, { status: 'done', message: `Sourced ${summary.inserted_total} records` });
+    const parkedMessage = summary.search_tasks_parked > 0
+      ? `; ${summary.search_tasks_parked} search tasks parked`
+      : '';
+    endRun(db, runId, { status: 'done', message: `Sourced ${summary.inserted_total} records${parkedMessage}` });
     return summary;
   } catch (error) {
     summary.errors.push(String((error as any)?.message || error));

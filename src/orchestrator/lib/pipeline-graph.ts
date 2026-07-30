@@ -418,6 +418,18 @@ const findCycle = (edges: Map<string, Set<string>>) => {
   return Array.from(edges.keys()).map((id) => visit(id, [])).find((cycle) => cycle.length > 0) || [];
 };
 
+const reachableDependencies = (edges: Map<string, Set<string>>, id: string) => {
+  const reachable = new Set<string>();
+  const pending = Array.from(edges.get(id) || []);
+  while (pending.length > 0) {
+    const dependency = pending.pop();
+    if (!dependency || reachable.has(dependency)) continue;
+    reachable.add(dependency);
+    pending.push(...Array.from(edges.get(dependency) || []));
+  }
+  return reachable;
+};
+
 export const validatePipelineGraph = (config: any, options: PipelineGraphOptions = {}) => {
   const steps = pipelineSteps(config);
   const ids = steps.map((step: any) => stepId(step)).filter(Boolean);
@@ -455,12 +467,6 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
   if (hasLinkedinSource && resolutionGates.length === 0) {
     errors.push('source.linkedin_profile_search requires a field_check gate asserting company_resolution eq resolved.');
   }
-  resolutionGates.forEach((gate) => {
-    if (!hasLinkedinSource || resolutionStepIds.length === 0) return;
-    const dependencies = new Set(stringArray(gate?.depends_on));
-    if (resolutionStepIds.some((id) => dependencies.has(id))) return;
-    errors.push(`pipeline.${stepId(gate)} must declare depends_on: [${resolutionStepIds[0]}] so LinkedIn records resolve before the company gate runs.`);
-  });
 
   steps.forEach((step: any) => {
     const id = stepId(step);
@@ -480,6 +486,21 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
     });
   });
 
+  const reachableByStep = new Map<string, Set<string>>();
+  const dependenciesReachableFrom = (id: string) => {
+    const cached = reachableByStep.get(id);
+    if (cached) return cached;
+    const reachable = reachableDependencies(explicitEdges, id);
+    reachableByStep.set(id, reachable);
+    return reachable;
+  };
+
+  resolutionGates.forEach((gate) => {
+    if (!hasLinkedinSource || resolutionStepIds.length === 0) return;
+    if (resolutionStepIds.some((id) => dependenciesReachableFrom(stepId(gate)).has(id))) return;
+    errors.push(`pipeline.${stepId(gate)} must declare depends_on: [${resolutionStepIds[0]}] so LinkedIn records resolve before the company gate runs.`);
+  });
+
   const cycle = findCycle(explicitEdges);
   if (cycle.length > 0) {
     errors.push(`pipeline dependency cycle detected: ${cycle.join(' -> ')}.`);
@@ -487,13 +508,8 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
 
   const inferred = inferPipelineEdges(config, options);
   inferred.forEach((deps, id) => {
-    const declared = new Set(stringArray(steps.find((step: any) => stepId(step) === id)?.depends_on));
-    const acknowledged = new Set([
-      ...declared,
-      ...stringArray(steps.find((step: any) => stepId(step) === id)?.runs_after),
-      ...Array.from(reviewDependencies.get(id) || []),
-    ]);
-    Array.from(deps).filter((dep) => !acknowledged.has(dep)).forEach((dep) => {
+    const reachable = dependenciesReachableFrom(id);
+    Array.from(deps).filter((dep) => !reachable.has(dep)).forEach((dep) => {
       errors.push(`pipeline.${id} consumes data from "${dep}" but is missing depends_on: "${dep}".`);
     });
   });

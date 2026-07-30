@@ -35,6 +35,11 @@ const runScenario = async ({
   const started = {};
   const result = await runDataflowCore({
     records,
+    // isTimeReady is required rather than defaulted, so that a caller cannot
+    // silently get instantly-ready wait steps. This harness has no clock and
+    // tests no timing behaviour, so always-ready is correct here — stated at
+    // the call site where the choice is visible in review.
+    isTimeReady: () => true,
     steps: steps.map((entry, index) => ({ ...entry, index })),
     concurrency,
     loadStep: async (selected, row) => {
@@ -151,6 +156,11 @@ const errorIsolationSummary = { errored: 0, dropped: 0 };
 const errorIsolationAttempts = {};
 await runDataflowCore({
   records: [record('infra_error'), record('genuine_fail'), record('genuine_pass')],
+  // isTimeReady is required rather than defaulted, so that a caller cannot
+  // silently get instantly-ready wait steps. This harness has no clock and
+  // tests no timing behaviour, so always-ready is correct here — stated at
+  // the call site where the choice is visible in review.
+  isTimeReady: () => true,
   steps: [
     step({ id: 'semantic_drop_gate', tier: 1, cost: 1, dropGate: true }),
     step({ id: 'downstream_enrich', kind: 'enrich', tier: 2, cost: 10 }),

@@ -104,6 +104,22 @@ const clearStaleness = ({ db, recordId, stepId }) => {
   db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
 };
 
+const lastErrorBelongsToStep = ({ lastError, stepId }: { lastError: unknown; stepId: string }) => {
+  const detail = String(lastError || '');
+  return detail.startsWith(`execute-step failed (${stepId}):`)
+    || detail.startsWith(`enrichment step failed (${stepId}):`);
+};
+
+const ownedLastError = ({ error, stepId }: { error: unknown; stepId: string }) => {
+  const detail = String(error || 'failed');
+  if (lastErrorBelongsToStep({ lastError: detail, stepId })) return detail;
+  return `enrichment step failed (${stepId}): ${detail}`;
+};
+
+const clearedLastErrorPatch = ({ record, stepId }: { record: Record<string, unknown>; stepId: string }) => (
+  lastErrorBelongsToStep({ lastError: record.last_error, stepId }) ? { last_error: '' } : {}
+);
+
 export const ttlToSeconds = (ttl) => {
   const raw = String(ttl || '').trim().toLowerCase();
   if (!raw) return 0;
@@ -594,7 +610,11 @@ export const executeEnrichmentStepOnRecords = async ({
       });
       patch[statusColumn] = outcome;
       const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
-      const merged = { ...currentRow, ...patch };
+      const merged = {
+        ...currentRow,
+        ...patch,
+        ...clearedLastErrorPatch({ record: currentRow, stepId: id }),
+      };
       upsertRecord({ db, row: merged });
       if (String(stepConfig.action || '').trim().toLowerCase() !== 'decision_makers') {
         upsertPrimaryContactIfPresent({ db, record: merged });
@@ -637,7 +657,7 @@ export const executeEnrichmentStepOnRecords = async ({
           ...currentRow,
           ...patch,
           retry_count: Number(currentRow.retry_count || 0) + 1,
-          last_error: detail,
+          last_error: ownedLastError({ error: detail, stepId: id }),
         };
         upsertRecord({ db, row: merged });
         clearStaleness({ db, recordId, stepId: id });
@@ -664,13 +684,14 @@ export const executeEnrichmentStepOnRecords = async ({
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: detail });
         clearStaleness({ db, recordId, stepId: id });
+        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
         upsertRecord({
           db,
           row: {
-            ...record,
+            ...currentRow,
             [statusColumn]: 'failed',
-            retry_count: Number(record.retry_count || 0) + 1,
-            last_error: detail,
+            retry_count: Number(currentRow.retry_count || 0) + 1,
+            last_error: ownedLastError({ error: detail, stepId: id }),
           },
         });
         summary.record_ids.push(recordId);
@@ -1015,7 +1036,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               });
               patch[statusColumn] = 'failed';
               patch.retry_count = Number(record.retry_count || 0) + 1;
-              patch.last_error = detail;
+              patch.last_error = ownedLastError({ error: detail, stepId: id });
               markStepFailure(recordId, id);
               patches.push({
                 recordId,
@@ -1046,7 +1067,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(item.recordId, item.recordId)
               || recordState.get(item.recordId)
               || {};
-            const merged = { ...currentRow, ...item.patch };
+            const patch = !item.skippedWhen && !item.failedError
+              ? {
+                ...item.patch,
+                ...clearedLastErrorPatch({ record: currentRow, stepId: result.id }),
+              }
+              : item.patch;
+            const merged = { ...currentRow, ...patch };
             upsertRecord({ db, row: merged });
             if (!result.managesContacts) upsertPrimaryContactIfPresent({ db, record: merged });
             if (item.failedError) {
@@ -1091,7 +1118,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               ...currentRow,
               [`${result.id}__status`]: 'failed',
               retry_count: Number(currentRow.retry_count || 0) + 1,
-              last_error: failure.error,
+              last_error: ownedLastError({ error: failure.error, stepId: result.id }),
             };
             upsertRecord({ db, row: updated });
             recordState.set(failure.recordId, updated);

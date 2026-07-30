@@ -484,7 +484,9 @@ const SCHEMA_SQL = `
     pages_fetched INTEGER DEFAULT 0,
     total_seen INTEGER DEFAULT 0,
     new_unique INTEGER DEFAULT 0,
-    last_run_at TEXT DEFAULT ''
+    last_run_at TEXT DEFAULT '',
+    attempt_count INTEGER DEFAULT 0,
+    last_error TEXT DEFAULT ''
   );
   CREATE INDEX IF NOT EXISTS idx_search_tasks_status ON search_tasks(status);
 
@@ -916,6 +918,8 @@ const openDb = ({ dbPath, readonly = false }) => {
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN total_seen INTEGER DEFAULT 0"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN new_unique INTEGER DEFAULT 0"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_run_at TEXT DEFAULT ''"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN attempt_count INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_error TEXT DEFAULT ''"); } catch {}
     ensureRecordCompatibility(db);
     ensurePipelineEventCompatibility(db);
     ensureContactCompatibility(db);
@@ -2540,9 +2544,9 @@ export const clearSearchState = ({ db, searchId }) => {
 export const upsertSearchTask = ({ db, task }) => {
   db.prepare(`
     INSERT INTO search_tasks (
-      id, kind, params, status, pages_fetched, total_seen, new_unique, last_run_at
+      id, kind, params, status, pages_fetched, total_seen, new_unique, last_run_at, attempt_count, last_error
     ) VALUES (
-      @id, @kind, @params, 'pending', 0, 0, 0, ''
+      @id, @kind, @params, 'pending', 0, 0, 0, '', 0, ''
     )
     ON CONFLICT(id) DO UPDATE SET
       kind = excluded.kind,
@@ -2558,6 +2562,10 @@ export const listPendingSearchTasks = ({ db }) => (
   db.prepare("SELECT * FROM search_tasks WHERE status = 'pending' ORDER BY id").all()
 );
 
+export const listSearchTasks = ({ db }) => (
+  db.prepare('SELECT * FROM search_tasks ORDER BY id').all()
+);
+
 export const getSearchTask = ({ db, id }) => (
   db.prepare('SELECT * FROM search_tasks WHERE id = ? LIMIT 1').get(String(id || ''))
 );
@@ -2565,17 +2573,25 @@ export const getSearchTask = ({ db, id }) => (
 export const listRecoverableGeoTileTasks = ({ db }) => (
   db.prepare(`
     SELECT * FROM search_tasks
-    WHERE kind = 'geo_tiles' AND status IN ('saturated', 'error')
+    WHERE kind = 'geo_tiles' AND status = 'saturated'
     ORDER BY id
   `).all()
 );
 
-export const rearmErroredGeoTileTasks = ({ db }) => (
+export const parkExhaustedSearchTasks = ({ db, maxAttempts }) => (
+  db.prepare(`
+    UPDATE search_tasks
+    SET status = 'failed'
+    WHERE status = 'error' AND COALESCE(attempt_count, 0) >= ?
+  `).run(Math.max(1, Number(maxAttempts || 1)))
+);
+
+export const rearmErroredSearchTasks = ({ db, maxAttempts }) => (
   db.prepare(`
     UPDATE search_tasks
     SET status = 'pending'
-    WHERE kind = 'geo_tiles' AND status = 'error'
-  `).run()
+    WHERE status = 'error' AND COALESCE(attempt_count, 0) < ?
+  `).run(Math.max(1, Number(maxAttempts || 1)))
 );
 
 export const rearmDoneGeoTileTasks = ({ db }) => (
@@ -2594,6 +2610,8 @@ export const updateSearchTaskResult = ({
   totalSeen = 0,
   newUnique = 0,
   lastRunAt = nowIso(),
+  attemptCount = null,
+  lastError = null,
 }) => {
   db.prepare(`
     UPDATE search_tasks
@@ -2601,7 +2619,9 @@ export const updateSearchTaskResult = ({
         pages_fetched = @pages_fetched,
         total_seen = @total_seen,
         new_unique = @new_unique,
-        last_run_at = @last_run_at
+        last_run_at = @last_run_at,
+        attempt_count = COALESCE(@attempt_count, attempt_count),
+        last_error = COALESCE(@last_error, last_error)
     WHERE id = @id
   `).run({
     id: String(id || ''),
@@ -2610,6 +2630,8 @@ export const updateSearchTaskResult = ({
     total_seen: Number(totalSeen || 0),
     new_unique: Number(newUnique || 0),
     last_run_at: String(lastRunAt || nowIso()),
+    attempt_count: attemptCount === null ? null : Number(attemptCount || 0),
+    last_error: lastError === null ? null : String(lastError || ''),
   });
 };
 

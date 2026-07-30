@@ -67,7 +67,7 @@ type DataflowCoreOptions = {
   concurrency: number;
   initialResolvedByRecord?: Map<string, Set<string>>;
   isApplicable?: (recordState: RecordState, step: DataflowStep) => boolean;
-  isTimeReady?: (recordState: RecordState, step: DataflowStep) => boolean;
+  isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
   onStepOutcome: (recordState: RecordState, step: DataflowStep, outcome: StepExecutionOutcome) => Promise<{ record?: DataflowRecord; dropped?: boolean; resolved?: boolean; errored?: boolean }>;
   loadStep: (step: DataflowStep, record: DataflowRecord, inFlight: () => number) => Promise<StepExecutionOutcome>;
 };
@@ -247,7 +247,7 @@ export const runDataflowCore = async ({
   concurrency,
   initialResolvedByRecord = new Map<string, Set<string>>(),
   isApplicable = defaultApplicable,
-  isTimeReady = () => true,
+  isTimeReady,
   onStepOutcome,
   loadStep,
 }: DataflowCoreOptions): Promise<DataflowCoreSummary> => {

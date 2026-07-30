@@ -152,6 +152,23 @@ const LinkedinProfileSearchStrategySchema = SourceStrategyBaseSchema.extend({
   maxItems: SourceMaxResultsSchema.optional(),
 });
 
+const SOURCE_STRATEGY_TOOL_ARGUMENTS = {
+  keyword_geo: new Set(['query', 'max_results', 'max_pages']),
+  geo_tiles: new Set(['lat', 'lng', 'radius_m', 'rank', 'types', 'max_results']),
+  linkedin_profile_search: new Set([
+    'search',
+    'locations',
+    'profileScraperMode',
+    'startPage',
+    'takePages',
+    'maxItems',
+  ]),
+};
+
+const SOURCE_TOOL_REQUIRED_ARGUMENTS = {
+  MAPS_NEARBY_SEARCH: ['lat', 'lng', 'radius_m'],
+};
+
 export const StrategySchema = z.discriminatedUnion('kind', [
   KeywordGeoStrategySchema,
   GeoTilesStrategySchema,
@@ -164,6 +181,22 @@ export const StrategySchema = z.discriminatedUnion('kind', [
   if (value.kind === 'geo_tiles') {
     exactlyOneOf('tiles', 'tiles_from', 'geo_tiles')(value, ctx);
   }
+  const suppliedArguments = SOURCE_STRATEGY_TOOL_ARGUMENTS[value.kind];
+  const tools = Array.isArray(value.tool?.tools) ? value.tool.tools : [];
+  tools.forEach((tool, index) => {
+    const toolSlug = String(tool || '').trim().toUpperCase();
+    const requiredArguments = SOURCE_TOOL_REQUIRED_ARGUMENTS[
+      toolSlug as keyof typeof SOURCE_TOOL_REQUIRED_ARGUMENTS
+    ];
+    if (!requiredArguments) return;
+    const missingArguments = requiredArguments.filter((argument) => !suppliedArguments.has(argument));
+    if (missingArguments.length === 0) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `source.strategy ${value.kind} cannot use tool "${toolSlug}": strategy does not supply required arguments ${missingArguments.join(', ')}.`,
+      path: ['tool', 'tools', index],
+    });
+  });
 });
 
 const SourceBudgetSchema = z.object({
