@@ -116,6 +116,8 @@ const SCHEMA_SQL = `
     crm_last_synced_at TEXT DEFAULT '',
     crm_sync_hash TEXT DEFAULT '',
     workflow_signals TEXT DEFAULT '{}',
+    company_resolution TEXT DEFAULT '',
+    resolution_source TEXT DEFAULT '',
     vertical TEXT DEFAULT '',
     sub_vertical TEXT DEFAULT '',
     size_tier TEXT DEFAULT '',
@@ -152,12 +154,20 @@ const SCHEMA_SQL = `
     row_id TEXT NOT NULL,
     name TEXT DEFAULT '',
     full_name TEXT DEFAULT '',
+    first_name TEXT DEFAULT '',
+    last_name TEXT DEFAULT '',
     title TEXT DEFAULT '',
+    seniority TEXT DEFAULT '',
     email TEXT DEFAULT '',
     phone TEXT DEFAULT '',
     linkedin_url TEXT DEFAULT '',
+    linkedin_urn TEXT DEFAULT '',
     role TEXT DEFAULT 'secondary',
     is_primary INTEGER DEFAULT 0,
+    source TEXT DEFAULT '',
+    source_query TEXT DEFAULT '',
+    sourced_at TEXT DEFAULT '',
+    confidence REAL DEFAULT 0,
     email_verification_status TEXT DEFAULT '',
     email_verification_confidence REAL DEFAULT 0,
     email_verified_at TEXT DEFAULT '',
@@ -169,7 +179,7 @@ const SCHEMA_SQL = `
     FOREIGN KEY(row_id) REFERENCES records(_row_id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_contacts_row ON contacts(row_id);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_row_email ON contacts(row_id, email);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_row_email ON contacts(row_id, email) WHERE email != '';
   CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_contact_id ON contacts(contact_id);
   CREATE INDEX IF NOT EXISTS idx_contacts_crm ON contacts(crm_person_id);
 
@@ -593,6 +603,22 @@ const ensureSuppressionCompatibility = (db) => {
 };
 
 const ensureRecordCompatibility = (db) => {
+  try { db.exec("ALTER TABLE records ADD COLUMN company_resolution TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN resolution_source TEXT DEFAULT ''"); } catch {}
+  try {
+    const columns = new Set(
+      db.prepare('PRAGMA table_info(records)').all().map((row) => String(row.name || ''))
+    );
+    const resolutionEvidence = ['place_id', 'primary_type'].filter((column) => columns.has(column));
+    if (resolutionEvidence.length > 0) {
+      db.exec(`
+        UPDATE records
+        SET company_resolution = 'resolved', resolution_source = 'places'
+        WHERE company_resolution = ''
+          AND (${resolutionEvidence.map((column) => `${column} != ''`).join(' OR ')})
+      `);
+    }
+  } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN reply_classification_latest TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN disposition_latest TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN disposition_follow_up_at TEXT DEFAULT ''"); } catch {}
@@ -618,6 +644,27 @@ const ensureRecordCompatibility = (db) => {
         AND (fit_score IS NULL OR fit_score != priority_rank)
     `);
   } catch {}
+};
+
+const ensureContactCompatibility = (db) => {
+  try { db.exec("ALTER TABLE contacts ADD COLUMN first_name TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN last_name TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN seniority TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN linkedin_urn TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN source TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN source_query TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN sourced_at TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN confidence REAL DEFAULT 0"); } catch {}
+
+  db.transaction(() => {
+    db.exec('DROP INDEX IF EXISTS idx_contacts_row_email');
+    db.exec("CREATE UNIQUE INDEX idx_contacts_row_email ON contacts(row_id, email) WHERE email != ''");
+    db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_row_linkedin_urn ON contacts(row_id, linkedin_urn) WHERE linkedin_urn != ''");
+    const recordIds = db.prepare("SELECT DISTINCT row_id FROM contacts WHERE row_id != ''").all();
+    recordIds.forEach((row) => {
+      syncPrimaryContactProjectionInternal({ db, recordId: String(row.row_id || '') });
+    });
+  })();
 };
 
 const ensureTerritoryCompatibility = (db) => {
@@ -838,6 +885,7 @@ const openDb = ({ dbPath, readonly = false }) => {
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN new_unique INTEGER DEFAULT 0"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_run_at TEXT DEFAULT ''"); } catch {}
     ensureRecordCompatibility(db);
+    ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);
     ensureTerritoryCompatibility(db);
     ensureDataAccessViewsInternal(db);
@@ -1078,6 +1126,15 @@ const isDynamicRecordValue = (value) => (
     || typeof value === 'bigint'
 );
 
+const PRIMARY_CONTACT_PROJECTION_FIELDS = new Set([
+  'contact_name',
+  'contact_title',
+  'contact_email',
+  'contact_name_primary',
+  'contact_title_primary',
+  'owner_name',
+]);
+
 // Overlay active human field overrides onto an incoming row. upsertRecord is the
 // chokepoint every writer (enrichment, generate, scoring, sequencer) flows
 // through, so a manually-set field can never be clobbered by a pipeline rerun.
@@ -1096,7 +1153,12 @@ const withFieldOverrides = ({ db, recordId, row }) => {
 export const upsertRecord = ({ db, row: inputRow }) => {
   const rowId = String(inputRow._row_id || inputRow.id || '').trim();
   if (!rowId) throw new Error('Record id/_row_id is required.');
-  const current = db.prepare('SELECT id, _row_id FROM records WHERE _row_id = ? OR id = ?').get(rowId, rowId);
+  const current = db.prepare(`
+    SELECT id, _row_id, contact_name, contact_title, contact_email,
+      contact_name_primary, contact_title_primary
+    FROM records
+    WHERE _row_id = ? OR id = ?
+  `).get(rowId, rowId);
   const row = withFieldOverrides({ db, recordId: String(current?._row_id || rowId), row: inputRow });
   const timestamp = nowIso();
 
@@ -1131,6 +1193,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     const dynamicFields = Object.keys(row).filter((k) => (
       tableCols.has(k)
         && !knownFields.includes(k)
+        && !PRIMARY_CONTACT_PROJECTION_FIELDS.has(k)
         && k !== 'id'
         && k !== 'updated_at'
         && isDynamicRecordValue(row[k])
@@ -1146,9 +1209,11 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       _updated_at: timestamp,
       zip: row.zip || row.postal_code || '',
       email_thread_id: row.email_thread_id || row.email_last_thread_id || '',
-      contact_name: row.contact_name || row.contact_name_primary || '',
-      contact_email: row.contact_email || row.email_primary || '',
-      contact_title: row.contact_title || row.contact_title_primary || '',
+      contact_name_primary: current.contact_name_primary || '',
+      contact_title_primary: current.contact_title_primary || '',
+      contact_name: current.contact_name || '',
+      contact_email: current.contact_email || '',
+      contact_title: current.contact_title || '',
       email_verification_status: row.email_verification_status || '',
       email_verification_confidence: Number(row.email_verification_confidence || 0),
       email_verified_at: row.email_verified_at || '',
@@ -1213,6 +1278,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
   const dynamicFields = Object.keys(row).filter((key) => (
     tableCols.has(key)
       && !knownInsertFields.has(key)
+      && !PRIMARY_CONTACT_PROJECTION_FIELDS.has(key)
       && key !== 'updated_at'
       && isDynamicRecordValue(row[key])
   ));
@@ -1282,8 +1348,8 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     domain: row.domain || '',
     phone: row.phone || '',
     email_primary: row.email_primary || '',
-    contact_name_primary: row.contact_name_primary || '',
-    contact_title_primary: row.contact_title_primary || '',
+    contact_name_primary: '',
+    contact_title_primary: '',
     fit_score: scoreValueForWrite(row.fit_score),
     trigger_score: scoreValueForWrite(row.trigger_score),
     fit_reasoning: row.fit_reasoning || '',
@@ -1303,9 +1369,9 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     disposition_latest: row.disposition_latest || '',
     disposition_follow_up_at: row.disposition_follow_up_at || '',
     email_thread_id: row.email_thread_id || row.email_last_thread_id || '',
-    contact_name: row.contact_name || row.contact_name_primary || '',
-    contact_email: row.contact_email || row.email_primary || '',
-    contact_title: row.contact_title || row.contact_title_primary || '',
+    contact_name: '',
+    contact_email: '',
+    contact_title: '',
     email_verification_status: row.email_verification_status || '',
     email_verification_confidence: Number(row.email_verification_confidence || 0),
     email_verified_at: row.email_verified_at || '',
@@ -1871,71 +1937,238 @@ export const insertChannelEvent = ({ db, event }) => {
   });
 };
 
+const normalizeContactIdentityPart = (value: unknown) => String(value || '')
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, ' ')
+  .trim();
+
+const contactNameTitleIdentity = (contact) => normalizeContactIdentityPart(
+  `${String(contact?.full_name || contact?.name || '')} ${String(contact?.title || '')}`
+);
+
+const contactSeniorityRank = (contact) => {
+  const seniority = normalizeContactIdentityPart(`${contact?.seniority || ''} ${contact?.title || ''}`);
+  const words = seniority.split(' ').filter(Boolean);
+  const tokens = new Set(words);
+  const isVicePresident = tokens.has('vp')
+    || words.some((word, index) => word === 'vice' && words[index + 1] === 'president');
+  const isTopTier = ['owner', 'founder', 'cofounder', 'principal', 'partner', 'ceo', 'proprietor']
+    .some((value) => tokens.has(value))
+    || (tokens.has('president') && !isVicePresident);
+  if (isTopTier) return 3;
+  if (isVicePresident || ['head', 'director'].some((value) => tokens.has(value))) return 2;
+  if (tokens.has('manager')) return 1;
+  return 0;
+};
+
+const stablePrimaryContactKey = (contact) => [
+  normalizeContactIdentityPart(contact?.full_name || contact?.name),
+  normalizeContactIdentityPart(contact?.title),
+  normalizeContactIdentityPart(contact?.seniority),
+  String(contact?.email || '').trim().toLowerCase(),
+  String(contact?.linkedin_urn || '').trim(),
+].join('\u0000');
+
+const primaryContactForRecord = ({ db, recordId }) => {
+  const contacts = db.prepare('SELECT rowid AS contact_rowid, * FROM contacts WHERE row_id = ? ORDER BY rowid ASC').all(recordId);
+  return [...contacts].sort((left, right) => {
+    const seniorityDifference = contactSeniorityRank(right) - contactSeniorityRank(left);
+    if (seniorityDifference !== 0) return seniorityDifference;
+    const emailDifference = Number(Boolean(String(right?.email || '').trim()))
+      - Number(Boolean(String(left?.email || '').trim()));
+    if (emailDifference !== 0) return emailDifference;
+    const createdAtDifference = String(left?.created_at || '').localeCompare(String(right?.created_at || ''));
+    if (createdAtDifference !== 0) return createdAtDifference;
+    const stableKeyDifference = stablePrimaryContactKey(left).localeCompare(stablePrimaryContactKey(right));
+    if (stableKeyDifference !== 0) return stableKeyDifference;
+    return Number(left?.contact_rowid || 0) - Number(right?.contact_rowid || 0);
+  })[0] || null;
+};
+
+const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
+  const normalizedRecordId = String(recordId || '').trim();
+  if (!normalizedRecordId) return null;
+  const primaryContact = primaryContactForRecord({ db, recordId: normalizedRecordId });
+  db.prepare(`
+    UPDATE contacts
+    SET is_primary = CASE WHEN contact_id = ? THEN 1 ELSE 0 END
+    WHERE row_id = ?
+      AND is_primary != CASE WHEN contact_id = ? THEN 1 ELSE 0 END
+  `).run(
+    String(primaryContact?.contact_id || ''),
+    normalizedRecordId,
+    String(primaryContact?.contact_id || '')
+  );
+
+  const recordColumns = new Set(
+    db.prepare('PRAGMA table_info(records)').all().map((row) => String(row.name || ''))
+  );
+  const name = String(primaryContact?.full_name || primaryContact?.name || '');
+  const projection = {
+    contact_name: name,
+    contact_title: String(primaryContact?.title || ''),
+    contact_email: String(primaryContact?.email || ''),
+    contact_name_primary: name,
+    contact_title_primary: String(primaryContact?.title || ''),
+    owner_name: name,
+  };
+  const writableProjection = Object.entries(projection)
+    .filter(([column]) => recordColumns.has(column));
+  if (writableProjection.length > 0) {
+    const assignments = writableProjection.map(([column]) => `${column} = @${column}`).join(', ');
+    const changed = writableProjection.map(([column]) => `COALESCE(${column}, '') != @${column}`).join(' OR ');
+    db.prepare(`
+      UPDATE records
+      SET ${assignments}, updated_at = @updated_at
+      WHERE _row_id = @record_id
+        AND (${changed})
+    `).run({
+      ...Object.fromEntries(writableProjection),
+      updated_at: nowIso(),
+      record_id: normalizedRecordId,
+    });
+  }
+  return primaryContact ? String(primaryContact.contact_id || '') : null;
+};
+
+export const syncPrimaryContactProjection = ({ db, recordId }) => (
+  db.transaction(() => syncPrimaryContactProjectionInternal({ db, recordId }))()
+);
+
 export const upsertContact = ({ db, contact }) => {
   const rowId = String(contact?.row_id || contact?.record_id || '').trim();
   const email = String(contact?.email || '').trim().toLowerCase();
-  if (!rowId || !email) return false;
+  const linkedinUrn = String(contact?.linkedin_urn || '').trim();
+  const explicitContactId = String(contact?.contact_id || contact?.id || '').trim();
+  const nameTitleIdentity = contactNameTitleIdentity(contact);
+  if (!rowId || (!explicitContactId && !linkedinUrn && !email && !nameTitleIdentity)) return null;
   const now = nowIso();
-  const existing = db.prepare('SELECT contact_id, id, created_at FROM contacts WHERE row_id = ? AND lower(email) = lower(?) LIMIT 1')
-    .get(rowId, email);
-  const contactId = String(existing?.contact_id || existing?.id || contact?.contact_id || contact?.id || `contact_${Math.random().toString(36).slice(2, 10)}`);
+  return db.transaction(() => {
+    const explicitMatch = explicitContactId
+      ? db.prepare(`
+          SELECT *
+          FROM contacts
+          WHERE contact_id = ? OR id = ?
+          ORDER BY CASE WHEN contact_id = ? THEN 0 ELSE 1 END
+          LIMIT 1
+        `).get(explicitContactId, explicitContactId, explicitContactId)
+      : null;
+    if (explicitMatch && String(explicitMatch.row_id || '') !== rowId) return null;
 
-  db.prepare(`
-    INSERT INTO contacts (
-      contact_id, id, row_id, name, full_name, title, email, phone, linkedin_url, role, is_primary,
-      email_verification_status, email_verification_confidence, email_verified_at, dne_email, dnc_phone, crm_person_id,
-      created_at, updated_at
-    )
-    VALUES (
-      @contact_id, @id, @row_id, @name, @full_name, @title, @email, @phone, @linkedin_url, @role, @is_primary,
-      @email_verification_status, @email_verification_confidence, @email_verified_at, @dne_email, @dnc_phone, @crm_person_id,
-      @created_at, @updated_at
-    )
-    ON CONFLICT(contact_id) DO UPDATE SET
-      name = excluded.name,
-      full_name = excluded.full_name,
-      title = excluded.title,
-      email = excluded.email,
-      phone = excluded.phone,
-      linkedin_url = excluded.linkedin_url,
-      role = excluded.role,
-    is_primary = excluded.is_primary,
-      email_verification_status = excluded.email_verification_status,
-      email_verification_confidence = excluded.email_verification_confidence,
-      email_verified_at = excluded.email_verified_at,
-      dne_email = excluded.dne_email,
-      dnc_phone = excluded.dnc_phone,
-      crm_person_id = excluded.crm_person_id,
-      updated_at = excluded.updated_at
-  `).run({
-    contact_id: contactId,
-    id: contactId,
-    row_id: rowId,
-    name: String(contact?.name || contact?.full_name || ''),
-    full_name: String(contact?.full_name || contact?.name || ''),
-    title: String(contact?.title || ''),
-    email,
-    phone: String(contact?.phone || ''),
-    linkedin_url: String(contact?.linkedin_url || ''),
-    role: String(contact?.role || 'secondary'),
-    is_primary: contact?.is_primary ? 1 : 0,
-    email_verification_status: String(contact?.email_verification_status || ''),
-    email_verification_confidence: Number(contact?.email_verification_confidence || 0),
-    email_verified_at: String(contact?.email_verified_at || ''),
-    dne_email: contact?.dne_email ? 1 : 0,
-    dnc_phone: contact?.dnc_phone ? 1 : 0,
-    crm_person_id: String(contact?.crm_person_id || ''),
-    created_at: existing?.created_at || now,
-    updated_at: now,
-  });
-  return true;
+    const linkedinMatch = !explicitMatch && linkedinUrn
+      ? db.prepare(`
+          SELECT *
+          FROM contacts
+          WHERE row_id = ? AND linkedin_urn = ?
+          LIMIT 1
+        `).get(rowId, linkedinUrn)
+      : null;
+    const emailMatch = !explicitMatch && !linkedinMatch && email
+      ? db.prepare(`
+          SELECT *
+          FROM contacts
+          WHERE row_id = ? AND lower(email) = ?
+          LIMIT 1
+        `).get(rowId, email)
+      : null;
+    const nameTitleMatch = !explicitMatch && !linkedinMatch && !emailMatch && nameTitleIdentity
+      ? db.prepare(`
+          SELECT *
+          FROM contacts
+          WHERE row_id = ?
+        `).all(rowId).find((candidate) => contactNameTitleIdentity(candidate) === nameTitleIdentity)
+      : null;
+    const existing = explicitMatch || linkedinMatch || emailMatch || nameTitleMatch;
+    const contactId = String(existing?.contact_id || existing?.id || explicitContactId || `contact_${randomUUID()}`);
+    const storedEmail = String(contact?.email ?? existing?.email ?? '').trim().toLowerCase();
+    const storedLinkedinUrn = String(contact?.linkedin_urn ?? existing?.linkedin_urn ?? '').trim();
+
+    db.prepare(`
+      INSERT INTO contacts (
+        contact_id, id, row_id, name, full_name, first_name, last_name, title, seniority,
+        email, phone, linkedin_url, linkedin_urn, role, is_primary, source, source_query,
+        sourced_at, confidence, email_verification_status, email_verification_confidence,
+        email_verified_at, dne_email, dnc_phone, crm_person_id, created_at, updated_at
+      )
+      VALUES (
+        @contact_id, @id, @row_id, @name, @full_name, @first_name, @last_name, @title, @seniority,
+        @email, @phone, @linkedin_url, @linkedin_urn, @role, 0, @source, @source_query,
+        @sourced_at, @confidence, @email_verification_status, @email_verification_confidence,
+        @email_verified_at, @dne_email, @dnc_phone, @crm_person_id, @created_at, @updated_at
+      )
+      ON CONFLICT(contact_id) DO UPDATE SET
+        name = excluded.name,
+        full_name = excluded.full_name,
+        first_name = excluded.first_name,
+        last_name = excluded.last_name,
+        title = excluded.title,
+        seniority = excluded.seniority,
+        email = excluded.email,
+        phone = excluded.phone,
+        linkedin_url = excluded.linkedin_url,
+        linkedin_urn = excluded.linkedin_urn,
+        role = excluded.role,
+        source = excluded.source,
+        source_query = excluded.source_query,
+        sourced_at = excluded.sourced_at,
+        confidence = excluded.confidence,
+        email_verification_status = excluded.email_verification_status,
+        email_verification_confidence = excluded.email_verification_confidence,
+        email_verified_at = excluded.email_verified_at,
+        dne_email = excluded.dne_email,
+        dnc_phone = excluded.dnc_phone,
+        crm_person_id = excluded.crm_person_id,
+        updated_at = excluded.updated_at
+    `).run({
+      contact_id: contactId,
+      id: contactId,
+      row_id: rowId,
+      name: String(contact?.name ?? contact?.full_name ?? existing?.name ?? existing?.full_name ?? ''),
+      full_name: String(contact?.full_name ?? contact?.name ?? existing?.full_name ?? existing?.name ?? ''),
+      first_name: String(contact?.first_name ?? existing?.first_name ?? ''),
+      last_name: String(contact?.last_name ?? existing?.last_name ?? ''),
+      title: String(contact?.title ?? existing?.title ?? ''),
+      seniority: String(contact?.seniority ?? existing?.seniority ?? ''),
+      email: storedEmail,
+      phone: String(contact?.phone ?? existing?.phone ?? ''),
+      linkedin_url: String(contact?.linkedin_url ?? existing?.linkedin_url ?? ''),
+      linkedin_urn: storedLinkedinUrn,
+      role: String(contact?.role ?? existing?.role ?? 'secondary'),
+      source: String(contact?.source ?? existing?.source ?? ''),
+      source_query: String(contact?.source_query ?? existing?.source_query ?? ''),
+      sourced_at: String(contact?.sourced_at ?? existing?.sourced_at ?? ''),
+      confidence: Number(contact?.confidence ?? existing?.confidence ?? 0),
+      email_verification_status: String(contact?.email_verification_status ?? existing?.email_verification_status ?? ''),
+      email_verification_confidence: Number(contact?.email_verification_confidence ?? existing?.email_verification_confidence ?? 0),
+      email_verified_at: String(contact?.email_verified_at ?? existing?.email_verified_at ?? ''),
+      dne_email: contact?.dne_email === undefined ? Number(Boolean(existing?.dne_email)) : Number(Boolean(contact.dne_email)),
+      dnc_phone: contact?.dnc_phone === undefined ? Number(Boolean(existing?.dnc_phone)) : Number(Boolean(contact.dnc_phone)),
+      crm_person_id: String(contact?.crm_person_id ?? existing?.crm_person_id ?? ''),
+      created_at: existing?.created_at || now,
+      updated_at: now,
+    });
+    syncPrimaryContactProjectionInternal({ db, recordId: rowId });
+    return contactId;
+  })();
 };
 
+export const deleteContact = ({ db, contactId }) => db.transaction(() => {
+  const normalizedContactId = String(contactId || '').trim();
+  if (!normalizedContactId) return false;
+  const existing = db.prepare('SELECT contact_id, row_id FROM contacts WHERE contact_id = ? OR id = ? LIMIT 1')
+    .get(normalizedContactId, normalizedContactId);
+  if (!existing?.row_id) return false;
+  const deleted = db.prepare('DELETE FROM contacts WHERE contact_id = ?')
+    .run(String(existing.contact_id || ''));
+  syncPrimaryContactProjectionInternal({ db, recordId: String(existing.row_id) });
+  return Number(deleted?.changes || 0) > 0;
+})();
+
 export const listContactsByRecord = ({ db, recordId }) =>
-  db.prepare('SELECT * FROM contacts WHERE row_id = ? ORDER BY is_primary DESC, updated_at DESC').all(recordId);
+  db.prepare('SELECT * FROM contacts WHERE row_id = ? ORDER BY is_primary DESC, created_at ASC, contact_id ASC').all(recordId);
 
 export const getPrimaryContact = ({ db, recordId }) =>
-  db.prepare('SELECT * FROM contacts WHERE row_id = ? ORDER BY is_primary DESC, updated_at DESC LIMIT 1').get(recordId);
+  primaryContactForRecord({ db, recordId: String(recordId || '') });
 
 export const insertDraft = ({ db, draft }) => {
   const now = nowIso();
