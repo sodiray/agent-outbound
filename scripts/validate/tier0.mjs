@@ -443,6 +443,18 @@ pipeline:
     : 'a sequence that no rule can reach produced no warning';
 });
 
+check('the FALLBACK sequence is NOT reported unreachable', () => {
+  // Nothing routes to the fallback by rule — that is precisely what makes it
+  // the fallback. Warning about it means every correct config emits a spurious
+  // warning, which trains people to ignore the warning channel. The earlier
+  // unreachable check used a sequence named `orphan`, so it could not catch this.
+  requireAssign();
+  const r = evalConfig(ASSIGN_OK);
+  return /unrouted/.test(r.text)
+    ? `the fallback "unrouted" was flagged: ${[...r.errors, ...r.warnings].join('; ').slice(0, 200)}`
+    : '';
+});
+
 // ==========================================================================
 section('Item 3 — sequence steps as pipeline steps');
 
@@ -549,6 +561,74 @@ check('headline parser: the two unparseable cases yield null, never a stub', () 
     if (got !== null) bad.push(`${JSON.stringify(h)} -> ${JSON.stringify(got)}`);
   }
   return bad.length ? `must be unparseable but produced a company: ${bad.join('; ')}` : '';
+});
+
+check('headline parser GENERALITY: unseen headline forms (anti-overfit)', () => {
+  requireLinkedin();
+  // The ten fixtures above are the only headlines the implementer was shown, so
+  // they cannot distinguish general rules from a lookup table. These are held
+  // out. `null` here means "must be quarantined", and a non-null value that
+  // still contains a title word is worse than null — it becomes a stub that
+  // gets sent to Places and may resolve to something arbitrary.
+  const cases = [
+    ['President at Treasure Valley Mechanical', 'Treasure Valley Mechanical'],
+    ['Co-Founder & CTO at Sagebrush Robotics', 'Sagebrush Robotics'],
+    ['Managing Partner of Boise Dental Partners', 'Boise Dental Partners'],
+    ['Owner, Nampa Auto Glass', 'Nampa Auto Glass'],
+    ['DDS | Owner of Cascade Family Dentistry', 'Cascade Family Dentistry'],
+    ['Principal Engineer at Micron', 'Micron'],
+    ['Owner', null],
+    ['Business Owner', null],
+    ['Self-Employed', null],
+    ['Realtor', null],
+    ['Entrepreneur | Investor | Advisor', null],
+    ['Owner at', null],
+    // third held-out round
+    ['CEO & Founder, Payette Valley Roofing', 'Payette Valley Roofing'],
+    ['Owner and Operator of Star Septic Services', 'Star Septic Services'],
+    ['General Manager | Silver Creek HVAC', 'Silver Creek HVAC'],
+    ['Founder at Kuna Family Chiropractic | Chiropractor', 'Kuna Family Chiropractic'],
+    ['Partner, Attorney at Law', null],
+    ['Owner - ', null],
+    ['Owner of', null],
+    ['Independent Contractor', null],
+    ['Dr. Jane Smith, DDS', null],
+    ['Sole Proprietor', null],
+    // fourth held-out round. Two entries below are ACCEPTED recall losses,
+    // recorded as null on purpose: an incomplete title vocabulary quarantines
+    // the lead, which is visible and recoverable. Only stub generation is
+    // dangerous, so the tail is not worth further rounds.
+    ['General Manager | Silver Creek HVAC', 'Silver Creek HVAC'],
+    ['Owner at Bogus Basin Plumbing & Heating', 'Bogus Basin Plumbing & Heating'],
+    ['Co-owner of Two Rivers Orthodontics', 'Two Rivers Orthodontics'],
+    ['President, Idaho Steel Fabricators, Inc.', 'Idaho Steel Fabricators, Inc.'],
+    ['Owner | Handyman', null],
+    ['Licensed Massage Therapist', null],
+    ['Notary Public', null],
+    ['Shop Foreman / Emmett Diesel Repair', null],
+    ['Regional Sales Director at Micron Technology', null],
+  ];
+  const bad = [];
+  for (const [h, want] of cases) {
+    const got = li.parseCompanyFromHeadline(h)?.company ?? null;
+    if (got !== want) bad.push(`${JSON.stringify(h)} -> ${JSON.stringify(got)} (want ${JSON.stringify(want)})`);
+  }
+  return bad.length ? `${bad.length}/${cases.length} wrong:\n            ${bad.join('\n            ')}` : '';
+});
+
+check('confirmation gate GENERALITY: unseen pairs, same suffix different city', () => {
+  requireLinkedin();
+  // The realistic poisoning mode is not a random business, it is a business
+  // with the same trade suffix in a neighbouring town.
+  const pairs = [
+    ['Treasure Valley Mechanical', 'Treasure Valley Mechanical LLC', true],
+    ['Sagebrush Robotics', 'Sagebrush Robotics Inc', true],
+    ['Micron', 'Micron Technology', true],
+    ['Nampa Auto Glass', 'Caldwell Auto Glass', false],
+    ['Boise Dental Partners', 'Meridian Dental Partners', false],
+  ];
+  const bad = pairs.filter(([p, c, want]) => li.confirmResolution({ parsedCompany: p, candidateName: c })?.confirmed !== want);
+  return bad.length ? `wrong verdicts: ${JSON.stringify(bad)}` : '';
 });
 
 check('confirmation gate ACCEPTS the four correct Tier 1 resolutions', () => {

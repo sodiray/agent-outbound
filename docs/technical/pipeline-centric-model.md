@@ -61,9 +61,17 @@ pipeline needs a guarantee that the company fields it reads are real rather than
 
 ### Scope
 
-- A `contacts` table, one-to-many against `records`: `record_id`, `full_name`, `first_name`,
+- A `contacts` table, one-to-many against `records`, carrying `row_id`, `full_name`, `first_name`,
   `last_name`, `title`, `seniority`, `linkedin_url`, `linkedin_urn`, `email`, `email_status`,
   `phone`, `source`, `source_query`, `sourced_at`, `is_primary`, `confidence`.
+
+  **Correction, found during implementation:** this table already existed (`db.ts`, with `upsertContact`,
+  `listContactsByRecord` and `getPrimaryContact` already wired) — the same pattern as `sequence_name`,
+  where the schema anticipates a feature nothing binds. The actual blocker was narrower and worse than
+  a missing table: `upsertContact` opened with `if (!rowId || !email) return false`, and a UNIQUE index
+  on `(row_id, email)` collided on the empty string. The whole subsystem was **email-keyed**, and every
+  harvestapi contact has no email — so attaching three LinkedIn people returned `false` three times and
+  wrote zero rows, silently. The work is therefore an identity rework, not a new table.
 - The existing flattened `contact_*` / `owner_name` fields become **derived projections of the
   primary contact** rather than storage. Gates, briefs, sequence templates, the CRM sync, and the
   review UI all read them today; keeping them as a projection avoids a big-bang rewrite and keeps
@@ -90,6 +98,20 @@ pipeline needs a guarantee that the company fields it reads are real rather than
   compare a bare company-name string to a canonical record, so stubs land as `needs_review`
   duplicates and pollute dedupe.
 - Flattened fields are projected, not dropped.
+- **Primary selection must be deterministic with no random component.** Found by validation: the first
+  implementation ranked by seniority *after* falling through `created_at`, which ties at millisecond
+  resolution, so a `Math.random()`-generated `contact_id` decided the winner — the same fixture chose
+  `Owner` in 2 of 8 runs and `Office Manager` in 6. A flaky primary means a flaky projection, which
+  means a sequence addressing a different person on a re-run. Seniority is the first sort key, and no
+  generated id may influence it.
+
+### Traps worth knowing before touching this
+
+- `records` base columns include `google_place_id`, **not** `place_id`, and **`primary_type` is not a
+  base column at all** — it is declared per-list in `outbound.yaml`. Anything that references either
+  (a backfill, a gate, a rule) must tolerate its absence, or it throws on a fresh list.
+- Additive migrations here follow `try { db.exec("ALTER TABLE ... ADD COLUMN ...") } catch {}`, which
+  swallows the error. That is idempotent by design, but it means a failed migration is silent.
 
 ---
 
