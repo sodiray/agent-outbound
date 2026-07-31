@@ -555,6 +555,25 @@ const makeApplicable = ({ db, listDir, config, force }: { db: any; listDir: stri
       if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
       return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
     }
+    if (step.kind === 'manual_task') {
+      const recordId = getRecordRowId(recordState.record);
+      const awaiting = Boolean(db.prepare(`
+        SELECT 1 AS ok
+        FROM pipeline_events
+        WHERE record_id = ? AND step_id = ? AND kind = 'manual_task'
+          AND passed = 0 AND reason = 'awaiting_manual'
+        LIMIT 1
+      `).get(recordId, step.id)?.ok);
+      if (!awaiting) return true;
+      // Parked until completeManualTask writes a passed event.
+      const completed = Boolean(db.prepare(`
+        SELECT 1 AS ok
+        FROM pipeline_events
+        WHERE record_id = ? AND step_id = ? AND kind = 'manual_task' AND passed = 1
+        LIMIT 1
+      `).get(recordId, step.id)?.ok);
+      return completed;
+    }
     if (step.kind !== 'enrich') return true;
     const work = enrichWork({ db, listDir, step: step.step, stepId: step.id, record: recordState.record, force });
     return Number(work.would_enrich || 0) > 0;
@@ -831,6 +850,42 @@ export const runPipelineDataflow = async ({
           progressState.done += 1;
           tickProgress(db, runId, { done: progressState.done, target: rows.length });
           emitActivity({ event: 'step_complete', phase: 'pipeline', step: step.id, kind: step.kind, awaiting_review: 1, rows: 1 });
+          return { record: refreshRecord({ db, record: recordState.record }), resolved: false };
+        }
+
+        if (step.kind === 'manual_task' || String(outcome.reason || '') === 'awaiting_manual') {
+          const alreadyAwaiting = Boolean(db.prepare(`
+            SELECT 1 AS ok
+            FROM pipeline_events
+            WHERE record_id = ? AND step_id = ? AND kind = 'manual_task'
+              AND passed = 0 AND reason = 'awaiting_manual'
+            LIMIT 1
+          `).get(recordId, step.id)?.ok);
+          if (!alreadyAwaiting) {
+            insertPipelineEvent({
+              db,
+              event: {
+                event_id: randomUUID(),
+                record_id: recordId,
+                step_id: step.id,
+                kind: 'manual_task',
+                passed: false,
+                reason: 'awaiting_manual',
+                occurred_at: now,
+              },
+            });
+          }
+          summary.newly_parked += alreadyAwaiting ? 0 : 1;
+          progressState.done += 1;
+          tickProgress(db, runId, { done: progressState.done, target: rows.length });
+          emitActivity({
+            event: 'step_complete',
+            phase: 'pipeline',
+            step: step.id,
+            kind: 'manual_task',
+            awaiting_manual: 1,
+            rows: 1,
+          });
           return { record: refreshRecord({ db, record: recordState.record }), resolved: false };
         }
 

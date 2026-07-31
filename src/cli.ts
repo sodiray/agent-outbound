@@ -42,6 +42,10 @@ import {
   reviewListCommand,
   reviewPassCommand,
   reviewStagesCommand,
+  manualCompleteCommand,
+  manualListCommand,
+  sequencesBoardCommand,
+  sequencesListCommand,
   rejectedListCommand,
   rejectedRestoreCommand,
   rejectedSourcesCommand,
@@ -277,6 +281,11 @@ const printHelp = () => {
   process.stdout.write(`  sequence run <list> [--sequence NAME] [--dry-run] [--sample N]\n`);
   process.stdout.write(`  sequence run --all-lists [--sequence NAME] [--dry-run] [--sample N]\n`);
   process.stdout.write(`  sequence status <list>\n`);
+  process.stdout.write(`  sequence list <list>                                                         # configured sequences / sub-pipelines\n`);
+  process.stdout.write(`  sequence board <list> --sequence NAME [--limit N]                             # step buckets for a sequence\n`);
+  process.stdout.write(`  manual list <list> [--type visit|mail|linkedin] [--limit N]                  # parked manual tasks\n`);
+  process.stdout.write(`  manual complete <list> <record> --step STEP_ID [--note TEXT]                 # complete a manual task\n`);
+  process.stdout.write(`  manual skip <list> <record> --step STEP_ID [--note TEXT]                     # skip a manual task\n`);
   process.stdout.write(`  dashboard [--list LIST | --all-lists] [--alerts]\n`);
   process.stdout.write(`  visits today [<list> | --all-lists] [--date YYYY-MM-DD]\n`);
   process.stdout.write(`  route plan <list> [--date YYYY-MM-DD]\n`);
@@ -1747,7 +1756,42 @@ const run = async () => {
       print(sequenceStatusCommand({ list }));
       return;
     }
+    if (sub === 'list') {
+      const list = String(argv.shift() || '');
+      print(sequencesListCommand({ list }));
+      return;
+    }
+    if (sub === 'board') {
+      const list = String(argv.shift() || '');
+      const sequence = consumeFlag(argv, '--sequence', '');
+      if (!sequence) throw new Error('sequence board requires --sequence NAME');
+      const limit = toNumber(consumeFlag(argv, '--limit', '50'), 50);
+      print(sequencesBoardCommand({ list, sequence, limit }));
+      return;
+    }
     throw new Error(`Unknown sequence subcommand: ${sub}`);
+  }
+
+  if (command === 'manual') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'list') {
+      const list = String(argv.shift() || '');
+      const taskType = consumeFlag(argv, '--type', '');
+      const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
+      const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
+      print(manualListCommand({ list, taskType, limit, offset }));
+      return;
+    }
+    if (sub === 'complete' || sub === 'skip') {
+      const list = String(argv.shift() || '');
+      const record = String(argv.shift() || '');
+      const step = consumeFlag(argv, '--step', '');
+      if (!step) throw new Error('manual complete/skip requires --step STEP_ID');
+      const note = consumeFlag(argv, '--note', '');
+      print(manualCompleteCommand({ list, record, step, note, skip: sub === 'skip' }));
+      return;
+    }
+    throw new Error(`Unknown manual subcommand: ${sub}`);
   }
 
   if (command === 'dashboard') {

@@ -163,8 +163,20 @@ export const executeChannelStep = async ({
   }
 
   try {
+    // Manual tasks never auto-complete: the operator must mark them done.
+    const stepKind = String(step?.kind || '').trim().toLowerCase();
+    if (stepKind === 'manual_task') {
+      return {
+        status: 'skipped',
+        reason: 'awaiting_manual',
+        provider_id: '',
+        auto_skipped_steps: [],
+      };
+    }
+
     let approvedDraft: any = null;
-    if (!dryRun && intent === 'send' && inferEventChannel({ description: step?.description, artifacts: {}, outputs: {}, channelHint }) === 'email') {
+    const emailChannel = inferEventChannel({ description: step?.description, artifacts: {}, outputs: {}, channelHint }) === 'email';
+    if (!dryRun && intent === 'send' && emailChannel) {
       approvedDraft = db.prepare(`
         SELECT *
         FROM drafts
@@ -191,6 +203,16 @@ export const executeChannelStep = async ({
           auto_skipped_steps: [],
         };
       }
+      const approvalRequired = step?.draft_approval_required === true
+        || Boolean((step?.config as any)?.draft_approval_required);
+      if (approvalRequired && !approvedDraft) {
+        return {
+          status: 'skipped',
+          reason: 'Draft approval required before send.',
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
     }
 
     const preChannelHint = inferEventChannel({
@@ -199,33 +221,101 @@ export const executeChannelStep = async ({
       outputs: {},
       channelHint,
     });
+    const stepConfig = (step?.config && typeof step.config === 'object') ? step.config as Record<string, unknown> : {};
+    const actionName = String(stepConfig.action || '').trim().toLowerCase();
     const llmRole = (intent === 'draft' || preChannelHint === 'email') ? 'copywriting' : 'research';
-    const stepResult = dryRun
-      ? { outputs: {}, artifacts: {}, summary: 'dry run', defer: false, reason: '' }
-      : await executeStepAction({
-          mcp,
-          listDir,
-          stepId: sequenceStepId,
-          description: String(step?.description || ''),
-          stepConfig: step?.config || {},
-          record,
-          context: {
-            phase: 'sequence',
-            sequence_name: sequenceName,
-            step_number: stepNumber,
-            intent,
-            approved_draft: approvedDraft
+
+    let stepResult: any;
+    if (dryRun) {
+      stepResult = { outputs: {}, artifacts: {}, summary: 'dry run', defer: false, reason: '' };
+    } else if (actionName === 'tool_call' && intent === 'send') {
+      // Deterministic send path — no LLM. Used for SMTP / pinned tools.
+      const { executeToolCallAction } = await import('../enrichment/actions/tool-call.js');
+      // Enforce daily cap when channel config is available via step.config.daily_cap or env.
+      const dailyCap = Number(
+        stepConfig.daily_cap
+        ?? process.env.AO_EMAIL_DAILY_CAP
+        ?? 2,
+      );
+      if (Number.isFinite(dailyCap) && dailyCap >= 0 && preChannelHint === 'email') {
+        const dayStart = new Date();
+        dayStart.setUTCHours(0, 0, 0, 0);
+        const sentToday = db.prepare(`
+          SELECT COUNT(*) AS n
+          FROM channel_events
+          WHERE channel = 'email'
+            AND action IN ('executed', 'sent')
+            AND occurred_at >= ?
+        `).get(dayStart.toISOString());
+        if (Number(sentToday?.n || 0) >= dailyCap) {
+          return {
+            status: 'skipped',
+            reason: `Daily email cap reached (${dailyCap}).`,
+            provider_id: '',
+            auto_skipped_steps: [],
+          };
+        }
+      }
+      const toolResult = await executeToolCallAction({
+        mcp,
+        listDir,
+        stepId: sequenceStepId,
+        stepConfig: {
+          ...stepConfig,
+          // Prefer approved draft content when present.
+          args: {
+            ...((stepConfig.args && typeof stepConfig.args === 'object') ? stepConfig.args as Record<string, unknown> : {}),
+            ...(approvedDraft
               ? {
-                draft_id: approvedDraft.draft_id,
                 subject: approvedDraft.subject,
                 body: approvedDraft.body,
               }
-              : null,
+              : {}),
           },
-          toolCatalog,
-          aiConfig,
-          role: llmRole,
-        });
+        },
+        record,
+        toolCatalog,
+      });
+      stepResult = {
+        outputs: toolResult.outputs || {},
+        artifacts: {
+          ...(toolResult.outputs || {}),
+          message_id: toolResult.outputs?.message_id || toolResult.outputs?.provider_id || '',
+          provider_id: toolResult.outputs?.provider_id || toolResult.outputs?.message_id || '',
+        },
+        summary: 'tool_call send',
+        defer: false,
+        reason: '',
+        model: toolResult.model || '',
+        provider: toolResult.provider || 'tool_call',
+        usage: toolResult.usage || null,
+      };
+    } else {
+      stepResult = await executeStepAction({
+        mcp,
+        listDir,
+        stepId: sequenceStepId,
+        description: String(step?.description || ''),
+        stepConfig: step?.config || {},
+        record,
+        context: {
+          phase: 'sequence',
+          sequence_name: sequenceName,
+          step_number: stepNumber,
+          intent,
+          approved_draft: approvedDraft
+            ? {
+              draft_id: approvedDraft.draft_id,
+              subject: approvedDraft.subject,
+              body: approvedDraft.body,
+            }
+            : null,
+        },
+        toolCatalog,
+        aiConfig,
+        role: llmRole,
+      });
+    }
 
     const stepArtifacts = (stepResult?.artifacts || {}) as any;
     const stepOutputs = (stepResult?.outputs || {}) as any;

@@ -388,7 +388,15 @@ export const executeStepBatch = async (
     ]));
   }
 
-  if (['send_email', 'send_sms', 'linkedin_connect', 'manual_task'].includes(kind)) {
+  if (kind === 'manual_task') {
+    // Always park — never LLM-execute a human task.
+    return new Map(rows.map((row) => [
+      getRecordRowId(row),
+      { passed: false, reason: 'awaiting_manual' },
+    ]));
+  }
+
+  if (['send_email', 'send_sms', 'linkedin_connect'].includes(kind)) {
     return executeSequenceActionBatch(ctx, step, stepId, rows);
   }
 

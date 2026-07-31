@@ -1980,6 +1980,16 @@ export {
 } from './review.js';
 
 export {
+  manualCompleteCommand,
+  manualListCommand,
+} from './manual.js';
+
+export {
+  sequencesBoardCommand,
+  sequencesListCommand,
+} from './sequences-board.js';
+
+export {
   rejectedListCommand,
   rejectedRestoreCommand,
   rejectedSourcesCommand,

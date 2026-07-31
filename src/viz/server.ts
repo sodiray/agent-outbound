@@ -24,6 +24,10 @@ import {
   queryRecords,
   restoreRejectedRecordForViz,
 } from './data.js';
+import { readConfig } from '../orchestrator/lib/config.js';
+import { openListDb } from '../orchestrator/runtime/db.js';
+import { completeManualTask, listAwaitingManualTasks } from '../orchestrator/pipeline/manual.js';
+import { getSequenceBoard, listConfiguredSequences } from '../orchestrator/pipeline/sequences-board.js';
 
 const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 const uiDistDir = resolve(moduleDir, 'ui/dist');
@@ -214,6 +218,68 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
       ));
     } catch (error) {
       return apiErrorResponse(c, error);
+    }
+  });
+
+  app.get('/api/sequences', (c) => {
+    try {
+      const { config } = readConfig(listDir);
+      return c.json({ ok: true, sequences: listConfiguredSequences({ config }) });
+    } catch (error: any) {
+      return c.json({ ok: false, error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.get('/api/sequences/:name/board', (c) => {
+    try {
+      const name = String(c.req.param('name') || '');
+      const { config } = readConfig(listDir);
+      const db = openListDb({ listDir, readonly: true });
+      try {
+        return c.json({ ok: true, board: getSequenceBoard({ db, config, sequence: name }) });
+      } finally {
+        db.close();
+      }
+    } catch (error: any) {
+      return c.json({ ok: false, error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.get('/api/manual', (c) => {
+    try {
+      const taskType = String(c.req.query('type') || '');
+      const limit = Number(c.req.query('limit') || 100);
+      const offset = Number(c.req.query('offset') || 0);
+      const db = openListDb({ listDir, readonly: true });
+      try {
+        return c.json({ ok: true, ...listAwaitingManualTasks({ db, taskType, limit, offset }) });
+      } finally {
+        db.close();
+      }
+    } catch (error: any) {
+      return c.json({ ok: false, error: String(error?.message || error) }, 500);
+    }
+  });
+
+  app.post('/api/manual/:rowId/complete', async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      const rowId = String(c.req.param('rowId') || '');
+      const stepId = String(body?.step_id || body?.step || '');
+      const note = String(body?.note || '');
+      const skip = Boolean(body?.skip);
+      const { config } = readConfig(listDir);
+      const db = openListDb({ listDir, readonly: false });
+      try {
+        return c.json({
+          ok: true,
+          ...completeManualTask({ db, config, recordId: rowId, stepId, note, skip }),
+        });
+      } finally {
+        db.close();
+      }
+    } catch (error: any) {
+      return c.json({ ok: false, error: String(error?.message || error) }, 400);
     }
   });
 
