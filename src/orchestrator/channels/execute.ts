@@ -222,7 +222,22 @@ export const executeChannelStep = async ({
       channelHint,
     });
     const stepConfig = (step?.config && typeof step.config === 'object') ? step.config as Record<string, unknown> : {};
-    const actionName = String(stepConfig.action || '').trim().toLowerCase();
+    // Prefer explicit action. If a tool is pinned on a send_email step with no
+    // action, treat it as deterministic tool_call so a stripped/legacy config
+    // cannot silently fall through to the LLM path.
+    const rawAction = String(stepConfig.action || '').trim().toLowerCase();
+    const hasPinnedTool = Boolean(
+      stepConfig.tool
+      && typeof stepConfig.tool === 'object'
+      && (
+        (Array.isArray((stepConfig.tool as any).tools) && (stepConfig.tool as any).tools.length > 0)
+        || String((stepConfig.tool as any).server || '').trim()
+      ),
+    );
+    const actionName = rawAction
+      || (intent === 'send' && (stepKind === 'send_email' || channelHint === 'email') && hasPinnedTool
+        ? 'tool_call'
+        : '');
     const llmRole = (intent === 'draft' || preChannelHint === 'email') ? 'copywriting' : 'research';
 
     let stepResult: any;
@@ -244,7 +259,7 @@ export const executeChannelStep = async ({
           SELECT COUNT(*) AS n
           FROM channel_events
           WHERE channel = 'email'
-            AND action IN ('executed', 'sent')
+            AND (action IN ('executed', 'sent') OR event_type IN ('executed', 'sent'))
             AND occurred_at >= ?
         `).get(dayStart.toISOString());
         if (Number(sentToday?.n || 0) >= dailyCap) {

@@ -18,9 +18,23 @@ export type SequenceBoard = {
   awaiting_manual: number;
 };
 
+const isParkedReason = (reason: string) => (
+  reason === 'awaiting_manual'
+  || reason === 'awaiting_review'
+  || reason === 'wake_at'
+  || reason.startsWith('Daily email cap')
+  || reason.startsWith('Draft ')
+);
+
 /**
- * Build a step-bucket board for a sub-pipeline (pipeline_name) or legacy sequence_name.
- * Counts are derived from pipeline_events + current assignment on records.
+ * Current-position board for a sub-pipeline.
+ *
+ * A record appears in exactly one bucket:
+ * - the first step that is not yet successfully completed, if that step has a
+ *   parked/failed event or is simply next (no event yet after prior completes);
+ * - or "completed" when every step has a passed=1 event.
+ *
+ * Completed earlier steps do NOT keep the record in those columns.
  */
 export const getSequenceBoard = ({
   db,
@@ -35,74 +49,81 @@ export const getSequenceBoard = ({
 }): SequenceBoard => {
   const name = text(sequence) || 'default';
   const steps = flattenPipelineSteps(config)
-    .filter((step: any) => {
-      const sub = stepSubpipelineName(step);
-      if (sub) return sub === name;
-      // Top-level sequence steps don't apply for pipeline_name routing.
-      return false;
-    });
+    .filter((step: any) => stepSubpipelineName(step) === name);
 
-  // Prefer sub-pipeline assignment; fall back to sequence_name for legacy.
-  const assignedCount = db.prepare(`
-    SELECT COUNT(*) AS n FROM records
+  const assignedRows = db.prepare(`
+    SELECT _row_id AS record_id
+    FROM records
     WHERE COALESCE(pipeline_name, '') = ?
        OR (COALESCE(pipeline_name, '') IN ('', 'default') AND COALESCE(sequence_name, 'default') = ?)
-  `).get(name, name);
+  `).all(name, name) as Array<{ record_id: string }>;
+
+  const assignedIds = assignedRows.map((row) => text(row.record_id)).filter(Boolean);
+  const limit = Math.max(1, Number(limitPerBucket) || 50);
+
+  const bucketIds = steps.map((step: any) => text(step.id));
+  const byBucket = new Map<string, string[]>(bucketIds.map((id) => [id, []]));
+  let completed = 0;
+  let awaitingManual = 0;
+
+  for (const recordId of assignedIds) {
+    const events = db.prepare(`
+      SELECT step_id, passed, reason, occurred_at
+      FROM pipeline_events
+      WHERE record_id = ?
+      ORDER BY occurred_at ASC
+    `).all(recordId) as Array<{ step_id: string; passed: number; reason: string }>;
+
+    // Latest event per step_id
+    const latest = new Map<string, { passed: number; reason: string }>();
+    for (const event of events) {
+      const sid = text(event.step_id);
+      if (!sid) continue;
+      latest.set(sid, { passed: Number(event.passed), reason: text(event.reason) });
+    }
+
+    let placed = false;
+    for (const step of steps) {
+      const stepId = text(step.id);
+      const state = latest.get(stepId);
+      if (state && Number(state.passed) === 1) {
+        continue; // completed this step — look further
+      }
+      // Not completed: this is current position (parked, failed, or not started).
+      const list = byBucket.get(stepId) || [];
+      if (list.length < limit) list.push(recordId);
+      byBucket.set(stepId, list);
+      if (state && isParkedReason(state.reason)) {
+        if (text(step.kind) === 'manual_task' || state.reason === 'awaiting_manual') {
+          awaitingManual += 1;
+        }
+      }
+      placed = true;
+      break;
+    }
+    if (!placed && steps.length > 0) {
+      completed += 1;
+    }
+  }
 
   const buckets: SequenceBoardBucket[] = steps.map((step: any) => {
     const stepId = text(step.id);
-    const kind = text(step.kind);
-    // Latest event for this step among records assigned to this sequence.
-    const rows = db.prepare(`
-      WITH assigned AS (
-        SELECT _row_id AS record_id
-        FROM records
-        WHERE COALESCE(pipeline_name, '') = ?
-           OR (COALESCE(pipeline_name, '') IN ('', 'default') AND COALESCE(sequence_name, 'default') = ?)
-      ),
-      latest AS (
-        SELECT e.record_id, e.passed, e.reason, e.occurred_at,
-               ROW_NUMBER() OVER (PARTITION BY e.record_id ORDER BY e.occurred_at DESC) AS rn
-        FROM pipeline_events e
-        JOIN assigned a ON a.record_id = e.record_id
-        WHERE e.step_id = ?
-      )
-      SELECT record_id, passed, reason
-      FROM latest
-      WHERE rn = 1
-        AND (
-          (passed = 1)
-          OR (passed = 0 AND reason IN ('awaiting_manual', 'awaiting_review', 'wake_at'))
-        )
-      LIMIT ?
-    `).all(name, name, stepId, Math.max(1, Number(limitPerBucket) || 50));
-
-    // For "current position" view: include only records whose furthest progressed
-    // incomplete step is this one, or who last completed this step and have no further.
-    const recordIds = rows.map((row: any) => text(row.record_id)).filter(Boolean);
+    const recordIds = byBucket.get(stepId) || [];
     return {
       step_id: stepId,
-      kind,
+      kind: text(step.kind),
       description: text(step.description),
       count: recordIds.length,
       record_ids: recordIds,
     };
   });
 
-  const awaitingManual = db.prepare(`
-    SELECT COUNT(DISTINCT e.record_id) AS n
-    FROM pipeline_events e
-    JOIN records r ON r._row_id = e.record_id
-    WHERE e.kind = 'manual_task' AND e.passed = 0 AND e.reason = 'awaiting_manual'
-      AND (COALESCE(r.pipeline_name, '') = ? OR COALESCE(r.sequence_name, 'default') = ?)
-  `).get(name, name);
-
   return {
     sequence: name,
     buckets,
-    total_assigned: Number(assignedCount?.n || 0),
-    completed: 0,
-    awaiting_manual: Number(awaitingManual?.n || 0),
+    total_assigned: assignedIds.length,
+    completed,
+    awaiting_manual: awaitingManual,
   };
 };
 

@@ -69,6 +69,15 @@ export const StepConfigSchema = z.object({
   cache: z.string().default(''),
   tool: ToolSpecSchema.optional(),
   args: z.record(z.any()).default({}),
+  // Deterministic tool_call path for send_email / enrich-like steps:
+  // action=tool_call + args_map (tool arg <- record field) + output_map
+  // (output field <- result path). Without these, Zod would strip them and
+  // channel execution would fall through to the LLM agent path.
+  action: z.string().default(''),
+  args_map: z.record(z.string()).default({}),
+  output_map: z.record(z.string()).default({}),
+  daily_cap: z.coerce.number().int().min(0).optional(),
+  draft_approval_required: z.boolean().optional(),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(), // Deprecated alias; prefer config.outputs.
   depends_on: z.array(z.string()).default([]),
