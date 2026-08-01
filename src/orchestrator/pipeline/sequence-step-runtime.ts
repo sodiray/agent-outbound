@@ -8,6 +8,10 @@ import { getRecordRowId } from '../lib/record.js';
 import { resolveStepTemplate } from '../lib/templates.js';
 import { upsertRecord } from '../runtime/db.js';
 
+const isBlank = (value: unknown) => (
+  value === undefined || value === null || String(value).trim() === ''
+);
+
 const WAIT_UNIT_MS: Record<string, number> = {
   h: 60 * 60 * 1000,
   d: 24 * 60 * 60 * 1000,
@@ -94,12 +98,30 @@ export const executePipelineSequenceAction = async ({
   const stepConfig = step.config && typeof step.config === 'object'
     ? step.config as Record<string, unknown>
     : {};
+  const existingArgs = stepConfig.args && typeof stepConfig.args === 'object'
+    ? stepConfig.args as Record<string, unknown>
+    : {};
+  // Merge rendered template copy into args so deterministic tool_call sends
+  // (SMTP etc.) use the operator's template — not a generic sink default body.
+  // Explicit non-empty args.subject/body still win (operator override).
+  const mergedArgs = template
+    ? {
+        ...existingArgs,
+        ...(isBlank(existingArgs.subject) && template.subject
+          ? { subject: template.subject }
+          : {}),
+        ...(isBlank(existingArgs.body) && template.body
+          ? { body: template.body }
+          : {}),
+      }
+    : existingArgs;
   const executableStep = template
     ? {
         ...step,
         description: template.rendered_description || String(step.description || ''),
         config: {
           ...stepConfig,
+          args: mergedArgs,
           template_context: {
             template_id: template.template_id,
             template_version: template.template_version,

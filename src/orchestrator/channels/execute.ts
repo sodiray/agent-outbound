@@ -271,22 +271,29 @@ export const executeChannelStep = async ({
           };
         }
       }
+      const baseArgs = (stepConfig.args && typeof stepConfig.args === 'object')
+        ? { ...(stepConfig.args as Record<string, unknown>) }
+        : {};
+      // Prefer approved draft, then template_context (from resolveStepTemplate),
+      // then any subject/body already on args (merged by sequence-step-runtime).
+      const templateCtx = (stepConfig.template_context && typeof stepConfig.template_context === 'object')
+        ? stepConfig.template_context as Record<string, unknown>
+        : {};
+      const blank = (v: unknown) => v === undefined || v === null || String(v).trim() === '';
+      if (approvedDraft) {
+        if (!blank(approvedDraft.subject)) baseArgs.subject = approvedDraft.subject;
+        if (!blank(approvedDraft.body)) baseArgs.body = approvedDraft.body;
+      } else {
+        if (blank(baseArgs.subject) && !blank(templateCtx.subject)) baseArgs.subject = templateCtx.subject;
+        if (blank(baseArgs.body) && !blank(templateCtx.body)) baseArgs.body = templateCtx.body;
+      }
       const toolResult = await executeToolCallAction({
         mcp,
         listDir,
         stepId: sequenceStepId,
         stepConfig: {
           ...stepConfig,
-          // Prefer approved draft content when present.
-          args: {
-            ...((stepConfig.args && typeof stepConfig.args === 'object') ? stepConfig.args as Record<string, unknown> : {}),
-            ...(approvedDraft
-              ? {
-                subject: approvedDraft.subject,
-                body: approvedDraft.body,
-              }
-              : {}),
-          },
+          args: baseArgs,
         },
         record,
         toolCatalog,

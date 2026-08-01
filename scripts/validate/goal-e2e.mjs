@@ -30,6 +30,7 @@ import { runPipelineDataflow } from '../../dist/orchestrator/pipeline/dataflow.j
 import { completeManualTask, listAwaitingManualTasks } from '../../dist/orchestrator/pipeline/manual.js';
 import { getSequenceBoard, listConfiguredSequences } from '../../dist/orchestrator/pipeline/sequences-board.js';
 import { clearStepState } from '../../dist/orchestrator/lib/step-cleanup.js';
+import { renderTemplateText, resolveStepTemplate } from '../../dist/orchestrator/lib/templates.js';
 
 const ROOT = new URL('../..', import.meta.url).pathname;
 const SCRATCH = process.env.GOAL_SCRATCH
@@ -265,9 +266,27 @@ for (const f of readdirSync(sinkDir)) {
   try { rmSync(join(sinkDir, f)); } catch { /* */ }
 }
 writeFileSync(join(sendDir, 'mcp.json'), smtpMcpJson(sinkDir));
+// Live TV shape: step declares template: email_1 and does NOT put subject/body in args.
+// Copy must come from resolveStepTemplate + merge into tool_call args.
 writeFileSync(join(sendDir, 'outbound.yaml'), `list:
   name: send-e2e
-${AI}sequences:
+${AI}templates:
+  email_1:
+    id: email_1
+    channel_hint: email
+    versions:
+      - version: 1
+        subject: 'Quick question for {{business_name}}'
+        body: |
+          Hi {{contact_name | default: there}},
+
+          I work with local {{business_name}}-type businesses in the Treasure Valley that are buried in admin busywork — intake, quote follow-up, scheduling, invoicing.
+
+          Worth a 10-minute conversation about what that looks like at {{business_name}}?
+
+          Ray
+        note: day-1 initial
+sequences:
   default: { steps: [] }
 pipeline:
   - kind: assign
@@ -287,6 +306,7 @@ pipeline:
         description: first touch
         side_effecting: true
         draft_approval_required: false
+        template: email_1
         depends_on: []
         config:
           action: tool_call
@@ -298,8 +318,6 @@ pipeline:
             to_name: contact_name
             business_name: business_name
           args:
-            subject: 'Goal E2E send'
-            body: 'Hello from pipeline tool_call'
             template_id: email_1
           output_map:
             message_id: message_id
@@ -354,15 +372,24 @@ upsertRecord({
     created_at: now, updated_at: now,
   },
 });
-sendDb.prepare(`UPDATE records SET contact_email = ?, contact_name = ? WHERE _row_id = ?`)
-  .run('buyer@example.com', 'Pat Buyer', 'send1');
+sendDb.prepare(`UPDATE records SET contact_email = ?, contact_name = ?, business_name = ? WHERE _row_id = ?`)
+  .run('buyer@example.com', 'Pat Buyer', 'Send Co HVAC', 'send1');
+const sendRecord = sendDb.prepare('SELECT * FROM records WHERE _row_id = ?').get('send1');
+
+// Expected rendered copy from shipped resolveStepTemplate (same entry used by pipeline).
+const expectedTemplate = resolveStepTemplate({
+  config: parsedSend.config,
+  step: parsedEmail,
+  record: sendRecord,
+});
+const expectedSubject = expectedTemplate?.subject || '';
+const expectedBody = expectedTemplate?.body || '';
 
 // Drive the REAL pipeline entry (not a hand-built executeChannelStep call)
 const sendResult = await runPipelineDataflow({
   listDir: sendDir,
   where: `_row_id = 'send1'`,
   concurrency: 10,
-  // inject clock so wait can still park without sleeping
 });
 const channelEvents = sendDb.prepare(`
   SELECT channel, action, provider_message_id, disposition
@@ -370,11 +397,16 @@ const channelEvents = sendDb.prepare(`
 `).all();
 const emailEvent = sendDb.prepare(`
   SELECT step_id, passed, reason, side_effecting FROM pipeline_events
-  WHERE record_id = 'send1' AND step_id LIKE '%email_1%'
+  WHERE record_id = 'send1'
+    AND step_id IN ('local_field.email_1', 'email_1')
+    AND kind = 'send_email'
   ORDER BY occurred_at DESC LIMIT 1
 `).get();
 const sinkFiles = existsSync(sinkDir) ? readdirSync(sinkDir) : [];
 const sendRow = sendDb.prepare(`SELECT pipeline_name, routed_by, email_last_message_id FROM records WHERE _row_id = 'send1'`).get();
+const sinkPayload = sinkFiles[0]
+  ? JSON.parse(readFileSync(join(sinkDir, sinkFiles[0]), 'utf8'))
+  : null;
 
 // Side-effect guard via shipped clearStepState
 let refused = false;
@@ -391,10 +423,22 @@ try {
   refuseMsg = String(err?.message || err);
 }
 
+// Unit-level: liquid default + record auto-bind
+const defaultExpand = renderTemplateText(
+  'Hi {{contact_name | default: there}}, at {{business_name}}',
+  { business_name: 'Acme', contact_name: '' },
+);
+
 capture('send-e2e.txt', JSON.stringify({
   refresh_exit: refresh.status,
   refresh_out: (refresh.stdout || '').slice(0, 400),
   parsed_email_config: parsedEmail?.config,
+  expected_template: {
+    subject: expectedSubject,
+    body: expectedBody,
+    has_placeholder: /\{\{/.test(expectedSubject + expectedBody),
+  },
+  sinkPayload,
   sendResult_summary: {
     survivors: sendResult?.survivors,
     processed: sendResult?.processed,
@@ -407,6 +451,7 @@ capture('send-e2e.txt', JSON.stringify({
   sinkFiles,
   side_effect_refused: refused,
   refuseMsg,
+  defaultExpand,
 }, null, 2));
 
 check('pipeline send via tool_call writes channel_events with message id', () => {
@@ -418,6 +463,39 @@ check('pipeline send via tool_call writes channel_events with message id', () =>
   if (!sinkFiles.some((f) => f.includes(String(ok.provider_message_id)) || f.endsWith('.json'))) {
     return `no sink file for ${ok.provider_message_id}; files=${sinkFiles.join(',')}`;
   }
+  return '';
+});
+check('sink body equals rendered template copy (live shape: template: email_1, no args.body)', () => {
+  if (!expectedSubject || !expectedBody) {
+    return `resolveStepTemplate failed: ${JSON.stringify(expectedTemplate)}`;
+  }
+  if (/\{\{/.test(expectedSubject) || /\{\{/.test(expectedBody)) {
+    return `template left unexpanded placeholders: subject=${expectedSubject} body=${expectedBody.slice(0, 120)}`;
+  }
+  if (!sinkPayload) return 'no sink payload';
+  if (String(sinkPayload.subject || '') !== expectedSubject) {
+    return `subject mismatch:\n  sink=${sinkPayload.subject}\n  expected=${expectedSubject}`;
+  }
+  // Normalize trailing newlines for comparison
+  const sinkBody = String(sinkPayload.body || '').replace(/\s+$/, '');
+  const wantBody = String(expectedBody || '').replace(/\s+$/, '');
+  if (sinkBody !== wantBody) {
+    return `body mismatch:\n  sink=${JSON.stringify(sinkBody)}\n  expected=${JSON.stringify(wantBody)}`;
+  }
+  if (!sinkBody.includes('Send Co HVAC')) {
+    return `body missing business_name expansion: ${sinkBody.slice(0, 200)}`;
+  }
+  if (!sinkBody.includes('Hi Pat Buyer')) {
+    return `body missing contact_name expansion: ${sinkBody.slice(0, 200)}`;
+  }
+  // Must not be the generic smtp-send fallback
+  if (/Hello from Agent Outbound|Quick note regarding/i.test(sinkBody) && !sinkBody.includes('Treasure Valley')) {
+    return `looks like generic sink body, not template: ${sinkBody.slice(0, 200)}`;
+  }
+  return '';
+});
+check('template default filter expands empty contact_name to "there"', () => {
+  if (defaultExpand !== 'Hi there, at Acme') return `got: ${defaultExpand}`;
   return '';
 });
 check('clearing side-effecting send is refused', () => {
