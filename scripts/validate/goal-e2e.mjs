@@ -1052,7 +1052,18 @@ check('smtp-send STARTTLS shipped CLI validation is green', () => {
   return '';
 });
 
-// --- 11. tier0 ---
+// --- 11. mailbox catalog + per-send SMTP overlay ---
+const mailboxValidation = spawnSync('node', [join(ROOT, 'scripts/validate/mailboxes.mjs')], {
+  encoding: 'utf8', cwd: ROOT,
+});
+capture('mailboxes.txt', `${mailboxValidation.stdout || ''}\n${mailboxValidation.stderr || ''}\nexit=${mailboxValidation.status}\n`);
+check('multi-mailbox validation is green', () => {
+  if (mailboxValidation.status !== 0) return `exit ${mailboxValidation.status}: ${(mailboxValidation.stderr || mailboxValidation.stdout || '').slice(-500)}`;
+  if (!/failed 0/.test(mailboxValidation.stdout || '')) return (mailboxValidation.stdout || '').slice(-500);
+  return '';
+});
+
+// --- 12. tier0 ---
 const tier0 = spawnSync('node', [join(ROOT, 'scripts/validate/tier0.mjs')], {
   encoding: 'utf8', cwd: ROOT,
 });

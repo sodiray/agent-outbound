@@ -17,7 +17,7 @@ export interface ToolProvider {
   id: string;
   searchTools(queries: Array<string | Record<string, unknown>>, limit?: number): Promise<ProviderToolSchema[]>;
   getSchemas(slugs: string[]): Promise<ProviderToolSchema[]>;
-  executeTool(slug: string, args: Record<string, unknown>): Promise<unknown>;
+  executeTool(slug: string, args: Record<string, unknown>, options?: { env?: Record<string, string | undefined> }): Promise<unknown>;
   registerSchemas?(schemas: ProviderToolSchema[]): void;
   resolveToolkitToolSlugs?(toolkits: string[]): Promise<string[]>;
   listToolkits?(): Promise<string[]>;

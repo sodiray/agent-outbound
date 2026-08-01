@@ -9,6 +9,7 @@ type ToolCallActionInput = {
   stepConfig: Record<string, unknown>;
   record: Record<string, unknown>;
   toolCatalog?: unknown;
+  env?: Record<string, string | undefined>;
 };
 
 type ToolCallActionResult = {
@@ -58,9 +59,10 @@ export const executeToolCallAction = async ({
   stepConfig,
   record,
   toolCatalog,
+  env,
 }: ToolCallActionInput): Promise<ToolCallActionResult> => {
   const toolSpec = (stepConfig?.tool && typeof stepConfig.tool === 'object' ? stepConfig.tool : {}) as Record<string, unknown>;
-  const resolvedTools = await loadTools(mcp || undefined, toolSpec, toolCatalog as any, { listDir });
+  const resolvedTools = await loadTools(mcp || undefined, toolSpec, toolCatalog as any, { listDir, env });
   const toolEntries = Object.entries(resolvedTools);
   if (toolEntries.length === 0) {
     throw new Error(`tool_call:${stepId}: no tool resolved — check the step's tool spec against connected servers/toolkits.`);

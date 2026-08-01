@@ -102,10 +102,11 @@ export const expandRegistryEnv = (serverName: string, env: Record<string, string
   for (const [key, value] of Object.entries(env || {})) {
     expanded[key] = String(value || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_match, name: string) => {
       const resolved = getEnv(name);
-      if (!resolved) {
-        throw new Error(`Provider "${serverName}" env "${key}" references unresolved variable \${${name}}.`);
-      }
-      return resolved;
+      // Registry variables are intentionally soft-expanded. A command provider
+      // may receive per-execution credentials (for example a selected mailbox),
+      // so rejecting unresolved SMTP placeholders at construction time would
+      // make a valid later env overlay impossible.
+      return resolved || '';
     });
   }
   return expanded;

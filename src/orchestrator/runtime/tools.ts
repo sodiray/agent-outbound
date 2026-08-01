@@ -92,6 +92,7 @@ const loadToolsWithProvider = async (
   provider: ToolProvider,
   spec: ToolSpec = {},
   catalog?: ToolCatalog,
+  options: { env?: Record<string, string | undefined> } = {},
 ): Promise<Record<string, Tool>> => {
   const explicitSlugs = (spec?.tools || []).map(normalizeSlug).filter(Boolean);
   let slugs = [...new Set(explicitSlugs)];
@@ -135,7 +136,7 @@ const loadToolsWithProvider = async (
       inputSchema: jsonSchema(rawInputSchema),
       execute: async (args: unknown) => {
         try {
-          return await provider.executeTool(schema.slug, (args || {}) as Record<string, unknown>);
+          return await provider.executeTool(schema.slug, (args || {}) as Record<string, unknown>, options);
         } catch (error) {
           if (isBudgetExceededError(error)) throw error;
           if (error instanceof Error && error.name === 'MonidProviderError') throw error;
@@ -152,7 +153,7 @@ export const loadTools = async (
   mcp: Client | undefined,
   spec: ToolSpec = {},
   catalog?: ToolCatalog,
-  options: { listDir?: string } = {},
+  options: { listDir?: string; env?: Record<string, string | undefined> } = {},
 ): Promise<Record<string, Tool>> => {
   const server = normalizeServer(spec?.server);
   const listDir = String(options.listDir || '').trim();
@@ -160,7 +161,7 @@ export const loadTools = async (
   const provider = isLocalCommand || (server && server !== 'composio')
     ? getProvider(server, { listDir: options.listDir })
     : composioProviderFor(mcp);
-  return loadToolsWithProvider(provider, spec, catalog);
+  return loadToolsWithProvider(provider, spec, catalog, { env: options.env });
 };
 
 export const toolSpecUsesLocalCommandServer = (

@@ -175,7 +175,11 @@ export class CommandProvider implements ToolProvider {
       .map((toolDef) => schemaFromTool(this.id, toolDef));
   }
 
-  async executeTool(slug: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  async executeTool(
+    slug: string,
+    args: Record<string, unknown> = {},
+    options: { env?: Record<string, string | undefined> } = {},
+  ): Promise<unknown> {
     const normalized = normalizeSlug(slug).toUpperCase();
     const toolDef = (this.server.tools || []).find((tool) => normalizeSlug(tool.slug).toUpperCase() === normalized);
     if (!toolDef) {
@@ -194,7 +198,7 @@ export class CommandProvider implements ToolProvider {
         command: this.server.command,
         argv,
         cwd: this.server.cwd || undefined,
-        env: this.env,
+        env: { ...this.env, ...(options.env || {}) },
         timeoutMs: DEFAULT_TIMEOUT_MS,
         label: `Command provider "${this.id}" tool "${slug}"`,
       });

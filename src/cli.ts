@@ -105,6 +105,9 @@ import {
   mcpListCommand,
   mcpRemoveCommand,
   mcpTestCommand,
+  mailboxesListCommand,
+  mailboxesShowCommand,
+  mailboxesTestCommand,
   modelsAddCommand,
   modelsListCommand,
   modelsRefreshCommand,
@@ -212,6 +215,9 @@ const printHelp = () => {
   process.stdout.write(`  mcp add <list> --name N --type command --command CMD --args 'a,b,c' [--env K=V ...] [--cwd DIR] [--tools-file path.json]\n`);
   process.stdout.write(`  mcp remove <list> --name N\n`);
   process.stdout.write(`  mcp test <list> --name N\n`);
+  process.stdout.write(`  mailboxes list <list>\n`);
+  process.stdout.write(`  mailboxes show <list> --id ID\n`);
+  process.stdout.write(`  mailboxes test <list> --id ID --to EMAIL\n`);
   process.stdout.write(`  list create <list> [--description TEXT]\n`);
   process.stdout.write(`  list info <list>\n`);
   process.stdout.write(`  lists\n`);
@@ -752,6 +758,28 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown mcp subcommand: ${sub}`);
+  }
+
+  if (command === 'mailboxes') {
+    const sub = String(argv.shift() || '').trim();
+    const list = String(argv.shift() || '');
+    setResponseContext({ command: `mailboxes ${sub}`, list });
+    if (sub === 'list') {
+      print(mailboxesListCommand({ list }));
+      return;
+    }
+    const mailboxId = consumeFlag(argv, '--id', '');
+    if (sub === 'show') {
+      print(mailboxesShowCommand({ list, mailboxId }));
+      return;
+    }
+    if (sub === 'test') {
+      const to = consumeFlag(argv, '--to', '');
+      if (!to) throw new Error('mailboxes test requires --to EMAIL.');
+      print(await mailboxesTestCommand({ list, mailboxId, to }));
+      return;
+    }
+    throw new Error(`Unknown mailboxes subcommand: ${sub}`);
   }
 
   if (command === 'describe') {

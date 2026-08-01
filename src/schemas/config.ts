@@ -77,6 +77,8 @@ export const StepConfigSchema = z.object({
   args_map: z.record(z.string()).default({}),
   output_map: z.record(z.string()).default({}),
   daily_cap: z.coerce.number().int().min(0).optional(),
+  mailbox: z.string().trim().min(1).optional(),
+  mailbox_from: z.string().trim().min(1).optional(),
   draft_approval_required: z.boolean().optional(),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(), // Deprecated alias; prefer config.outputs.
@@ -728,6 +730,13 @@ const AutomationsSchema = z.object({
   cache_key: z.string().default(''),
 }).partial().default({});
 
+const MailboxesConfigSchema = z.object({
+  dir: z.string().trim().min(1).optional(),
+  file: z.string().trim().min(1).optional(),
+  default: z.string().trim().min(1).optional(),
+  allow_inline_secrets: z.boolean().optional(),
+}).partial();
+
 export const ConfigSchema = z.object({
   list: z.object({
     name: z.string().default(''),
@@ -752,6 +761,7 @@ export const ConfigSchema = z.object({
   ai: AiSchema.default({}),
   budgets: BudgetsSchema.default({}),
   channels: z.record(z.any()).default({}),
+  mailboxes: MailboxesConfigSchema.optional(),
   suppression: SuppressionSchema.default({}),
   crm: CrmSchema.optional(),
 }).partial().default({});

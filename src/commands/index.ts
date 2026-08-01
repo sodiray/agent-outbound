@@ -77,6 +77,7 @@ export {
 } from './mcp.js';
 export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand } from './leads.js';
 export { attioDomainsCommand } from './attio-domains.js';
+export { mailboxesListCommand, mailboxesShowCommand, mailboxesTestCommand } from './mailboxes.js';
 export { briefCommand, briefShowCommand } from './briefs.js';
 export { sourceTerritoryCommand } from './source-territory.js';
 export { automationsCommand, automationsShowCommand } from './automations.js';

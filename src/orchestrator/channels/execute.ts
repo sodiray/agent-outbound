@@ -6,6 +6,8 @@ import { executeStepAction } from '../actions/execute-step/index.js';
 import { computeNextScheduledAction, resolveWorkingDayConfig, toIsoDate } from '../lib/working-days.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
+import { readConfig } from '../lib/config.js';
+import { countMailboxSendsToday, resolveSendMailbox, smtpCredentialEnv } from '../lib/mailboxes.js';
 
 const inferEventChannel = ({ description, artifacts, outputs, channelHint }) => {
   const hinted = String(channelHint || '').trim().toLowerCase();
@@ -240,6 +242,15 @@ export const executeChannelStep = async ({
         ? 'tool_call'
         : '');
     const llmRole = (intent === 'draft' || preChannelHint === 'email') ? 'copywriting' : 'research';
+    const sendMailbox = !dryRun && actionName === 'tool_call' && intent === 'send' && preChannelHint === 'email'
+      ? resolveSendMailbox({
+          listDir,
+          config: readConfig(listDir).config,
+          db,
+          record,
+          stepConfig,
+        })
+      : null;
 
     let stepResult: any;
     if (dryRun) {
@@ -281,22 +292,22 @@ export const executeChannelStep = async ({
     } else if (actionName === 'tool_call' && intent === 'send') {
       // Deterministic send path — no LLM. Used for SMTP / pinned tools.
       const { executeToolCallAction } = await import('../enrichment/actions/tool-call.js');
-      // Enforce daily cap when channel config is available via step.config.daily_cap or env.
-      const dailyCap = Number(
-        stepConfig.daily_cap
-        ?? process.env.AO_EMAIL_DAILY_CAP
-        ?? 2,
-      );
+      // A selected mailbox's daily_cap is scoped to its own event payload and
+      // takes precedence over the legacy step/global cap. The latter remains
+      // the compatibility guard for lists without a capped mailbox.
+      const dailyCap = Number(sendMailbox?.mailbox.daily_cap ?? stepConfig.daily_cap ?? process.env.AO_EMAIL_DAILY_CAP ?? 2);
       if (Number.isFinite(dailyCap) && dailyCap >= 0 && preChannelHint === 'email') {
         const dayStart = new Date();
         dayStart.setUTCHours(0, 0, 0, 0);
-        const sentToday = db.prepare(`
-          SELECT COUNT(*) AS n
-          FROM channel_events
-          WHERE channel = 'email'
-            AND (action IN ('executed', 'sent') OR event_type IN ('executed', 'sent'))
-            AND occurred_at >= ?
-        `).get(dayStart.toISOString());
+        const sentToday = sendMailbox?.mailbox.daily_cap !== undefined
+          ? { n: countMailboxSendsToday(db, sendMailbox.id) }
+          : db.prepare(`
+              SELECT COUNT(*) AS n
+              FROM channel_events
+              WHERE channel = 'email'
+                AND (action IN ('executed', 'sent') OR event_type IN ('executed', 'sent'))
+                AND occurred_at >= ?
+            `).get(dayStart.toISOString());
         if (Number(sentToday?.n || 0) >= dailyCap) {
           return {
             status: 'skipped',
@@ -322,6 +333,9 @@ export const executeChannelStep = async ({
         if (blank(baseArgs.subject) && !blank(templateCtx.subject)) baseArgs.subject = templateCtx.subject;
         if (blank(baseArgs.body) && !blank(templateCtx.body)) baseArgs.body = templateCtx.body;
       }
+      if (sendMailbox && blank(baseArgs.from) && !blank(sendMailbox.credentials.SMTP_FROM)) {
+        baseArgs.from = sendMailbox.credentials.SMTP_FROM;
+      }
       const toolResult = await executeToolCallAction({
         mcp,
         listDir,
@@ -332,6 +346,7 @@ export const executeChannelStep = async ({
         },
         record,
         toolCatalog,
+        env: sendMailbox ? smtpCredentialEnv(sendMailbox.credentials) : undefined,
       });
       stepResult = {
         outputs: toolResult.outputs || {},
@@ -429,6 +444,10 @@ export const executeChannelStep = async ({
             outputs: stepResult.outputs,
             artifacts: stepResult.artifacts,
             reason: stepResult.reason || '',
+            ...(sendMailbox ? {
+              mailbox_id: sendMailbox.id,
+              smtp_from: String(sendMailbox.credentials.SMTP_FROM || sendMailbox.credentials.SMTP_USER || ''),
+            } : {}),
           },
           occurred_at: now,
         },
@@ -487,6 +506,11 @@ export const executeChannelStep = async ({
       outputs: stepOutputs,
       intent,
     });
+
+    if (sendMailbox && intent === 'send' && eventChannel === 'email') {
+      artifactUpdatedRecord.assigned_mailbox_id = sendMailbox.id;
+      artifactUpdatedRecord.email_last_from = String(sendMailbox.credentials.SMTP_FROM || sendMailbox.credentials.SMTP_USER || '');
+    }
 
     const launchedAt = shouldAdvanceSequence
       ? ((stepNumber === 1 && intent !== 'draft') ? now : String(record.launched_at || ''))
