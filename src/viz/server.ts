@@ -25,6 +25,7 @@ import {
   restoreRejectedRecordForViz,
 } from './data.js';
 import { readConfig } from '../orchestrator/lib/config.js';
+import { flattenPipelineSteps, stepSubpipelineName } from '../orchestrator/lib/subpipelines.js';
 import { openListDb } from '../orchestrator/runtime/db.js';
 import { completeManualTask, listAwaitingManualTasks } from '../orchestrator/pipeline/manual.js';
 import { getSequenceBoard, listConfiguredSequences } from '../orchestrator/pipeline/sequences-board.js';
@@ -224,7 +225,21 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
   app.get('/api/sequences', (c) => {
     try {
       const { config } = readConfig(listDir);
-      return c.json({ ok: true, sequences: listConfiguredSequences({ config }) });
+      const names = listConfiguredSequences({ config });
+      const allSteps = flattenPipelineSteps(config);
+      const sequences = names.map((name: string) => {
+        const steps = allSteps.filter((step: any) => stepSubpipelineName(step) === name);
+        const pipelineNode = ((config?.pipeline || []) as any[]).find((node: any) => (
+          String(node?.kind) === 'pipeline' && String(node?.id || '') === name
+        )) as { manual?: boolean; description?: string } | undefined;
+        return {
+          name,
+          step_count: steps.length,
+          manual: Boolean(pipelineNode?.manual),
+          description: String(pipelineNode?.description || ''),
+        };
+      });
+      return c.json({ ok: true, sequences });
     } catch (error: any) {
       return c.json({ ok: false, error: String(error?.message || error) }, 500);
     }

@@ -131,3 +131,117 @@ export const restoreRejectedRecord = (rowId: string) => requestJson<RejectedRest
     body: JSON.stringify({}),
   },
 );
+
+export type SequenceSummary = {
+  name: string;
+  step_count: number;
+  manual?: boolean;
+  description?: string;
+};
+
+export type SequenceBoardBucket = {
+  step_id: string;
+  kind: string;
+  description: string;
+  count: number;
+  record_ids: string[];
+};
+
+export type SequenceBoard = {
+  sequence: string;
+  buckets: SequenceBoardBucket[];
+  total_assigned: number;
+  completed: number;
+  awaiting_manual: number;
+};
+
+export type ManualTask = {
+  record_id: string;
+  step_id: string;
+  task_type: string;
+  business_name: string;
+  address: string;
+  contact_name: string;
+  contact_email: string;
+  sequence_name: string;
+  pipeline_name: string;
+  parked_at: string;
+  reason: string;
+};
+
+export const fetchSequences = async () => {
+  const payload = await getJson<{
+    ok?: boolean;
+    sequences?: Array<SequenceSummary | string>;
+    error?: string;
+  }>('/api/sequences');
+  if (payload.ok === false) throw new Error(String(payload.error || 'Failed to load sequences'));
+  const raw = Array.isArray(payload.sequences) ? payload.sequences : [];
+  return raw.map((item): SequenceSummary => {
+    if (typeof item === 'string') {
+      return { name: item, step_count: 0 };
+    }
+    return {
+      name: String(item.name || ''),
+      step_count: Number(item.step_count || 0),
+      manual: Boolean(item.manual),
+      description: item.description || '',
+    };
+  }).filter((item) => item.name);
+};
+
+export const fetchSequenceBoard = async (name: string) => {
+  const payload = await getJson<{ ok?: boolean; board?: SequenceBoard; error?: string }>(
+    `/api/sequences/${encodeURIComponent(name)}/board`,
+  );
+  if (payload.ok === false || !payload.board) {
+    throw new Error(String(payload.error || 'Failed to load sequence board'));
+  }
+  return payload.board;
+};
+
+export const fetchManualTasks = async ({
+  type = '',
+  limit = 100,
+  offset = 0,
+}: {
+  type?: string;
+  limit?: number;
+  offset?: number;
+} = {}) => {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  if (type) params.set('type', type);
+  const payload = await getJson<{
+    ok?: boolean;
+    total?: number;
+    tasks?: ManualTask[];
+    error?: string;
+  }>(`/api/manual?${params.toString()}`);
+  if (payload.ok === false) throw new Error(String(payload.error || 'Failed to load manual tasks'));
+  return {
+    total: Number(payload.total || 0),
+    tasks: Array.isArray(payload.tasks) ? payload.tasks : [],
+  };
+};
+
+export const completeManualTask = ({
+  rowId,
+  stepId,
+  note = '',
+  skip = false,
+}: {
+  rowId: string;
+  stepId: string;
+  note?: string;
+  skip?: boolean;
+}) => requestJson<{ ok?: boolean; error?: string; record_id?: string; step_id?: string }>(
+  `/api/manual/${encodeURIComponent(rowId)}/complete`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ step_id: stepId, note, skip }),
+  },
+);

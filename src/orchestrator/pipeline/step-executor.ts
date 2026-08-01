@@ -322,6 +322,47 @@ const executeSequenceActionBatch = async (
     const recordId = getRecordRowId(row);
     const sequenceName = stepSubpipelineName(step) || textValue(row.sequence_name, 'default');
     try {
+      // Mirror sequencer: when draft approval is required and no ready draft exists,
+      // first create a pending draft (intent=draft); operator approves, then a later
+      // pipeline run sends with intent=send.
+      const approvalRequired = kind === 'send_email' && (
+        step.draft_approval_required === true
+        || Boolean((step.config as any)?.draft_approval_required)
+      );
+      let sequenceIntent: 'send' | 'draft' = 'send';
+      if (approvalRequired) {
+        const readyDraft = (ctx.db as any).prepare(`
+          SELECT draft_id
+          FROM drafts
+          WHERE row_id = ?
+            AND sequence_name = ?
+            AND step_number = ?
+            AND status = 'ready'
+          ORDER BY updated_at DESC
+          LIMIT 1
+        `).get(recordId, sequenceName, stepNumber);
+        if (!readyDraft) {
+          const pendingDraft = (ctx.db as any).prepare(`
+            SELECT draft_id
+            FROM drafts
+            WHERE row_id = ?
+              AND sequence_name = ?
+              AND step_number = ?
+              AND status = 'pending_approval'
+            ORDER BY updated_at DESC
+            LIMIT 1
+          `).get(recordId, sequenceName, stepNumber);
+          if (pendingDraft) {
+            return [recordId, {
+              passed: false,
+              reason: 'Draft pending approval.',
+              errored: false,
+            }] as const;
+          }
+          sequenceIntent = 'draft';
+        }
+      }
+
       const result = await executePipelineSequenceAction({
         mcp: ctx.mcp,
         listDir: ctx.listDir,
@@ -336,14 +377,30 @@ const executeSequenceActionBatch = async (
         sequence: { steps: [] },
         aiConfig: ctx.aiConfig || ctx.config?.ai || {},
         dryRun: false,
-        intent: 'send',
+        intent: sequenceIntent,
         channelHint: channelForPipelineKind(kind),
       });
       const status = textValue(result?.status);
       const reason = textValue(result?.reason);
       const idempotentSkip = status === 'skipped' && /already sent/i.test(reason);
+      const draftCreated = sequenceIntent === 'draft' && (status === 'sent' || status === 'drafted' || /draft/i.test(reason));
       if (status === 'sent' || idempotentSkip) {
+        // Draft creation parks the lead until approval — do not mark the send step passed.
+        if (sequenceIntent === 'draft') {
+          return [recordId, {
+            passed: false,
+            reason: reason || 'Draft pending approval.',
+            errored: false,
+          }] as const;
+        }
         return [recordId, { passed: true, reason }] as const;
+      }
+      if (draftCreated || /pending approval|approval required/i.test(reason)) {
+        return [recordId, {
+          passed: false,
+          reason: reason || 'Draft pending approval.',
+          errored: false,
+        }] as const;
       }
       return [
         recordId,

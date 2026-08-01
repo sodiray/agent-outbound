@@ -149,7 +149,8 @@ export const executeChannelStep = async ({
 
   const idemConfig = step?.config?.idempotency;
   let idemKey = '';
-  if (idemConfig?.key_source?.length) {
+  // Drafts must not claim send idempotency — otherwise approve→send is blocked as "Already sent".
+  if (intent !== 'draft' && idemConfig?.key_source?.length) {
     idemKey = buildIdempotencyKey({ keySource: idemConfig.key_source, record, scope: idemConfig.scope || 'list' });
     const claimed = claimIdempotency({
       db,
@@ -243,6 +244,40 @@ export const executeChannelStep = async ({
     let stepResult: any;
     if (dryRun) {
       stepResult = { outputs: {}, artifacts: {}, summary: 'dry run', defer: false, reason: '' };
+    } else if (actionName === 'tool_call' && intent === 'draft') {
+      // Deterministic draft from template — no LLM, no SMTP. Operator approves then send.
+      const templateCtx = (stepConfig.template_context && typeof stepConfig.template_context === 'object')
+        ? stepConfig.template_context as Record<string, unknown>
+        : {};
+      const baseArgs = (stepConfig.args && typeof stepConfig.args === 'object')
+        ? { ...(stepConfig.args as Record<string, unknown>) }
+        : {};
+      const blank = (v: unknown) => v === undefined || v === null || String(v).trim() === '';
+      const subject = !blank(baseArgs.subject)
+        ? String(baseArgs.subject)
+        : (!blank(templateCtx.subject) ? String(templateCtx.subject) : '');
+      const body = !blank(baseArgs.body)
+        ? String(baseArgs.body)
+        : (!blank(templateCtx.body) ? String(templateCtx.body) : '');
+      const draftId = `draft_${randomUUID()}`;
+      stepResult = {
+        outputs: {
+          draft_id: draftId,
+          subject,
+          body,
+        },
+        artifacts: {
+          draft_id: draftId,
+          subject,
+          body,
+        },
+        summary: 'tool_call draft',
+        defer: false,
+        reason: 'Draft pending approval.',
+        model: '',
+        provider: 'tool_call',
+        usage: null,
+      };
     } else if (actionName === 'tool_call' && intent === 'send') {
       // Deterministic send path — no LLM. Used for SMTP / pinned tools.
       const { executeToolCallAction } = await import('../enrichment/actions/tool-call.js');

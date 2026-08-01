@@ -6,12 +6,13 @@
  *   1. Sink (default when SMTP_HOST unset or AO_SMTP_SINK=1): write the message
  *      to AO_SMTP_SINK_DIR (or .outbound/smtp-sink) and return a synthetic message_id.
  *   2. Real SMTP when SMTP_HOST + SMTP_USER + SMTP_PASS are set (Mailforge etc.).
+ *      Prefer port 465 (implicit TLS). Port 587 uses STARTTLS.
  *
  * Usage (as MCP command tool):
  *   node scripts/smtp-send.mjs send --to ADDR --subject S --body B [--from ADDR] [--json]
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { createWriteStream, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
@@ -33,93 +34,85 @@ Options:
   --subject-template   Used when --subject empty
   --json               JSON stdout (default)
   --help
+
+Env (Mailforge / real SMTP):
+  SMTP_HOST     e.g. smtp.mailforge.ai
+  SMTP_PORT     465 (default, SMTPS) or 587 (STARTTLS)
+  SMTP_SECURE   1 for implicit TLS (default on 465), 0 for plain then STARTTLS
+  SMTP_USER     mailbox login
+  SMTP_PASS     mailbox password
+  SMTP_FROM     From header (defaults to SMTP_USER)
+  AO_SMTP_SINK  set to 1 to force sink mode even if SMTP_HOST is set
+  AO_SMTP_SINK_DIR  directory for sink JSON files
 `.trim();
 
-const encode = (s) => Buffer.from(String(s || ''), 'utf8');
-
 const b64 = (s) => Buffer.from(String(s || ''), 'utf8').toString('base64');
-
-const crlf = (lines) => lines.join('\r\n') + '\r\n';
+const crlf = (lines) => `${lines.join('\r\n')}\r\n`;
 
 const readSmtpResponse = (socket) => new Promise((resolve, reject) => {
   let buf = '';
   const onData = (chunk) => {
     buf += chunk.toString('utf8');
-    if (/\r\n$/.test(buf) && !/^\d{3}-/m.test(buf.split('\r\n').filter(Boolean).slice(-1)[0] || '')) {
-      // complete if last line is not a continuation (###-)
-      const lines = buf.split('\r\n').filter(Boolean);
-      const last = lines[lines.length - 1] || '';
-      if (/^\d{3} /.test(last) || /^\d{3}$/.test(last)) {
-        socket.off('data', onData);
-        resolve(buf);
-      }
+    const lines = buf.split('\r\n').filter(Boolean);
+    const last = lines[lines.length - 1] || '';
+    // Complete response: last line is "### message" (not "###-continuation")
+    if (/^\d{3}[ \t]/.test(last) || /^\d{3}$/.test(last)) {
+      socket.off('data', onData);
+      resolve(buf);
     }
   };
   socket.on('data', onData);
   socket.on('error', reject);
-  setTimeout(() => reject(new Error('SMTP response timeout')), 30_000);
+  setTimeout(() => {
+    socket.off('data', onData);
+    reject(new Error(`SMTP response timeout: ${buf.slice(0, 200)}`));
+  }, 30_000);
 });
 
 const sendLine = (socket, line) => {
-  socket.write(line + '\r\n');
+  socket.write(`${line}\r\n`);
 };
 
-const smtpSend = async ({
-  host,
-  port,
-  secure,
-  user,
-  pass,
-  from,
-  to,
-  subject,
-  body,
-}) => {
-  const connect = () => new Promise((resolve, reject) => {
-    const socket = secure
-      ? tls.connect({ host, port, servername: host }, () => resolve(socket))
-      : net.connect({ host, port }, () => resolve(socket));
+const expectCode = (response, code, label) => {
+  if (!new RegExp(`^${code}`).test(response)) {
+    throw new Error(`${label} failed: ${response.trim().slice(0, 300)}`);
+  }
+};
+
+const connectSocket = ({ host, port, secure }) => new Promise((resolve, reject) => {
+  if (secure) {
+    const socket = tls.connect({ host, port, servername: host }, () => resolve(socket));
     socket.on('error', reject);
-  });
+    return;
+  }
+  const socket = net.connect({ host, port }, () => resolve(socket));
+  socket.on('error', reject);
+});
 
-  const socket = await connect();
+const upgradeToTls = (socket, host) => new Promise((resolve, reject) => {
+  const upgraded = tls.connect({ socket, servername: host }, () => resolve(upgraded));
+  upgraded.on('error', reject);
+});
+
+const smtpDialog = async (socket, { user, pass, from, to, subject, body }) => {
   const greet = await readSmtpResponse(socket);
-  if (!/^220/.test(greet)) throw new Error(`SMTP greeting failed: ${greet.trim()}`);
+  expectCode(greet, 220, 'SMTP greeting');
 
-  sendLine(socket, `EHLO agent-outbound`);
+  sendLine(socket, 'EHLO agent-outbound');
   await readSmtpResponse(socket);
 
-  if (!secure && port === 587) {
-    sendLine(socket, 'STARTTLS');
-    const startTls = await readSmtpResponse(socket);
-    if (!/^220/.test(startTls)) throw new Error(`STARTTLS failed: ${startTls.trim()}`);
-    await new Promise((resolve, reject) => {
-      const upgraded = tls.connect({ socket, servername: host }, () => {
-        Object.assign(socket, upgraded);
-        resolve(null);
-      });
-      upgraded.on('error', reject);
-    });
-    // After STARTTLS we need a fresh EHLO on the TLS socket — re-open simply for reliability.
-  }
-
-  // Prefer AUTH PLAIN over a fresh TLS connection for simplicity when secure or after STARTTLS.
-  // For STARTTLS complexity, fall back to sink unless SMTP_FORCE=1.
-  if (!secure && process.env.SMTP_FORCE !== '1') {
-    socket.destroy();
-    throw new Error('Non-TLS SMTP without SMTP_FORCE=1; use port 465 (SMTPS) or set AO_SMTP_SINK=1 for sink mode.');
-  }
-
-  sendLine(socket, 'AUTH PLAIN ' + b64(`\u0000${user}\u0000${pass}`));
+  sendLine(socket, `AUTH PLAIN ${b64(`\u0000${user}\u0000${pass}`)}`);
   const auth = await readSmtpResponse(socket);
-  if (!/^235/.test(auth)) throw new Error(`SMTP AUTH failed: ${auth.trim()}`);
+  expectCode(auth, 235, 'SMTP AUTH');
 
   sendLine(socket, `MAIL FROM:<${from}>`);
-  await readSmtpResponse(socket);
+  expectCode(await readSmtpResponse(socket), 250, 'MAIL FROM');
+
   sendLine(socket, `RCPT TO:<${to}>`);
-  await readSmtpResponse(socket);
+  expectCode(await readSmtpResponse(socket), 250, 'RCPT TO');
+
   sendLine(socket, 'DATA');
-  await readSmtpResponse(socket);
+  expectCode(await readSmtpResponse(socket), 354, 'DATA');
 
   const messageId = `<${randomUUID()}@agent-outbound.local>`;
   const payload = crlf([
@@ -134,11 +127,44 @@ const smtpSend = async ({
     '.',
   ]);
   socket.write(payload);
-  const dataResp = await readSmtpResponse(socket);
-  if (!/^250/.test(dataResp)) throw new Error(`SMTP DATA failed: ${dataResp.trim()}`);
+  expectCode(await readSmtpResponse(socket), 250, 'SMTP DATA');
   sendLine(socket, 'QUIT');
-  socket.end();
+  try { socket.end(); } catch { /* */ }
   return { message_id: messageId, mode: 'smtp' };
+};
+
+const smtpSend = async ({
+  host,
+  port,
+  secure,
+  user,
+  pass,
+  from,
+  to,
+  subject,
+  body,
+}) => {
+  if (!host) throw new Error('SMTP_HOST is required for real SMTP mode');
+  if (!user || !pass) throw new Error('SMTP_USER and SMTP_PASS are required for real SMTP mode');
+
+  let socket = await connectSocket({ host, port, secure });
+  try {
+    if (!secure) {
+      // STARTTLS path (typical Mailforge port 587)
+      const greet = await readSmtpResponse(socket);
+      expectCode(greet, 220, 'SMTP greeting');
+      sendLine(socket, 'EHLO agent-outbound');
+      await readSmtpResponse(socket);
+      sendLine(socket, 'STARTTLS');
+      expectCode(await readSmtpResponse(socket), 220, 'STARTTLS');
+      socket = await upgradeToTls(socket, host);
+      // Fresh EHLO on TLS socket happens inside smtpDialog
+    }
+    return await smtpDialog(socket, { user, pass, from, to, subject, body });
+  } catch (err) {
+    try { socket.destroy(); } catch { /* */ }
+    throw err;
+  }
 };
 
 const sinkSend = ({ from, to, subject, body, toName, businessName, templateId }) => {
@@ -231,10 +257,15 @@ const main = async () => {
       templateId: values['template-id'],
     });
   } else {
+    const port = Number(process.env.SMTP_PORT || 465);
+    const secureEnv = process.env.SMTP_SECURE;
+    const secure = secureEnv === undefined || secureEnv === ''
+      ? port === 465
+      : String(secureEnv) !== '0';
     result = await smtpSend({
       host,
-      port: Number(process.env.SMTP_PORT || 465),
-      secure: String(process.env.SMTP_SECURE || '1') !== '0',
+      port,
+      secure,
       user: process.env.SMTP_USER || '',
       pass: process.env.SMTP_PASS || '',
       from,

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { APIProvider, Map as GoogleMap, Marker } from '@vis.gl/react-google-maps';
-import { Link } from 'react-router-dom';
 import {
   clearReviewDecision,
   fetchMeta,
@@ -9,6 +8,7 @@ import {
   submitReviewDecisions,
 } from './api.js';
 import { DetailDrawer } from './DetailDrawer.js';
+import { RouteNav } from './RouteNav.js';
 import type {
   MetaResponse,
   RecordDetail,
@@ -637,11 +637,7 @@ export const ReviewRoute = () => {
           <span className="topbar__name">{meta.list.name}</span>
           <span className="topbar__path">{meta.list.dir}</span>
         </div>
-        <nav className="route-nav" aria-label="Primary">
-          <Link to="/">Table</Link>
-          <Link to="/map">Map</Link>
-          <Link to="/rejected">Rejected</Link>
-        </nav>
+        <RouteNav />
       </header>
 
       <section className="review-heading">

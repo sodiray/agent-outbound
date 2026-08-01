@@ -34,7 +34,7 @@ import { renderTemplateText, resolveStepTemplate } from '../../dist/orchestrator
 
 const ROOT = new URL('../..', import.meta.url).pathname;
 const SCRATCH = process.env.GOAL_SCRATCH
-  || '/var/folders/rh/cpfkb8bd3b79n9zcs5s7zk_c0000gn/T/grok-goal-014a522250b9/implementer';
+  || '/var/folders/rh/cpfkb8bd3b79n9zcs5s7zk_c0000gn/T/grok-goal-0a1a977e5bad/implementer';
 const LIVE_LIST = process.env.TV_LIST
   || '/Users/rayepps/projects/mission/.outbound/treasure-valley';
 const SMTP_SCRIPT = join(ROOT, 'scripts/smtp-send.mjs');
@@ -675,7 +675,371 @@ check('CLI sequence board works', () => (cliBoard.status === 0 ? '' : (cliBoard.
 boardDb.close();
 sendDb.close();
 
-// --- 7. tier0 ---
+// --- 7. Draft → approve → send (scoped, tool_call + templates) ---
+const draftDir = mkdtempSync(join(tmpdir(), 'ao-draft-'));
+const draftSink = join(SCRATCH, 'smtp-sink-draft');
+mkdirSync(draftSink, { recursive: true });
+for (const f of readdirSync(draftSink)) {
+  try { rmSync(join(draftSink, f)); } catch { /* */ }
+}
+writeFileSync(join(draftDir, 'mcp.json'), smtpMcpJson(draftSink));
+writeFileSync(join(draftDir, 'outbound.yaml'), `list:
+  name: draft-e2e
+${AI}templates:
+  email_1:
+    id: email_1
+    channel_hint: email
+    versions:
+      - version: 1
+        subject: 'Draft for {{business_name}}'
+        body: |
+          Hello {{contact_name | default: there}},
+
+          Draft body for {{business_name}}.
+        note: draft-path
+sequences:
+  default: { steps: [] }
+pipeline:
+  - kind: assign
+    id: sequence_assign
+    target: pipeline_name
+    fallback: unrouted
+    rules:
+      - id: local_field_rule
+        pipeline: local_field
+        conditions:
+          - {field: contact_email, operator: is_not_empty}
+  - kind: pipeline
+    id: local_field
+    steps:
+      - kind: send_email
+        id: email_1
+        description: first touch with approval
+        side_effecting: true
+        draft_approval_required: true
+        template: email_1
+        depends_on: []
+        config:
+          action: tool_call
+          tool:
+            server: smtp
+            tools: [SMTP_SEND]
+          args_map:
+            to: contact_email
+            to_name: contact_name
+            business_name: business_name
+          args:
+            template_id: email_1
+          output_map:
+            message_id: message_id
+            provider_id: message_id
+          daily_cap: 2
+          outputs:
+            message_id:
+              type: string
+              description: Provider message id
+          columns:
+            message_id: email_last_message_id
+          idempotency:
+            key_source: [_row_id, step_id]
+            scope: list
+  - kind: pipeline
+    id: unrouted
+    manual: true
+    steps: []
+`);
+spawnSync('node', [CLI, 'refresh-tools', draftDir], {
+  encoding: 'utf8',
+  env: { ...process.env, AO_SMTP_SINK: '1', AO_SMTP_SINK_DIR: draftSink },
+});
+const draftDb = openListDb({ listDir: draftDir, readonly: false });
+upsertRecord({
+  db: draftDb,
+  row: {
+    _row_id: 'draft1', business_name: 'Draft Co', fit_score: 80,
+    sequence_status: 'idle', company_resolution: 'resolved',
+    created_at: now, updated_at: now,
+  },
+});
+draftDb.prepare(`UPDATE records SET contact_email = ?, contact_name = ? WHERE _row_id = ?`)
+  .run('draft-buyer@example.com', 'Dana Draft', 'draft1');
+
+// Pass 1: create pending draft (scoped where)
+const draftPass1 = await runPipelineDataflow({
+  listDir: draftDir,
+  where: `_row_id = 'draft1'`,
+  concurrency: 10,
+});
+const pendingDrafts = draftDb.prepare(`
+  SELECT draft_id, status, subject, body, step_number, sequence_name
+  FROM drafts WHERE row_id = 'draft1'
+`).all();
+const sinkAfterDraft = existsSync(draftSink) ? readdirSync(draftSink) : [];
+
+// Approve via shipped CLI path
+const draftId = String(pendingDrafts[0]?.draft_id || '');
+const approveCli = draftId
+  ? spawnSync('node', [CLI, 'drafts', 'approve', draftDir, '--id', draftId], { encoding: 'utf8' })
+  : { status: 1, stdout: '', stderr: 'no draft id' };
+const readyDrafts = draftDb.prepare(`
+  SELECT draft_id, status FROM drafts WHERE row_id = 'draft1' AND status = 'ready'
+`).all();
+
+// Pass 2: send approved draft
+const draftPass2 = await runPipelineDataflow({
+  listDir: draftDir,
+  where: `_row_id = 'draft1'`,
+  concurrency: 10,
+});
+const sentChannel = draftDb.prepare(`
+  SELECT channel, action, provider_message_id
+  FROM channel_events
+  WHERE row_id = 'draft1' AND action = 'executed'
+`).all();
+const sinkAfterSend = existsSync(draftSink) ? readdirSync(draftSink) : [];
+const sentDrafts = draftDb.prepare(`SELECT draft_id, status FROM drafts WHERE row_id = 'draft1'`).all();
+
+// Re-dispatch must not re-send (idempotent skip or already-passed)
+const draftPass3 = await runPipelineDataflow({
+  listDir: draftDir,
+  where: `_row_id = 'draft1'`,
+  concurrency: 10,
+});
+const sinkAfterRedispatch = existsSync(draftSink) ? readdirSync(draftSink) : [];
+
+capture('draft-approve-send.txt', JSON.stringify({
+  draftPass1_summary: {
+    survivors: draftPass1?.survivors,
+    processed: draftPass1?.processed,
+    failed: draftPass1?.failed,
+    errors: draftPass1?.errors,
+  },
+  pendingDrafts,
+  sinkAfterDraft,
+  approveCli: {
+    status: approveCli.status,
+    out: (approveCli.stdout || '').slice(0, 400),
+    err: (approveCli.stderr || '').slice(0, 200),
+  },
+  readyDrafts,
+  draftPass2_summary: {
+    survivors: draftPass2?.survivors,
+    processed: draftPass2?.processed,
+    failed: draftPass2?.failed,
+    errors: draftPass2?.errors,
+  },
+  sentChannel,
+  sinkAfterSend,
+  sentDrafts,
+  draftPass3_summary: {
+    survivors: draftPass3?.survivors,
+    processed: draftPass3?.processed,
+    failed: draftPass3?.failed,
+    skipped_passed: draftPass3?.skipped_passed,
+  },
+  sinkAfterRedispatch,
+  scoped_where_only: true,
+}, null, 2));
+
+check('draft path creates pending_approval draft without SMTP sink file', () => {
+  if (!pendingDrafts.length || pendingDrafts[0].status !== 'pending_approval') {
+    return `drafts=${JSON.stringify(pendingDrafts)}; pass1=${JSON.stringify(draftPass1?.errors)}`;
+  }
+  if (!String(pendingDrafts[0].subject || '').includes('Draft Co')) {
+    return `subject not templated: ${pendingDrafts[0].subject}`;
+  }
+  if (sinkAfterDraft.length > 0) {
+    return `SMTP fired on draft: ${sinkAfterDraft.join(',')}`;
+  }
+  return '';
+});
+check('drafts approve CLI marks draft ready', () => {
+  if (approveCli.status !== 0) return (approveCli.stderr || approveCli.stdout || '').slice(0, 200);
+  if (!readyDrafts.length) return 'no ready draft after approve';
+  return '';
+});
+check('approved draft sends via tool_call with message id', () => {
+  const ok = sentChannel.find((e) => e.provider_message_id);
+  if (!ok) {
+    return `no executed channel event: ${JSON.stringify({ sentChannel, errors: draftPass2?.errors, sentDrafts })}`;
+  }
+  if (sinkAfterSend.length < 1) return `no sink file after send: ${sinkAfterSend.join(',')}`;
+  return '';
+});
+check('re-dispatch does not create another sink send', () => {
+  if (sinkAfterRedispatch.length !== sinkAfterSend.length) {
+    return `sink grew on redispatch: before=${sinkAfterSend.length} after=${sinkAfterRedispatch.length}`;
+  }
+  return '';
+});
+draftDb.close();
+
+// --- 8. SPA structure: Sequence + Manual routes + API client ---
+const spaRoot = join(ROOT, 'src/viz/ui/src');
+const spaFiles = {
+  main: readFileSync(join(spaRoot, 'main.tsx'), 'utf8'),
+  sequences: existsSync(join(spaRoot, 'SequencesRoute.tsx'))
+    ? readFileSync(join(spaRoot, 'SequencesRoute.tsx'), 'utf8') : '',
+  manual: existsSync(join(spaRoot, 'ManualRoute.tsx'))
+    ? readFileSync(join(spaRoot, 'ManualRoute.tsx'), 'utf8') : '',
+  api: readFileSync(join(spaRoot, 'api.ts'), 'utf8'),
+  nav: existsSync(join(spaRoot, 'RouteNav.tsx'))
+    ? readFileSync(join(spaRoot, 'RouteNav.tsx'), 'utf8') : '',
+};
+const distIndex = join(ROOT, 'src/viz/ui/dist/index.html');
+const distAssets = existsSync(join(ROOT, 'src/viz/ui/dist/assets'))
+  ? readdirSync(join(ROOT, 'src/viz/ui/dist/assets'))
+  : [];
+const builtJs = distAssets.find((f) => f.endsWith('.js')) || '';
+const builtJsBody = builtJs
+  ? readFileSync(join(ROOT, 'src/viz/ui/dist/assets', builtJs), 'utf8')
+  : '';
+
+capture('spa-sequences-manual.txt', JSON.stringify({
+  routes_in_main: {
+    sequences: /path=["']\/sequences["']/.test(spaFiles.main),
+    manual: /path=["']\/manual["']/.test(spaFiles.main),
+  },
+  sequences_route_exists: Boolean(spaFiles.sequences),
+  manual_route_exists: Boolean(spaFiles.manual),
+  api_client: {
+    fetchSequences: /fetchSequences/.test(spaFiles.api),
+    fetchSequenceBoard: /fetchSequenceBoard/.test(spaFiles.api),
+    fetchManualTasks: /fetchManualTasks/.test(spaFiles.api),
+    completeManualTask: /completeManualTask/.test(spaFiles.api),
+  },
+  nav_links: {
+    sequences: /\/sequences/.test(spaFiles.nav),
+    manual: /\/manual/.test(spaFiles.nav),
+  },
+  dist_built: existsSync(distIndex),
+  dist_js: builtJs,
+  dist_includes_sequences: /sequence-board|SequencesRoute|\/sequences/.test(builtJsBody),
+  dist_includes_manual: /manual-queue|ManualRoute|\/manual/.test(builtJsBody),
+}, null, 2));
+
+check('SPA registers /sequences and /manual routes', () => {
+  if (!/path=["']\/sequences["']/.test(spaFiles.main)) return 'missing /sequences route in main.tsx';
+  if (!/path=["']\/manual["']/.test(spaFiles.main)) return 'missing /manual route in main.tsx';
+  if (!spaFiles.sequences) return 'SequencesRoute.tsx missing';
+  if (!spaFiles.manual) return 'ManualRoute.tsx missing';
+  if (!/fetchSequenceBoard|sequence-board/.test(spaFiles.sequences)) {
+    return 'SequencesRoute does not call board API';
+  }
+  if (!/completeManualTask|\/api\/manual/.test(spaFiles.manual + spaFiles.api)) {
+    return 'ManualRoute missing complete action';
+  }
+  if (!/\/sequences/.test(spaFiles.nav) || !/\/manual/.test(spaFiles.nav)) {
+    return 'RouteNav missing Sequences/Manual links';
+  }
+  return '';
+});
+check('SPA dist build includes sequence/manual surfaces', () => {
+  if (!existsSync(distIndex)) return 'dist/index.html missing — run ui build';
+  if (!builtJs) return 'no dist JS asset';
+  if (!/\/sequences|Sequences|sequence-board/.test(builtJsBody)) {
+    return 'built JS missing sequences surface';
+  }
+  if (!/\/manual|Manual|manual-queue/.test(builtJsBody)) {
+    return 'built JS missing manual surface';
+  }
+  return '';
+});
+
+// --- 9. Mailforge config + sink parity proof (live Mailforge needs SMTP_* env) ---
+const smtpHelp = spawnSync('node', [SMTP_SCRIPT, '--help'], { encoding: 'utf8' });
+const sinkProofDir = join(SCRATCH, 'mailforge-sink-parity');
+mkdirSync(sinkProofDir, { recursive: true });
+const sinkProof = spawnSync('node', [
+  SMTP_SCRIPT, 'send',
+  '--to', 'parity@example.com',
+  '--subject', 'Mailforge path parity',
+  '--body', 'Sink proves the same CLI entry Mailforge uses.',
+  '--from', 'outbound@example.com',
+  '--json',
+], {
+  encoding: 'utf8',
+  env: {
+    ...process.env,
+    AO_SMTP_SINK: '1',
+    AO_SMTP_SINK_DIR: sinkProofDir,
+    SMTP_HOST: '', // force sink
+  },
+});
+const liveHost = String(process.env.SMTP_HOST || '').trim();
+const liveUser = String(process.env.SMTP_USER || '').trim();
+const livePass = String(process.env.SMTP_PASS || '').trim();
+const envGap = !liveHost || !liveUser || !livePass;
+let liveAttempt = null;
+if (!envGap) {
+  liveAttempt = spawnSync('node', [
+    SMTP_SCRIPT, 'send',
+    '--to', process.env.MAILFORGE_TEST_TO || liveUser,
+    '--subject', 'Agent Outbound Mailforge probe',
+    '--body', 'Scoped live probe from goal verification.',
+    '--json',
+  ], {
+    encoding: 'utf8',
+    env: { ...process.env, AO_SMTP_SINK: '0' },
+    timeout: 45_000,
+  });
+}
+const tvMcp = readFileSync(join(LIVE_LIST, 'mcp.json'), 'utf8');
+const tvYaml = readFileSync(join(LIVE_LIST, 'outbound.yaml'), 'utf8');
+capture('mailforge-send.txt', [
+  '=== env ===',
+  `SMTP_HOST=${liveHost ? '[set]' : '[missing]'}`,
+  `SMTP_USER=${liveUser ? '[set]' : '[missing]'}`,
+  `SMTP_PASS=${livePass ? '[set]' : '[missing]'}`,
+  `SMTP_FROM=${process.env.SMTP_FROM ? '[set]' : '[missing]'}`,
+  `env_gap=${envGap}`,
+  '',
+  '=== smtp-send --help (documents Mailforge env) ===',
+  smtpHelp.stdout || '',
+  smtpHelp.stderr || '',
+  '',
+  '=== sink parity (same tool entry as Mailforge) ===',
+  `exit=${sinkProof.status}`,
+  sinkProof.stdout || '',
+  sinkProof.stderr || '',
+  '',
+  '=== live attempt ===',
+  envGap
+    ? 'SKIPPED: set SMTP_HOST, SMTP_USER, SMTP_PASS (and optional SMTP_FROM/SMTP_PORT) to prove live Mailforge delivery. Code path + mcp smtp server + daily_cap=2 are wired; criterion 1 blocked only by credentials.'
+    : JSON.stringify({
+      status: liveAttempt?.status,
+      stdout: (liveAttempt?.stdout || '').slice(0, 800),
+      stderr: (liveAttempt?.stderr || '').slice(0, 400),
+    }, null, 2),
+  '',
+  '=== treasure-valley wiring ===',
+  `mcp has smtp server: ${/"smtp"\s*:/.test(tvMcp)}`,
+  `outbound.yaml tool_call SMTP_SEND: ${/SMTP_SEND/.test(tvYaml) && /action:\s*tool_call/.test(tvYaml)}`,
+  `daily_cap present: ${/daily_cap:\s*2/.test(tvYaml)}`,
+].join('\n'));
+
+check('smtp tool + TV mcp/config ready for Mailforge (sink parity when no creds)', () => {
+  if (smtpHelp.status !== 0 && !(smtpHelp.stdout || '').includes('SMTP_HOST')) {
+    return 'smtp-send help missing Mailforge env docs';
+  }
+  if (sinkProof.status !== 0) return (sinkProof.stderr || sinkProof.stdout || '').slice(0, 200);
+  let sinkJson;
+  try { sinkJson = JSON.parse(sinkProof.stdout || '{}'); } catch {
+    return `sink stdout not JSON: ${sinkProof.stdout}`;
+  }
+  if (!sinkJson.ok || !sinkJson.message_id || sinkJson.mode !== 'sink') {
+    return `bad sink result: ${JSON.stringify(sinkJson)}`;
+  }
+  if (!/"smtp"\s*:/.test(tvMcp)) return 'treasure-valley mcp.json missing smtp server';
+  if (!/SMTP_SEND/.test(tvYaml)) return 'treasure-valley outbound.yaml missing SMTP_SEND';
+  if (!/daily_cap:\s*2/.test(tvYaml)) return 'daily_cap: 2 missing from TV config';
+  if (!envGap && liveAttempt && liveAttempt.status !== 0) {
+    return `live SMTP failed: ${(liveAttempt.stderr || liveAttempt.stdout || '').slice(0, 300)}`;
+  }
+  return '';
+});
+
+// --- 10. tier0 ---
 const tier0 = spawnSync('node', [join(ROOT, 'scripts/validate/tier0.mjs')], {
   encoding: 'utf8', cwd: ROOT,
 });
@@ -687,7 +1051,7 @@ check('tier0 still green', () => {
 });
 
 // Cleanup temps
-for (const dir of [gateDir, assignDir, sendDir, boardDir]) {
+for (const dir of [gateDir, assignDir, sendDir, boardDir, draftDir]) {
   try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ }
 }
 

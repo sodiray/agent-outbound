@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { RouteNav } from './RouteNav.js';
 import {
   fetchMeta,
   fetchRejectedRecords,
@@ -193,11 +193,7 @@ export const RejectedRoute = () => {
           <span className="topbar__name">{meta.list.name}</span>
           <span className="topbar__path">{meta.list.dir}</span>
         </div>
-        <nav className="route-nav" aria-label="Primary">
-          <Link to="/">Table</Link>
-          <Link to="/map">Map</Link>
-          <Link to="/review">Review</Link>
-        </nav>
+        <RouteNav />
       </header>
 
       <section className="rejected-heading">
