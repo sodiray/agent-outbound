@@ -8,11 +8,14 @@
  *   2. Real SMTP when SMTP_HOST + SMTP_USER + SMTP_PASS are set (Mailforge etc.).
  *      Prefer port 465 (implicit TLS). Port 587 uses STARTTLS.
  *
+ * STARTTLS (RFC 3207): after the TLS handshake there is NO second 220 greeting.
+ * Client must issue EHLO again on the encrypted channel, then AUTH / MAIL / …
+ *
  * Usage (as MCP command tool):
  *   node scripts/smtp-send.mjs send --to ADDR --subject S --body B [--from ADDR] [--json]
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
@@ -49,23 +52,32 @@ Env (Mailforge / real SMTP):
 const b64 = (s) => Buffer.from(String(s || ''), 'utf8').toString('base64');
 const crlf = (lines) => `${lines.join('\r\n')}\r\n`;
 
-const readSmtpResponse = (socket) => new Promise((resolve, reject) => {
+export const readSmtpResponse = (socket) => new Promise((resolve, reject) => {
   let buf = '';
+  const cleanup = () => {
+    clearTimeout(timeout);
+    socket.off('data', onData);
+    socket.off('error', onError);
+  };
+  const fail = (error) => {
+    cleanup();
+    reject(error);
+  };
   const onData = (chunk) => {
     buf += chunk.toString('utf8');
     const lines = buf.split('\r\n').filter(Boolean);
     const last = lines[lines.length - 1] || '';
     // Complete response: last line is "### message" (not "###-continuation")
     if (/^\d{3}[ \t]/.test(last) || /^\d{3}$/.test(last)) {
-      socket.off('data', onData);
+      cleanup();
       resolve(buf);
     }
   };
+  const onError = (error) => fail(error);
   socket.on('data', onData);
-  socket.on('error', reject);
-  setTimeout(() => {
-    socket.off('data', onData);
-    reject(new Error(`SMTP response timeout: ${buf.slice(0, 200)}`));
+  socket.on('error', onError);
+  const timeout = setTimeout(() => {
+    fail(new Error(`SMTP response timeout: ${buf.slice(0, 200)}`));
   }, 30_000);
 });
 
@@ -94,9 +106,25 @@ const upgradeToTls = (socket, host) => new Promise((resolve, reject) => {
   upgraded.on('error', reject);
 });
 
-const smtpDialog = async (socket, { user, pass, from, to, subject, body }) => {
-  const greet = await readSmtpResponse(socket);
-  expectCode(greet, 220, 'SMTP greeting');
+/**
+ * AUTH + MAIL + DATA + QUIT on an already-connected socket.
+ * @param {{ expectGreeting?: boolean }} opts
+ *   expectGreeting=true  → wait for 220 then EHLO (implicit TLS / plain open)
+ *   expectGreeting=false → EHLO immediately (post-STARTTLS; RFC 3207 forbids re-greeting)
+ */
+export const smtpSession = async (socket, {
+  user,
+  pass,
+  from,
+  to,
+  subject,
+  body,
+  expectGreeting = true,
+}) => {
+  if (expectGreeting) {
+    const greet = await readSmtpResponse(socket);
+    expectCode(greet, 220, 'SMTP greeting');
+  }
 
   sendLine(socket, 'EHLO agent-outbound');
   await readSmtpResponse(socket);
@@ -133,7 +161,7 @@ const smtpDialog = async (socket, { user, pass, from, to, subject, body }) => {
   return { message_id: messageId, mode: 'smtp' };
 };
 
-const smtpSend = async ({
+export const smtpSend = async ({
   host,
   port,
   secure,
@@ -158,9 +186,17 @@ const smtpSend = async ({
       sendLine(socket, 'STARTTLS');
       expectCode(await readSmtpResponse(socket), 220, 'STARTTLS');
       socket = await upgradeToTls(socket, host);
-      // Fresh EHLO on TLS socket happens inside smtpDialog
+      // RFC 3207: after TLS, do NOT wait for another 220 — EHLO then AUTH.
+      return await smtpSession(socket, {
+        user, pass, from, to, subject, body,
+        expectGreeting: false,
+      });
     }
-    return await smtpDialog(socket, { user, pass, from, to, subject, body });
+    // Implicit TLS (465): server greets with 220 on the TLS socket.
+    return await smtpSession(socket, {
+      user, pass, from, to, subject, body,
+      expectGreeting: true,
+    });
   } catch (err) {
     try { socket.destroy(); } catch { /* */ }
     throw err;
@@ -190,6 +226,11 @@ const sinkSend = ({ from, to, subject, body, toName, businessName, templateId })
   };
   writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
   return payload;
+};
+
+const isCliEntry = () => {
+  const entry = process.argv[1] ? String(process.argv[1]) : '';
+  return entry.endsWith('smtp-send.mjs') || entry.endsWith('smtp-send.js');
 };
 
 const main = async () => {
@@ -286,7 +327,10 @@ const main = async () => {
   })}\n`);
 };
 
-main().catch((err) => {
-  process.stderr.write(`Error: ${err?.message || err}\n`);
-  process.exit(1);
-});
+// Only run CLI when this file is the process entry (not when imported by tests).
+if (isCliEntry()) {
+  main().catch((err) => {
+    process.stderr.write(`Error: ${err?.message || err}\n`);
+    process.exit(1);
+  });
+}

@@ -1039,7 +1039,20 @@ check('smtp tool + TV mcp/config ready for Mailforge (sink parity when no creds)
   return '';
 });
 
-// --- 10. tier0 ---
+// --- 10. STARTTLS shipped CLI (RFC 3207 post-upgrade EHLO, no second 220) ---
+const starttls = spawnSync('node', [join(ROOT, 'scripts/validate/smtp-starttls.mjs')], {
+  encoding: 'utf8',
+  cwd: ROOT,
+  env: { ...process.env, GOAL_SCRATCH: SCRATCH },
+});
+capture('smtp-starttls-goal-e2e.txt', `${starttls.stdout || ''}\n${starttls.stderr || ''}\nexit=${starttls.status}\n`);
+check('smtp-send STARTTLS shipped CLI validation is green', () => {
+  if (starttls.status !== 0) return `exit ${starttls.status}: ${(starttls.stderr || starttls.stdout || '').slice(-400)}`;
+  if (!/passed 4\s+failed 0/.test(starttls.stdout || '')) return (starttls.stdout || '').slice(-400);
+  return '';
+});
+
+// --- 11. tier0 ---
 const tier0 = spawnSync('node', [join(ROOT, 'scripts/validate/tier0.mjs')], {
   encoding: 'utf8', cwd: ROOT,
 });
