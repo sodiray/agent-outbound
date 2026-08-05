@@ -2,6 +2,7 @@ import { completeManualTask, listAwaitingManualTasks } from '../orchestrator/pip
 import { readConfig } from '../orchestrator/lib/config.js';
 import { openListDb } from '../orchestrator/runtime/db.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
+import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
 
 export const manualListCommand = ({
   list,
@@ -23,7 +24,7 @@ export const manualListCommand = ({
   }
 };
 
-export const manualCompleteCommand = ({
+export const manualCompleteCommand = async ({
   list,
   record,
   step,
@@ -37,12 +38,14 @@ export const manualCompleteCommand = ({
   skip?: boolean;
 }) => {
   const listDir = resolveListDir(list);
+  assertRecordAccessForMutation({ listDir, recordId: record });
   const { config } = readConfig(listDir);
   const db = openListDb({ listDir, readonly: false });
   try {
-    return completeManualTask({
+    return await completeManualTask({
       db,
       config,
+      listDir,
       recordId: record,
       stepId: step,
       note,

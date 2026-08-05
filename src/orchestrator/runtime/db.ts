@@ -240,10 +240,12 @@ const SCHEMA_SQL = `
     reason TEXT DEFAULT '',
     wake_at TEXT DEFAULT '',
     side_effecting INTEGER DEFAULT 0,
+    contact_id TEXT DEFAULT '',
     occurred_at TEXT NOT NULL,
     FOREIGN KEY(record_id) REFERENCES records(_row_id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_pipeline_events_record ON pipeline_events(record_id, occurred_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_pipeline_events_contact ON pipeline_events(record_id, contact_id, step_id);
 
   CREATE TABLE IF NOT EXISTS batch_events (
     run_id TEXT NOT NULL,
@@ -404,6 +406,11 @@ const SCHEMA_SQL = `
     body TEXT DEFAULT '',
     reason TEXT DEFAULT '',
     artifacts_json TEXT DEFAULT '{}',
+    claim_packet_hash TEXT DEFAULT '',
+    claim_audit_version TEXT DEFAULT '',
+    preliminary_snapshot_hash TEXT DEFAULT '',
+    claim_audit_passed INTEGER DEFAULT 0,
+    content_binding_json TEXT DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(row_id) REFERENCES records(_row_id) ON DELETE CASCADE
@@ -542,6 +549,94 @@ const SCHEMA_SQL = `
   );
   CREATE INDEX IF NOT EXISTS idx_activity_history_occurred ON activity_history(occurred_at DESC);
 
+  CREATE TABLE IF NOT EXISTS observations (
+    observation_id TEXT PRIMARY KEY,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    project TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    subject_type TEXT DEFAULT '',
+    subject_id TEXT DEFAULT '',
+    summary TEXT NOT NULL,
+    payload_json TEXT DEFAULT '{}',
+    active INTEGER NOT NULL DEFAULT 1,
+    first_observed_at TEXT NOT NULL,
+    last_observed_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_observations_active
+    ON observations(active, kind, last_observed_at DESC);
+
+  CREATE TABLE IF NOT EXISTS pending_items (
+    pending_id TEXT PRIMARY KEY,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    project TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    status TEXT NOT NULL DEFAULT 'open',
+    subject_type TEXT DEFAULT '',
+    subject_id TEXT DEFAULT '',
+    summary TEXT NOT NULL,
+    context_json TEXT DEFAULT '{}',
+    source_state_json TEXT DEFAULT '{}',
+    owner_id TEXT DEFAULT '',
+    claimed_at TEXT DEFAULT '',
+    claim_lease_expires_at TEXT DEFAULT '',
+    delegated_task_id TEXT DEFAULT '',
+    last_progress_at TEXT DEFAULT '',
+    snoozed_until TEXT DEFAULT '',
+    resolution_reason TEXT DEFAULT '',
+    resolution_evidence_json TEXT DEFAULT '{}',
+    idempotency_key TEXT DEFAULT '',
+    observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT DEFAULT '',
+    dismissed_at TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_pending_attention
+    ON pending_items(status, priority, created_at);
+  CREATE INDEX IF NOT EXISTS idx_pending_subject
+    ON pending_items(subject_type, subject_id, status);
+
+  CREATE TABLE IF NOT EXISTS pending_item_events (
+    event_id TEXT PRIMARY KEY,
+    pending_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    details_json TEXT DEFAULT '{}',
+    idempotency_key TEXT DEFAULT '',
+    occurred_at TEXT NOT NULL,
+    FOREIGN KEY(pending_id) REFERENCES pending_items(pending_id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_pending_item_events
+    ON pending_item_events(pending_id, occurred_at ASC);
+
+  CREATE TABLE IF NOT EXISTS notification_deliveries (
+    delivery_id TEXT PRIMARY KEY,
+    dedupe_key TEXT NOT NULL UNIQUE,
+    sink TEXT NOT NULL,
+    event TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    payload_json TEXT NOT NULL,
+    last_error TEXT DEFAULT '',
+    available_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    delivered_at TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_notification_delivery_status
+    ON notification_deliveries(status, updated_at);
+
+  CREATE TABLE IF NOT EXISTS operator_monitor_state (
+    phase TEXT PRIMARY KEY,
+    last_attempted_at TEXT DEFAULT '',
+    last_succeeded_at TEXT DEFAULT '',
+    last_error TEXT DEFAULT ''
+  );
+
   CREATE TABLE IF NOT EXISTS lead_territories (
     row_id TEXT NOT NULL,
     territory_id TEXT NOT NULL,
@@ -620,6 +715,29 @@ const ensureSuppressionCompatibility = (db) => {
   try { db.exec("UPDATE suppression SET identifier_type = value_type WHERE (identifier_type IS NULL OR identifier_type = '') AND value_type IS NOT NULL AND value_type != ''"); } catch {}
 };
 
+/**
+ * Whole-corpus DML during open is only safe when canary isolation is off.
+ * When active, scope updates to the allowlist (never mutate excluded records
+ * just because the DB was opened).
+ * Returns null when canary is off / unavailable (unscoped). Returns [] to skip
+ * all DML under active isolation with empty allowlist.
+ */
+const canaryScopedRecordIds = (db: any): string[] | null => {
+  try {
+    const listDir = String(db?.__ao_list_dir || '').trim();
+    if (!listDir) return null;
+    const { loadCanaryConfig } = require('../policy/canary-isolation.js') as {
+      loadCanaryConfig: (o?: { listDir?: string }) => { mode: string; allowlist_record_ids: string[] };
+    };
+    const cfg = loadCanaryConfig({ listDir });
+    const mode = String(cfg?.mode || 'off');
+    if (mode === 'off') return null;
+    return (cfg.allowlist_record_ids || []).map((id) => String(id || '').trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+};
+
 const ensureRecordCompatibility = (db) => {
   try { db.exec("ALTER TABLE records ADD COLUMN place_id TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN primary_type TEXT DEFAULT ''"); } catch {}
@@ -641,12 +759,28 @@ const ensureRecordCompatibility = (db) => {
     );
     const resolutionEvidence = ['place_id', 'primary_type'].filter((column) => columns.has(column));
     if (resolutionEvidence.length > 0) {
-      db.exec(`
-        UPDATE records
-        SET company_resolution = 'resolved', resolution_source = 'places'
-        WHERE company_resolution = ''
-          AND (${resolutionEvidence.map((column) => `${column} != ''`).join(' OR ')})
-      `);
+      const allowIds = canaryScopedRecordIds(db);
+      if (allowIds !== null) {
+        if (allowIds.length === 0) {
+          // Strict/canary with empty allowlist: skip whole-corpus DML entirely.
+        } else {
+          const placeholders = allowIds.map(() => '?').join(',');
+          db.prepare(`
+            UPDATE records
+            SET company_resolution = 'resolved', resolution_source = 'places'
+            WHERE company_resolution = ''
+              AND (${resolutionEvidence.map((column) => `${column} != ''`).join(' OR ')})
+              AND _row_id IN (${placeholders})
+          `).run(...allowIds);
+        }
+      } else {
+        db.exec(`
+          UPDATE records
+          SET company_resolution = 'resolved', resolution_source = 'places'
+          WHERE company_resolution = ''
+            AND (${resolutionEvidence.map((column) => `${column} != ''`).join(' OR ')})
+        `);
+      }
     }
   } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN reply_classification_latest TEXT DEFAULT ''"); } catch {}
@@ -683,7 +817,25 @@ const ensureRecordCompatibility = (db) => {
 const ensurePipelineEventCompatibility = (db) => {
   try { db.exec("ALTER TABLE pipeline_events ADD COLUMN wake_at TEXT DEFAULT ''"); } catch {}
   try { db.exec('ALTER TABLE pipeline_events ADD COLUMN side_effecting INTEGER DEFAULT 0'); } catch {}
+  try { db.exec("ALTER TABLE pipeline_events ADD COLUMN contact_id TEXT DEFAULT ''"); } catch {}
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_pipeline_events_wake ON pipeline_events(record_id, wake_at)'); } catch {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_pipeline_events_contact ON pipeline_events(record_id, contact_id, step_id)'); } catch {}
+};
+
+/** Content-version binding columns on drafts (diagnostic claim packet / snapshot hashes). */
+const ensureDraftCompatibility = (db) => {
+  try { db.exec("ALTER TABLE drafts ADD COLUMN claim_packet_hash TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE drafts ADD COLUMN claim_audit_version TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE drafts ADD COLUMN preliminary_snapshot_hash TEXT DEFAULT ''"); } catch {}
+  try { db.exec('ALTER TABLE drafts ADD COLUMN claim_audit_passed INTEGER DEFAULT 0'); } catch {}
+  try { db.exec("ALTER TABLE drafts ADD COLUMN content_binding_json TEXT DEFAULT '{}'"); } catch {}
+};
+
+/**
+ * Ensure drafts table has content-binding columns (export for execute path).
+ */
+export const ensureDraftColumns = ({ db }) => {
+  ensureDraftCompatibility(db);
 };
 
 const ensureContactCompatibility = (db) => {
@@ -700,7 +852,16 @@ const ensureContactCompatibility = (db) => {
     db.exec('DROP INDEX IF EXISTS idx_contacts_row_email');
     db.exec("CREATE UNIQUE INDEX idx_contacts_row_email ON contacts(row_id, email) WHERE email != ''");
     db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_row_linkedin_urn ON contacts(row_id, linkedin_urn) WHERE linkedin_urn != ''");
-    const recordIds = db.prepare("SELECT DISTINCT row_id FROM contacts WHERE row_id != ''").all();
+    let recordIds = db.prepare("SELECT DISTINCT row_id FROM contacts WHERE row_id != ''").all() as Array<{ row_id?: string }>;
+    // Scope primary-contact projection under canary — do not touch excluded accounts.
+    const allowIds = canaryScopedRecordIds(db);
+    if (allowIds !== null) {
+      if (allowIds.length === 0) recordIds = [];
+      else {
+        const allowed = new Set(allowIds);
+        recordIds = recordIds.filter((row) => allowed.has(String(row.row_id || '')));
+      }
+    }
     recordIds.forEach((row) => {
       syncPrimaryContactProjectionInternal({ db, recordId: String(row.row_id || '') });
     });
@@ -735,7 +896,36 @@ export const committedWhere = (alias = ''): string => {
 };
 
 // True when this record already passed this pipeline step (used to skip idempotent filters).
-export const hasPassedStep = ({ db, recordId, stepId }: { db: any; recordId: string; stepId: string }): boolean => {
+// When contactId is provided, only events for that contact count (multi-contact succession).
+// Empty contact_id legacy rows are NOT treated as "any contact" when scoping — that made
+// contact 2 inherit contact 1's completion.
+export const hasPassedStep = ({
+  db,
+  recordId,
+  stepId,
+  contactId,
+}: {
+  db: any;
+  recordId: string;
+  stepId: string;
+  contactId?: string | null;
+}): boolean => {
+  const cid = String(contactId || '').trim();
+  if (cid) {
+    try {
+      const row = db
+        .prepare(`
+          SELECT 1 FROM pipeline_events
+          WHERE record_id = ? AND step_id = ? AND passed = 1
+            AND contact_id = ?
+          LIMIT 1
+        `)
+        .get(recordId, stepId, cid);
+      return Boolean(row);
+    } catch {
+      // contact_id column may be absent on older harness DBs — fall through unscoped.
+    }
+  }
   const row = db
     .prepare('SELECT 1 FROM pipeline_events WHERE record_id = ? AND step_id = ? AND passed = 1 LIMIT 1')
     .get(recordId, stepId);
@@ -927,23 +1117,88 @@ const openDb = ({ dbPath, readonly = false }) => {
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_run_at TEXT DEFAULT ''"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN attempt_count INTEGER DEFAULT 0"); } catch {}
     try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_error TEXT DEFAULT ''"); } catch {}
+    try { db.exec("ALTER TABLE notification_deliveries ADD COLUMN available_at TEXT NOT NULL DEFAULT ''"); } catch {}
+    try { db.exec("UPDATE notification_deliveries SET available_at = created_at WHERE available_at = ''"); } catch {}
     ensureRecordCompatibility(db);
     ensurePipelineEventCompatibility(db);
     ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);
     ensureTerritoryCompatibility(db);
+    ensureDraftCompatibility(db);
     ensureDataAccessViewsInternal(db);
   }
   return db;
 };
 
+/**
+ * Open a list DB and pin listDir on the handle so every write chokepoint
+ * (upsertRecord / insertDraft / updateDraft / insertChannelEvent / …) can
+ * enforce canary isolation without each call site remembering to assert.
+ */
 export const openListDb = ({ listDir, readonly = false }) => {
   ensureListDirs(listDir);
   const dbPath = getDbPath(listDir);
   if (readonly && !existsSync(dbPath)) {
     throw new Error(`List DB does not exist: ${dbPath}`);
   }
-  return openDb({ dbPath, readonly });
+  // Open raw first, pin listDir BEFORE schema/compatibility DML so canary can
+  // scope whole-corpus updates (company_resolution backfill, contact projection).
+  const db = openRawDb({ dbPath, readonly });
+  try {
+    Object.defineProperty(db, '__ao_list_dir', {
+      value: String(listDir || ''),
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
+    Object.defineProperty(db, '__ao_readonly', {
+      value: Boolean(readonly),
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
+  } catch {
+    (db as any).__ao_list_dir = String(listDir || '');
+    (db as any).__ao_readonly = Boolean(readonly);
+  }
+  if (!readonly) {
+    db.exec(SCHEMA_SQL);
+    try { db.exec("ALTER TABLE records ADD COLUMN mail_last_cost_cents INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE run_state ADD COLUMN step_index INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE run_state ADD COLUMN step_total INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN pages_fetched INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN total_seen INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN new_unique INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_run_at TEXT DEFAULT ''"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN attempt_count INTEGER DEFAULT 0"); } catch {}
+    try { db.exec("ALTER TABLE search_tasks ADD COLUMN last_error TEXT DEFAULT ''"); } catch {}
+    try { db.exec("ALTER TABLE notification_deliveries ADD COLUMN available_at TEXT NOT NULL DEFAULT ''"); } catch {}
+    try { db.exec("UPDATE notification_deliveries SET available_at = created_at WHERE available_at = ''"); } catch {}
+    ensureRecordCompatibility(db);
+    ensurePipelineEventCompatibility(db);
+    ensureContactCompatibility(db);
+    ensureSuppressionCompatibility(db);
+    ensureTerritoryCompatibility(db);
+    ensureDraftCompatibility(db);
+    ensureDataAccessViewsInternal(db);
+  }
+  return db;
+};
+
+/**
+ * Unavoidable canary gate for any record mutation on a list-scoped db handle.
+ * No-op when mode=off or listDir was not pinned (unit tests with raw better-sqlite3).
+ */
+export const enforceCanaryRecordMutation = (db: any, recordId: unknown) => {
+  if (!db || db.__ao_readonly) return;
+  const listDir = String(db.__ao_list_dir || '').trim();
+  if (!listDir) return;
+  const rid = String(recordId || '').trim();
+  if (!rid) return;
+  // Lazy import avoids circular dependency (canary-isolation → paths; db → canary).
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { assertRecordAccessForMutation } = require('../policy/canary-isolation.js') as typeof import('../policy/canary-isolation.js');
+  assertRecordAccessForMutation({ listDir, recordId: rid });
 };
 
 export const openGlobalSuppressionDb = ({ readonly = false } = {}) => {
@@ -1032,6 +1287,7 @@ export const logCostEventFile = ({ listDir, payload }) => {
 };
 
 export const insertCostEvent = ({ db, event }) => {
+  enforceCanaryRecordMutation(db, event?.record_id || event?.row_id);
   db.prepare(`
     INSERT INTO cost_events (
       id, record_id, step_id, model, input_tokens, output_tokens, cache_creation_tokens,
@@ -1165,12 +1421,14 @@ export const syncNextActionDateFromPipelineEvents = ({
 };
 
 export const insertPipelineEvent = ({ db, event }) => {
+  enforceCanaryRecordMutation(db, event?.record_id || event?.row_id);
+  ensurePipelineEventCompatibility(db);
   db.prepare(`
     INSERT INTO pipeline_events (
-      event_id, record_id, step_id, kind, passed, reason, wake_at, side_effecting, occurred_at
+      event_id, record_id, step_id, kind, passed, reason, wake_at, side_effecting, contact_id, occurred_at
     )
     VALUES (
-      @event_id, @record_id, @step_id, @kind, @passed, @reason, @wake_at, @side_effecting, @occurred_at
+      @event_id, @record_id, @step_id, @kind, @passed, @reason, @wake_at, @side_effecting, @contact_id, @occurred_at
     )
   `).run({
     event_id: event.event_id || event.id,
@@ -1181,6 +1439,7 @@ export const insertPipelineEvent = ({ db, event }) => {
     reason: String(event.reason || ''),
     wake_at: String(event.wake_at || ''),
     side_effecting: event.side_effecting ? 1 : 0,
+    contact_id: String(event.contact_id || event.active_contact_id || ''),
     occurred_at: event.occurred_at || nowIso(),
   });
   if (String(event.reason || '') === 'wake_at' || String(event.kind || '') === 'wait') {
@@ -1244,6 +1503,7 @@ const withFieldOverrides = ({ db, recordId, row }) => {
 export const upsertRecord = ({ db, row: inputRow }) => {
   const rowId = String(inputRow._row_id || inputRow.id || '').trim();
   if (!rowId) throw new Error('Record id/_row_id is required.');
+  enforceCanaryRecordMutation(db, rowId);
   const current = db.prepare(`
     SELECT id, _row_id, contact_name, contact_title, contact_email,
       contact_name_primary, contact_title_primary, pipeline_name
@@ -1253,7 +1513,8 @@ export const upsertRecord = ({ db, row: inputRow }) => {
   const row = withFieldOverrides({ db, recordId: String(current?._row_id || rowId), row: inputRow });
   const timestamp = nowIso();
 
-  if (current?.id) {
+  // Prefer _row_id existence: many records leave legacy `id` empty.
+  if (current?._row_id || current?.id) {
     const knownFields = [
       '_row_id', '_created_at', '_updated_at',
       'business_name', 'address', 'city', 'state', 'zip', 'postal_code', 'country', 'website', 'domain', 'phone',
@@ -1673,12 +1934,39 @@ export const overridesByRecordMap = ({ db }) => {
 // Reconcile record state to honor every active override. Idempotent; safe to run
 // at the start of every pipeline run and at override-create time. This is what
 // makes overrides survive --reapply and full resets.
-export const reconcileOverrides = ({ db }) => {
+/**
+ * Re-apply active drop/keep overrides onto records.
+ * When `recordIds` is provided, only those records are touched (canary scope).
+ * Direct SQL updates still go through enforceCanaryRecordMutation when listDir is pinned
+ * — but that only fires on upsertRecord; these UPDATEs must be scoped explicitly.
+ */
+export const reconcileOverrides = ({
+  db,
+  recordIds = null,
+}: {
+  db: any;
+  recordIds?: string[] | null;
+} = {} as any) => {
+  const allow = Array.isArray(recordIds) && recordIds.length > 0
+    ? new Set(recordIds.map((id) => String(id || '').trim()).filter(Boolean))
+    : null;
   const rows = listActiveOverrides({ db });
   const now = nowIso();
-  const summary = { drops_applied: 0, keeps_restored: 0 };
+  const summary = { drops_applied: 0, keeps_restored: 0, skipped_out_of_scope: 0 };
   rows.forEach((row) => {
-    const record = getRecordById({ db, id: String(row.record_id) });
+    const rid = String(row.record_id || '').trim();
+    if (allow && !allow.has(rid)) {
+      summary.skipped_out_of_scope += 1;
+      return;
+    }
+    // Canary gate for direct UPDATE paths that bypass upsertRecord.
+    try {
+      enforceCanaryRecordMutation(db, rid);
+    } catch {
+      summary.skipped_out_of_scope += 1;
+      return;
+    }
+    const record = getRecordById({ db, id: rid });
     if (!record) return;
     if (String(row.kind) === 'drop') {
       const alreadyDropped = String(record.disqualified_at || '').trim() !== '';
@@ -1783,16 +2071,37 @@ export const activeFieldOverrideMap = ({ db, recordId }) => {
 
 // Re-stamp every active field override onto its record. Idempotent; belt-and-
 // braces alongside the upsertRecord hook (covers direct UPDATEs that bypass it).
-export const reconcileFieldOverrides = ({ db }) => {
+// When `recordIds` is provided, only those records are touched (canary scope).
+export const reconcileFieldOverrides = ({
+  db,
+  recordIds = null,
+}: {
+  db: any;
+  recordIds?: string[] | null;
+} = {} as any) => {
+  const allow = Array.isArray(recordIds) && recordIds.length > 0
+    ? new Set(recordIds.map((id) => String(id || '').trim()).filter(Boolean))
+    : null;
   const rows = listActiveFieldOverrides({ db });
   const tableCols = getTableColumns(db, 'records');
-  const summary = { applied: 0 };
+  const summary = { applied: 0, skipped_out_of_scope: 0 };
   rows.forEach((row) => {
+    const rid = String(row.record_id || '').trim();
+    if (allow && !allow.has(rid)) {
+      summary.skipped_out_of_scope += 1;
+      return;
+    }
+    try {
+      enforceCanaryRecordMutation(db, rid);
+    } catch {
+      summary.skipped_out_of_scope += 1;
+      return;
+    }
     const field = String(row.field || '');
     if (!field || !tableCols.has(field)) return;
     const quoted = `"${field.replace(/"/g, '""')}"`;
     const result = db.prepare(`UPDATE records SET ${quoted} = ?, updated_at = ? WHERE _row_id = ? AND ${quoted} IS NOT ?`).run(
-      row.value, nowIso(), String(row.record_id), row.value,
+      row.value, nowIso(), rid, row.value,
     );
     if (result.changes > 0) summary.applied += 1;
   });
@@ -1827,6 +2136,9 @@ export const insertInteraction = ({ db, recordId, kind = 'note', summary, body =
     throw new Error(`Unknown interaction kind "${kindName}". Kinds: ${INTERACTION_KINDS.join(', ')}`);
   }
   if (!String(summary || '').trim()) throw new Error('An interaction summary is required.');
+  const rid = String(recordId || '').trim();
+  // Strict canary: non-allowlisted records cannot receive interactions.
+  enforceCanaryRecordMutation(db, rid);
   const now = nowIso();
   const id = `int_${randomUUID().slice(0, 12)}`;
   db.prepare(`
@@ -1834,7 +2146,7 @@ export const insertInteraction = ({ db, recordId, kind = 'note', summary, body =
       follow_up_at, follow_up_done_at, follow_up_note, created_by, occurred_at, created_at, updated_at, deleted_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, '')
   `).run(
-    id, String(recordId), String(contact || ''), kindName, String(summary).trim(), String(body || ''), String(objections || ''),
+    id, rid, String(contact || ''), kindName, String(summary).trim(), String(body || ''), String(objections || ''),
     String(followUpAt || ''), String(followUpNote || ''), String(createdBy || ''), String(occurredAt || now), now, now,
   );
   syncNextActionFromFollowUps({ db, recordId });
@@ -1910,6 +2222,7 @@ export const getBriefForRecord = ({ db, rowId }) =>
   db.prepare('SELECT * FROM lead_briefs WHERE row_id = ?').get(String(rowId));
 
 export const persistBrief = ({ db, rowId, summary, content, rolesJson = '[]', depHash = '', model = '' }) => {
+  enforceCanaryRecordMutation(db, rowId);
   const now = nowIso();
   const existing = getBriefForRecord({ db, rowId });
   if (existing) {
@@ -1927,18 +2240,28 @@ export const persistBrief = ({ db, rowId, summary, content, rolesJson = '[]', de
 };
 
 export const deleteRecord = ({ db, id }) => {
+  const rid = String(id || '').trim();
+  if (!rid) return;
+  // Canary gate before any delete side effects (strict isolation boundary).
+  enforceCanaryRecordMutation(db, rid);
   db.prepare(`
     UPDATE records
     SET duplicate_of = '', duplicate_status = ''
     WHERE duplicate_of = ?
-  `).run(id);
-  db.prepare('DELETE FROM records WHERE _row_id = ? OR id = ?').run(id, id);
+  `).run(rid);
+  db.prepare('DELETE FROM records WHERE _row_id = ? OR id = ?').run(rid, rid);
 };
 
 export const deleteRecordsBatch = ({ db, where, params = [] as any[] }) => {
   const whereSql = String(where || '').trim();
   if (!whereSql) return { deleted: 0 };
   const bound = Array.isArray(params) ? params : [];
+
+  // Gate every candidate before bulk delete — refuse the batch if any is blocked.
+  const candidates = db.prepare(`SELECT _row_id FROM records WHERE ${whereSql}`).all(...bound) as Array<{ _row_id?: string }>;
+  for (const row of candidates) {
+    enforceCanaryRecordMutation(db, row?._row_id);
+  }
 
   db.prepare(`
     UPDATE records
@@ -1955,6 +2278,8 @@ export const deleteRecordsBatch = ({ db, where, params = [] as any[] }) => {
 export const deleteRecordsKeepTop = ({ db, limit, orderBy }) => {
   const keepLimit = Math.max(0, Number(limit || 0));
   if (keepLimit <= 0) {
+    const allRows = db.prepare('SELECT _row_id FROM records').all() as Array<{ _row_id?: string }>;
+    for (const row of allRows) enforceCanaryRecordMutation(db, row?._row_id);
     const count = db.prepare('SELECT COUNT(*) as n FROM records').get();
     db.prepare('DELETE FROM records').run();
     return { deleted: Number(count?.n || 0), kept: 0 };
@@ -1969,12 +2294,19 @@ export const deleteRecordsKeepTop = ({ db, limit, orderBy }) => {
   `).all(keepLimit);
   const keepIds = keepRows.map((row: any) => String(row?._row_id || '')).filter(Boolean);
   if (keepIds.length === 0) {
+    const allRows = db.prepare('SELECT _row_id FROM records').all() as Array<{ _row_id?: string }>;
+    for (const row of allRows) enforceCanaryRecordMutation(db, row?._row_id);
     const count = db.prepare('SELECT COUNT(*) as n FROM records').get();
     db.prepare('DELETE FROM records').run();
     return { deleted: Number(count?.n || 0), kept: 0 };
   }
 
   const placeholders = keepIds.map(() => '?').join(',');
+  const toDelete = db.prepare(
+    `SELECT _row_id FROM records WHERE _row_id NOT IN (${placeholders})`,
+  ).all(...keepIds) as Array<{ _row_id?: string }>;
+  for (const row of toDelete) enforceCanaryRecordMutation(db, row?._row_id);
+
   db.prepare(`
     UPDATE records
     SET duplicate_of = '', duplicate_status = ''
@@ -1988,6 +2320,7 @@ export const deleteRecordsKeepTop = ({ db, limit, orderBy }) => {
 };
 
 export const insertChannelEvent = ({ db, event }) => {
+  enforceCanaryRecordMutation(db, event?.row_id || event?.record_id);
   db.prepare(`
     INSERT INTO channel_events (
       event_id, id, row_id, contact_id, channel, event_type, action, sequence_step, notes, disposition,
@@ -2131,6 +2464,82 @@ export const syncPrimaryContactProjection = ({ db, recordId }) => (
   db.transaction(() => syncPrimaryContactProjectionInternal({ db, recordId }))()
 );
 
+/**
+ * Project a specific contact (campaign active target) onto denormalized record
+ * contact_* fields. Unlike syncPrimaryContactProjection (seniority primary), this
+ * writes the named contact so channel sends / post-rotation state match the
+ * active contact plan. Bypasses upsertRecord's primary-projection lock.
+ */
+export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
+  const normalizedRecordId = String(recordId || '').trim();
+  const normalizedContactId = String(contactId || '').trim();
+  if (!normalizedRecordId || !normalizedContactId || !db) return null;
+
+  return db.transaction(() => {
+    const contact = db.prepare(`
+      SELECT *
+      FROM contacts
+      WHERE (contact_id = ? OR id = ?) AND row_id = ?
+      ORDER BY CASE WHEN contact_id = ? THEN 0 ELSE 1 END
+      LIMIT 1
+    `).get(normalizedContactId, normalizedContactId, normalizedRecordId, normalizedContactId)
+      || db.prepare(`
+        SELECT *
+        FROM contacts
+        WHERE contact_id = ? OR id = ?
+        ORDER BY CASE WHEN contact_id = ? THEN 0 ELSE 1 END
+        LIMIT 1
+      `).get(normalizedContactId, normalizedContactId, normalizedContactId);
+
+    if (!contact) return null;
+
+    const recordColumns = new Set(
+      db.prepare('PRAGMA table_info(records)').all().map((row) => String(row.name || '')),
+    );
+    // Ensure optional outreach fields exist before projecting.
+    for (const col of ['contact_phone', 'contact_linkedin_url', 'active_contact_id']) {
+      if (!recordColumns.has(col) && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
+        try {
+          db.exec(`ALTER TABLE records ADD COLUMN ${col} TEXT DEFAULT '';`);
+          recordColumns.add(col);
+        } catch {
+          /* concurrent migration / missing rights */
+        }
+      }
+    }
+
+    const name = String(contact?.full_name || contact?.name || '');
+    const projection: Record<string, string> = {
+      contact_name: name,
+      contact_title: String(contact?.title || ''),
+      contact_email: String(contact?.email || ''),
+      contact_name_primary: name,
+      contact_title_primary: String(contact?.title || ''),
+      owner_name: name,
+      contact_phone: String(contact?.phone || ''),
+      contact_linkedin_url: String(contact?.linkedin_url || ''),
+      active_contact_id: String(contact?.contact_id || contact?.id || normalizedContactId),
+    };
+    const writableProjection = Object.entries(projection)
+      .filter(([column]) => recordColumns.has(column));
+    if (writableProjection.length === 0) return String(contact?.contact_id || '') || null;
+
+    const assignments = writableProjection.map(([column]) => `${column} = @${column}`).join(', ');
+    const changed = writableProjection.map(([column]) => `COALESCE(${column}, '') != @${column}`).join(' OR ');
+    db.prepare(`
+      UPDATE records
+      SET ${assignments}, updated_at = @updated_at
+      WHERE _row_id = @record_id
+        AND (${changed})
+    `).run({
+      ...Object.fromEntries(writableProjection),
+      updated_at: nowIso(),
+      record_id: normalizedRecordId,
+    });
+    return String(contact?.contact_id || contact?.id || normalizedContactId) || null;
+  })();
+};
+
 export const upsertContact = ({ db, contact }) => {
   const rowId = String(contact?.row_id || contact?.record_id || '').trim();
   const email = String(contact?.email || '').trim().toLowerCase();
@@ -2138,6 +2547,7 @@ export const upsertContact = ({ db, contact }) => {
   const explicitContactId = String(contact?.contact_id || contact?.id || '').trim();
   const nameTitleIdentity = contactNameTitleIdentity(contact);
   if (!rowId || (!explicitContactId && !linkedinUrn && !email && !nameTitleIdentity)) return null;
+  enforceCanaryRecordMutation(db, rowId);
   const now = nowIso();
   return db.transaction(() => {
     const explicitMatch = explicitContactId
@@ -2268,13 +2678,24 @@ export const getPrimaryContact = ({ db, recordId }) =>
 
 export const insertDraft = ({ db, draft }) => {
   const now = nowIso();
+  ensureDraftCompatibility(db);
+  enforceCanaryRecordMutation(db, draft?.row_id || draft?.record_id);
+  const contentBinding = draft?.content_binding && typeof draft.content_binding === 'object'
+    ? draft.content_binding
+    : {};
   db.prepare(`
     INSERT INTO drafts (
       draft_id, row_id, sequence_name, step_number, step_id, channel, status,
-      subject, body, reason, artifacts_json, created_at, updated_at
+      subject, body, reason, artifacts_json,
+      claim_packet_hash, claim_audit_version, preliminary_snapshot_hash,
+      claim_audit_passed, content_binding_json,
+      created_at, updated_at
     ) VALUES (
       @draft_id, @row_id, @sequence_name, @step_number, @step_id, @channel, @status,
-      @subject, @body, @reason, @artifacts_json, @created_at, @updated_at
+      @subject, @body, @reason, @artifacts_json,
+      @claim_packet_hash, @claim_audit_version, @preliminary_snapshot_hash,
+      @claim_audit_passed, @content_binding_json,
+      @created_at, @updated_at
     )
   `).run({
     draft_id: String(draft?.draft_id || draft?.id || ''),
@@ -2288,20 +2709,50 @@ export const insertDraft = ({ db, draft }) => {
     body: String(draft?.body || ''),
     reason: String(draft?.reason || ''),
     artifacts_json: safeJson(draft?.artifacts || {}),
+    claim_packet_hash: String(draft?.claim_packet_hash || contentBinding.claim_packet_hash || ''),
+    claim_audit_version: String(draft?.claim_audit_version || contentBinding.claim_audit_version || ''),
+    preliminary_snapshot_hash: String(
+      draft?.preliminary_snapshot_hash || contentBinding.preliminary_snapshot_hash || '',
+    ),
+    claim_audit_passed: Number(
+      draft?.claim_audit_passed
+      ?? contentBinding.claim_audit_passed
+      ?? 0,
+    ) ? 1 : 0,
+    content_binding_json: safeJson(
+      Object.keys(contentBinding).length
+        ? contentBinding
+        : {
+          claim_packet_hash: draft?.claim_packet_hash || '',
+          claim_audit_version: draft?.claim_audit_version || '',
+          preliminary_snapshot_hash: draft?.preliminary_snapshot_hash || '',
+          claim_audit_passed: draft?.claim_audit_passed ?? 0,
+        },
+    ),
     created_at: String(draft?.created_at || now),
     updated_at: String(draft?.updated_at || now),
   });
 };
 
 export const updateDraft = ({ db, draftId, patch }) => {
+  ensureDraftCompatibility(db);
   const existing = db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1').get(String(draftId || '').trim());
   if (!existing) return null;
+  // Draft approve/edit/reject always touches a record — canary gate is mandatory.
+  enforceCanaryRecordMutation(db, existing.row_id || (patch as any)?.row_id);
   const merged = {
     ...existing,
     ...patch,
     artifacts_json: patch && Object.prototype.hasOwnProperty.call(patch, 'artifacts')
       ? safeJson((patch as any).artifacts)
       : existing.artifacts_json,
+    content_binding_json: patch && Object.prototype.hasOwnProperty.call(patch, 'content_binding')
+      ? safeJson((patch as any).content_binding)
+      : (patch && Object.prototype.hasOwnProperty.call(patch, 'content_binding_json')
+        ? (typeof (patch as any).content_binding_json === 'string'
+          ? (patch as any).content_binding_json
+          : safeJson((patch as any).content_binding_json))
+        : existing.content_binding_json),
     updated_at: nowIso(),
   };
   db.prepare(`
@@ -2311,6 +2762,11 @@ export const updateDraft = ({ db, draftId, patch }) => {
         body = @body,
         reason = @reason,
         artifacts_json = @artifacts_json,
+        claim_packet_hash = @claim_packet_hash,
+        claim_audit_version = @claim_audit_version,
+        preliminary_snapshot_hash = @preliminary_snapshot_hash,
+        claim_audit_passed = @claim_audit_passed,
+        content_binding_json = @content_binding_json,
         updated_at = @updated_at
     WHERE draft_id = @draft_id
   `).run({
@@ -2320,6 +2776,11 @@ export const updateDraft = ({ db, draftId, patch }) => {
     body: String(merged.body || ''),
     reason: String(merged.reason || ''),
     artifacts_json: String(merged.artifacts_json || '{}'),
+    claim_packet_hash: String(merged.claim_packet_hash || ''),
+    claim_audit_version: String(merged.claim_audit_version || ''),
+    preliminary_snapshot_hash: String(merged.preliminary_snapshot_hash || ''),
+    claim_audit_passed: Number(merged.claim_audit_passed || 0) ? 1 : 0,
+    content_binding_json: String(merged.content_binding_json || '{}'),
     updated_at: String(merged.updated_at),
   });
   return db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1').get(existing.draft_id);
@@ -2336,6 +2797,7 @@ export const insertAsset = ({
   status = 'ready',
   reason = '',
 }) => {
+  enforceCanaryRecordMutation(db, rowId);
   const assetId = `asset_${randomUUID().slice(0, 12)}`;
   const now = nowIso();
   db.prepare(`

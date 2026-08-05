@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { insertCostEvent, logCostEventFile } from '../runtime/db.js';
+import { insertCostEvent, logCostEventFile, ensureRecordColumns } from '../runtime/db.js';
 import { readConfig } from './config.js';
 import { AgentOutboundError } from '../runtime/contract.js';
+import {
+  parseCostLedger,
+  appendCostEntry,
+  costEntryKindFromStep,
+  type CostEntry,
+} from '../policy/cost-ledger.js';
 
 const windowStartAndReset = (window: 'daily' | 'weekly' | 'monthly') => {
   const now = new Date();
@@ -274,4 +280,71 @@ export const recordCostEvent = ({ db, listDir, recordId = '', stepId, model = ''
 
   insertCostEvent({ db, event });
   logCostEventFile({ listDir, payload: event });
+
+  // Keep per-record cost_ledger_json / enrichment_cost_usd in sync so GT and
+  // enrichment ceilings read real production spend (not a stale empty ledger).
+  if (db && recordId && usdCost != null && Number(usdCost) > 0) {
+    appendCostEventToRecordLedger({
+      db,
+      recordId: String(recordId),
+      entry: {
+        entry_id: event.id,
+        kind: toolCalls.length > 0 ? 'tool' : costEntryKindFromStep(event.step_id),
+        amount_usd: Number(usdCost),
+        step_id: event.step_id,
+        model: event.model || undefined,
+        tool: toolCalls.length ? String(toolCalls[0]) : undefined,
+        occurred_at: event.occurred_at,
+      },
+    });
+  }
+};
+
+/**
+ * Append one production cost event onto the record's cost_ledger_json and
+ * enrichment_cost_usd scalar. Best-effort — never throws into the caller path.
+ */
+export const appendCostEventToRecordLedger = ({
+  db,
+  recordId,
+  entry,
+}: {
+  db: any;
+  recordId: string;
+  entry: Omit<CostEntry, 'entry_id' | 'occurred_at'> & {
+    entry_id?: string;
+    occurred_at?: string;
+  };
+}): void => {
+  const id = String(recordId || '').trim();
+  if (!db || !id) return;
+  try {
+    ensureRecordColumns({
+      db,
+      columns: ['cost_ledger_json', 'enrichment_cost_usd'],
+    });
+    const row = db.prepare(
+      'SELECT _row_id, cost_ledger_json, enrichment_cost_usd FROM records WHERE _row_id = ? OR id = ? LIMIT 1',
+    ).get(id, id);
+    if (!row) return;
+    const ledger = parseCostLedger(row.cost_ledger_json, id);
+    // Skip duplicate entry_ids (idempotent re-appends).
+    if (entry.entry_id && ledger.entries.some((e) => e.entry_id === entry.entry_id)) {
+      return;
+    }
+    const next = appendCostEntry(ledger, entry);
+    db.prepare(`
+      UPDATE records
+      SET cost_ledger_json = ?, enrichment_cost_usd = ?, _updated_at = ?
+      WHERE _row_id = ? OR id = ?
+    `).run(
+      JSON.stringify(next),
+      next.enrichment_usd,
+      new Date().toISOString(),
+      id,
+      id,
+    );
+  } catch {
+    /* never break cost recording on ledger sync failure */
+  }
 };

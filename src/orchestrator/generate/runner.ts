@@ -1,12 +1,15 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import {
   type Asset,
+  ensureRecordColumns,
   findAsset,
   inPlayWhere,
   insertAsset,
   openListDb,
   updateAsset,
+  upsertRecord,
 } from '../runtime/db.js';
+import { EVIDENCE_RECORD_COLUMNS } from '../policy/evidence.js';
 import { readConfig } from '../lib/config.js';
 import { getRecordRowId } from '../lib/record.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
@@ -25,9 +28,11 @@ import {
   enrichDepHash,
   enrichmentActionNeedsMcp,
   enrichmentStepConfig,
+  enrichmentCeilingSkipPatch,
   executeEnrichmentAction,
   getDeclaredOutputs,
   isEnrichFresh,
+  isEnrichmentCeilingSkip,
   mergedRecordForEnrichment,
   outputOutcomeFor,
   parseExtra,
@@ -299,6 +304,7 @@ export const runGenerateStep = async ({
     skipped_fresh: 0,
     skipped_locked: 0,
     skipped_when: 0,
+    skipped_ceiling: 0,
     failed: 0,
     errors: [] as Array<{ record_id: string; error: string }>,
     record_ids: [] as string[],
@@ -333,6 +339,7 @@ export const runGenerateStep = async ({
     try {
       const inputRecord = mergedRecordForEnrichment({ db, record });
       const executionResult = await executeEnrichmentAction({
+        db,
         mcp,
         listDir,
         stepId: id,
@@ -348,6 +355,48 @@ export const runGenerateStep = async ({
         outputSchema: executionOutputZod,
         toolCatalog,
       }) as Record<string, unknown>;
+
+      // Expensive generate (e.g. diagnostic_content_pack): skip provider when over ceiling.
+      if (isEnrichmentCeilingSkip(executionResult)) {
+        const detail = String(executionResult.skip_detail || 'enrichment_ceiling');
+        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId)
+          || inputRecord
+          || record;
+        const evidencePatch = enrichmentCeilingSkipPatch({
+          record: currentRow as Record<string, unknown>,
+          stepId: id,
+          stepConfig,
+          detail,
+        });
+        ensureRecordColumns({ db, columns: [...EVIDENCE_RECORD_COLUMNS] });
+        upsertRecord({ db, row: { ...(currentRow as Record<string, unknown>), ...evidencePatch } });
+        persistAsset({
+          db,
+          existing,
+          recordId,
+          stepId: id,
+          label: String(stepConfig.label || ''),
+          result: '',
+          outputsJson: stringifyJson(emptyOutputsFor(outputZod)),
+          isReference: false,
+          status: 'skipped',
+          reason: detail,
+        });
+        summary.skipped_ceiling += 1;
+        summary.record_ids.push(recordId);
+        emit({
+          logger,
+          event: {
+            event: 'row_skipped',
+            phase: 'generate',
+            step: id,
+            row: rowLabel,
+            reason: 'enrichment_ceiling',
+            detail,
+          },
+        });
+        return;
+      }
 
       const outputs = objectValue(executionResult.outputs);
       const expectedOutputs = declaredOutputs;
@@ -425,6 +474,188 @@ export const runGenerateStep = async ({
         status: outcome === 'empty' ? 'empty' : 'ready',
         reason: referenceAsset.reason,
       });
+
+      // Deterministic claim packet assembly + claim audit (not best-effort swallow).
+      {
+        const {
+          auditClaims,
+          assemblePermittedClaimPacket,
+          calculateEconomicScenario,
+          claimAuditAssetHash,
+          draftAssetText,
+        } = await import('../policy/index.js');
+        const { ensureRecordColumns, upsertRecord } = await import('../runtime/db.js');
+        // Final drafted email (subject+body) is the only asset that may authorize
+        // claim_audit for send. Do NOT hash diagnostic snapshot + raw model result
+        // into the same hash — that makes legitimate drafts fail at send.
+        const draftedEmail = draftAssetText({
+          subject: parsedOutputs.subject as string,
+          body: (parsedOutputs.body || parsedOutputs.email_body || parsedOutputs.email_copy) as string,
+        });
+        // Audit text: prefer drafted email; fall back to diagnostic snapshot alone
+        // (not a composite with model result) when no body yet.
+        const assetText = draftedEmail
+          || String(parsedOutputs.preliminary_snapshot || '').trim()
+          || String(referenceAsset.result || '').trim();
+
+        // Prefer code-assembled packet over model-emitted packet (prevents self-approval).
+        let packet: any = null;
+        try {
+          const economicInputs: Record<string, number> = {};
+          for (const key of [
+            'weekly_admin_hours',
+            'admin_hours_per_week',
+            'hourly_loaded_cost',
+            'hourly_rate',
+            'missed_leads_per_month',
+            'avg_job_value',
+            'close_rate',
+          ]) {
+            const n = Number((inputRecord as any)[key] ?? (parsedOutputs as any)[key]);
+            if (Number.isFinite(n)) economicInputs[key] = n;
+          }
+          const scenarioIds = ['admin_labor_leak', 'missed_lead_revenue'];
+          const econResults = scenarioIds.map((scenario_id) =>
+            calculateEconomicScenario({
+              scenario_id,
+              weekly_admin_hours: economicInputs.weekly_admin_hours ?? economicInputs.admin_hours_per_week,
+              hourly_loaded_cost: economicInputs.hourly_loaded_cost ?? economicInputs.hourly_rate,
+              missed_leads_per_month: economicInputs.missed_leads_per_month,
+              avg_job_value: economicInputs.avg_job_value,
+              close_rate: economicInputs.close_rate,
+            }),
+          );
+          parsedOutputs.economic_scenarios_json = JSON.stringify(econResults);
+
+          packet = assemblePermittedClaimPacket({
+            account_id: String(recordId),
+            family_id: String(inputRecord.diagnostic_family || inputRecord.vertical || ''),
+            vertical: String(inputRecord.vertical || ''),
+            economic_inputs: economicInputs,
+            preliminary_snapshot: String(parsedOutputs.preliminary_snapshot || ''),
+            listDir: String(listDir || ''),
+          });
+          parsedOutputs.permitted_claim_packet_json = JSON.stringify(packet);
+        } catch (assembleErr) {
+          // Fall back to model packet only if assembler fails; still audit.
+          const packetRaw = parsedOutputs.permitted_claim_packet_json
+            || inputRecord.permitted_claim_packet_json
+            || '';
+          if (packetRaw) {
+            packet = typeof packetRaw === 'string' ? JSON.parse(String(packetRaw)) : packetRaw;
+          }
+          parsedOutputs.claim_packet_assemble_error = String((assembleErr as Error)?.message || assembleErr);
+        }
+
+        if (packet && Array.isArray(packet.permitted_claims) && assetText) {
+          // Sentence-ish extract for audit. Empty result with non-empty assetText must fail
+          // (claim-audit v2 no_claims_extracted) — never treat "nothing extracted" as pass.
+          // Audit EVERY substantive sentence (no 12-sentence cap, no dropping short claims
+          // that can still assert commercial falsehoods).
+          const extracted = String(assetText)
+            .split(/[.!?\n]+/)
+            .map((t) => t.trim())
+            .filter((t) => t.length >= 3)
+            .map((text) => ({ text }));
+          let audit: any;
+          try {
+            audit = auditClaims({ packet, extracted, assetText });
+            // Belt-and-suspenders: empty extract of authored content cannot pass even if
+            // auditClaims were ever relaxed.
+            if (extracted.length === 0 && String(assetText).trim()) {
+              audit = {
+                ...audit,
+                passed: false,
+                unauthorized: [
+                  ...(audit.unauthorized || []),
+                  { text: String(assetText).slice(0, 120), reason: 'no_claims_extracted' },
+                ],
+              };
+            }
+            // Withheld / unknown family packet (zero claims) cannot authorize content.
+            if ((packet.permitted_claims || []).length === 0 && String(assetText).trim()) {
+              audit = {
+                ...audit,
+                passed: false,
+                unauthorized: [
+                  ...(audit.unauthorized || []).filter((u: any) => u.reason !== 'withheld_claim_packet'),
+                  {
+                    text: String(assetText).slice(0, 120),
+                    reason: String((packet as any).withhold_reason || 'withheld_claim_packet'),
+                  },
+                ],
+              };
+            }
+          } catch (auditErr) {
+            // Do not swallow: mark failed so readiness cannot pass on missing audit.
+            audit = {
+              passed: false,
+              authorized: [],
+              unauthorized: [{ text: 'audit_error', reason: String((auditErr as Error)?.message || auditErr) }],
+              policy_version: 'error',
+            };
+          }
+          ensureRecordColumns({
+            db,
+            columns: [
+              'claim_audit_passed',
+              'claim_audit_json',
+              'claim_audit_asset_hash',
+              'permitted_claim_packet_json',
+              'economic_scenarios_json',
+              'claim_packet_assemble_error',
+            ],
+          });
+          // Bind hash only when we audited a real drafted email body. Snapshot-only
+          // audits never set claim_audit_passed=1 (send requires draft-bound hash).
+          const assetHash = draftedEmail ? claimAuditAssetHash(draftedEmail) : '';
+          const pass = Boolean(audit.passed && draftedEmail && assetHash);
+          const patch: Record<string, unknown> = {
+            ...inputRecord,
+            ...parsedOutputs,
+            permitted_claim_packet_json: JSON.stringify(packet),
+            claim_audit_json: JSON.stringify(audit),
+            claim_audit_passed: pass ? 1 : 0,
+            ...(assetHash ? { claim_audit_asset_hash: assetHash } : {}),
+          };
+          upsertRecord({ db, row: patch });
+          if (!audit.passed) {
+            persistAsset({
+              db,
+              existing: saved,
+              recordId,
+              stepId: id,
+              label: String(stepConfig.label || ''),
+              result: referenceAsset.result,
+              outputsJson,
+              isReference,
+              status: 'needs_repair',
+              reason: `claim_audit_failed:${(audit.unauthorized || []).map((u: any) => u.reason).join(',')}`,
+            });
+          }
+        } else if (Object.keys(parsedOutputs).length > 0) {
+          ensureRecordColumns({ db, columns: Object.keys(parsedOutputs) });
+          // Content without packet/audit → mark audit required failed if text exists.
+          const patch: Record<string, unknown> = { ...inputRecord, ...parsedOutputs };
+          if (assetText && !packet) {
+            patch.claim_audit_passed = 0;
+            patch.claim_audit_json = JSON.stringify({
+              passed: false,
+              unauthorized: [{ text: '', reason: 'missing_permitted_claim_packet' }],
+            });
+          }
+          // Empty extract path: assetText present but condition skipped → fail closed.
+          if (assetText && packet && !Array.isArray(packet.permitted_claims)) {
+            patch.claim_audit_passed = 0;
+            patch.claim_audit_json = JSON.stringify({
+              passed: false,
+              unauthorized: [{ text: '', reason: 'invalid_permitted_claim_packet' }],
+            });
+            patch.permitted_claim_packet_json = JSON.stringify(packet);
+          }
+          upsertRecord({ db, row: patch });
+        }
+      }
 
       recordCostEvent({
         db,
@@ -511,13 +742,15 @@ export const runGeneration = async ({ listDir, stepId = '', where = '', limit = 
   const db = openListDb({ listDir, readonly: false }) as DbLike;
   const whereSql = String(where || '').trim();
   const limitN = Number(limit || 0);
-  const params: unknown[] = [];
+  // Canary isolation: assert list + filter BEFORE limit so allowlisted rows are not starved.
+  const { loadCanaryConfig, filterRecordsForCanary, assertListAccessForMutation } = await import('../policy/canary-isolation.js');
+  assertListAccessForMutation(listDir);
   const baseRowsSql = `SELECT * FROM records WHERE sequence_status != 'opted_out' AND ${inPlayWhere()}`;
   const filteredRowsSql = whereSql ? `${baseRowsSql} AND (${whereSql})` : baseRowsSql;
   const orderedRowsSql = `${filteredRowsSql} ORDER BY updated_at DESC`;
-  const rowsSql = limitN > 0 ? `${orderedRowsSql} LIMIT ?` : orderedRowsSql;
-  if (limitN > 0) params.push(limitN);
-  const rows = db.prepare(rowsSql).all(...params);
+  let rows = db.prepare(orderedRowsSql).all() as any[];
+  rows = filterRecordsForCanary(rows, loadCanaryConfig({ listDir }));
+  if (limitN > 0) rows = rows.slice(0, limitN);
   const toolCatalog = readToolCatalog(listDir);
   const mcpState: { client: Client | null } = { client: null };
   const mcpForStep = async (stepConfig: Record<string, unknown>) => {

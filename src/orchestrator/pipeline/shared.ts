@@ -151,7 +151,8 @@ export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply 
     if (kind === 'review') {
       const evalRows = active.filter((record) => {
         const recordId = getRecordRowId(record);
-        return !hasPassedStep({ db, recordId, stepId })
+        const contactId = String((record as any).active_contact_id || (record as any).contact_id || '') || null;
+        return !hasPassedStep({ db, recordId, stepId, contactId })
           || isRecordAwaitingReview({ db, recordId, stageId: stepId });
       });
       const skippedPassed = active.length - evalRows.length;
@@ -249,7 +250,8 @@ export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply 
     const onFail = String(step?.on_fail || 'drop').trim().toLowerCase() === 'flag' ? 'flag' : 'drop';
     const evalRows = reapply ? active : active.filter((record) => {
       const recordId = getRecordRowId(record);
-      if (!hasPassedStep({ db, recordId, stepId })) return true;
+      const contactId = String((record as any).active_contact_id || (record as any).contact_id || '') || null;
+      if (!hasPassedStep({ db, recordId, stepId, contactId })) return true;
       const cached = readStaleness({ db, recordId, stepId: filterStalenessStepId(stepId) });
       return !isFilterDefFresh({ cached, stepConfig: step, listDir });
     });

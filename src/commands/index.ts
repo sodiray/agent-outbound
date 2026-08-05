@@ -41,6 +41,7 @@ import {
   logOutcome,
   runSequencer,
 } from '../orchestrator/sequencer/runner.js';
+import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
 import { runDashboard } from '../orchestrator/operator/dashboard.js';
 import {
   assertToolSpecAvailable,
@@ -88,6 +89,11 @@ export {
   territoriesShowCommand,
 } from './territories.js';
 export { purgeCommand } from './purge.js';
+export { interruptCommand } from './interrupt.js';
+export {
+  stageReviewAuthorizeCommand,
+  stageReviewListCommand,
+} from './stage-review.js';
 export {
   followupsCommand,
   interactionAddCommand,
@@ -711,6 +717,8 @@ export const removeCommand = ({ list, row = '', where = '', keepTop = 0, sortBy 
   let autoSnapshot: any = null;
   try {
     if (rowId) {
+      // Command-level canary gate (DB delete also enforces when listDir is pinned).
+      assertRecordAccessForMutation({ listDir, recordId: rowId });
       const existing = db.prepare('SELECT COUNT(*) as n FROM records WHERE _row_id = ? OR id = ?').get(rowId, rowId);
       if (Number(existing?.n || 0) >= threshold) {
         autoSnapshot = snapshotCreateCommand({ list: listDir, label: `auto-before-remove-row-${new Date().toISOString()}` });
@@ -1121,19 +1129,42 @@ export const runCommand = async ({ list, more = 0 }) => {
   assertPhaseModelReferences({ config: loaded.config, phase: 'pipeline' });
   assertPhaseModelReferences({ config: loaded.config, phase: 'score' });
 
+  // Canary isolation scopes the full run surface — not only the pipeline pass.
+  const { loadCanaryConfig, filterRecordsForCanary } = await import(
+    '../orchestrator/policy/canary-isolation.js'
+  );
+  const canaryConfig = loadCanaryConfig({ listDir });
+
   const sourceResult: any = Number(more || 0) > 0
     ? await runSourcingMore({ listDir, targetNew: Number(more || 0) })
     : await runSourcing({ listDir, limit: 0 });
 
   const newIds = Array.isArray(sourceResult?.inserted_ids) ? sourceResult.inserted_ids : [];
+  // Intersect newly sourced IDs with canary allowlist when isolation is active.
+  const scopedNew = filterRecordsForCanary(
+    newIds.map((id: string) => ({ _row_id: id })),
+    canaryConfig,
+  ).map((r: any) => String(r._row_id));
   const pipelineResult = await (async () => {
-    if (newIds.length === 0) return null;
-    const escaped = newIds.map((id: string) => `'${String(id || '').replace(/'/g, "''")}'`).join(', ');
+    if (scopedNew.length === 0) return null;
+    const escaped = scopedNew.map((id: string) => `'${String(id || '').replace(/'/g, "''")}'`).join(', ');
     return runPipelineDataflow({ listDir, where: `_row_id IN (${escaped})` });
   })();
 
-  const scoreResult = await runScoringWithBriefs({ listDir });
-  const generateResult = await runGeneration({ listDir });
+  // Score/generate must not re-query the unfiltered production corpus under canary.
+  const allowIds = (canaryConfig.allowlist_record_ids || []).map((id) => String(id).trim()).filter(Boolean);
+  const canaryWhere = canaryConfig.mode !== 'off' && allowIds.length > 0
+    ? `_row_id IN (${allowIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ')})`
+    : (canaryConfig.mode !== 'off' ? `_row_id IN ('__canary_none__')` : '');
+
+  const scoreResult = await runScoringWithBriefs({
+    listDir,
+    ...(canaryWhere ? { where: canaryWhere } : {}),
+  });
+  const generateResult = await runGeneration({
+    listDir,
+    ...(canaryWhere ? { where: canaryWhere } : {}),
+  });
 
   return {
     source: sourceResult,
@@ -1186,6 +1217,73 @@ export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 
     ...scored,
     auto_snapshot: autoSnapshot,
   };
+};
+
+/**
+ * Deterministic policy projection (treatment, priority, next-action, readiness)
+ * without model calls. Uses score_breakdown grades when present.
+ */
+export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun = false }) => {
+  const listDir = resolveListDir(list);
+  const whereSql = String(where || '').trim();
+  const whereCheck = validateWhereSql(whereSql);
+  if (!whereCheck.ok) throw new Error(whereCheck.error || 'Invalid --where SQL fragment.');
+
+  const { applyOutboundPolicy } = await import('../orchestrator/policy/index.js');
+  const { ensureRecordColumns, openListDb: openDb, upsertRecord, inPlayWhere } = await import('../orchestrator/runtime/db.js');
+
+  const db = openDb({ listDir, readonly: Boolean(dryRun) });
+  const limitN = Math.max(0, Number(limit || 0));
+  const params: unknown[] = [];
+  let sql = `SELECT * FROM records WHERE ${inPlayWhere()} ${whereSql ? `AND (${whereSql})` : ''} ORDER BY updated_at DESC`;
+  if (limitN > 0) {
+    sql += ' LIMIT ?';
+    params.push(limitN);
+  }
+  const rows = db.prepare(sql).all(...params);
+  const summary = {
+    matched: rows.length,
+    updated: 0,
+    dry_run: Boolean(dryRun),
+    tiers: {} as Record<string, number>,
+    integrity_errors: 0,
+    sample: [] as Array<Record<string, unknown>>,
+  };
+
+  for (const record of rows) {
+    const { loadCampaignContactsFromDb, hydrateRecordCostLedger } = await import('../orchestrator/policy/index.js');
+    const rowId = String(record._row_id || '');
+    const campaignContacts = loadCampaignContactsFromDb(db, rowId);
+    const costHydrate = hydrateRecordCostLedger({ db, recordId: rowId, record });
+    const result = applyOutboundPolicy({
+      record: { ...record, ...costHydrate.patch },
+      recomputeFitFromBreakdown: true,
+      contacts: campaignContacts.length ? campaignContacts : undefined,
+      campaignId: `camp_${record._row_id}`,
+      costLedger: costHydrate.ledger,
+      enrichmentSpendUsd: costHydrate.enrichment_usd,
+    });
+    summary.tiers[result.treatment_tier] = (summary.tiers[result.treatment_tier] || 0) + 1;
+    if (result.integrity_errors.length) summary.integrity_errors += 1;
+    if (summary.sample.length < 5) {
+      summary.sample.push({
+        _row_id: record._row_id,
+        treatment_tier: result.treatment_tier,
+        mail_treatment: result.mail_treatment,
+        priority_lane: result.priority_lane,
+        priority_rank: result.priority_rank,
+        next_action_type: result.next_action?.action_type,
+        eligibility: result.eligibility_outcome,
+      });
+    }
+    if (!dryRun) {
+      ensureRecordColumns({ db, columns: Object.keys(result.patch) });
+      upsertRecord({ db, row: { ...record, ...result.patch } });
+      summary.updated += 1;
+    }
+  }
+  db.close();
+  return summary;
 };
 
 export const generateCommand = async ({ list, where = '', step = '', force = false, dryRun = false, sample = 0 }) => {
@@ -1986,6 +2084,29 @@ export {
 } from './manual.js';
 
 export {
+  callBoardCommand,
+  callBoardClaimCommand,
+  callBoardDisposeCommand,
+  healthCheckCommand,
+  timelineCommand,
+  decisionViewCommand,
+  metricsCommand,
+  auditExportCommand,
+  workQueuesCommand,
+  queueRepairCommand,
+  queueEnrichmentHoldCommand,
+  queueObjectionCommand,
+  queueCallbackCommand,
+  queueMeetingCommand,
+  queueRecycleCommand,
+  queueReentryCommand,
+  queueStageReviewCommand,
+  queueManualCommand,
+  queueReplyCommand,
+  WORK_QUEUE_NAMES,
+} from './operator-surfaces.js';
+
+export {
   sequencesBoardCommand,
   sequencesListCommand,
 } from './sequences-board.js';
@@ -2010,3 +2131,12 @@ export {
   templatesShowCommand,
   templatesUpdateCommand,
 } from './templates.js';
+
+export {
+  contextCommand,
+  monitorCommand,
+  monitorOnceCommand,
+  pendingActionCommand,
+  pendingListCommand,
+  pendingShowCommand,
+} from './operator.js';

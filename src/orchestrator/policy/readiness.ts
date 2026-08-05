@@ -1,0 +1,259 @@
+/**
+ * Readiness evaluators for account, contact, channel, content, treatment, suppression.
+ */
+
+import { actionConfidenceAllows, type EvidenceConfidenceProfile } from './scoring.js';
+import { assertWorkAllowed } from './forbidden-channels.js';
+
+export type ReadinessInput = {
+  eligible: boolean;
+  suppressed: boolean;
+  identityConfidence: number;
+  materialContradiction: boolean;
+  treatmentTier: string;
+  /**
+   * When mail_treatment is none, mail channel ready is forced false —
+   * never invent mail permission from address reachability alone.
+   */
+  mailTreatment?: string | null;
+  channels: {
+    email?: { ready: boolean; confidence?: number };
+    phone?: { ready: boolean; confidence?: number };
+    linkedin?: { ready: boolean; confidence?: number };
+    mail?: { ready: boolean; confidence?: number };
+  };
+  contentReady?: boolean;
+  claimAuditPassed?: boolean;
+  withinBudget?: boolean;
+  collision?: boolean;
+  hasNextAction?: boolean;
+  confidenceProfile?: EvidenceConfidenceProfile;
+  /**
+   * Named buyer for Tier A / GT readiness — never invent confirmed status.
+   * When treatmentTier is A, status confirmed|likely + non-empty name required.
+   */
+  namedBuyerStatus?: string | null;
+  namedBuyerName?: string | null;
+  /**
+   * Optional affiliation fields. If status is unresolved → hold.
+   * High tiers (A) also fail closed when affiliation/role missing.
+   */
+  buyerAffiliationStatus?: string | null;
+  buyingCenterRole?: string | null;
+  proposedAction?: {
+    kind?: string;
+    channel?: 'email' | 'phone' | 'linkedin' | 'mail';
+    taskType?: string;
+    stepId?: string;
+  };
+};
+
+/** Channel is usable when ready=true and confidence is a finite number (present). */
+function channelUsable(state: { ready?: boolean; confidence?: number } | null | undefined): boolean {
+  if (!state || state.ready !== true) return false;
+  if (state.confidence == null || state.confidence === ('' as unknown)) return false;
+  const c = Number(state.confidence);
+  return Number.isFinite(c);
+}
+
+export type ReadinessResult = {
+  ready: boolean;
+  blockers: string[];
+  warnings: string[];
+  permitted_channels: string[];
+};
+
+/**
+ * Baseline outbound readiness before any active external action.
+ */
+export function evaluateOutboundReadiness(input: ReadinessInput): ReadinessResult {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+
+  if (!input.eligible) blockers.push('not_eligible');
+  if (input.suppressed) blockers.push('suppressed');
+  if (input.identityConfidence < 80) blockers.push('identity_confidence_below_80');
+  if (input.materialContradiction) blockers.push('material_contradiction');
+  if (input.treatmentTier === 'enrichment_hold') blockers.push('enrichment_hold');
+  if (input.treatmentTier === 'D' && input.proposedAction?.channel) {
+    // Tier D: no proactive cold outreach
+    blockers.push('tier_d_no_proactive_outreach');
+  }
+  if (input.withinBudget === false) blockers.push('budget_exceeded');
+  if (input.collision) blockers.push('channel_or_contact_collision');
+  // Fail closed: missing next_action must not readiness-pass.
+  if (input.hasNextAction !== true) blockers.push('missing_next_action');
+
+  // Named buyer + affiliation gates (GT matrix + Tier A readiness).
+  const buyerStatus = input.namedBuyerStatus != null
+    ? String(input.namedBuyerStatus).trim().toLowerCase()
+    : '';
+  const buyerName = input.namedBuyerName != null
+    ? String(input.namedBuyerName).trim()
+    : '';
+  const affStatus = input.buyerAffiliationStatus != null
+    ? String(input.buyerAffiliationStatus).trim().toLowerCase()
+    : '';
+  const buyingRole = input.buyingCenterRole != null
+    ? String(input.buyingCenterRole).trim()
+    : '';
+  const affUnresolved = new Set(['unresolved', 'unknown', 'not_found', 'ambiguous']);
+
+  // If affiliation is present and unresolved → always hold (never invent).
+  if (affStatus && affUnresolved.has(affStatus)) {
+    blockers.push('buyer_affiliation_unresolved');
+  }
+
+  if (input.treatmentTier === 'A') {
+    if (!buyerStatus) blockers.push('named_buyer_status_missing');
+    else if (!['confirmed', 'likely'].includes(buyerStatus)) {
+      blockers.push('named_buyer_not_confirmed');
+    }
+    if (!buyerName) blockers.push('named_buyer_name_missing');
+    // High-tier fail closed: affiliation + buying-center role required.
+    if (!affStatus) blockers.push('buyer_affiliation_status_missing');
+    else if (!affUnresolved.has(affStatus) && !['confirmed', 'likely'].includes(affStatus)) {
+      blockers.push('buyer_affiliation_not_confirmed');
+    }
+    if (!buyingRole) blockers.push('buying_center_role_missing');
+  }
+
+  if (input.proposedAction) {
+    try {
+      assertWorkAllowed({
+        kind: input.proposedAction.kind,
+        channel: input.proposedAction.channel,
+        taskType: input.proposedAction.taskType,
+        stepId: input.proposedAction.stepId,
+      });
+    } catch (e) {
+      blockers.push(`forbidden_work:${(e as Error).message}`);
+    }
+  }
+
+  // Never invent mail permission: mail_treatment none forces mail not ready.
+  const channels = { ...(input.channels || {}) };
+  if (channels.mail) {
+    const mailTreatment = input.mailTreatment != null
+      ? String(input.mailTreatment).trim().toLowerCase()
+      : '';
+    if (mailTreatment === 'none' || mailTreatment === '') {
+      // Empty / none = no mail permission. Explicit empty only forces when provided as 'none'.
+      if (mailTreatment === 'none') {
+        channels.mail = { ...channels.mail, ready: false };
+      }
+    }
+  }
+
+  const permitted_channels: string[] = [];
+  for (const [ch, state] of Object.entries(channels)) {
+    if (state?.ready) permitted_channels.push(ch);
+  }
+
+  // Baseline: no channel ready=true with confidence → fail closed even without proposedAction.
+  const usable = Object.entries(channels).filter(([, state]) => channelUsable(state));
+  if (usable.length === 0) {
+    blockers.push('no_usable_channel');
+  }
+  if (permitted_channels.length === 0 && input.proposedAction?.channel) {
+    blockers.push('no_ready_channel');
+  }
+
+  if (input.proposedAction?.channel === 'email' && channels.email && !channels.email.ready) {
+    blockers.push('email_not_ready');
+  }
+  if (input.proposedAction?.channel === 'phone' && channels.phone && !channels.phone.ready) {
+    blockers.push('phone_not_ready');
+  }
+  if (input.proposedAction?.channel === 'linkedin' && channels.linkedin && !channels.linkedin.ready) {
+    blockers.push('linkedin_not_ready');
+  }
+  if (input.proposedAction?.channel === 'mail' && channels.mail && !channels.mail.ready) {
+    blockers.push('mail_not_ready');
+  }
+
+  // Fail closed: undefined/null content must not readiness-pass.
+  if (input.contentReady !== true) blockers.push('content_not_ready');
+  // Explicit fail always blocks. Content present + missing/null audit also blocks
+  // (null must not readiness-pass — AGGREGATE B2).
+  if (input.claimAuditPassed === false) blockers.push('claim_audit_failed');
+  else if (input.contentReady === true && input.claimAuditPassed !== true) {
+    blockers.push('claim_audit_required');
+  }
+
+  if (input.confidenceProfile && input.proposedAction?.channel) {
+    const gate = actionConfidenceAllows({
+      action: input.proposedAction.channel,
+      profile: input.confidenceProfile,
+    });
+    if (!gate.allowed) blockers.push(...gate.failing.map((f) => `confidence:${f}`));
+  }
+
+  // Tier C: no proactive cold calls or default mail
+  if (input.treatmentTier === 'C' && input.proposedAction?.channel === 'phone') {
+    blockers.push('tier_c_no_proactive_cold_calls');
+  }
+  if (input.treatmentTier === 'C' && input.proposedAction?.channel === 'mail') {
+    blockers.push('tier_c_no_default_mail');
+  }
+
+  return {
+    ready: blockers.length === 0,
+    blockers,
+    warnings,
+    permitted_channels,
+  };
+}
+
+/**
+ * Eligibility outcome with auditable reason codes.
+ */
+export type EligibilityOutcome =
+  | 'eligible'
+  | 'review_hold'
+  | 'enrichment_hold'
+  | 'active'
+  | 'recycle'
+  | 'disqualified'
+  | 'suppressed';
+
+export function classifyEligibility(input: {
+  isBusiness: boolean;
+  permanentlyClosed: boolean;
+  outOfTerritory: boolean;
+  isDuplicate: boolean;
+  isNonSmbOrg: boolean; // government, school, church, association
+  corporateNoLocalAuthority: boolean;
+  identityUnresolved: boolean;
+  suppressed: boolean;
+  reasonEvidenceIds?: string[];
+}): { outcome: EligibilityOutcome; reasons: string[]; evidence_ids: string[] } {
+  const reasons: string[] = [];
+  const evidence_ids = input.reasonEvidenceIds || [];
+
+  if (input.suppressed) {
+    return { outcome: 'suppressed', reasons: ['suppression_rule'], evidence_ids };
+  }
+  if (!input.isBusiness) {
+    return { outcome: 'disqualified', reasons: ['not_a_business'], evidence_ids };
+  }
+  if (input.permanentlyClosed) {
+    return { outcome: 'disqualified', reasons: ['permanently_closed'], evidence_ids };
+  }
+  if (input.outOfTerritory) {
+    return { outcome: 'disqualified', reasons: ['out_of_territory'], evidence_ids };
+  }
+  if (input.isDuplicate) {
+    return { outcome: 'disqualified', reasons: ['duplicate_canonical_record'], evidence_ids };
+  }
+  if (input.isNonSmbOrg) {
+    return { outcome: 'disqualified', reasons: ['non_smb_organization'], evidence_ids };
+  }
+  if (input.corporateNoLocalAuthority) {
+    return { outcome: 'disqualified', reasons: ['corporate_no_local_authority'], evidence_ids };
+  }
+  if (input.identityUnresolved) {
+    return { outcome: 'enrichment_hold', reasons: ['identity_unresolved'], evidence_ids };
+  }
+  return { outcome: 'eligible', reasons: ['passed_hard_eligibility'], evidence_ids };
+}

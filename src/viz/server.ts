@@ -286,9 +286,18 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
       const { config } = readConfig(listDir);
       const db = openListDb({ listDir, readonly: false });
       try {
+        const result = await completeManualTask({
+          db,
+          config,
+          listDir,
+          recordId: rowId,
+          stepId,
+          note,
+          skip,
+        });
         return c.json({
           ok: true,
-          ...completeManualTask({ db, config, recordId: rowId, stepId, note, skip }),
+          ...result,
         });
       } finally {
         db.close();

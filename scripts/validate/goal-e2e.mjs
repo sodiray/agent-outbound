@@ -529,7 +529,7 @@ await runPipelineDataflow({
 const awaiting = listAwaitingManualTasks({ db: sendDb });
 const parked = awaiting.tasks.find((t) => t.record_id === 'send1');
 const completed = parked
-  ? completeManualTask({
+  ? await completeManualTask({
     db: sendDb,
     config: parsedSend.config,
     recordId: 'send1',

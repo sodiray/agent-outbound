@@ -158,7 +158,8 @@ export const smtpSession = async (socket, {
   expectCode(await readSmtpResponse(socket), 250, 'SMTP DATA');
   sendLine(socket, 'QUIT');
   try { socket.end(); } catch { /* */ }
-  return { message_id: messageId, mode: 'smtp' };
+  // First-send thread seed = Message-ID until a provider returns a conversation id.
+  return { message_id: messageId, thread_id: messageId, mode: 'smtp' };
 };
 
 export const smtpSend = async ({
@@ -212,8 +213,11 @@ const sinkSend = ({ from, to, subject, body, toName, businessName, templateId })
     .digest('hex')
     .slice(0, 24)}`;
   const file = join(sinkDir, `${messageId}.json`);
+  // First-send thread seed = message_id (no separate conversation id in sink mode).
   const payload = {
     message_id: messageId,
+    thread_id: messageId,
+    provider_id: messageId,
     mode: 'sink',
     from,
     to,
@@ -320,6 +324,7 @@ const main = async () => {
     ok: true,
     message_id: result.message_id,
     provider_id: result.message_id,
+    thread_id: result.thread_id || result.message_id,
     mode: result.mode,
     to,
     from,

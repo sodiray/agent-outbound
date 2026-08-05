@@ -31,6 +31,11 @@ import {
   simulatePipeline,
   writeFilterFailure,
 } from './shared.js';
+import {
+  assertListAccessForMutation,
+  filterRecordsForCanary,
+  loadCanaryConfig,
+} from '../policy/canary-isolation.js';
 
 type DataflowRecord = Record<string, any>;
 
@@ -131,9 +136,94 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
       || kind === 'exit'
       || (kind === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag'),
     deps: [...new Set([...stringArray(step?.depends_on), ...stringArray(step?.runs_after), ...reviewDeps])],
-    executable: ['filter', 'enrich', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit'].includes(kind),
+    executable: (() => {
+      // generate is executable on the normal path when selected by selectDataflowSteps
+      // (critical-path / AO_RUN_GENERATE / run_in_pipeline / fixture).
+      const base = ['filter', 'enrich', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate'];
+      // Deterministic pipeline fixture mode also executes sourcing-like kinds via fixtures.
+      if (String(process.env.AO_PIPELINE_FIXTURE || '').trim() === '1') {
+        return [...base, 'geo_tiles', 'linkedin_profile_search', 'pipeline'].includes(kind);
+      }
+      return base.includes(kind);
+    })(),
   };
 });
+
+const envFlag = (name: string) => String(process.env[name] || '').trim() === '1';
+
+/**
+ * Generate steps that non-generate pipeline steps (transitively) depend on.
+ * e.g. treatment_assignment (policy_apply) → account_intelligence.
+ */
+export const criticalPathGenerateIds = (
+  steps: Array<{ id: string; kind: string; deps: string[] }>,
+): Set<string> => {
+  const byId = new Map(steps.map((entry) => [entry.id, entry]));
+  const critical = new Set<string>();
+  for (const entry of steps) {
+    if (entry.kind === 'generate') continue;
+    for (const dep of entry.deps) {
+      if (byId.get(dep)?.kind === 'generate') critical.add(dep);
+    }
+  }
+  // Pull in generate→generate prerequisites of critical generates.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const id of [...critical]) {
+      const step = byId.get(id);
+      if (!step) continue;
+      for (const dep of step.deps) {
+        if (byId.get(dep)?.kind === 'generate' && !critical.has(dep)) {
+          critical.add(dep);
+          changed = true;
+        }
+      }
+    }
+  }
+  return critical;
+};
+
+/**
+ * Whether a step stays in the dataflow step list.
+ *
+ * Non-generate always kept.
+ *
+ * Generate policy (production-first; fixtures only for $0 tests):
+ * - **Critical path** (depended on transitively by any non-generate step, e.g.
+ *   `account_intelligence` → `treatment_assignment`): always on the normal path.
+ *   Never requires AO_PIPELINE_FIXTURE.
+ * - **Honest opt-in** (`run_in_pipeline: true` on the step or step.config):
+ *   e.g. TV `diagnostic_content_pack` — runs on production dataflow without
+ *   AO_RUN_GENERATE, still subject to its `when:` gate (A/B/C only).
+ * - **AO_RUN_GENERATE=1**: include every generate (expensive asset packs too).
+ * - **AO_PIPELINE_FIXTURE=1**: full generate graph with deterministic fixtures.
+ * - Otherwise deferred (not hidden from config — simply not selected for this run).
+ */
+export const includeStepInDataflow = ({
+  step,
+  criticalGenerateIds,
+  pipelineFixture = envFlag('AO_PIPELINE_FIXTURE'),
+  runGenerate = envFlag('AO_RUN_GENERATE'),
+}: {
+  step: { kind: string; id: string; step?: any };
+  criticalGenerateIds: Set<string>;
+  pipelineFixture?: boolean;
+  runGenerate?: boolean;
+}): boolean => {
+  if (step.kind !== 'generate') return true;
+  if (pipelineFixture || runGenerate) return true;
+  if (criticalGenerateIds.has(step.id)) return true;
+  const raw = step.step || {};
+  if (raw.run_in_pipeline === true) return true;
+  if (raw.config && typeof raw.config === 'object' && raw.config.run_in_pipeline === true) return true;
+  return false;
+};
+
+export const selectDataflowSteps = (steps: DataflowStep[]): DataflowStep[] => {
+  const criticalGenerateIds = criticalPathGenerateIds(steps);
+  return steps.filter((step) => includeStepInDataflow({ step, criticalGenerateIds }));
+};
 
 const compareCost = (a: DataflowStep, b: DataflowStep) => (
   a.tier - b.tier
@@ -491,7 +581,7 @@ const initializeResolved = ({
     const initial = new Set(Array.from(passed.get(recordId) || []).filter((stepId) => {
       const step = steps.find((entry) => entry.id === stepId);
       if (!step) return true;
-      if (step.kind === 'enrich') return !force;
+      if (step.kind === 'enrich' || step.kind === 'generate') return !force;
       if (step.kind === 'review') {
         if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
         return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
@@ -583,9 +673,15 @@ const makeApplicable = ({ db, listDir, config, force }: { db: any; listDir: stri
 const createLazyExecutionContext = ({ db, listDir, config, force }: { db: any; listDir: string; config: any; force: boolean }) => {
   const state: { mcp: any; toolCatalog: any } = { mcp: null, toolCatalog: null };
   return async (step: DataflowStep) => {
-    if (step.kind === 'enrich' && enrichmentStepNeedsMcp(step.step, { listDir }) && !state.mcp) state.mcp = await getMcpClient();
+    if (
+      (step.kind === 'enrich' || step.kind === 'generate')
+      && enrichmentStepNeedsMcp(step.step, { listDir })
+      && !state.mcp
+    ) {
+      state.mcp = await getMcpClient();
+    }
     if (PIPELINE_ACTION_KINDS.has(step.kind) && step.step?.config?.tool && !state.mcp) state.mcp = await getMcpClient();
-    if ((step.kind === 'enrich' || PIPELINE_ACTION_KINDS.has(step.kind)) && !state.toolCatalog) {
+    if ((step.kind === 'enrich' || step.kind === 'generate' || PIPELINE_ACTION_KINDS.has(step.kind)) && !state.toolCatalog) {
       state.toolCatalog = readToolCatalog(listDir);
     }
     return {
@@ -623,6 +719,11 @@ export const runPipelineDataflow = async ({
   concurrency?: number;
   clock?: PipelineClock;
 }) => {
+  // Canary isolation: refuse unscoped mutations against dirty prod corpus.
+  const canaryConfig = dryRun
+    ? loadCanaryConfig({ listDir })
+    : assertListAccessForMutation(listDir);
+
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   prepareFieldCheckValueFiles({ config, listDir });
@@ -641,14 +742,27 @@ export const runPipelineDataflow = async ({
   const rawSteps: any[] = flattenPipelineSteps(config);
   const db = openListDb({ listDir, readonly: dryRun });
   try {
-    const steps = buildSteps({ db, steps: rawSteps }).filter((step) => step.kind !== 'generate');
-    // Honor human decision overrides before selecting the in-play set: drops are
-    // re-disqualified (excluded), keeps are un-disqualified (re-included).
-    if (!dryRun) reconcileOverrides({ db });
-    // Re-assert human-owned field values (lead set) before and regardless of
-    // whatever the steps write; upsertRecord also enforces these per-write.
-    if (!dryRun) reconcileFieldOverrides({ db });
-    const rows = readInPlayRows({ db, where, limit });
+    // Keep critical-path generate (e.g. account_intelligence → treatment/policy_apply).
+    // Non-critical generate stays deferred unless AO_RUN_GENERATE=1 or run_in_pipeline.
+    // Fixture mode still includes the full generate graph for deterministic dry runs.
+    const steps = selectDataflowSteps(buildSteps({ db, steps: rawSteps }));
+    // Select canary-allowed in-play set FIRST. Reconciliation must not touch
+    // non-allowlisted production rows under canary/strict mode.
+    // Filter canary before limit so excluded production rows cannot starve allowlist.
+    const rawInPlay = readInPlayRows({ db, where, limit: 0 });
+    const canaryRows = filterRecordsForCanary(rawInPlay, canaryConfig);
+    const rows = Number(limit || 0) > 0 ? canaryRows.slice(0, Number(limit)) : canaryRows;
+    // Honor human decision overrides only for the canary-scoped set.
+    if (!dryRun) {
+      reconcileOverrides({
+        db,
+        recordIds: rows.map((r) => getRecordRowId(r)).filter(Boolean),
+      });
+      reconcileFieldOverrides({
+        db,
+        recordIds: rows.map((r) => getRecordRowId(r)).filter(Boolean),
+      });
+    }
     if (dryRun) return simulatePipeline({ db, listDir, steps: steps.map((entry) => ({ ...entry.step, id: entry.id })), baseRows: rows, force, reapply });
     const overridesByRecord = overridesByRecordMap({ db });
 
@@ -677,7 +791,12 @@ export const runPipelineDataflow = async ({
     summary.skipped_passed = rows.reduce((total, row) => total + steps.filter((step) => (
       (step.kind === 'filter' || step.kind === 'exit')
       && resolvedByRecord.get(getRecordRowId(row))?.has(step.id)
-      && hasPassedStep({ db, recordId: getRecordRowId(row), stepId: step.id })
+      && hasPassedStep({
+        db,
+        recordId: getRecordRowId(row),
+        stepId: step.id,
+        contactId: String((row as any).active_contact_id || (row as any).contact_id || '') || null,
+      })
     )).length, 0);
 
     emitActivity({ event: 'phase_start', phase: 'pipeline', rows: rows.length, steps: steps.length, engine: 'dataflow' });
@@ -722,7 +841,8 @@ export const runPipelineDataflow = async ({
       onStepOutcome: async (recordState, step, outcome) => {
         const recordId = getRecordRowId(recordState.record);
         const now = clockIso(clock);
-        if (step.kind === 'enrich') {
+        // enrich + generate both write fields then must refresh so dependents (policy_apply) see them.
+        if (step.kind === 'enrich' || step.kind === 'generate') {
           if (outcome.errored) {
             const error = String(outcome.reason || 'failed');
             db.prepare(`
@@ -745,7 +865,7 @@ export const runPipelineDataflow = async ({
               step_id: step.id,
               kind: step.kind,
               passed: true,
-              reason: '',
+              reason: String(outcome.reason || ''),
               occurred_at: now,
             },
           });

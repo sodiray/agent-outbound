@@ -53,6 +53,30 @@ import {
   scoreCommand,
   sequenceRunCommand,
   sequenceStatusCommand,
+  interruptCommand,
+  stageReviewAuthorizeCommand,
+  stageReviewListCommand,
+  manualListCommand,
+  manualCompleteCommand,
+  callBoardCommand,
+  callBoardClaimCommand,
+  callBoardDisposeCommand,
+  healthCheckCommand,
+  timelineCommand,
+  decisionViewCommand,
+  metricsCommand,
+  auditExportCommand,
+  workQueuesCommand,
+  queueRepairCommand,
+  queueEnrichmentHoldCommand,
+  queueObjectionCommand,
+  queueCallbackCommand,
+  queueMeetingCommand,
+  queueRecycleCommand,
+  queueReentryCommand,
+  queueStageReviewCommand,
+  queueManualCommand,
+  queueReplyCommand,
   sourceCommand,
   sourceMoreCommand,
   snapshotCreateCommand,
@@ -145,6 +169,35 @@ const ACTIONS: Record<string, any> = {
   reconcile: reconcileCommand,
   suppress: suppressCommand,
   forget: forgetCommand,
+  interrupt: interruptCommand,
+  // Operator surfaces (canary: authorize LI, complete mail, claim call, export audit)
+  stage_review_authorize: stageReviewAuthorizeCommand,
+  stage_review_list: stageReviewListCommand,
+  stage_review_pending: stageReviewListCommand,
+  manual_list: manualListCommand,
+  manual_complete: manualCompleteCommand,
+  call_board: callBoardCommand,
+  call_board_claim: callBoardClaimCommand,
+  call_board_dispose: callBoardDisposeCommand,
+  operator_health: healthCheckCommand,
+  health_check: healthCheckCommand,
+  timeline: timelineCommand,
+  decision: decisionViewCommand,
+  metrics: metricsCommand,
+  audit_export: auditExportCommand,
+  // Work queues (unified + per-queue aliases)
+  work_queues: workQueuesCommand,
+  operator_queues: workQueuesCommand,
+  queue_repair: queueRepairCommand,
+  queue_reply: queueReplyCommand,
+  queue_enrichment_hold: queueEnrichmentHoldCommand,
+  queue_objection: queueObjectionCommand,
+  queue_callback: queueCallbackCommand,
+  queue_meeting: queueMeetingCommand,
+  queue_recycle: queueRecycleCommand,
+  queue_reentry: queueReentryCommand,
+  queue_stage_review: queueStageReviewCommand,
+  queue_manual: queueManualCommand,
 };
 
 const MUTATING_ACTIONS = new Set([
@@ -183,6 +236,11 @@ const MUTATING_ACTIONS = new Set([
   'reconcile',
   'suppress',
   'forget',
+  'interrupt',
+  'stage_review_authorize',
+  'manual_complete',
+  'call_board_claim',
+  'call_board_dispose',
 ]);
 
 const nowIso = () => new Date().toISOString();
@@ -298,6 +356,88 @@ const handleAction = async (c: any) => {
 };
 app.post('/actions/:action', handleAction);
 app.post('/v1/actions/:action', handleAction);
+
+/**
+ * Unipile (or fixture) inbound webhook transport.
+ * Engineering owns route, auth/signature, payload parse, duplicate/order reconciliation.
+ * Live provider delivery remains a canary concern.
+ */
+const handleUnipileWebhook = async (c: any) => {
+  const { resolveListDir } = await import('./orchestrator/runtime/paths.js');
+  const { openListDb, upsertRecord, ensureRecordColumns } = await import('./orchestrator/runtime/db.js');
+  const { reconcileUnipileWebhook } = await import('./orchestrator/channels/unipile.js');
+
+  const rawBody = await c.req.text().catch(() => '');
+  let payload: any = {};
+  try {
+    payload = rawBody ? JSON.parse(rawBody) : {};
+  } catch {
+    return c.json({ ok: false, error: 'invalid_json' }, 400);
+  }
+
+  const signatureHeader = String(c.req.header('x-unipile-signature') || c.req.header('x-webhook-signature') || '').trim();
+  const secret = String(process.env.UNIPILE_WEBHOOK_SECRET || process.env.AO_WEBHOOK_SECRET || '').trim();
+  // When a secret is configured, require exact secret or sha256=hex(secret:body).
+  if (secret) {
+    const expected = createHash('sha256').update(`${secret}:${rawBody}`).digest('hex');
+    const ok = signatureHeader === secret
+      || signatureHeader === expected
+      || signatureHeader === `sha256=${expected}`;
+    if (!ok) {
+      return c.json({ ok: false, error: 'invalid_webhook_signature' }, 401);
+    }
+  }
+
+  const list = String(payload.list || c.req.query('list') || '').trim();
+  const recordId = String(payload.record_id || payload.row_id || payload.account_external_id || '').trim();
+  if (!list || !recordId) {
+    return c.json({ ok: false, error: 'list and record_id required' }, 400);
+  }
+
+  const listDir = resolveListDir(list);
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    const row = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId) as any;
+    if (!row) return c.json({ ok: false, error: 'record_not_found' }, 404);
+
+    let seen: string[] = [];
+    try {
+      const raw = row.linkedin_webhook_seen_json;
+      seen = typeof raw === 'string' ? JSON.parse(raw || '[]') : Array.isArray(raw) ? raw : [];
+    } catch {
+      seen = [];
+    }
+
+    const result = reconcileUnipileWebhook({
+      record: row,
+      payload,
+      seen_event_ids: seen,
+    });
+
+    if (result.event_id && !seen.includes(result.event_id)) {
+      seen.push(result.event_id);
+    }
+    const patch = {
+      ...result.patch,
+      linkedin_webhook_seen_json: JSON.stringify(seen.slice(-50)),
+    };
+    ensureRecordColumns({ db, columns: Object.keys(patch) });
+    upsertRecord({ db, row: { ...row, ...patch } });
+
+    return c.json({
+      ok: result.ok,
+      reason: result.reason,
+      provider_id: result.provider_id,
+      event_id: result.event_id,
+      duplicate: result.duplicate,
+      out_of_order: result.out_of_order,
+    });
+  } finally {
+    db.close();
+  }
+};
+app.post('/webhooks/unipile', handleUnipileWebhook);
+app.post('/v1/webhooks/unipile', handleUnipileWebhook);
 
 app.get('/v1/activity', async (c) => {
   const list = String(c.req.query('list') || activeListDir || '').trim();
@@ -432,6 +572,9 @@ const parseWsFrames = (buffer: Buffer) => {
   }
   return { frames: out, rest: buffer.subarray(offset) };
 };
+
+/** Exported for engineering validation (real HTTP requests against routes). */
+export { app as serveApp };
 
 export const startServeMode = ({ list = '.', port = 49391 } = {}) => {
   const listDir = resolveListDir(list);

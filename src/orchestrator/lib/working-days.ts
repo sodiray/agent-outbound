@@ -20,6 +20,90 @@ export const toIsoDate = (value: any) => {
   return parsed.toISOString().slice(0, 10);
 };
 
+/**
+ * Calendar date (YYYY-MM-DD) in an IANA timezone for an instant.
+ * Used for Boise (America/Boise) wall-clock scheduling across DST.
+ */
+export const toZonedIsoDate = (value: string | Date, timeZone = 'America/Boise'): string => {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  // en-CA yields YYYY-MM-DD
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+};
+
+/** Weekday token in IANA timezone (DST-aware). */
+export const getWeekdayInTimezone = (
+  isoDateOrInstant: string | Date,
+  timeZone = 'America/Boise',
+): SequenceWorkingDay => {
+  const d = typeof isoDateOrInstant === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(isoDateOrInstant)
+    ? new Date(`${isoDateOrInstant}T12:00:00.000Z`)
+    : isoDateOrInstant instanceof Date
+      ? isoDateOrInstant
+      : new Date(isoDateOrInstant);
+  const short = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(d);
+  const map: Record<string, SequenceWorkingDay> = {
+    Sun: 'sun', Mon: 'mon', Tue: 'tue', Wed: 'wed', Thu: 'thu', Fri: 'fri', Sat: 'sat',
+  };
+  return map[short] || getUtcWeekday(toIsoDate(d));
+};
+
+/**
+ * Apply working-days filter using wall clock in `timeZone` (default America/Boise).
+ * Falls back to UTC weekday when timeZone is empty.
+ */
+export const applyWorkingDaysFilterInTimezone = ({
+  isoDate,
+  workingDays,
+  policy,
+  timeZone = 'America/Boise',
+}: {
+  isoDate: string;
+  workingDays: SequenceWorkingDay[];
+  policy: NonWorkingDayPolicy;
+  timeZone?: string;
+}): { date: string; shifted: boolean } | { skip: true } => {
+  const allowed = new Set(workingDays || []);
+  if (allowed.size === 0) throw new Error('working_days must include at least one day.');
+
+  const weekdayOf = (day: string) =>
+    timeZone ? getWeekdayInTimezone(day, timeZone) : getUtcWeekday(day);
+
+  if (allowed.has(weekdayOf(isoDate))) {
+    return { date: isoDate, shifted: false };
+  }
+  if (policy === 'skip') return { skip: true };
+
+  for (let offset = 1; offset <= 14; offset += 1) {
+    const candidate = addIsoDays(isoDate, offset);
+    if (allowed.has(weekdayOf(candidate))) {
+      return { date: candidate, shifted: true };
+    }
+  }
+  throw new Error('Failed to resolve next working day in timezone.');
+};
+
+/** True when next_action_date is due relative to "today" in timezone. */
+export const isActionDueInTimezone = ({
+  nextActionDate,
+  now,
+  timeZone = 'America/Boise',
+}: {
+  nextActionDate: string;
+  now: string | Date;
+  timeZone?: string;
+}): boolean => {
+  const due = toIsoDate(nextActionDate);
+  if (!due) return true;
+  const today = toZonedIsoDate(now, timeZone);
+  return due <= today;
+};
+
 export const addIsoDays = (isoDate: string, days: number) => {
   const date = new Date(`${isoDate}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + Number(days || 0));
@@ -110,6 +194,19 @@ export const computeNextScheduledAction = ({
   const skippedStepNumbers: number[] = [];
   let sequenceStep = Number(completedStepNumber || 0);
   const list = Array.isArray(steps) ? steps : [];
+
+  // Fail closed: empty steps means the caller did not provide the sequence
+  // definition (e.g. nested pipeline previously passed `{ steps: [] }`).
+  // Never invent sequence completion — that prematurely ends campaigns and
+  // rotates contacts onto the wrong step.
+  if (list.length === 0) {
+    return {
+      sequenceStep: Math.max(0, sequenceStep),
+      nextActionDate: '',
+      skippedStepNumbers,
+      completed: false,
+    };
+  }
 
   for (let stepNumber = sequenceStep + 1; stepNumber <= list.length; stepNumber += 1) {
     const step = list[stepNumber - 1] || {};

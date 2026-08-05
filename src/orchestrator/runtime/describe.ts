@@ -10,8 +10,8 @@ export type CommandDefinition = {
     default?: string | number | boolean;
     description: string;
   }>;
-  input_schema: Record<string, any>;
-  output_schema: Record<string, any>;
+  input_schema: Record<string, unknown>;
+  output_schema: Record<string, unknown>;
   examples: string[];
 };
 
@@ -24,6 +24,84 @@ const COMMON_OUTPUT = {
 };
 
 const CATALOG: CommandDefinition[] = [
+  {
+    name: 'context',
+    description: 'Compile concise project operating context for an agent.',
+    mutating: false,
+    flags: [
+      { name: '--list', type: 'string', required: true, description: 'Outbound project directory.' },
+    ],
+    input_schema: { list: 'string' },
+    output_schema: {
+      ...COMMON_OUTPUT,
+      result: {
+        project: 'string',
+        objective: 'string',
+        activePipelines: 'string[]',
+        activeSequences: 'string[]',
+        approvalPolicy: 'object',
+        operatorInstructions: 'string',
+        pendingSummary: 'object',
+        configVersion: 'string',
+      },
+    },
+    examples: ['agent-outbound context --list treasure-valley --json'],
+  },
+  {
+    name: 'pending',
+    description: 'Reconcile and rank durable operator attention across one or more projects.',
+    mutating: true,
+    flags: [
+      { name: '--list', type: 'string', required: false, description: 'Outbound project directory.' },
+      { name: '--all-lists', type: 'boolean', default: false, description: 'Read every project under the current directory.' },
+      { name: '--summary', type: 'boolean', default: false, description: 'Return counts without item detail.' },
+      { name: '--kind', type: 'string', required: false, description: 'Filter by pending kind.' },
+      { name: '--priority', type: 'string', required: false, description: 'Filter by priority.' },
+      { name: '--status', type: 'string', required: false, description: 'Filter by lifecycle status.' },
+    ],
+    input_schema: { list: 'optional string', all_lists: 'optional boolean' },
+    output_schema: { ...COMMON_OUTPUT, result: { projects: 'array', summary: 'object' } },
+    examples: [
+      'agent-outbound pending --list treasure-valley --summary --json',
+      'agent-outbound pending --all-lists --json',
+    ],
+  },
+  {
+    name: 'pending lifecycle',
+    aliases: ['pending show', 'pending claim', 'pending release', 'pending resolve', 'pending dismiss', 'pending snooze'],
+    description: 'Inspect or change one durable pending item.',
+    mutating: true,
+    flags: [
+      { name: '--list', type: 'string', required: false, description: 'Outbound project directory.' },
+      { name: '--owner', type: 'string', required: false, description: 'Claimant or resolving actor.' },
+      { name: '--reason', type: 'string', required: false, description: 'Required lifecycle rationale.' },
+      { name: '--until', type: 'timestamp', required: false, description: 'Snooze expiration.' },
+      { name: '--task-id', type: 'string', required: false, description: 'Delegated task id.' },
+      { name: '--lease-minutes', type: 'number', default: 60, description: 'Claim lease duration.' },
+      { name: '--evidence-json', type: 'json', required: false, description: 'Source-state evidence recorded on resolution.' },
+      { name: '--actions-json', type: 'json', required: false, description: 'Actions that satisfied the pending item.' },
+    ],
+    input_schema: { pending_id: 'string', list: 'optional string' },
+    output_schema: { ...COMMON_OUTPUT, result: { project: 'string', item: 'object' } },
+    examples: [
+      'agent-outbound pending claim pending_123 --owner sdr-owner --task-id task_123',
+      'agent-outbound pending resolve pending_123 --reason "Reply handled and state verified"',
+    ],
+  },
+  {
+    name: 'monitor',
+    description: 'Run deterministic observation, pending reconciliation, and notification delivery.',
+    mutating: true,
+    flags: [
+      { name: '--list', type: 'string', required: false, description: 'Outbound project directory.' },
+      { name: '--all-lists', type: 'boolean', default: false, description: 'Monitor all projects below cwd.' },
+      { name: '--interval-seconds', type: 'number', default: 15, description: 'Reconciliation interval.' },
+      { name: '--once', type: 'boolean', default: false, description: 'Run one pass and exit.' },
+    ],
+    input_schema: { list: 'optional string', all_lists: 'optional boolean' },
+    output_schema: { ...COMMON_OUTPUT, result: { projects: 'array' } },
+    examples: ['agent-outbound monitor --list treasure-valley', 'agent-outbound monitor --all-lists --once'],
+  },
   {
     name: 'describe',
     description: 'List command contracts for agent consumers.',
@@ -527,10 +605,123 @@ const CATALOG: CommandDefinition[] = [
   },
 ];
 
+const BASIC_COMMANDS: Array<{
+  name: string;
+  description: string;
+  mutating: boolean;
+  aliases?: string[];
+}> = [
+  { name: 'onboard', description: 'Print the agent-consumable setup guide.', mutating: false },
+  { name: 'init', description: 'Initialize AgentOutbound provider configuration.', mutating: true },
+  { name: 'mcp list', description: 'List MCP server registrations for a project.', mutating: false },
+  { name: 'mcp add', description: 'Register an MCP server for a project.', mutating: true },
+  { name: 'mcp remove', description: 'Remove an MCP server registration.', mutating: true },
+  { name: 'mcp test', description: 'Test one configured MCP server.', mutating: false },
+  { name: 'mailboxes list', description: 'List configured mailboxes.', mutating: false },
+  { name: 'mailboxes show', description: 'Show one mailbox without exposing secrets.', mutating: false },
+  { name: 'mailboxes test', description: 'Send a mailbox connectivity test.', mutating: true },
+  { name: 'list create', description: 'Create a new outbound project scaffold.', mutating: true },
+  { name: 'list info', description: 'Show project metadata and record counts.', mutating: false },
+  { name: 'lists', description: 'List outbound projects below the current directory.', mutating: false },
+  { name: 'lead add', description: 'Add and optionally enrich a named lead.', mutating: true },
+  { name: 'lead set', description: 'Set a durable operator-owned record field.', mutating: true },
+  { name: 'lead unset', description: 'Release an operator-owned record field.', mutating: true },
+  { name: 'lead overrides', description: 'Show field overrides for one lead.', mutating: false },
+  { name: 'interaction add', description: 'Record a prospect interaction and optional follow-up.', mutating: true },
+  { name: 'interaction list', description: 'List prospect interactions and due work.', mutating: false },
+  { name: 'interaction show', description: 'Show one interaction.', mutating: false },
+  { name: 'interaction edit', description: 'Edit one interaction.', mutating: true },
+  { name: 'interaction done', description: 'Complete an interaction follow-up.', mutating: true },
+  { name: 'interaction remove', description: 'Soft-delete an interaction.', mutating: true },
+  { name: 'followups', description: 'List open follow-ups, overdue first.', mutating: false },
+  { name: 'brief', description: 'Generate SDR briefs for selected qualified leads.', mutating: true },
+  { name: 'brief show', description: 'Show the current SDR brief for one lead.', mutating: false },
+  { name: 'automations', description: 'Generate automation plans for selected leads.', mutating: true },
+  { name: 'automations show', description: 'Show one lead automation plan.', mutating: false },
+  { name: 'territories list', description: 'List configured territories.', mutating: false },
+  { name: 'territories assign', description: 'Assign leads to configured territories.', mutating: true },
+  { name: 'territories note', description: 'Add an operator note to a territory.', mutating: true },
+  { name: 'territories show', description: 'Show territory detail and notes.', mutating: false },
+  { name: 'purge', description: 'Remove records matching source exclusion rules after backup.', mutating: true },
+  { name: 'override keep', description: 'Keep a lead despite an automated gate.', mutating: true },
+  { name: 'override drop', description: 'Disqualify a lead by operator decision.', mutating: true },
+  { name: 'override clear', description: 'Clear an active operator decision override.', mutating: true },
+  { name: 'override list', description: 'List active decision overrides.', mutating: false },
+  { name: 'override show', description: 'Show decision history for one lead.', mutating: false },
+  { name: 'pipeline report', description: 'Show a structured pipeline run report.', mutating: false },
+  { name: 'config read', description: 'Read normalized project configuration.', mutating: false },
+  { name: 'config update', description: 'Apply a YAML project configuration update.', mutating: true },
+  { name: 'config author', description: 'Author project configuration from an operating request.', mutating: true },
+  { name: 'config infer-deps', description: 'Infer and optionally write pipeline dependencies.', mutating: true },
+  { name: 'refresh-tools', description: 'Refresh the project MCP tool catalog.', mutating: true },
+  { name: 'source', description: 'Source records using configured strategies.', mutating: true },
+  { name: 'source-territory', description: 'Source records within one configured territory.', mutating: true },
+  { name: 'remove', description: 'Remove selected records from a project.', mutating: true },
+  { name: 'pipeline', description: 'Run the configured pipeline dataflow.', mutating: true },
+  { name: 'score', description: 'Score selected project records.', mutating: true },
+  { name: 'generate', description: 'Run a configured generation step.', mutating: true },
+  { name: 'run', description: 'Run the configured outbound workflow.', mutating: true },
+  { name: 'launch draft', description: 'Generate launch drafts for eligible records.', mutating: true },
+  { name: 'launch send', description: 'Send approved launch work.', mutating: true },
+  { name: 'followup send', description: 'Send currently due sequence follow-ups.', mutating: true },
+  { name: 'sequence run', description: 'Advance one or more configured sequences.', mutating: true },
+  { name: 'sequence status', description: 'Show current sequence state and counts.', mutating: false },
+  { name: 'sequence list', description: 'List configured sequences and sub-pipelines.', mutating: false },
+  { name: 'sequence board', description: 'Show records grouped by sequence step.', mutating: false },
+  { name: 'manual list', description: 'List parked manual tasks.', mutating: false },
+  { name: 'manual complete', aliases: ['manual skip'], description: 'Complete or skip one manual task.', mutating: true },
+  { name: 'dashboard', description: 'Show portfolio pipeline health and alerts.', mutating: false },
+  { name: 'visits today', description: 'List visits scheduled for one date.', mutating: false },
+  { name: 'route plan', description: 'Plan a field route for one date.', mutating: true },
+  { name: 'assets list', description: 'List generated project assets.', mutating: false },
+  { name: 'assets show', description: 'Show a generated asset.', mutating: false },
+  { name: 'assets open', description: 'Open a generated asset in the local environment.', mutating: true },
+  { name: 'log', description: 'Record an outbound action and optional transition.', mutating: true },
+  { name: 'suppress', description: 'Add an identifier to suppression state.', mutating: true },
+  { name: 'forget', description: 'Remove personal contact data from matching records.', mutating: true },
+  { name: 'crm sync', description: 'Synchronize eligible records with the configured CRM.', mutating: true },
+  { name: 'duplicates list', description: 'List possible or confirmed duplicate records.', mutating: false },
+  { name: 'duplicates confirm', description: 'Confirm a duplicate and its canonical record.', mutating: true },
+  { name: 'duplicates break', description: 'Break a duplicate relationship.', mutating: true },
+  { name: 'auth list', aliases: ['auth --list'], description: 'List available integration authentication state.', mutating: false },
+  { name: 'auth login', description: 'Start the integration authentication login flow.', mutating: true },
+  { name: 'auth connect', description: 'Show the authentication URL for one toolkit.', mutating: true },
+  { name: 'serve', description: 'Run the local AgentOutbound action service and integration polling.', mutating: true },
+  { name: 'view', description: 'Run the local AgentOutbound visualizer for one project.', mutating: false },
+  { name: 'reconcile', description: 'Reconcile stale activity and runtime state.', mutating: true },
+  { name: 'watch', description: 'Watch current project activity.', mutating: false },
+  { name: 'kill', description: 'Stop a running local AgentOutbound service.', mutating: true },
+];
+
+const completeCatalog = (): CommandDefinition[] => {
+  const explicitNames = new Set(CATALOG.flatMap((definition) => [
+    definition.name.toLowerCase(),
+    ...(definition.aliases || []).map((alias) => alias.toLowerCase()),
+  ]));
+  const generated = BASIC_COMMANDS
+    .filter((definition) => !explicitNames.has(definition.name.toLowerCase()))
+    .map((definition): CommandDefinition => ({
+      ...definition,
+      flags: [
+        {
+          name: '<arguments>',
+          type: 'string[]',
+          required: false,
+          description: 'Command-specific positional arguments and flags shown by agent-outbound --help.',
+        },
+      ],
+      input_schema: { arguments: 'string[]' },
+      output_schema: { ...COMMON_OUTPUT, result: 'command-specific object' },
+      examples: [`agent-outbound describe --command "${definition.name}"`],
+    }));
+  return [...CATALOG, ...generated];
+};
+
 export const listCommandDefinitions = ({ command = '' }: { command?: string } = {}) => {
+  const definitions = completeCatalog();
   const normalized = String(command || '').trim().toLowerCase();
-  if (!normalized) return CATALOG;
-  return CATALOG.filter((item) => (
+  if (!normalized) return definitions;
+  return definitions.filter((item) => (
     item.name.toLowerCase() === normalized
     || (item.aliases || []).some((alias) => alias.toLowerCase() === normalized)
   ));

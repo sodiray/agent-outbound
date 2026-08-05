@@ -23,6 +23,71 @@ import { providerToolUsageFromError } from '../runtime/providers/usage.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
 import { executeToolCallAction } from './actions/tool-call.js';
 import { executeLinkedinCompanyResolutionAction } from './actions/linkedin-company-resolution.js';
+import {
+  buildEnrichEvidencePatch,
+  EVIDENCE_RECORD_COLUMNS,
+  preservePriorNonBlankFields,
+} from '../policy/evidence.js';
+import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
+
+const zeroUsage = () => ({
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_creation_tokens: 0,
+  cache_read_tokens: 0,
+  usd_cost: 0,
+  tool_calls: [] as unknown[],
+  tool_costs: [] as unknown[],
+});
+
+/** Structured skip from executeEnrichmentAction when over tier enrichment ceiling. */
+export type EnrichmentCeilingSkipResult = {
+  outputs: Record<string, unknown>;
+  artifacts: Record<string, unknown>;
+  usage: ReturnType<typeof zeroUsage>;
+  model: string;
+  provider: string;
+  skipped: true;
+  skip_reason: 'enrichment_ceiling';
+  skip_detail: string;
+};
+
+export const isEnrichmentCeilingSkip = (result: unknown): result is EnrichmentCeilingSkipResult => (
+  Boolean(
+    result
+    && typeof result === 'object'
+    && (result as EnrichmentCeilingSkipResult).skipped === true
+    && (result as EnrichmentCeilingSkipResult).skip_reason === 'enrichment_ceiling',
+  )
+);
+
+/** Evidence + status patch when an enrich/generate step is blocked by the spend ceiling. */
+export const enrichmentCeilingSkipPatch = ({
+  record,
+  stepId,
+  stepConfig,
+  detail,
+  statusColumn,
+}: {
+  record: Record<string, unknown>;
+  stepId: string;
+  stepConfig?: Record<string, unknown>;
+  detail: string;
+  statusColumn?: string;
+}): Record<string, unknown> => {
+  const evidencePatch = buildEnrichEvidencePatch({
+    record,
+    step_id: stepId,
+    step_config: stepConfig,
+    error: detail || 'enrichment_ceiling',
+    failed: true,
+  });
+  const patch: Record<string, unknown> = {
+    ...evidencePatch,
+  };
+  if (statusColumn) patch[statusColumn] = 'skipped';
+  return patch;
+};
 
 const recordErroredProviderToolCost = ({
   db,
@@ -139,7 +204,89 @@ export const ttlToSeconds = (ttl) => {
 // columns, when, cache TTL) must NOT invalidate already-computed enrichment. An
 // explicit `cache_key` overrides everything, giving authors deterministic control
 // over when a step is forced to recompute.
-const MATERIAL_ENRICH_FIELDS = ['action', 'tool', 'args', 'args_map', 'output_map', 'outputs', 'model', 'reasoning', 'prompt_file', 'prompt_args', 'depends_on', 'on_error'] as const;
+const MATERIAL_ENRICH_FIELDS = [
+  'action',
+  'tool',
+  'waterfall',
+  'fallback_tools',
+  'args',
+  'args_map',
+  'output_map',
+  'outputs',
+  'model',
+  'reasoning',
+  'prompt_file',
+  'prompt_args',
+  'depends_on',
+  'on_error',
+] as const;
+
+/** Score-axis staleness keys written by scoring/runner (shouldRescore). */
+export const SCORE_STALENESS_STEP_IDS = ['score:score', 'score:fit', 'score:trigger'] as const;
+
+/**
+ * Clear score cache after material evidence mutation so the next dataflow /
+ * re-score run recomputes fit. Failures do not mark stale (no new usable evidence).
+ * Returns number of staleness rows deleted.
+ */
+export const markScoringStale = ({
+  db,
+  recordId,
+}: {
+  db: any;
+  recordId: string;
+}): number => {
+  const id = String(recordId || '').trim();
+  if (!db || !id) return 0;
+  try {
+    const result = db.prepare(`
+      DELETE FROM staleness
+      WHERE record_id = ?
+        AND (
+          step_id = 'score:score'
+          OR step_id = 'score:fit'
+          OR step_id = 'score:trigger'
+          OR step_id LIKE 'score:%'
+        )
+    `).run(id);
+    return Number(result?.changes || 0);
+  } catch {
+    return 0;
+  }
+};
+
+/**
+ * True when an enrich evidence patch wrote a durable retrieval snapshot (not
+ * tool_failure). Used to decide whether to mark scoring stale + score_status.
+ */
+export const evidencePatchIsMaterialRetrieval = (patch: Record<string, unknown> | null | undefined): boolean => {
+  if (!patch || typeof patch !== 'object') return false;
+  const raw = patch.last_retrieval_snapshot_json;
+  if (raw == null || raw === '') return false;
+  try {
+    const snap = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!snap || typeof snap !== 'object') return false;
+    const kind = String((snap as any).kind || '').trim().toLowerCase();
+    if (kind === 'tool_failure' || kind === 'error') return false;
+    // Success path always stamps kind: retrieval; accept missing kind only when body/hash present.
+    if (kind === 'retrieval' || kind === '') {
+      return Boolean(
+        (snap as any).content_hash
+        || (snap as any).body
+        || (snap as any).excerpt
+        || (snap as any).source_id,
+      );
+    }
+    return false;
+  } catch {
+    return false;
+  }
+};
+
+/** Patch fragment for records when scoring must re-run after evidence mutation. */
+export const scoringStaleRecordPatch = (): Record<string, unknown> => ({
+  score_status: 'stale',
+});
 
 export const materialEnrichConfig = (stepConfig: any): Record<string, any> => {
   const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};
@@ -351,6 +498,65 @@ const applyOutputs = ({ step, outputs }) => {
   return patch;
 };
 
+/** Ensure evidence JSON columns + score_status exist on the list records table. */
+const ensureEvidenceColumns = (db: any) => {
+  ensureRecordColumns({
+    db,
+    columns: [
+      ...EVIDENCE_RECORD_COLUMNS,
+      // Set to 'stale' after material retrieval so next scoring pass re-runs.
+      { name: 'score_status', type: 'TEXT' },
+    ],
+  });
+};
+
+/**
+ * Apply tool/enrich outputs without clobbering prior non-blank fields with empties,
+ * and attach immutable retrieval snapshot + observations (or tool_failure).
+ */
+const applyOutputsWithEvidence = ({
+  step,
+  stepConfig,
+  stepId,
+  outputs,
+  record,
+  provider,
+  usage,
+  error,
+  failed,
+}: {
+  step: any;
+  stepConfig: Record<string, unknown>;
+  stepId: string;
+  outputs: Record<string, unknown>;
+  record: Record<string, unknown>;
+  provider?: string;
+  usage?: Record<string, unknown> | null;
+  error?: string | null;
+  failed?: boolean;
+}) => {
+  const rawPatch = applyOutputs({
+    step: { ...step, config: stepConfig },
+    outputs,
+  });
+  // Never overwrite good site_text (etc.) with empty success/failure outputs.
+  const patch = preservePriorNonBlankFields({
+    record,
+    patch: rawPatch,
+  });
+  const evidencePatch = buildEnrichEvidencePatch({
+    record,
+    step_id: stepId,
+    step_config: stepConfig,
+    outputs: failed ? {} : outputs,
+    provider,
+    usage,
+    error,
+    failed: Boolean(failed),
+  });
+  return { ...patch, ...evidencePatch };
+};
+
 const upsertPrimaryContactIfPresent = ({ db, record }: { db: any; record: any }) => {
   const contactEmail = String(record?.contact_email || record?.email_primary || '').trim().toLowerCase();
   if (!contactEmail) return;
@@ -441,7 +647,52 @@ export const executeEnrichmentAction = async ({
   toolCatalog?: ToolCatalog;
 }) => {
   const action = String(stepConfig?.action || '').trim().toLowerCase();
+  const fixtureMode = String(process.env.AO_PIPELINE_FIXTURE || process.env.AO_STEP_FIXTURE || '').trim() === '1';
+
+  // Pre-provider spend gate: when a tiered record is already over its enrichment
+  // ceiling, skip tool_call / model generate / decision_makers without calling the provider.
+  if (!fixtureMode) {
+    const gate = evaluateEnrichmentCeilingGate({ db, record, stepConfig });
+    if (gate.apply && !gate.within_budget) {
+      const detail = String(gate.detail || gate.reason || 'enrichment_ceiling');
+      return {
+        outputs: {},
+        artifacts: {
+          skipped: true,
+          reason: 'enrichment_ceiling',
+          enrichment_usd: gate.enrichment_usd,
+          ceiling: gate.ceiling,
+          step_id: stepId,
+        },
+        usage: zeroUsage(),
+        model: '',
+        provider: 'cost_blocked',
+        skipped: true as const,
+        skip_reason: 'enrichment_ceiling' as const,
+        skip_detail: detail,
+      };
+    }
+  }
+
   if (action === 'decision_makers') {
+    if (fixtureMode) {
+      const outputs: Record<string, unknown> = {
+        decision_makers_json: record.decision_makers_json
+          || JSON.stringify([{ name: 'Owner', title: 'Owner', email: record.email_primary || record.contact_email || '' }]),
+        contact_name: record.contact_name || 'Owner',
+        contact_email: record.contact_email || record.email_primary || '',
+      };
+      return {
+        outputs,
+        artifacts: { fixture: true, action },
+        usage: {
+          input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
+          usd_cost: 0, tool_calls: [], tool_costs: [],
+        },
+        model: 'fixture',
+        provider: 'fixture',
+      };
+    }
     return executeDecisionMakersAction({
       db,
       mcp,
@@ -463,6 +714,23 @@ export const executeEnrichmentAction = async ({
     });
   }
   if (action === 'linkedin_company_resolution') {
+    if (fixtureMode) {
+      const outputs: Record<string, unknown> = {
+        company_resolution: record.company_resolution || 'resolved',
+        linkedin_company_url: record.linkedin_company_url || 'https://www.linkedin.com/company/fixture',
+        linkedin_confidence: record.linkedin_confidence ?? 90,
+      };
+      return {
+        outputs,
+        artifacts: { fixture: true, action },
+        usage: {
+          input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
+          usd_cost: 0, tool_calls: [], tool_costs: [],
+        },
+        model: 'fixture',
+        provider: 'fixture',
+      };
+    }
     return executeLinkedinCompanyResolutionAction({
       db,
       listDir,
@@ -474,6 +742,101 @@ export const executeEnrichmentAction = async ({
         : [],
     });
   }
+  if (action === 'policy_apply') {
+    const { applyOutboundPolicy, loadCampaignContactsFromDb, hydrateRecordCostLedger } = await import('../policy/index.js');
+    const { ensureRecordColumns, upsertRecord } = await import('../runtime/db.js');
+    const rowId = String(record._row_id || record.id || '');
+    const contacts = db ? loadCampaignContactsFromDb(db, rowId) : [];
+    // Production spend lives in cost_events — hydrate ledger before ceilings/GT.
+    const costHydrate = db && rowId
+      ? hydrateRecordCostLedger({ db, recordId: rowId, record })
+      : null;
+    const recordForPolicy = {
+      ...record,
+      ...(costHydrate?.patch || {}),
+      _list_dir: record._list_dir || listDir,
+    };
+    const result = applyOutboundPolicy({
+      record: recordForPolicy,
+      recomputeFitFromBreakdown: true,
+      contacts: contacts.length ? contacts : undefined,
+      campaignId: rowId ? `camp_${rowId}` : undefined,
+      listDir,
+      costLedger: costHydrate?.ledger,
+      enrichmentSpendUsd: costHydrate?.enrichment_usd,
+    });
+    if (db) {
+      ensureRecordColumns({ db, columns: Object.keys(result.patch) });
+      upsertRecord({ db, row: { ...recordForPolicy, ...result.patch } });
+    }
+    // Map declared outputs from patch when present
+    const outputs: Record<string, unknown> = { ...result.patch };
+    return {
+      outputs,
+      artifacts: {
+        treatment_tier: result.treatment_tier,
+        mail_treatment: result.mail_treatment,
+        priority_lane: result.priority_lane,
+        priority_rank: result.priority_rank,
+        integrity_errors: result.integrity_errors,
+      },
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        usd_cost: 0,
+        tool_calls: [],
+        tool_costs: [],
+      },
+      model: '',
+      provider: 'policy',
+    };
+  }
+  // Generic model/research enrich under fixture: no model spend; typed declared outputs.
+  if (fixtureMode) {
+    const declared = (stepConfig?.outputs && typeof stepConfig.outputs === 'object' ? stepConfig.outputs : {}) as Record<string, unknown>;
+    const outputs: Record<string, unknown> = {};
+    for (const key of Object.keys(declared)) {
+      const spec = declared[key];
+      const typ = (spec && typeof spec === 'object' && !Array.isArray(spec))
+        ? String((spec as any).type || 'string').toLowerCase()
+        : 'string';
+      const existing = record?.[key];
+      if (typ === 'boolean') {
+        if (typeof existing === 'boolean') outputs[key] = existing;
+        else if (key === 'is_franchise') outputs[key] = false;
+        else if (key === 'locally_accessible') outputs[key] = true;
+        else outputs[key] = Boolean(existing);
+        continue;
+      }
+      if (typ === 'number' || typ === 'integer') {
+        const n = Number(existing);
+        outputs[key] = Number.isFinite(n) ? n : 0;
+        continue;
+      }
+      if (existing !== undefined && existing !== null && String(existing).trim() !== '') {
+        outputs[key] = existing;
+      } else if (key === 'franchise_brand') {
+        outputs[key] = '';
+      } else if (key === 'accessibility_reasoning') {
+        outputs[key] = 'Fixture: independent local business with on-site buyer access.';
+      } else {
+        outputs[key] = `fixture_${key}`;
+      }
+    }
+    return {
+      outputs,
+      artifacts: { fixture: true, action: action || 'model' },
+      usage: {
+        input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
+        usd_cost: 0, tool_calls: [], tool_costs: [],
+      },
+      model: 'fixture',
+      provider: 'fixture',
+    };
+  }
+
   return executeStepAction({
     mcp,
     listDir,
@@ -528,11 +891,13 @@ export const executeEnrichmentStepOnRecords = async ({
       ],
     });
   }
+  ensureEvidenceColumns(db);
 
   const summary = {
     processed: 0,
     skipped_fresh: 0,
     skipped_when: 0,
+    skipped_ceiling: 0,
     failed: 0,
     errors: [] as Array<{ record_id: string; error: string }>,
     record_ids: [] as string[],
@@ -591,6 +956,30 @@ export const executeEnrichmentStepOnRecords = async ({
         toolCatalog,
       });
 
+      if (isEnrichmentCeilingSkip(result)) {
+        const detail = String(result.skip_detail || 'enrichment_ceiling');
+        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+        const patch = enrichmentCeilingSkipPatch({
+          record: currentRow,
+          stepId: id,
+          stepConfig,
+          detail,
+          statusColumn,
+        });
+        upsertRecord({ db, row: { ...currentRow, ...patch } });
+        summary.skipped_ceiling += 1;
+        summary.record_ids.push(recordId);
+        emitActivity({
+          event: 'row_skipped',
+          phase: 'pipeline',
+          step: id,
+          row: rowLabel,
+          reason: 'enrichment_ceiling',
+          detail,
+        });
+        return { outcome: 'skipped', attempt, ceiling: true };
+      }
+
       const outputs = result.outputs || {};
       const outcome = outputOutcomeFor({ outputs, expectedOutputs });
 
@@ -605,12 +994,27 @@ export const executeEnrichmentStepOnRecords = async ({
       });
       if (outcome === 'ok') outputZod.parse(outputs);
 
-      const patch = applyOutputs({
+      const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+      // Empty success: still do not clobber prior good site_text; record evidence only when material.
+      const isEmptyOutcome = outcome === 'empty';
+      const failedEmpty = isEmptyOutcome && Object.keys(outputs || {}).every((k) => isBlank(outputs?.[k]));
+      const patch = applyOutputsWithEvidence({
         step: { ...step, config: stepConfig, __list_dir: listDir },
-        outputs,
+        stepConfig,
+        stepId: id,
+        outputs: isEmptyOutcome ? {} : outputs,
+        record: currentRow,
+        provider: String((result as any)?.provider || ''),
+        usage: result.usage as Record<string, unknown> | null,
+        failed: failedEmpty,
+        error: isEmptyOutcome ? `enrichment step empty (${id})` : null,
       });
       patch[statusColumn] = outcome;
-      const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+      // Material retrieval → force next scoring pass (clear score:* staleness).
+      if (!failedEmpty && evidencePatchIsMaterialRetrieval(patch)) {
+        markScoringStale({ db, recordId });
+        Object.assign(patch, scoringStaleRecordPatch());
+      }
       const merged = {
         ...currentRow,
         ...patch,
@@ -648,12 +1052,17 @@ export const executeEnrichmentStepOnRecords = async ({
       const detail = formatErrorMessage(error);
       if (enrichStepUsesEmptyOnError(stepConfig)) {
         const outputs = emptyOutputsFor(outputZod);
-        const patch = applyOutputs({
+        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+        const patch = applyOutputsWithEvidence({
           step: { ...step, config: stepConfig, __list_dir: listDir },
+          stepConfig,
+          stepId: id,
           outputs,
+          record: currentRow,
+          error: detail,
+          failed: true,
         });
         patch[statusColumn] = 'failed';
-        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
         const merged = {
           ...currentRow,
           ...patch,
@@ -686,10 +1095,18 @@ export const executeEnrichmentStepOnRecords = async ({
         summary.errors.push({ record_id: recordId, error: detail });
         clearStaleness({ db, recordId, stepId: id });
         const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+        const evidencePatch = buildEnrichEvidencePatch({
+          record: currentRow,
+          step_id: id,
+          step_config: stepConfig,
+          error: detail,
+          failed: true,
+        });
         upsertRecord({
           db,
           row: {
             ...currentRow,
+            ...evidencePatch,
             [statusColumn]: 'failed',
             retry_count: Number(currentRow.retry_count || 0) + 1,
             last_error: ownedLastError({ error: detail, stepId: id }),
@@ -848,6 +1265,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
     skipped_fresh: 0,
     skipped_upstream: 0,
     skipped_when: 0,
+    skipped_ceiling: 0,
     failed: 0,
     errors: [],
   };
@@ -899,6 +1317,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         const statusColumn = stepStatusColumn(id);
         const whenPredicate = whenPredicateForStep({ step, stepConfig: step?.config || {} });
         ensureRecordColumns({ db, columns: [...targetColumns, { name: statusColumn, type: 'TEXT' }] });
+        ensureEvidenceColumns(db);
 
         emitActivity({ event: 'step_start', phase: 'enrichment', step: id, rows: recordState.size });
 
@@ -910,6 +1329,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           cacheTtlSeconds: number;
           cacheTtl: string;
           skippedWhen?: boolean;
+          skippedCeiling?: boolean;
           failedError?: string;
         }> = [];
         const failures: Array<{ recordId: string; rowLabel: string; error: string }> = [];
@@ -982,6 +1402,35 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               toolCatalog,
             });
 
+            if (isEnrichmentCeilingSkip(result)) {
+              const detail = String(result.skip_detail || 'enrichment_ceiling');
+              const patch = enrichmentCeilingSkipPatch({
+                record,
+                stepId: id,
+                stepConfig,
+                detail,
+                statusColumn,
+              });
+              patches.push({
+                recordId,
+                rowLabel,
+                patch,
+                depHash: '',
+                cacheTtlSeconds: 0,
+                cacheTtl: '',
+                skippedCeiling: true,
+              });
+              emitActivity({
+                event: 'row_skipped',
+                phase: 'enrichment',
+                step: id,
+                row: rowLabel,
+                reason: 'enrichment_ceiling',
+                detail,
+              });
+              return;
+            }
+
             const outputs = result.outputs || {};
             const outcome = outputOutcomeFor({ outputs, expectedOutputs });
             if (
@@ -1004,9 +1453,17 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             });
             if (outcome === 'ok') outputZod.parse(outputs);
 
-            const patch = applyOutputs({
+            const isEmptyOutcome = outcome === 'empty';
+            const patch = applyOutputsWithEvidence({
               step: { ...step, __list_dir: listDir },
-              outputs,
+              stepConfig,
+              stepId: id,
+              outputs: isEmptyOutcome ? {} : outputs,
+              record,
+              provider: String((result as any)?.provider || ''),
+              usage: result.usage as Record<string, unknown> | null,
+              failed: isEmptyOutcome && Object.keys(outputs || {}).every((k) => isBlank(outputs?.[k])),
+              error: isEmptyOutcome ? `enrichment step empty (${id})` : null,
             });
             patch[statusColumn] = outcome;
             patches.push({
@@ -1031,9 +1488,14 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             const detail = formatErrorMessage(error);
             if (enrichStepUsesEmptyOnError(neutralStepConfig)) {
               const outputs = emptyOutputsFor(outputZod);
-              const patch = applyOutputs({
+              const patch = applyOutputsWithEvidence({
                 step: { ...step, __list_dir: listDir },
+                stepConfig: neutralStepConfig as Record<string, unknown>,
+                stepId: id,
                 outputs,
+                record,
+                error: detail,
+                failed: true,
               });
               patch[statusColumn] = 'failed';
               patch.retry_count = Number(record.retry_count || 0) + 1;
@@ -1068,18 +1530,28 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(item.recordId, item.recordId)
               || recordState.get(item.recordId)
               || {};
-            const patch = !item.skippedWhen && !item.failedError
+            let patch = !item.skippedWhen && !item.skippedCeiling && !item.failedError
               ? {
                 ...item.patch,
                 ...clearedLastErrorPatch({ record: currentRow, stepId: result.id }),
               }
               : item.patch;
+            // Material retrieval evidence → mark scoring stale so next dataflow re-scores.
+            if (
+              !item.failedError
+              && !item.skippedWhen
+              && !item.skippedCeiling
+              && evidencePatchIsMaterialRetrieval(patch)
+            ) {
+              markScoringStale({ db, recordId: item.recordId });
+              patch = { ...patch, ...scoringStaleRecordPatch() };
+            }
             const merged = { ...currentRow, ...patch };
             upsertRecord({ db, row: merged });
             if (!result.managesContacts) upsertPrimaryContactIfPresent({ db, record: merged });
             if (item.failedError) {
               clearStaleness({ db, recordId: item.recordId, stepId: result.id });
-            } else if (!item.skippedWhen) {
+            } else if (!item.skippedWhen && !item.skippedCeiling) {
               writeStaleness({
                 db,
                 recordId: item.recordId,
@@ -1090,7 +1562,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               });
             }
             recordState.set(item.recordId, merged);
-            if (item.skippedWhen) {
+            if (item.skippedCeiling) {
+              summary.skipped_ceiling += 1;
+            } else if (item.skippedWhen) {
               summary.skipped_when += 1;
             } else if (item.failedError) {
               summary.failed += 1;
@@ -1115,8 +1589,16 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           clearStaleness({ db, recordId: failure.recordId, stepId: result.id });
           const currentRow = recordState.get(failure.recordId);
           if (currentRow) {
+            const evidencePatch = buildEnrichEvidencePatch({
+              record: currentRow,
+              step_id: result.id,
+              step_config: (level.find((n) => n.id === result.id)?.step?.config || {}) as Record<string, unknown>,
+              error: failure.error,
+              failed: true,
+            });
             const updated = {
               ...currentRow,
+              ...evidencePatch,
               [`${result.id}__status`]: 'failed',
               retry_count: Number(currentRow.retry_count || 0) + 1,
               last_error: ownedLastError({ error: failure.error, stepId: result.id }),
@@ -1132,7 +1614,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
       event: 'phase_complete',
       phase: 'enrichment',
       processed: summary.processed,
-      skipped: summary.skipped_fresh + summary.skipped_upstream,
+      skipped: summary.skipped_fresh + summary.skipped_upstream + summary.skipped_when + summary.skipped_ceiling,
       failed: summary.failed,
     });
     return summary;

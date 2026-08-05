@@ -251,6 +251,44 @@ export const executeStepAction = async ({
   aiConfig?: any;
   role?: ActionRole;
 }) => {
+  // Deterministic engineering fixture: no model spend; real step entry still used.
+  const fixtureOn = String(process.env.AO_STEP_FIXTURE || process.env.AO_PIPELINE_FIXTURE || '').trim() === '1'
+    || String(process.env.AO_STEP_FIXTURE || '').toLowerCase() === 'true';
+  if (fixtureOn) {
+    const declared = getDeclaredOutputKeys(stepConfig);
+    const outputs: Record<string, unknown> = {};
+    for (const key of declared) {
+      outputs[key] = record?.[key] ?? `fixture_${key}`;
+    }
+    if (!Object.keys(outputs).length) {
+      outputs.fixture_status = 'ok';
+      outputs.step_id = stepId;
+    }
+    return {
+      outputs,
+      // Sourcing and other consumers may read these fields; keep fixture shape compatible.
+      results: [],
+      defer: false,
+      reason: 'fixture_step',
+      artifacts: {
+        fixture: true,
+        step_id: stepId,
+        description: description || '',
+      },
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        usd_cost: 0,
+        tool_calls: [],
+        tool_costs: [],
+      },
+      model: 'fixture',
+      provider: 'fixture',
+    } as any;
+  }
+
   const promptFileBody = readPromptFileIfAny({ listDir, promptFile: stepConfig?.prompt_file });
   const systemPrompt = renderPromptTemplate({
     template: promptFileBody || promptTemplate,

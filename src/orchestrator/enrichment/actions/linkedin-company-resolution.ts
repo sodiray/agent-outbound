@@ -396,7 +396,7 @@ export const executeLinkedinCompanyResolutionAction = async ({
   const resolvedIdentityFields = configuredIdentityFields.length > 0
     ? configuredIdentityFields
     : identityFields.map(text).filter(Boolean);
-  await resolveLinkedinCompany({
+  const result = await resolveLinkedinCompany({
     db,
     listDir,
     record,
@@ -405,10 +405,29 @@ export const executeLinkedinCompanyResolutionAction = async ({
       ? resolvedIdentityFields
       : ['business_name', 'address'],
   });
+
+  // Re-read after resolve/quarantine so outputs reflect durable resolution fields
+  // (immutable retrieval snapshot is written by the enrich runner from these).
+  const recordId = getRecordRowId(record);
+  const current = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId)
+    || record;
+  const status = text((result as any)?.status);
+  const outputs: Record<string, unknown> = {
+    company_resolution: text(current.company_resolution) || (status === 'resolved' || status === 'already_resolved' ? 'resolved' : status === 'unresolvable' ? 'unresolvable' : ''),
+    place_id: text(current.place_id) || text((result as any)?.place_id),
+    business_name: text(current.business_name),
+    address: text(current.address),
+    website: text(current.website),
+    resolution_source: text(current.resolution_source),
+    resolution_reason: text(current.resolution_reason) || text((result as any)?.reason),
+    primary_type: text(current.primary_type),
+    google_place_id: text(current.google_place_id) || text(current.place_id),
+  };
+
   return {
-    outputs: {},
+    outputs,
     usage: null,
     model: '',
-    provider: '',
+    provider: 'places',
   };
 };

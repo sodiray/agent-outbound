@@ -108,6 +108,42 @@ Enrichment steps can declare `depends_on` references to other steps' outputs. Th
 
 ## CLI reference
 
+### Agent-operated pipelines
+
+AgentOutbound can project the current pipeline into a durable operator queue.
+Each project defines its own objectives, observations, pending rules,
+notification routes, and operator brief under `operations` in `outbound.yaml`.
+The CLI remains fully available; the operator queue is an attention surface,
+not an allowlist.
+
+```bash
+# Load concise, current project context
+npx agent-outbound context --list <list> --json
+
+# Reconcile and inspect everything needing operator attention
+npx agent-outbound pending --list <list> --json
+npx agent-outbound pending --all-lists --summary --json
+
+# Claim before delegating or acting, then record the verified outcome
+npx agent-outbound --idem-key <stable-key> pending claim <pending-id> \
+  --list <list> --owner <owner-id> --task-id <task-id>
+npx agent-outbound --idem-key <stable-key> pending resolve <pending-id> \
+  --list <list> --reason "Outcome verified" \
+  --evidence-json '{"state":"verified"}' \
+  --actions-json '["reply sent","record advanced"]'
+
+# Ingest provider state, refresh pending work, and deliver configured callbacks
+npx agent-outbound monitor --list <list>
+
+# Discover the complete structured command surface just in time
+npx agent-outbound describe
+npx agent-outbound describe --command "pending lifecycle"
+```
+
+Pending items have durable claims, leases, snoozes, resolutions, dismissals,
+evidence, and transition history. The monitor coalesces notifications and
+retries failed deliveries without running a sales decision loop.
+
 ### List management
 
 ```bash

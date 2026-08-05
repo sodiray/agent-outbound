@@ -12,6 +12,7 @@ import {
 import { leadStatus } from '../orchestrator/runtime/status.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
+import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
 
 const interactionView = (row: any) => ({
   interaction_id: String(row.interaction_id || ''),
@@ -40,6 +41,8 @@ export const interactionAddCommand = ({ list, ref, kind = 'note', summary, body 
   const db = openListDb({ listDir, readonly: false });
   try {
     const record = resolveRecordRef({ db, ref });
+    // Strict canary gate before any interaction write.
+    assertRecordAccessForMutation({ listDir, recordId: String(record._row_id || '') });
     const interaction = insertInteraction({
       db,
       recordId: String(record._row_id),
@@ -142,11 +145,17 @@ export const interactionRemoveCommand = ({ list, interactionId }: { list: string
 };
 
 export const followupsCommand = ({ list, dueBy = '' }: { list: string; dueBy?: string }) => {
+  // Note: visit/door-to-door follow-ups are filtered from operator noise (forbidden motion).
   const listDir = resolveListDir(list);
   const db = openListDb({ listDir, readonly: true });
   try {
     const today = new Date().toISOString().slice(0, 10);
-    const rows = listOpenFollowUps({ db, dueBy });
+    const rows = listOpenFollowUps({ db, dueBy }).filter((row: any) => {
+      const kind = String(row.kind || row.channel || '').toLowerCase();
+      // Forbidden motion: never surface visit / door-to-door as operator follow-up work.
+      if (kind.includes('visit') || kind.includes('door') || kind.includes('field')) return false;
+      return true;
+    });
     const followups = rows.map((row: any) => {
       const dueDate = String(row.follow_up_at || '').slice(0, 10);
       return {

@@ -7,10 +7,13 @@ import {
 } from './db.js';
 import { executeComposioTool } from './tools.js';
 import { classifyReplyAction } from '../actions/classify-reply/index.js';
+import { applyInboundReplyClassification } from '../policy/inbound-reply.js';
+import { detectBounceFromText } from '../policy/bounce.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { emitActivity } from './activity.js';
 import { isBudgetExceededError } from './contract.js';
+import { processBounceEvent } from './bounce-process.js';
 
 type PollContext = {
   mcp: Client;
@@ -91,7 +94,9 @@ const alreadyRecorded = (db: any, providerMessageId: string) => {
   const row = db
     .prepare(`
       SELECT 1 AS hit FROM channel_events
-      WHERE channel = 'email' AND action = 'reply_detected' AND provider_message_id = ?
+      WHERE channel = 'email'
+        AND action IN ('reply_detected', 'bounce_detected')
+        AND provider_message_id = ?
       LIMIT 1
     `)
     .get(providerMessageId);
@@ -107,15 +112,6 @@ const findRecordByThreadId = (db: any, threadId: string) => {
       LIMIT 1
     `)
     .get(threadId, threadId);
-};
-
-const nextStatusFor = (classification: string, explicitStop: boolean) => {
-  if (explicitStop) return 'opted_out';
-  if (classification === 'unsubscribe') return 'opted_out';
-  if (classification === 'booking_intent' || classification === 'positive_signal' || classification === 'question' || classification === 'objection') return 'engaged';
-  if (classification === 'bounce') return 'bounced';
-  if (classification === 'hard_no') return 'completed';
-  return 'active';
 };
 
 export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, config }: PollContext) => {
@@ -166,61 +162,31 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
       const snippet = extractSnippet(message);
       const replyAt = extractOccurredAt(message);
 
-      const classified = await classifyReplyAction({
-        replyText: snippet,
-        model: config?.sequences?.default?.reply_check?.model || '',
-        aiConfig: config?.ai || {},
-      });
-      recordCostEvent({
-        db,
-        listDir,
-        recordId,
-        stepId: 'poll:classify_reply',
-        model: String((classified as any)?.model || ''),
-        provider: String((classified as any)?.provider || ''),
-        usage: classified.usage,
-      });
-
-      const classification = String(classified.classification || 'unknown');
-      const explicitStop = hasExplicitStopIntent(` ${snippet} `);
-      const nextStatus = nextStatusFor(classification, explicitStop);
-
-      const updated = {
-        ...record,
-        email_last_reply_at: replyAt,
-        email_reply_classification: classification,
-        reply_classification_latest: classification,
-        sequence_status: nextStatus,
-        next_action_date: nextStatus === 'active' ? record.next_action_date : '',
-        suppressed: (explicitStop || classification === 'unsubscribe') ? 1 : record.suppressed,
-        suppressed_reason: (explicitStop || classification === 'unsubscribe') ? 'opt_out' : record.suppressed_reason,
-        suppressed_at: (explicitStop || classification === 'unsubscribe') ? new Date().toISOString() : record.suppressed_at,
-      };
-      upsertRecord({ db, row: updated });
-
-      insertChannelEvent({
-        db,
-        event: {
-          id: randomUUID(),
-          row_id: recordId,
-          channel: 'email',
-          event_type: 'reply_detected',
-          action: 'reply_detected',
-          disposition: classification,
-          provider_message_id: messageId,
-          provider_thread_id: threadId,
-          payload: {
-            snippet,
-            classifier_reason: classified.reason || '',
-            explicit_stop: explicitStop,
-            classification,
-          },
-          occurred_at: replyAt,
-        },
-      });
+      // Production path: processInboundReplyText pauses before classification.
+      // Do NOT classify inline here — that left accounts outbound-active during
+      // model latency and was not canary-scoped as a single mutation path.
+      const { processInboundReplyText } = await import('./inbound-reply-process.js');
+      let processed;
+      try {
+        processed = await processInboundReplyText({
+          db,
+          recordId,
+          replyText: snippet,
+          messageId,
+          threadId,
+          model: config?.sequences?.default?.reply_check?.model || '',
+          aiConfig: config?.ai || {},
+        });
+      } catch (err) {
+        // Canary isolation / transient classifier errors — skip record, do not send.
+        continue;
+      }
+      const classification = String(processed.classification || 'unknown');
+      const explicitStop = hasExplicitStopIntent(` ${snippet} `)
+        || classification === 'unsubscribe';
 
       if (explicitStop) {
-        const email = String(record?.email_primary || '').trim().toLowerCase();
+        const email = String(record?.email_primary || record?.contact_email || '').trim().toLowerCase();
         if (email) {
           const entry = {
             id: randomUUID(),
@@ -237,9 +203,10 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
         }
       }
 
+      const nextStatus = String(processed.sequence_status || '');
       summary.replied += 1;
       if (nextStatus === 'engaged') summary.engaged += 1;
-      if (nextStatus === 'opted_out') summary.opted_out += 1;
+      if (nextStatus === 'opted_out' || explicitStop) summary.opted_out += 1;
     } catch (error) {
       if (isBudgetExceededError(error)) throw error;
       summary.errors.push(String((error as any)?.message || error));

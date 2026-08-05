@@ -68,6 +68,10 @@ export const StepConfigSchema = z.object({
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
   cache: z.string().default(''),
   tool: ToolSpecSchema.optional(),
+  // tool_call provider waterfall: try primary tool, then each entry in order on
+  // retryable failure. Alias: fallback_tools. Fail closed after all fail.
+  waterfall: z.array(ToolSpecSchema).optional(),
+  fallback_tools: z.array(ToolSpecSchema).optional(),
   args: z.record(z.any()).default({}),
   // Deterministic tool_call path for send_email / enrich-like steps:
   // action=tool_call + args_map (tool arg <- record field) + output_map
@@ -87,6 +91,9 @@ export const StepConfigSchema = z.object({
   prompt_args: z.record(z.any()).default({}),
   condition: z.string().default(''),
   idempotency: IdempotencySchema.optional(),
+  // Honest generate opt-in: keep non-critical generate on the production dataflow
+  // without AO_PIPELINE_FIXTURE / AO_RUN_GENERATE (see includeStepInDataflow).
+  run_in_pipeline: z.boolean().optional(),
 }).partial().default({});
 
 const SourceMaxResultsSchema = z.coerce.number().int().min(1).max(5000).default(100);
@@ -339,6 +346,9 @@ const PipelineEnrichmentStepSchema = z.object({
   cache_key: z.string().default(''),
   action: z.string().default(''),
   tool: ToolSpecSchema.optional(),
+  // tool_call provider waterfall (primary tool first, then each entry in order).
+  waterfall: z.array(ToolSpecSchema).optional(),
+  fallback_tools: z.array(ToolSpecSchema).optional(),
   args: z.record(z.any()).default({}),
   // action: tool_call only — deterministic single tool execution, no LLM.
   // args_map: tool arg <- record field. output_map: output field <- result path.
@@ -362,6 +372,8 @@ const PipelineEnrichmentStepSchema = z.object({
   cache_key: true,
   action: true,
   tool: true,
+  waterfall: true,
+  fallback_tools: true,
   args: true,
   args_map: true,
   output_map: true,
@@ -393,6 +405,11 @@ const PipelineGenerateStepSchema = z.object({
   when: PipelineEnrichmentStepSchema.shape.when,
   prompt_file: PipelineEnrichmentStepSchema.shape.prompt_file,
   prompt_args: PipelineEnrichmentStepSchema.shape.prompt_args,
+  // Keep this generate on the normal production dataflow without AO_PIPELINE_FIXTURE
+  // or AO_RUN_GENERATE. Critical-path generates (depended on by non-generate steps)
+  // are always included; use this for diagnostic packs that must run for A/B/C
+  // without being a hard dependency of treatment_assignment.
+  run_in_pipeline: z.boolean().optional(),
 });
 
 const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
@@ -737,6 +754,103 @@ const MailboxesConfigSchema = z.object({
   allow_inline_secrets: z.boolean().optional(),
 }).partial();
 
+const PendingRuleSchema = z.object({
+  id: z.string().trim().min(1).optional(),
+  observation: z.string().trim().min(1).optional(),
+  kind: z.string().trim().min(1),
+  priority: z.enum(['urgent', 'high', 'normal', 'low']).default('normal'),
+  after: z.string().trim().min(1).optional(),
+}).superRefine((rule, ctx) => {
+  if (rule.id || rule.observation) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'A pending rule requires id or observation.',
+    path: ['id'],
+  });
+});
+
+const ObservationRuleSchema = z.object({
+  id: z.string().trim().min(1),
+  source: z.string().trim().min(1),
+  when: z.record(z.unknown()).default({}),
+});
+
+const NotificationSinkSchema = z.object({
+  type: z.enum(['webhook', 'command', 'stdout', 'file']),
+  url: z.string().trim().min(1).optional(),
+  command: z.string().trim().min(1).optional(),
+  args: z.array(z.string()).default([]),
+  path: z.string().trim().min(1).optional(),
+}).superRefine((sink, ctx) => {
+  const requiredField = sink.type === 'webhook'
+    ? 'url'
+    : sink.type === 'command'
+      ? 'command'
+      : sink.type === 'file'
+        ? 'path'
+        : '';
+  if (!requiredField || sink[requiredField]) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: `${sink.type} notification sink requires ${requiredField}.`,
+    path: [requiredField],
+  });
+});
+
+const NotificationRouteSchema = z.object({
+  events: z.array(z.string().trim().min(1)).min(1),
+  sink: z.string().trim().min(1),
+  coalesce_for: z.string().trim().min(1).optional(),
+});
+
+const OperationsSchema = z.object({
+  instructions: z.string().trim().default(''),
+  objectives: z.object({
+    primary: z.string().trim().default(''),
+    secondary: z.array(z.string()).default([]),
+  }).partial().default({}),
+  observations: z.array(ObservationRuleSchema).default([]),
+  pending: z.object({
+    rules: z.array(PendingRuleSchema).default([]),
+  }).partial().default({}),
+  notifications: z.object({
+    coalesce_for: z.string().trim().min(1).optional(),
+    notify_on: z.array(z.string()).default([]),
+    sinks: z.record(NotificationSinkSchema).default({}),
+    routes: z.array(NotificationRouteSchema).default([]),
+  }).partial().default({}),
+  monitor: z.object({
+    interval_seconds: z.coerce.number().int().min(5).default(15),
+  }).partial().default({}),
+}).partial().default({}).superRefine((operations, ctx) => {
+  const sinks = operations.notifications?.sinks || {};
+  for (const [index, route] of (operations.notifications?.routes || []).entries()) {
+    if (sinks[route.sink]) continue;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Notification route references unknown sink "${route.sink}".`,
+      path: ['notifications', 'routes', index, 'sink'],
+    });
+  }
+});
+
+const WatchSchema = z.object({
+  poll_replies_minutes: z.coerce.number().int().min(1).default(5),
+  poll_delivery_minutes: z.coerce.number().int().min(1).default(15),
+}).partial().default({});
+
+/** Project-level outbound policy (forbidden channels, hard readiness, versions). */
+const PolicySchema = z.object({
+  version: z.string().trim().default(''),
+  forbidden_channels: z.array(z.string()).default([]),
+  /** When true, channel execute hard-blocks non-ready external sends (send_email, linkedin_connect). */
+  enforce_readiness: z.boolean().default(false),
+  fit_rule_version: z.string().trim().default(''),
+  treatment_rule_version: z.string().trim().default(''),
+  deterministic_treatment: z.boolean().default(true),
+  review_required_for: z.array(z.string()).default([]),
+}).partial().default({});
+
 export const ConfigSchema = z.object({
   list: z.object({
     name: z.string().default(''),
@@ -764,6 +878,10 @@ export const ConfigSchema = z.object({
   mailboxes: MailboxesConfigSchema.optional(),
   suppression: SuppressionSchema.default({}),
   crm: CrmSchema.optional(),
+  /** Deterministic outbound policy gates (TV and similar projects). */
+  policy: PolicySchema,
+  operations: OperationsSchema,
+  watch: WatchSchema,
 }).partial().default({});
 
 // Fold a legacy fit/trigger/priority score block into the single-score shape so

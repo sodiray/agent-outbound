@@ -18,6 +18,7 @@ import {
   configReadCommand,
   configUpdateCommand,
   configValidateCommand,
+  contextCommand,
   crmSyncCommand,
   dashboardCommand,
   describeCommand,
@@ -44,6 +45,18 @@ import {
   reviewStagesCommand,
   manualCompleteCommand,
   manualListCommand,
+  callBoardCommand,
+  callBoardClaimCommand,
+  callBoardDisposeCommand,
+  healthCheckCommand,
+  timelineCommand,
+  decisionViewCommand,
+  metricsCommand,
+  auditExportCommand,
+  workQueuesCommand,
+  WORK_QUEUE_NAMES,
+  stageReviewAuthorizeCommand,
+  stageReviewListCommand,
   sequencesBoardCommand,
   sequencesListCommand,
   rejectedListCommand,
@@ -112,7 +125,12 @@ import {
   modelsListCommand,
   modelsRefreshCommand,
   modelsRemoveCommand,
+  monitorCommand,
+  pendingActionCommand,
+  pendingListCommand,
+  pendingShowCommand,
   scoreCommand,
+  policyApplyCommand,
   sequenceRunCommand,
   sequenceStatusCommand,
   sourceCommand,
@@ -222,6 +240,14 @@ const printHelp = () => {
   process.stdout.write(`  list info <list>\n`);
   process.stdout.write(`  lists\n`);
   process.stdout.write(`  describe [--command NAME]\n`);
+  process.stdout.write(`  context --list LIST\n`);
+  process.stdout.write(`  pending [--list LIST | --all-lists] [--summary] [--kind KIND] [--priority PRIORITY] [--status STATUS]\n`);
+  process.stdout.write(`  pending show <pending-id> [--list LIST]\n`);
+  process.stdout.write(`  pending claim <pending-id> --owner OWNER [--task-id ID] [--lease-minutes N] [--list LIST]\n`);
+  process.stdout.write(`  pending release|dismiss <pending-id> --reason REASON [--list LIST]\n`);
+  process.stdout.write(`  pending resolve <pending-id> --reason REASON [--evidence-json JSON] [--actions-json JSON] [--list LIST]\n`);
+  process.stdout.write(`  pending snooze <pending-id> --until ISO --reason REASON [--list LIST]\n`);
+  process.stdout.write(`  monitor [--list LIST | --all-lists] [--interval-seconds N] [--once]\n`);
   process.stdout.write(`  attio-domains [--out contacted-domains.txt] [--list LIST]\n`);
   process.stdout.write(`  query <list> --sql "SELECT ..."\n`);
   process.stdout.write(`  schema <list> [--table NAME] [--format json|markdown]\n`);
@@ -292,6 +318,19 @@ const printHelp = () => {
   process.stdout.write(`  manual list <list> [--type visit|mail|linkedin] [--limit N]                  # parked manual tasks\n`);
   process.stdout.write(`  manual complete <list> <record> --step STEP_ID [--note TEXT]                 # complete a manual task\n`);
   process.stdout.write(`  manual skip <list> <record> --step STEP_ID [--note TEXT]                     # skip a manual task\n`);
+  process.stdout.write(`  stage-review list <list> [--status open|pending|all] [--limit N]              # pending stage reviews (LI/mail)\n`);
+  process.stdout.write(`  stage-review authorize <list> <record> --stage STAGE --decision authorize|reject [--asset-version V] [--actor NAME] [--notes TEXT]\n`);
+  process.stdout.write(`  stage-review reject <list> <record> --stage STAGE [--asset-version V] [--actor NAME] [--notes TEXT]\n`);
+  process.stdout.write(`  call-board <list> [--capacity N] [--limit N]                                  # capacity-ranked human call board\n`);
+  process.stdout.write(`  call-board claim <list> <record> [--owner NAME]\n`);
+  process.stdout.write(`  call-board dispose <list> <record> --disposition D [--note TEXT]\n`);
+  process.stdout.write(`  health <list> [--limit N]                                                      # integrity / orphan / visit-path health\n`);
+  process.stdout.write(`  timeline <list> <record> [--limit N]                                           # account timeline\n`);
+  process.stdout.write(`  decision <list> <record>                                                       # why treatment/priority/readiness\n`);
+  process.stdout.write(`  metrics <list>                                                                 # commercial vs activity metrics\n`);
+  process.stdout.write(`  audit export <list> [--record ID] [--limit N]                                   # transition_audit / stage_review JSON dump\n`);
+  process.stdout.write(`  work-queues <list> [--queue NAME|all] [--limit N] [--offset N]                # operator work queues (repair/enrichment/…)\n`);
+  process.stdout.write(`  queues <list> [--queue NAME|all]                                               # alias for work-queues\n`);
   process.stdout.write(`  dashboard [--list LIST | --all-lists] [--alerts]\n`);
   process.stdout.write(`  visits today [<list> | --all-lists] [--date YYYY-MM-DD]\n`);
   process.stdout.write(`  route plan <list> [--date YYYY-MM-DD]\n`);
@@ -326,6 +365,7 @@ const printHelp = () => {
   process.stdout.write(`  auth login                 # browser login for Composio OAuth\n`);
   process.stdout.write(`  auth <toolkit>              # prints the Composio dashboard URL for this toolkit\n`);
   process.stdout.write(`  serve <list> [--port N]\n`);
+  process.stdout.write(`  view <list> [--port N] [--no-open] [--build]\n`);
   process.stdout.write(`  reconcile <list> [--stale-minutes N]\n`);
   process.stdout.write(`  watch <list> [--history]\n`);
   process.stdout.write(`  kill\n`);
@@ -404,6 +444,15 @@ const run = async () => {
 
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     printHelp();
+    return;
+  }
+
+  if (hasFlag(argv, '--help') || hasFlag(argv, '-h')) {
+    const subcommand = String(argv.find((argument) => !argument.startsWith('-')) || '').trim();
+    const target = subcommand ? `${command} ${subcommand}` : command;
+    setResponseContext({ command: 'describe', list: '' });
+    const described = describeCommand({ command: target });
+    print(described.count > 0 ? described : describeCommand({ command }));
     return;
   }
 
@@ -786,6 +835,73 @@ const run = async () => {
     const targetCommand = consumeFlag(argv, '--command', '');
     setResponseContext({ command: 'describe', list: '' });
     print(describeCommand({ command: targetCommand }));
+    return;
+  }
+
+  if (command === 'context') {
+    const configuredList = consumeFlag(argv, '--list', '');
+    const list = configuredList || String(argv.shift() || '');
+    if (!list) throw new Error('context requires --list LIST.');
+    hasFlag(argv, '--json');
+    setResponseContext({ command: 'context', list });
+    print(contextCommand({ list }));
+    return;
+  }
+
+  if (command === 'pending') {
+    const sub = String(argv[0] || '').trim();
+    if (['show', 'claim', 'release', 'resolve', 'dismiss', 'snooze'].includes(sub)) {
+      argv.shift();
+      const pendingId = String(argv.shift() || '');
+      const list = consumeFlag(argv, '--list', '');
+      hasFlag(argv, '--json');
+      setResponseContext({ command: `pending ${sub}`, list });
+      if (sub === 'show') {
+        print(pendingShowCommand({ list, pendingId }));
+        return;
+      }
+      const owner = consumeFlag(argv, '--owner', '');
+      const reason = consumeFlag(argv, '--reason', '');
+      const until = consumeFlag(argv, '--until', '');
+      const taskId = consumeFlag(argv, '--task-id', '');
+      const leaseMinutes = toNumber(consumeFlag(argv, '--lease-minutes', '60'), 60);
+      const evidenceJson = consumeFlag(argv, '--evidence-json', '');
+      const actionsJson = consumeFlag(argv, '--actions-json', '');
+      print(pendingActionCommand({
+        list,
+        pendingId,
+        action: sub as 'claim' | 'release' | 'resolve' | 'dismiss' | 'snooze',
+        owner,
+        reason,
+        until,
+        taskId,
+        leaseMinutes,
+        idemKey: cliState.globalIdemKey,
+        evidenceJson,
+        actionsJson,
+      }));
+      return;
+    }
+    const allLists = hasFlag(argv, '--all-lists');
+    const summary = hasFlag(argv, '--summary');
+    hasFlag(argv, '--json');
+    const list = consumeFlag(argv, '--list', '');
+    const kind = consumeFlag(argv, '--kind', '');
+    const priority = consumeFlag(argv, '--priority', '');
+    const status = consumeFlag(argv, '--status', '');
+    setResponseContext({ command: 'pending', list });
+    print(pendingListCommand({ list, allLists, kind, priority, status, summary }));
+    return;
+  }
+
+  if (command === 'monitor') {
+    const allLists = hasFlag(argv, '--all-lists');
+    const once = hasFlag(argv, '--once');
+    const configuredList = consumeFlag(argv, '--list', '');
+    const list = configuredList || String(argv.shift() || '');
+    const intervalSeconds = toNumber(consumeFlag(argv, '--interval-seconds', '15'), 15);
+    setResponseContext({ command: 'monitor', list });
+    print(await monitorCommand({ list, allLists, intervalSeconds, once }));
     return;
   }
 
@@ -1671,6 +1787,16 @@ const run = async () => {
     return;
   }
 
+  if (command === 'policy' && String(argv[0] || '') === 'apply') {
+    argv.shift();
+    const list = String(argv.shift() || '');
+    const where = consumeFlag(argv, '--where', '');
+    const limit = toNumber(consumeFlag(argv, '--limit', '0'), 0);
+    const dryRun = hasFlag(argv, '--dry-run');
+    print(await policyApplyCommand({ list, where, limit, dryRun }));
+    return;
+  }
+
   if (command === 'generate') {
     const list = String(argv.shift() || '');
     const where = consumeFlag(argv, '--where', '');
@@ -1820,6 +1946,143 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown manual subcommand: ${sub}`);
+  }
+
+  if (command === 'stage-review' || command === 'stage_review') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'list' || sub === 'pending') {
+      const list = String(argv.shift() || '');
+      const status = consumeFlag(argv, '--status', 'open');
+      const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
+      const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
+      setResponseContext({ command: 'stage-review list', list });
+      print(stageReviewListCommand({ list, status, limit, offset }));
+      return;
+    }
+    if (sub === 'authorize' || sub === 'reject') {
+      const list = String(argv.shift() || '');
+      const record = String(argv.shift() || '');
+      const stage = consumeFlag(argv, '--stage', '') || consumeFlag(argv, '--stage-id', '');
+      const decision = sub === 'reject'
+        ? 'reject'
+        : consumeFlag(argv, '--decision', 'authorize');
+      const assetVersion = consumeFlag(argv, '--asset-version', '')
+        || consumeFlag(argv, '--asset_version', '');
+      const actor = consumeFlag(argv, '--actor', 'operator');
+      const notes = consumeFlag(argv, '--notes', '') || consumeFlag(argv, '--note', '');
+      if (!stage) throw new Error('stage-review authorize/reject requires --stage STAGE_ID');
+      setResponseContext({ command: `stage-review ${sub}`, list });
+      print(stageReviewAuthorizeCommand({
+        list,
+        recordId: record,
+        stage_id: stage,
+        decision,
+        asset_version: assetVersion,
+        actor,
+        notes,
+      }));
+      return;
+    }
+    throw new Error(`Unknown stage-review subcommand: ${sub || '(none)'}. Use list|authorize|reject.`);
+  }
+
+  if (command === 'audit') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub === 'export') {
+      const list = String(argv.shift() || '');
+      const record = consumeFlag(argv, '--record', '')
+        || consumeFlag(argv, '--row', '')
+        || consumeFlag(argv, '--record-id', '');
+      const limit = toNumber(consumeFlag(argv, '--limit', '500'), 500);
+      setResponseContext({ command: 'audit export', list });
+      print(auditExportCommand({ list, record, limit }));
+      return;
+    }
+    throw new Error(`Unknown audit subcommand: ${sub || '(none)'}. Use export.`);
+  }
+
+  if (command === 'call-board' || command === 'call_board') {
+    const subOrList = String(argv.shift() || '').trim();
+    if (subOrList === 'claim') {
+      const list = String(argv.shift() || '');
+      const record = String(argv.shift() || '');
+      const owner = consumeFlag(argv, '--owner', 'operator');
+      print(callBoardClaimCommand({ list, record, owner }));
+      return;
+    }
+    if (subOrList === 'dispose') {
+      const list = String(argv.shift() || '');
+      const record = String(argv.shift() || '');
+      const disposition = consumeFlag(argv, '--disposition', '');
+      if (!disposition) throw new Error('call-board dispose requires --disposition');
+      const note = consumeFlag(argv, '--note', '');
+      print(callBoardDisposeCommand({ list, record, disposition, note }));
+      return;
+    }
+    const list = subOrList;
+    const capacity = toNumber(consumeFlag(argv, '--capacity', '25'), 25);
+    const limit = toNumber(consumeFlag(argv, '--limit', '50'), 50);
+    print(callBoardCommand({ list, capacity, limit }));
+    return;
+  }
+
+  if (command === 'health') {
+    const list = String(argv.shift() || '');
+    const limit = toNumber(consumeFlag(argv, '--limit', '500'), 500);
+    print(healthCheckCommand({ list, limit }));
+    return;
+  }
+
+  if (command === 'timeline') {
+    const list = String(argv.shift() || '');
+    const record = String(argv.shift() || '');
+    const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
+    print(timelineCommand({ list, record, limit }));
+    return;
+  }
+
+  if (command === 'decision') {
+    const list = String(argv.shift() || '');
+    const record = String(argv.shift() || '');
+    print(decisionViewCommand({ list, record }));
+    return;
+  }
+
+  if (command === 'metrics') {
+    const list = String(argv.shift() || '');
+    print(metricsCommand({ list }));
+    return;
+  }
+
+  if (
+    command === 'work-queues'
+    || command === 'work_queues'
+    || command === 'queues'
+    || command === 'operator-queues'
+    || command === 'operator_queues'
+  ) {
+    const list = String(argv.shift() || '');
+    const queue = consumeFlag(argv, '--queue', '')
+      || consumeFlag(argv, '--name', '')
+      || String(argv[0] && !String(argv[0]).startsWith('-') ? argv.shift() : '')
+      || 'all';
+    const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
+    const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
+    const status = consumeFlag(argv, '--status', 'open');
+    const taskType = consumeFlag(argv, '--type', '') || consumeFlag(argv, '--task-type', '');
+    setResponseContext({ command: 'work-queues', list });
+    if (queue && queue !== 'all' && !WORK_QUEUE_NAMES.includes(queue as any)
+      && !['counts'].includes(queue)) {
+      // Allow hyphenated aliases; listWorkQueue normalizes.
+      const normalized = String(queue).toLowerCase().replace(/-/g, '_');
+      if (!WORK_QUEUE_NAMES.includes(normalized as any) && normalized !== 'counts') {
+        throw new Error(
+          `Unknown queue "${queue}". Valid: all, ${WORK_QUEUE_NAMES.join(', ')}`,
+        );
+      }
+    }
+    print(workQueuesCommand({ list, queue, limit, offset, status, taskType }));
+    return;
   }
 
   if (command === 'dashboard') {

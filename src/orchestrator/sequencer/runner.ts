@@ -34,6 +34,17 @@ import { evaluateStructuredCondition } from '../lib/sequence-conditions.js';
 import { resolveStepTemplate } from '../lib/templates.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
+import {
+  isOptionalPhoneCapacityStep,
+  laterStepsDependOn,
+  shouldExecuteSequenceOutbound,
+} from '../policy/sequence-outbound.js';
+import {
+  assertListAccessForMutation,
+  filterRecordsForCanary,
+  loadCanaryConfig,
+} from '../policy/canary-isolation.js';
+import { applyContactRotation } from '../policy/contact-campaign.js';
 
 const parseExtra = (value) => {
   try {
@@ -206,22 +217,48 @@ const getLaunchDecision = ({ sequence, firstStep, today }) => {
   return { timing, launchBaseDate, filtered };
 };
 
+/**
+ * Collect in-play sequence records, then apply logical-time outbound gate.
+ * `now` controls wait due_at / sequence_state blocks without mutating wall clock.
+ */
 export const collectDueRecords = ({
   db,
   limit = 0,
   sequenceName = '',
   holdingNames = new Set(),
+  now = new Date(),
+  listDir = '',
+  canaryConfig,
+}: {
+  db: any;
+  limit?: number;
+  sequenceName?: string;
+  holdingNames?: Set<string> | Set<unknown>;
+  now?: string | Date;
+  /** When set, canary isolation filters due records to the allowlist. */
+  listDir?: string;
+  canaryConfig?: import('../policy/canary-isolation.js').CanaryIsolationConfig;
 }) => {
-  const scope = sequenceScope({ sequenceName, holdingNames });
+  const holdings = holdingNames instanceof Set
+    ? (holdingNames as Set<string>)
+    : new Set<string>();
+  const scope = sequenceScope({ sequenceName, holdingNames: holdings });
   const capped = Math.max(0, Number(limit || 0));
-  return db.prepare(`
+  // Over-fetch then filter by logical time so waits that are not due are excluded.
+  const fetchLimit = capped > 0 ? Math.max(capped * 4, capped) : 0;
+  const rows = db.prepare(`
     SELECT * FROM records
     WHERE ${inPlayWhere()}
       AND (sequence_status IS NULL OR sequence_status NOT IN ('completed','opted_out'))
       ${scope.sql}
     ORDER BY updated_at DESC
-    ${capped > 0 ? 'LIMIT ?' : ''}
-  `).all(...scope.params, ...(capped > 0 ? [capped] : []));
+    ${fetchLimit > 0 ? 'LIMIT ?' : ''}
+  `).all(...scope.params, ...(fetchLimit > 0 ? [fetchLimit] : []));
+  const due = (rows || []).filter((record: any) => shouldExecuteSequenceOutbound(record, now).execute);
+  const isolation = canaryConfig
+    || (listDir ? loadCanaryConfig({ listDir }) : null);
+  const scoped = isolation ? filterRecordsForCanary(due, isolation) : due;
+  return capped > 0 ? scoped.slice(0, capped) : scoped;
 };
 
 const StepIntentSchema = z.object({
@@ -290,14 +327,71 @@ const classifyStepIntent = async ({ db, listDir, step, cache, aiConfig = {}, mod
   }
 };
 
-const resolveDueStep = ({ record, steps, today }) => {
-  const next = Number(record.sequence_step || 0) + 1;
-  const step = steps[next - 1];
-  if (!step) return { step: null, stepNumber: next };
-
+/**
+ * Pick the next due sequence step.
+ *
+ * Linear by default (sequence_step + 1). When the next step is optional phone
+ * capacity that is already open-parked and no later step depends_on it, walk
+ * forward so independent mail (depends_on email_2, not phone) can run without
+ * waiting for the call board to clear the phone park.
+ */
+const resolveDueStep = ({
+  record,
+  steps,
+  today,
+  db = null,
+}: {
+  record: Record<string, unknown>;
+  steps: any[];
+  today: string;
+  db?: any;
+}) => {
   const dueDate = String(record.next_action_date || '').trim();
-  if (!dueDate || dueDate <= today) return { step, stepNumber: next };
-  return { step: null, stepNumber: next };
+  if (dueDate && dueDate > today) {
+    return { step: null, stepNumber: Number(record.sequence_step || 0) + 1 };
+  }
+
+  let cursor = Number(record.sequence_step || 0); // 0-based completed count
+  while (cursor < steps.length) {
+    const stepNumber = cursor + 1;
+    const step = steps[cursor];
+    if (!step) return { step: null, stepNumber };
+
+    // Optional phone capacity already parked and not required by later steps:
+    // skip the cursor past it so independent channels (mail) can execute.
+    if (db && isOptionalPhoneCapacityStep(step)) {
+      const stepId = String(step.id || '').trim();
+      const recordId = getRecordRowId(record);
+      let openPark = false;
+      try {
+        openPark = Boolean(db.prepare(`
+          SELECT 1 AS ok
+          FROM pipeline_events
+          WHERE record_id = ? AND step_id = ? AND kind = 'manual_task'
+            AND passed = 0 AND reason = 'awaiting_manual'
+            AND NOT EXISTS (
+              SELECT 1 FROM pipeline_events done
+              WHERE done.record_id = pipeline_events.record_id
+                AND done.step_id = pipeline_events.step_id
+                AND done.kind = 'manual_task'
+                AND done.passed = 1
+                AND done.occurred_at > pipeline_events.occurred_at
+            )
+          LIMIT 1
+        `).get(recordId, stepId)?.ok);
+      } catch {
+        openPark = false;
+      }
+      if (openPark && stepId && !laterStepsDependOn(steps, stepId)) {
+        cursor += 1;
+        continue;
+      }
+    }
+
+    return { step, stepNumber };
+  }
+
+  return { step: null, stepNumber: cursor + 1 };
 };
 
 const planVisitRoutesIfNeeded = async ({ mcp, db, listDir, config, visitCandidates, today, aiConfig = {} }: any) => {
@@ -585,7 +679,25 @@ const applyDeferPolicy = ({ record, step, stepNumber, today, steps, timing }) =>
   };
 };
 
-export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false, sample = 0 }) => {
+export const runSequencer = async ({
+  listDir,
+  sequenceName = '',
+  dryRun = false,
+  sample = 0,
+  now,
+}: {
+  listDir: string;
+  sequenceName?: string;
+  dryRun?: boolean;
+  sample?: number;
+  /** Logical clock for due/wait gating (defaults to wall clock). */
+  now?: string | Date;
+} = {} as any) => {
+  // Canary isolation: refuse unscoped sequence mutations against dirty prod corpus.
+  const canaryConfig = dryRun
+    ? loadCanaryConfig({ listDir })
+    : assertListAccessForMutation(listDir);
+
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   assertPhaseModelReferences({ config, phase: 'sequence' });
@@ -595,19 +707,36 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
   if (sequenceFilter && !holdingNames.has(sequenceFilter)) getSequence(config, sequenceFilter);
 
   const db = openListDb({ listDir, readonly: false });
-  const today = todayIsoDate();
+  const logicalNow = now != null ? (now instanceof Date ? now : new Date(String(now))) : new Date();
+  const today = toIsoDate(logicalNow) || todayIsoDate();
   const sampleLimit = Math.max(0, Number(sample || 0));
   const scope = sequenceScope({ sequenceName: sequenceFilter, holdingNames });
   const sequenceState = (() => {
     try {
-      const records = db.prepare(`
-        SELECT * FROM records
-        WHERE ${inPlayWhere()}
-          ${scope.sql}
-        ORDER BY updated_at DESC
-        ${sampleLimit > 0 ? 'LIMIT ?' : ''}
-      `).all(...scope.params, ...(sampleLimit > 0 ? [sampleLimit] : []));
-      return { records, partition: partitionRecordsBySequence({ config, records }) };
+      // Prefer collectDueRecords so wait due_at / sequence_state honor logical `now`.
+      const records = collectDueRecords({
+        db,
+        limit: sampleLimit,
+        sequenceName: sequenceFilter,
+        holdingNames,
+        now: logicalNow,
+        listDir,
+        canaryConfig,
+      });
+      // When sample is 0, collectDueRecords returns all due; still partition.
+      const allScoped = sampleLimit > 0
+        ? records
+        : filterRecordsForCanary(
+          db.prepare(`
+            SELECT * FROM records
+            WHERE ${inPlayWhere()}
+              ${scope.sql}
+            ORDER BY updated_at DESC
+          `).all(...scope.params).filter((r) => shouldExecuteSequenceOutbound(r, logicalNow).execute),
+          canaryConfig,
+        );
+      const finalRecords = sampleLimit > 0 ? records : allScoped;
+      return { records: finalRecords, partition: partitionRecordsBySequence({ config, records: finalRecords }) };
     } catch (error) {
       db.close();
       throw error;
@@ -650,22 +779,29 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
       throw error;
     }
   })();
-  const mcp = dryRun
+  // AO_SEQUENCER_NO_MCP=1: validation/harness path — real sequencer writes without MCP poll.
+  const skipMcp = dryRun
+    || String(process.env.AO_SEQUENCER_NO_MCP || '').trim() === '1'
+    || String(process.env.AO_PIPELINE_FIXTURE || '').trim() === '1';
+  const mcp = skipMcp
     ? null
     : await getMcpClient().catch((error) => {
       db.close();
       globalSuppressionDb?.close();
       throw error;
     });
-  const toolCatalog = dryRun ? {} : readToolCatalog(listDir);
+  const toolCatalog = skipMcp ? {} : readToolCatalog(listDir);
 
   emitActivity({ event: 'phase_start', phase: 'sequence', rows: records.length, steps: summary.steps });
 
   try {
     if (dryRun) {
+      const dryRunNow = `${today}T12:00:00.000Z`;
       const dryRunCounts = sequenceGroups.reduce((counts, group) => (
         group.records.reduce((groupCounts, record) => {
           if (record.sequence_status === 'completed' || record.sequence_status === 'opted_out') return groupCounts;
+          // next_action_json / account_sequence_state gate (not only sequence_step integers)
+          if (!shouldExecuteSequenceOutbound(record, dryRunNow).execute) return groupCounts;
           const { step } = resolveDueStep({ record, steps: group.steps, today });
           return {
             due: groupCounts.due + (step ? 1 : 0),
@@ -687,24 +823,30 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
     const visitCandidates = [];
     const pendingVisitExecutions = [];
 
-    const replySummary = await runReplyPoll({
-      mcp,
-      db,
-      globalSuppressionDb,
-      listDir,
-      config,
-    });
-    summary.replies = replySummary.replied;
-    summary.engaged = replySummary.engaged;
-    summary.opted_out = replySummary.opted_out;
+    if (mcp) {
+      const replySummary = await runReplyPoll({
+        mcp,
+        db,
+        globalSuppressionDb,
+        listDir,
+        config,
+      });
+      summary.replies = replySummary.replied;
+      summary.engaged = replySummary.engaged;
+      summary.opted_out = replySummary.opted_out;
 
-    await runDeliveryPoll({ mcp, db, listDir, config });
+      await runDeliveryPoll({ mcp, db, listDir, config });
+    }
 
+    // Must re-apply canary filter — never re-query the full production due set.
     const freshRecords = collectDueRecords({
       db,
       limit: sampleLimit,
       sequenceName: sequenceFilter,
       holdingNames,
+      now: logicalNow,
+      listDir,
+      canaryConfig,
     });
     const freshPartition = partitionRecordsBySequence({ config, records: freshRecords });
     const newSequenceFailures = freshPartition.invalid.filter(
@@ -731,7 +873,22 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
         return;
       }
 
-      const { step, stepNumber } = resolveDueStep({ record, steps, today });
+      // Consume next_action_json + account_sequence_state so policy succession is honored.
+      // Record-level: phone next_action keeps the account in play (mail independence).
+      const outboundGate = shouldExecuteSequenceOutbound(record, new Date().toISOString());
+      if (!outboundGate.execute) {
+        upsertRecord({
+          db,
+          row: {
+            ...record,
+            last_error: `sequence_outbound_gated: ${outboundGate.reason}`,
+          },
+        });
+        summary.skipped += 1;
+        return;
+      }
+
+      const { step, stepNumber } = resolveDueStep({ record, steps, today, db });
       if (!step) {
         if (Number(record.sequence_step || 0) >= steps.length && steps.length > 0) {
           upsertRecord({ db, row: { ...record, sequence_status: 'completed', next_action_date: '' } });
@@ -906,6 +1063,25 @@ export const runSequencer = async ({ listDir, sequenceName = '', dryRun = false,
         summary.skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
         emitActivity({ event: 'row_complete', phase: 'sequence', row: record.business_name || recordId, step: step.id || stepNumber });
       } else if (result.status === 'skipped') {
+        // Optional phone capacity park: advance cursor past phone when no later step
+        // depends on it so independent mail can become due next tick without waiting
+        // for call-board completion. Park remains open for the operator.
+        if (
+          !dryRun
+          && (result.parked || String(result.reason || '') === 'awaiting_manual')
+          && isOptionalPhoneCapacityStep(step)
+          && !laterStepsDependOn(steps, String(step.id || ''))
+        ) {
+          const advanced = advanceAfterCompletedStep({
+            record,
+            completedStepNumber: stepNumber,
+            steps,
+            timing,
+            today,
+            lastError: 'phone_parked_cursor_advanced_for_independent_channels',
+          });
+          upsertRecord({ db, row: advanced.row });
+        }
         summary.skipped += 1;
       } else {
         summary.failed += 1;
@@ -1041,14 +1217,18 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
   if (sequenceFilter && !holdingNames.has(sequenceFilter)) getSequence(config, sequenceFilter);
   const db = openListDb({ listDir, readonly: false });
   try {
+    assertListAccessForMutation(listDir);
+    const canaryConfig = loadCanaryConfig({ listDir });
     const scope = sequenceScope({ sequenceName: sequenceFilter, holdingNames });
-    const records = db.prepare(`
+    // Filter allowlist BEFORE applying LIMIT so excluded rows cannot starve canary rows.
+    const rawRecords = db.prepare(`
       SELECT * FROM records
       WHERE sequence_status = 'idle' AND ${inPlayWhere()}
         ${scope.sql}
       ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
-      LIMIT ?
-    `).all(...scope.params, Number(limit));
+    `).all(...scope.params);
+    const records = filterRecordsForCanary(rawRecords, canaryConfig)
+      .slice(0, Math.max(0, Number(limit) || 50));
     const partition = partitionRecordsBySequence({ config, records });
     const groups = partition.groups;
     const summary = { drafted: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
@@ -1206,15 +1386,19 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
 
   const db = openListDb({ listDir, readonly: false });
   try {
+    assertListAccessForMutation(listDir);
+    const canaryConfig = loadCanaryConfig({ listDir });
     const holdingNames = holdingSequenceNames(config);
     const scope = sequenceScope({ holdingNames });
-    const rows = db.prepare(`
+    // Filter allowlist BEFORE LIMIT so excluded rows cannot starve canary selection.
+    const rawRows = db.prepare(`
       SELECT * FROM records
       WHERE ${inPlayWhere()} AND sequence_status = 'idle'
         ${scope.sql}
       ORDER BY COALESCE(fit_score, priority_rank) DESC, updated_at DESC
-      LIMIT ?
-    `).all(...scope.params, Number(limit));
+    `).all(...scope.params);
+    const rows = filterRecordsForCanary(rawRows, canaryConfig)
+      .slice(0, Math.max(0, Number(limit) || 50));
     const partition = partitionRecordsBySequence({ config, records: rows });
     const groups = partition.groups;
     const summary = { sent: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
@@ -1404,7 +1588,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
             : '';
     const normalizedTransition = inferredTransition;
 
-    const updated = {
+    const updated: Record<string, unknown> = {
       ...row,
       outcome: String(action || ''),
       disposition_latest: String(action || ''),
@@ -1433,6 +1617,84 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
       updated.next_action_date = '';
     }
 
+    // Call-board dispositions must close open phone parks and rotate contacts.
+    // Terminal dispositions complete the manual_tail so the successor can start.
+    const terminalCallBoard = /^(no_answer|left_voicemail|not_interested|wrong_number|gatekeeper|callback|talked_to_owner|booked_meeting|meeting_booked|completed|not_a_fit|opted_out|opt_out)$/i
+      .test(normalizedAction);
+    let parkClosed: string | null = null;
+    let rotationResult: { rotated: boolean; active_contact_id?: string | null } | null = null;
+    if (terminalCallBoard) {
+      try {
+        const recordId = getRecordRowId(row);
+        const activeContactId = String(row.active_contact_id || row.contact_id || '').trim();
+        // Ensure contact_id column exists for contact-scoped completion.
+        try { db.exec("ALTER TABLE pipeline_events ADD COLUMN contact_id TEXT DEFAULT ''"); } catch { /* */ }
+        const openPark = db.prepare(`
+          SELECT event_id, step_id, contact_id FROM pipeline_events
+          WHERE record_id = ? AND kind = 'manual_task'
+            AND passed = 0 AND reason = 'awaiting_manual'
+            AND (
+              lower(step_id) LIKE '%phone%'
+              OR lower(step_id) LIKE '%call%'
+              OR lower(step_id) LIKE '%manual_tail%'
+            )
+            ${activeContactId ? "AND (contact_id = ? OR contact_id IS NULL OR contact_id = '')" : ''}
+          ORDER BY occurred_at DESC LIMIT 1
+        `).get(...(activeContactId ? [recordId, activeContactId] : [recordId])) as
+          | { event_id?: string; step_id?: string; contact_id?: string }
+          | undefined;
+        if (openPark?.step_id) {
+          parkClosed = String(openPark.step_id);
+          db.prepare(`
+            INSERT INTO pipeline_events (
+              event_id, record_id, step_id, kind, passed, reason, contact_id, occurred_at
+            ) VALUES (?, ?, ?, 'manual_task', 1, ?, ?, ?)
+          `).run(
+            randomUUID(),
+            recordId,
+            parkClosed,
+            `call_board:${normalizedAction}`,
+            activeContactId,
+            new Date().toISOString(),
+          );
+          // Rotate after manual-tail completion when not opted out / engaged.
+          if (!['engaged', 'opted_out'].includes(normalizedTransition)) {
+            const rotation = applyContactRotation(updated, {
+              reason: `call_board_disposition:${normalizedAction}`,
+            });
+            if (rotation.rotated && rotation.active_contact_id) {
+              rotationResult = {
+                rotated: true,
+                active_contact_id: rotation.active_contact_id,
+              };
+              updated.active_contact_id = rotation.active_contact_id;
+              updated.contact_id = rotation.active_contact_id;
+              updated.sequence_step = 0;
+              updated.sequence_status = 'idle';
+              // 3 business-day quiet period before successor contact outreach.
+              const quiet = addDays(new Date().toISOString().slice(0, 10), 3);
+              updated.next_action_date = quiet;
+              updated.next_action_json = JSON.stringify({
+                type: 'contact_rotation',
+                active_contact_id: rotation.active_contact_id,
+                previous_contact_id: rotation.previous_contact_id,
+                quiet_until: quiet,
+                reason: `call_board:${normalizedAction}`,
+              });
+              if (rotation.account_contact_plan_json) {
+                updated.account_contact_plan_json = rotation.account_contact_plan_json;
+              }
+            } else if (!rotation.rotated) {
+              updated.sequence_status = updated.sequence_status || 'completed';
+              updated.contact_campaign_status = 'exhausted';
+            }
+          }
+        }
+      } catch {
+        /* park close / rotation best-effort — disposition still records */
+      }
+    }
+
     upsertRecord({ db, row: updated });
 
     insertChannelEvent({
@@ -1443,7 +1705,14 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
         channel: 'operator',
         action: 'outcome_logged',
         disposition: String(action || ''),
-        payload: { note, transition, follow_up_in: followUpIn || '' },
+        contact_id: String(updated.active_contact_id || row.active_contact_id || ''),
+        payload: {
+          note,
+          transition,
+          follow_up_in: followUpIn || '',
+          ...(parkClosed ? { park_closed: parkClosed } : {}),
+          ...(rotationResult ? { rotation: rotationResult } : {}),
+        },
         occurred_at: new Date().toISOString(),
       },
     });
