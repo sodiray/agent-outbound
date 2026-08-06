@@ -57,6 +57,37 @@ const GradedCriteriaScoreResultSchema = z.object({
   summary_reasoning: z.string().default(''),
 });
 
+type GradedCriteriaScoreResult = z.infer<typeof GradedCriteriaScoreResultSchema>;
+type GradedCriterionResult = GradedCriteriaScoreResult['criteria'][number];
+
+const reduceGradedCriteriaSamples = ({
+  criteria,
+  samples,
+}: {
+  criteria: Array<{ id: string }>;
+  samples: GradedCriteriaScoreResult[];
+}): Map<string, GradedCriterionResult> => {
+  const returnedById = new Map<string, GradedCriterionResult>();
+  for (const criterion of criteria) {
+    const candidates = samples.flatMap((sample) => {
+      const result = sample.criteria.find((item) => String(item.id || '').trim() === criterion.id);
+      return result ? [result] : [];
+    });
+    if (candidates.length === 0) continue;
+
+    const grades = candidates.map((candidate) => Number(candidate.grade)).sort((a, b) => a - b);
+    // The lower median keeps even-sized reductions on an observed integer grade.
+    const grade = grades[Math.floor((grades.length - 1) / 2)];
+    const representative = candidates.reduce((closest, candidate) => (
+      Math.abs(Number(candidate.grade) - grade) < Math.abs(Number(closest.grade) - grade)
+        ? candidate
+        : closest
+    ));
+    returnedById.set(criterion.id, { ...representative, grade });
+  }
+  return returnedById;
+};
+
 const parseExtra = (value) => {
   try {
     if (!value) return {};
@@ -119,7 +150,7 @@ const rewardOnlyPointsGraded = (criterion, grade) => (
   Math.max(0, Math.round(100 * Math.max(0, numericOr(criterion.weight, 0)) * (grade / 10)))
 );
 
-const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget }) => {
+export const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget, samples = 1, generateObject = generateObjectWithTools }) => {
   const recordId = getRecordRowId(record);
   const normalizedCriteria = normalizeCriteria(criteria);
   if (normalizedCriteria.length <= 0) {
@@ -161,8 +192,11 @@ const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description,
     modelContext.serialized,
   ].join('\n');
 
-  const runAttempt = async () => {
-    const result = await generateObjectWithTools({
+  const sampleCount = Number.isSafeInteger(Number(samples)) && Number(samples) > 0
+    ? Number(samples)
+    : 1;
+  const runSample = async () => {
+    const result = await generateObject({
       task: `score-${axis}`,
       model: model || '',
       role: 'evaluation',
@@ -186,85 +220,98 @@ const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description,
       usage: withModelContextTelemetry(result.usage, modelContext.telemetry),
     });
 
-    const configuredIds = new Set(normalizedCriteria.map((criterion) => criterion.id));
-    const returnedById = new Map(parsed.criteria
-      .filter((criterion) => configuredIds.has(String(criterion.id || '').trim()))
-      .map((criterion) => [String(criterion.id || '').trim(), criterion]));
-    const gradeFor = (criterion) => {
-      const grade = Number(returnedById.get(criterion.id)?.grade);
-      return Number.isFinite(grade) ? Math.max(0, Math.min(10, Math.round(grade))) : 0;
-    };
-    const baseCriteria = normalizedCriteria.filter(isBaseCriterion);
-    const baseWeights = normalizeCriterionWeights(baseCriteria);
-    const baseWeightById = new Map(baseCriteria.map((criterion, index) => [criterion.id, baseWeights[index]]));
-    const baseScore = baseCriteria.reduce((sum, criterion, index) => (
-      sum + (baseWeights[index] * (gradeFor(criterion) / 10))
-    ), 0);
-    const rewardBonus = normalizedCriteria
-      .filter((criterion) => criterion.reward_only)
-      .reduce((sum, criterion) => sum + rewardOnlyPointsGraded(criterion, gradeFor(criterion)), 0);
-    const recordEvidencePool = collectRecordEvidenceIds(record);
-    const poolSet = new Set(recordEvidencePool);
-    const breakdown = normalizedCriteria.map((criterion) => {
-      const rawGrade = gradeFor(criterion);
-      const modelEids = (returnedById.get(criterion.id) as any)?.evidence_ids;
-      // AO_SCORE_DEBUG=1 shows the grade the model gave and the ids it cited,
-      // BEFORE admissibility filtering. Without this the failure mode is silent:
-      // every criterion reads "grade 0, no admissible evidence" whether the model
-      // graded badly, cited nothing, or cited something real that got filtered.
-      // Those need different fixes and look identical from the outside.
-      if (process.env.AO_SCORE_DEBUG === '1') {
-        process.stderr.write(`[score-debug] ${criterion.id} rawGrade=${rawGrade} modelEids=${JSON.stringify(modelEids)} poolSize=${poolSet.size}\n`);
-      }
-      // Criterion-specific + admissible only.
-      const evidence_ids = poolSet.size === 0
-        ? []
-        : evidenceIdsForCriterion(modelEids, recordEvidencePool).filter((id) => poolSet.has(id));
-      // Unsupported components are unknown (grade 0), not full credit without evidence.
-      const grade = evidence_ids.length === 0 ? 0 : rawGrade;
-      const base = {
-        id: criterion.id,
-        description: criterion.description,
-        grade,
-        verdict: verdictForGrade(grade),
-        sub_score: grade / 10,
-        reasoning: evidence_ids.length === 0
-          ? `${criterionReasoning(returnedById, criterion)} [no_admissible_evidence]`.trim()
-          : criterionReasoning(returnedById, criterion),
-        evidence_ids,
-        ...(evidence_ids.length === 0 ? { missing: true, unknown: true } : {}),
-      };
-      if (criterion.reward_only) {
-        return { ...base, weight: criterion.weight, points: rewardOnlyPointsGraded(criterion, grade), reward_only: true };
-      }
-      const weight = baseWeightById.get(criterion.id) || 0;
-      return { ...base, weight, points: Math.round(100 * weight * (grade / 10)) };
-    });
-    // Recompute score from evidence-gated grades (not raw model grades).
-    const gatedBase = baseCriteria.reduce((sum, criterion, index) => {
-      const item = breakdown.find((b) => b.id === criterion.id);
-      const g = Number(item?.grade || 0);
-      return sum + (baseWeights[index] * (g / 10));
-    }, 0);
-    const score = Math.max(0, Math.min(100, Math.round(100 * gatedBase)));
-
-    return {
-      score,
-      reasoning: String(parsed.summary_reasoning || '').trim() || fallbackCriterionSummary(breakdown),
-      breakdown,
-    };
+    return parsed;
   };
 
-  try {
-    return await runAttempt();
-  } catch (error) {
-    emitActivity({ event: 'warning', phase: 'scoring', row: record.business_name || recordId, detail: `Retrying ${axis} graded score after invalid response: ${String((error as any)?.message || error)}` });
-    try {
-      return await runAttempt();
-    } catch (retryError) {
-      throw new Error(`invalid_${axis}_graded_score_after_retry:${String((retryError as any)?.message || retryError)}`);
+  const runSamples = async () => mapWithConcurrency(
+    Array.from({ length: sampleCount }),
+    async () => {
+      try {
+        return { result: await runSample(), error: null };
+      } catch (error) {
+        return { result: null, error };
+      }
+    },
+    sampleCount,
+  );
+
+  const firstAttempt = await runSamples();
+  const successfulSamples = firstAttempt.flatMap((sample) => (sample.result ? [sample.result] : []));
+  const samplesToReduce = successfulSamples.length > 0
+    ? successfulSamples
+    : await (async () => {
+      const firstError = firstAttempt.find((sample) => sample.error)?.error;
+      emitActivity({ event: 'warning', phase: 'scoring', row: record.business_name || recordId, detail: `Retrying ${axis} graded score after invalid response: ${String((firstError as Error | undefined)?.message || firstError || '')}` });
+      const retryAttempt = await runSamples();
+      const retrySuccesses = retryAttempt.flatMap((sample) => (sample.result ? [sample.result] : []));
+      if (retrySuccesses.length > 0) return retrySuccesses;
+      const retryError = retryAttempt.find((sample) => sample.error)?.error;
+      throw new Error(`invalid_${axis}_graded_score_after_retry:${String((retryError as Error | undefined)?.message || retryError || '')}`);
+    })();
+  const returnedById = reduceGradedCriteriaSamples({
+    criteria: normalizedCriteria,
+    samples: samplesToReduce,
+  });
+  const parsed = samplesToReduce[0];
+  const gradeFor = (criterion) => {
+    const grade = Number(returnedById.get(criterion.id)?.grade);
+    return Number.isFinite(grade) ? Math.max(0, Math.min(10, Math.round(grade))) : 0;
+  };
+  const baseCriteria = normalizedCriteria.filter(isBaseCriterion);
+  const baseWeights = normalizeCriterionWeights(baseCriteria);
+  const baseWeightById = new Map(baseCriteria.map((criterion, index) => [criterion.id, baseWeights[index]]));
+  const recordEvidencePool = collectRecordEvidenceIds(record);
+  const poolSet = new Set(recordEvidencePool);
+  const breakdown = normalizedCriteria.map((criterion) => {
+    const rawGrade = gradeFor(criterion);
+    const modelEids = (returnedById.get(criterion.id) as any)?.evidence_ids;
+    // AO_SCORE_DEBUG=1 shows the grade the model gave and the ids it cited,
+    // BEFORE admissibility filtering. Without this the failure mode is silent:
+    // every criterion reads "grade 0, no admissible evidence" whether the model
+    // graded badly, cited nothing, or cited something real that got filtered.
+    // Those need different fixes and look identical from the outside.
+    if (process.env.AO_SCORE_DEBUG === '1') {
+      process.stderr.write(`[score-debug] ${criterion.id} rawGrade=${rawGrade} modelEids=${JSON.stringify(modelEids)} poolSize=${poolSet.size}\n`);
     }
-  }
+    // Criterion-specific + admissible only.
+    const evidence_ids = poolSet.size === 0
+      ? []
+      : evidenceIdsForCriterion(modelEids, recordEvidencePool).filter((id) => poolSet.has(id));
+    // Unsupported components are unknown (grade 0), not full credit without evidence.
+    const grade = evidence_ids.length === 0 ? 0 : rawGrade;
+    const base = {
+      id: criterion.id,
+      description: criterion.description,
+      grade,
+      verdict: verdictForGrade(grade),
+      sub_score: grade / 10,
+      reasoning: evidence_ids.length === 0
+        ? `${criterionReasoning(returnedById, criterion)} [no_admissible_evidence]`.trim()
+        : criterionReasoning(returnedById, criterion),
+      evidence_ids,
+      ...(evidence_ids.length === 0 ? { missing: true, unknown: true } : {}),
+    };
+    if (criterion.reward_only) {
+      return { ...base, weight: criterion.weight, points: rewardOnlyPointsGraded(criterion, grade), reward_only: true };
+    }
+    const weight = baseWeightById.get(criterion.id) || 0;
+    return { ...base, weight, points: Math.round(100 * weight * (grade / 10)) };
+  });
+  // Recompute score from evidence-gated grades (not raw model grades).
+  const gatedBase = baseCriteria.reduce((sum, criterion, index) => {
+    const item = breakdown.find((b) => b.id === criterion.id);
+    const grade = Number(item?.grade || 0);
+    return sum + (baseWeights[index] * (grade / 10));
+  }, 0);
+  const score = Math.max(0, Math.min(100, Math.round(100 * gatedBase)));
+
+  return {
+    score,
+    reasoning: samplesToReduce.length === 1
+      ? String(parsed.summary_reasoning || '').trim() || fallbackCriterionSummary(breakdown)
+      : fallbackCriterionSummary(breakdown),
+    breakdown,
+  };
 };
 
 const MIN_SCORE_GATE = 'score_minimum';
@@ -534,9 +581,9 @@ const scoreAxisSingle = async ({ db, listDir, record, axis, description, model, 
   }
 };
 
-const scoreAxisCriteria = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, grading = 'ternary', inputs, identityFields, contextBudget }) => {
+const scoreAxisCriteria = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, grading = 'ternary', inputs, identityFields, contextBudget, samples = 1 }) => {
   if (String(grading || 'ternary') === 'graded') {
-    return scoreAxisCriteriaGraded({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget });
+    return scoreAxisCriteriaGraded({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget, samples });
   }
   const recordId = getRecordRowId(record);
   const normalizedCriteria = normalizeCriteria(criteria);
@@ -696,6 +743,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
   const scoreCriteria = normalizeCriteria(scoreConfig?.criteria);
   const scoreModel = String(scoreConfig?.model || '');
   const scoreGrading = String(scoreConfig?.grading || 'ternary');
+  const scoreSamples = scoreGrading === 'graded' ? Number(scoreConfig?.samples || 1) : 1;
   const minimumScore = numericOr(scoreConfig?.minimum, 0);
 
   const db = openListDb({ listDir, readonly: false });
@@ -771,7 +819,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           db,
           record,
           type: 'score',
-          description: { description: scoreDescription, criteria: scoreCriteria, grading: scoreGrading },
+          description: { description: scoreDescription, criteria: scoreCriteria, grading: scoreGrading, samples: scoreSamples },
           includeDate: false,
         });
 
@@ -813,6 +861,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
               model: scoreModel,
               aiConfig: config?.ai || {},
               grading: scoreGrading,
+              samples: scoreSamples,
               inputs: scoreConfig?.inputs || [],
               identityFields: config?.source?.identity || [],
               contextBudget: config?.model_context,

@@ -579,6 +579,8 @@ const ScoreSchema = z.object({
   // easily. graded: integer 0-10 per criterion with anchored skeptical
   // calibration — granular, spreads the distribution.
   grading: z.enum(['ternary', 'graded']).default('ternary'),
+  // Independent graded samples per criterion; even counts use the lower median.
+  samples: z.coerce.number().int().positive().default(1),
   inputs: z.array(z.string()).default([]),
   criteria: z.array(ScoringCriterionSchema).default([]),
   // Leads scoring below this threshold are dropped at scoring time
@@ -1023,6 +1025,10 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
   const config = {
       ...parsed.data,
       territories,
+      score: {
+        ...(parsed.data?.score || {}),
+        samples: parsed.data?.score?.samples ?? 1,
+      },
       ai: {
         ...(parsed.data?.ai || {}),
         defaults: {
