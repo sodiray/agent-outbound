@@ -55,6 +55,19 @@ const callWithTimeoutRetry = async (
         }
         return attempt(remaining - 1);
       }
+      // A timed-out model call otherwise reaches the operator as a bare
+      // "fetch failed" with no task, no model, and no duration — which reads
+      // as a network fault and sends you looking at DNS instead of at a prompt
+      // that is too large to answer inside the timeout.
+      if (isTimeoutError(error)) {
+        const seconds = Math.round(llmTimeoutMs() / 1000);
+        throw new Error(
+          `Model call "${task}" timed out after ${seconds}s and ${timeoutRetries() + 1} attempt(s). `
+          + 'The prompt may be too large for this model, or the provider is slow. '
+          + 'Raise AO_LLM_TIMEOUT_MS or reduce the record content sent to this step.',
+          { cause: error },
+        );
+      }
       throw error;
     }
   };
