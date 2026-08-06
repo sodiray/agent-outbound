@@ -1,0 +1,29 @@
+From: MAILER-DAEMON <mailer-daemon@example.net>
+To: outreach@example.com
+Subject: Undelivered Mail Returned to Sender
+Message-ID: <dsn-1@example.net>
+Content-Type: multipart/report; report-type=delivery-status; boundary="dsn-boundary"
+
+--dsn-boundary
+Content-Type: text/plain; charset=utf-8
+
+Delivery failed: user unknown (5.1.1).
+
+--dsn-boundary
+Content-Type: message/delivery-status
+
+Final-Recipient: rfc822; alex@example.com
+Action: failed
+Status: 5.1.1
+
+--dsn-boundary
+Content-Type: message/rfc822
+
+From: outreach@example.com
+To: Alex Rivera <alex@example.com>
+Message-ID: <outbound-bounce@example.com>
+Subject: Hello
+
+Original message.
+
+--dsn-boundary--

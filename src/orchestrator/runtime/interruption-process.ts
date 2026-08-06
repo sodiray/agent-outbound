@@ -2,6 +2,7 @@
  * Production entrypoint: apply a sequence interruption and persist.
  */
 import { applySequenceInterruption, type InterruptionKind } from '../policy/interruptions.js';
+import type { BounceType } from '../policy/bounce.js';
 import { ensureRecordColumns, upsertRecord } from './db.js';
 
 export function processSequenceInterruption(input: {
@@ -9,6 +10,12 @@ export function processSequenceInterruption(input: {
   recordId: string;
   kind: InterruptionKind;
   reason?: string;
+  bounceType?: BounceType;
+  messageId?: string;
+  threadId?: string;
+  email?: string;
+  contactId?: string;
+  snippet?: string;
 }): {
   record: Record<string, unknown>;
   kind: InterruptionKind;
@@ -23,6 +30,12 @@ export function processSequenceInterruption(input: {
     record,
     kind: input.kind,
     reason: input.reason,
+    bounceType: input.bounceType,
+    messageId: input.messageId,
+    threadId: input.threadId,
+    email: input.email,
+    contactId: input.contactId,
+    snippet: input.snippet,
   });
   ensureRecordColumns({ db: input.db, columns: Object.keys(applied.patch) });
   upsertRecord({ db: input.db, row: applied.patch });

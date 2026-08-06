@@ -32,6 +32,7 @@ export type ApplyEmailBounceInput = {
   messageId?: string;
   threadId?: string;
   email?: string;
+  contactId?: string;
   snippet?: string;
   /** Soft bounces at or above this count harden (default 3). */
   softBounceThreshold?: number;
@@ -241,7 +242,7 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
   // treats email_bounced as not ready either way).
   let suppressed_contact_ids = parseSuppressedContactIds(record);
   const contactId = String(
-    record.active_contact_id || record.contact_id || record.primary_contact_id || '',
+    input.contactId || record.active_contact_id || record.contact_id || record.primary_contact_id || '',
   ).trim();
   if (contactId && !suppressed_contact_ids.includes(contactId)) {
     suppressed_contact_ids = [...suppressed_contact_ids, contactId];

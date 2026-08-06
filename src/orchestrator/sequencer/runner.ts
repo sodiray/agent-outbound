@@ -18,7 +18,7 @@ import { planRouteAction } from '../actions/plan-route/index.js';
 import { emitActivity } from '../runtime/activity.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getMcpClient } from '../runtime/mcp.js';
-import { runDeliveryPoll, runReplyPoll } from '../runtime/polling.js';
+import { runDeliveryPoll, runImapInboundPoll } from '../runtime/polling.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { assertToolSpecAvailable } from '../runtime/mcp.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
@@ -823,18 +823,12 @@ export const runSequencer = async ({
     const visitCandidates = [];
     const pendingVisitExecutions = [];
 
-    if (mcp) {
-      const replySummary = await runReplyPoll({
-        mcp,
-        db,
-        globalSuppressionDb,
-        listDir,
-        config,
-      });
-      summary.replies = replySummary.replied;
-      summary.engaged = replySummary.engaged;
-      summary.opted_out = replySummary.opted_out;
+    const inboundSummary = await runImapInboundPoll({ db, listDir, config });
+    summary.replies = inboundSummary.replies;
+    summary.engaged = inboundSummary.replies;
+    summary.opted_out = 0;
 
+    if (mcp) {
       await runDeliveryPoll({ mcp, db, listDir, config });
     }
 

@@ -121,6 +121,8 @@ import {
   mailboxesListCommand,
   mailboxesShowCommand,
   mailboxesTestCommand,
+  inboundListCommand,
+  inboundResolveCommand,
   modelsAddCommand,
   modelsListCommand,
   modelsRefreshCommand,
@@ -236,6 +238,8 @@ const printHelp = () => {
   process.stdout.write(`  mailboxes list <list>\n`);
   process.stdout.write(`  mailboxes show <list> --id ID\n`);
   process.stdout.write(`  mailboxes test <list> --id ID --to EMAIL\n`);
+  process.stdout.write(`  inbound list <list> [--status matched|unmatched|ambiguous] [--classification reply|bounce|auto_reply]\n`);
+  process.stdout.write(`  inbound resolve <list> --message IMAP_MESSAGE_ID --record RECORD_ID\n`);
   process.stdout.write(`  list create <list> [--description TEXT]\n`);
   process.stdout.write(`  list info <list>\n`);
   process.stdout.write(`  lists\n`);
@@ -829,6 +833,27 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown mailboxes subcommand: ${sub}`);
+  }
+
+  if (command === 'inbound') {
+    const sub = String(argv.shift() || '').trim();
+    const list = String(argv.shift() || '');
+    setResponseContext({ command: `inbound ${sub}`, list });
+    if (sub === 'list') {
+      const status = consumeFlag(argv, '--status', '');
+      const classification = consumeFlag(argv, '--classification', '');
+      const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
+      print(inboundListCommand({ list, status, classification, limit }));
+      return;
+    }
+    if (sub === 'resolve') {
+      const inboundMessageId = consumeFlag(argv, '--message', '');
+      const recordId = consumeFlag(argv, '--record', '') || consumeFlag(argv, '--row', '');
+      if (!inboundMessageId || !recordId) throw new Error('inbound resolve requires --message and --record.');
+      print(inboundResolveCommand({ list, inboundMessageId, recordId }));
+      return;
+    }
+    throw new Error(`Unknown inbound subcommand: ${sub}`);
   }
 
   if (command === 'describe') {

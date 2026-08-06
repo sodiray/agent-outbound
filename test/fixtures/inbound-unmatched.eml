@@ -1,0 +1,7 @@
+From: Unknown Sender <unknown@example.com>
+To: outreach@example.com
+Subject: Hello
+Message-ID: <unmatched-1@example.com>
+Content-Type: text/plain; charset=utf-8
+
+No correlation headers are present.

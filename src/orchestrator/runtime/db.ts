@@ -220,6 +220,28 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_channel_events_row ON channel_events(row_id, occurred_at DESC);
   CREATE INDEX IF NOT EXISTS idx_channel_events_channel ON channel_events(channel, occurred_at DESC);
 
+  CREATE TABLE IF NOT EXISTS inbound_messages (
+    inbound_message_id TEXT PRIMARY KEY,
+    mailbox_id TEXT NOT NULL,
+    imap_uid INTEGER NOT NULL,
+    rfc_message_id TEXT DEFAULT '',
+    classification TEXT NOT NULL,
+    correlation_status TEXT NOT NULL,
+    record_id TEXT DEFAULT '',
+    contact_id TEXT DEFAULT '',
+    sender_email TEXT DEFAULT '',
+    subject TEXT DEFAULT '',
+    snippet TEXT DEFAULT '',
+    references_json TEXT DEFAULT '[]',
+    received_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(mailbox_id, imap_uid)
+  );
+  CREATE INDEX IF NOT EXISTS idx_inbound_messages_operator
+    ON inbound_messages(correlation_status, classification, received_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_inbound_messages_record
+    ON inbound_messages(record_id, received_at DESC);
+
   CREATE TABLE IF NOT EXISTS score_events (
     event_id TEXT PRIMARY KEY,
     row_id TEXT NOT NULL,

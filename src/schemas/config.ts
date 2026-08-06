@@ -835,6 +835,7 @@ const OperationsSchema = z.object({
 });
 
 const WatchSchema = z.object({
+  poll_inbound_minutes: z.coerce.number().int().min(1).default(5),
   poll_replies_minutes: z.coerce.number().int().min(1).default(5),
   poll_delivery_minutes: z.coerce.number().int().min(1).default(15),
 }).partial().default({});

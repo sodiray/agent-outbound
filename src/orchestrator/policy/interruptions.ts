@@ -4,19 +4,27 @@
  */
 import { NEXT_ACTION_POLICY_VERSION, type LifecycleStage, type SequenceState, type WorkState } from './lifecycle.js';
 import { assertLifecycleTransition, canTransitionLifecycle } from './lifecycle.js';
+import { applyEmailBounce, type BounceType } from './bounce.js';
 
 export type InterruptionKind =
   | 'became_customer'
   | 'inbound_opportunity'
   | 'referral'
   | 'disqualified'
-  | 'campaign_cancelled';
+  | 'campaign_cancelled'
+  | 'email_bounce';
 
 export type ApplyInterruptionInput = {
   record: Record<string, unknown>;
   kind: InterruptionKind;
   reason?: string;
   asOf?: string;
+  bounceType?: BounceType;
+  messageId?: string;
+  threadId?: string;
+  email?: string;
+  contactId?: string;
+  snippet?: string;
 };
 
 export type ApplyInterruptionResult = {
@@ -162,6 +170,25 @@ export function applySequenceInterruption(input: ApplyInterruptionInput): ApplyI
         policy_version: NEXT_ACTION_POLICY_VERSION,
       });
       break;
+    }
+    case 'email_bounce': {
+      const bounced = applyEmailBounce({
+        record,
+        bounceType: input.bounceType,
+        bounceAt: asOf,
+        messageId: input.messageId,
+        threadId: input.threadId,
+        email: input.email,
+        contactId: input.contactId,
+        snippet: input.snippet,
+        source: 'dsn',
+      });
+      return {
+        patch: bounced.patch,
+        kind,
+        account_sequence_state: String(bounced.patch.account_sequence_state || ''),
+        lifecycle_stage: String(bounced.patch.lifecycle_stage || lifecycle_stage),
+      };
     }
     default:
       throw new Error(`Unknown interruption kind: ${kind}`);

@@ -4,10 +4,10 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
-import { openGlobalSuppressionDb, openListDb } from '../orchestrator/runtime/db.js';
+import { openListDb } from '../orchestrator/runtime/db.js';
 import { getMcpClient } from '../orchestrator/runtime/mcp.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
-import { runDeliveryPoll, runReplyPoll } from '../orchestrator/runtime/polling.js';
+import { runDeliveryPoll, runImapInboundPoll } from '../orchestrator/runtime/polling.js';
 
 type Priority = 'urgent' | 'high' | 'normal' | 'low';
 type PendingStatus = 'open' | 'claimed' | 'snoozed' | 'resolved' | 'dismissed';
@@ -857,7 +857,7 @@ const runDuePolling = async ({
   const watch = asRecord(asRecord(config).watch);
   const replyIntervalMinutes = Math.max(
     1,
-    Number(watch.poll_replies_minutes || 5),
+    Number(watch.poll_inbound_minutes || watch.poll_replies_minutes || 5),
   );
   const deliveryIntervalMinutes = Math.max(
     1,
@@ -886,48 +886,9 @@ const runDuePolling = async ({
       ok: false as const,
       error: error instanceof Error ? error.message : String(error),
     }));
-  if ('error' in mcpResult) {
-    const mcpError = mcpResult.error;
-    if (due.replies) {
-      recordMonitorPhase({
-        db,
-        phase: 'replies',
-        attemptedAt,
-        succeeded: false,
-        error: mcpError,
-      });
-    }
-    if (due.delivery) {
-      recordMonitorPhase({
-        db,
-        phase: 'delivery',
-        attemptedAt,
-        succeeded: false,
-        error: mcpError,
-      });
-    }
-    db.close();
-    return {
-      replies: due.replies
-        ? { due: true, error: mcpError }
-        : { due: false },
-      delivery: due.delivery
-        ? { due: true, error: mcpError }
-        : { due: false },
-    };
-  }
-  const globalSuppressionDb = due.replies
-    ? openGlobalSuppressionDb({ readonly: false })
-    : null;
   try {
     const replyResult = due.replies
-      ? await runReplyPoll({
-          mcp: mcpResult.mcp,
-          listDir,
-          db,
-          globalSuppressionDb,
-          config,
-        }).then((result) => ({
+      ? await runImapInboundPoll({ listDir, db, config }).then((result) => ({
           ok: true as const,
           result,
         })).catch((error) => ({
@@ -950,18 +911,20 @@ const runDuePolling = async ({
       });
     }
     const deliveryResult = due.delivery
-      ? await runDeliveryPoll({
-          mcp: mcpResult.mcp,
-          listDir,
-          db,
-          config,
-        }).then((result) => ({
-          ok: true as const,
-          result,
-        })).catch((error) => ({
-          ok: false as const,
-          error: error instanceof Error ? error.message : String(error),
-        }))
+      ? 'mcp' in mcpResult
+        ? await runDeliveryPoll({
+            mcp: mcpResult.mcp,
+            listDir,
+            db,
+            config,
+          }).then((result) => ({
+            ok: true as const,
+            result,
+          })).catch((error) => ({
+            ok: false as const,
+            error: error instanceof Error ? error.message : String(error),
+          }))
+        : { ok: false as const, error: mcpResult.error }
       : null;
     const deliveryErrors = deliveryResult && 'error' in deliveryResult
       ? [deliveryResult.error]
@@ -990,7 +953,6 @@ const runDuePolling = async ({
         : { due: false },
     };
   } finally {
-    globalSuppressionDb?.close();
     db.close();
   }
 };

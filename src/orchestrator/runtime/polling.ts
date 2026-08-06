@@ -14,6 +14,9 @@ import { getRecordRowId } from '../lib/record.js';
 import { emitActivity } from './activity.js';
 import { isBudgetExceededError } from './contract.js';
 import { processBounceEvent } from './bounce-process.js';
+import { fetchInboxMessages } from './imap-client.js';
+import { processInboundEmail } from './inbound-email.js';
+import { loadMailboxesCatalog, resolveMailboxCredentials } from '../lib/mailboxes.js';
 
 type PollContext = {
   mcp: Client;
@@ -21,6 +24,66 @@ type PollContext = {
   db: any;
   globalSuppressionDb: any;
   config: any;
+};
+
+export const runImapInboundPoll = async ({
+  listDir,
+  db,
+  config,
+}: Omit<PollContext, 'mcp' | 'globalSuppressionDb'>) => {
+  const { assertListAccessForMutation } = await import('../policy/canary-isolation.js');
+  assertListAccessForMutation(listDir);
+  const catalog = loadMailboxesCatalog({ listDir, config });
+  const enabledMailboxes = catalog?.mailboxes.filter((mailbox) => mailbox.enabled) || [];
+  const summary = {
+    scanned: 0,
+    processed: 0,
+    replies: 0,
+    bounces: 0,
+    auto_replies: 0,
+    unmatched: 0,
+    ambiguous: 0,
+    errors: [] as string[],
+  };
+  for (const mailbox of enabledMailboxes) {
+    try {
+      const credentials = resolveMailboxCredentials(mailbox, catalog!.yamlDir).credentials;
+      const host = String(credentials.IMAP_HOST || credentials.SMTP_HOST || '').trim();
+      const user = String(credentials.IMAP_USER || credentials.SMTP_USER || '').trim();
+      const password = String(credentials.IMAP_PASS || credentials.SMTP_PASS || '').trim();
+      const port = Number(credentials.IMAP_PORT || 993);
+      const missing = [
+        !host ? 'IMAP_HOST/SMTP_HOST' : '',
+        !user ? 'IMAP_USER/SMTP_USER' : '',
+        !password ? 'IMAP_PASS/SMTP_PASS' : '',
+      ].filter(Boolean);
+      if (missing.length > 0 || !Number.isInteger(port) || port <= 0) {
+        summary.errors.push(`Mailbox "${mailbox.id}" missing ${missing.join(', ') || 'a valid IMAP_PORT'}.`);
+        continue;
+      }
+      const messages = await fetchInboxMessages({ host, port, user, password });
+      summary.scanned += messages.length;
+      for (const message of messages) {
+        const processed = await processInboundEmail({
+          db,
+          mailboxId: mailbox.id,
+          uid: message.uid,
+          raw: message.source,
+          receivedAt: (message.internalDate || new Date()).toISOString(),
+        });
+        if (!processed.processed) continue;
+        summary.processed += 1;
+        if (processed.classification === 'reply') summary.replies += 1;
+        if (processed.classification === 'bounce') summary.bounces += 1;
+        if (processed.classification === 'auto_reply') summary.auto_replies += 1;
+        if (processed.correlation.status === 'unmatched') summary.unmatched += 1;
+        if (processed.correlation.status === 'ambiguous') summary.ambiguous += 1;
+      }
+    } catch (error) {
+      summary.errors.push(`Mailbox "${mailbox.id}": ${String((error as Error)?.message || error)}`);
+    }
+  }
+  return summary;
 };
 
 const hasExplicitStopIntent = (text: string) => {
@@ -338,7 +401,7 @@ export const startPollingScheduler = ({
   globalSuppressionDb,
   config,
 }: PollContext): PollingSchedulerHandle => {
-  const replyIntervalMs = Math.max(1, Number(config?.watch?.poll_replies_minutes || 5)) * 60 * 1000;
+  const replyIntervalMs = Math.max(1, Number(config?.watch?.poll_inbound_minutes || config?.watch?.poll_replies_minutes || 5)) * 60 * 1000;
   const deliveryIntervalMs = Math.max(1, Number(config?.watch?.poll_delivery_minutes || 15)) * 60 * 1000;
 
   let running = true;
@@ -349,7 +412,7 @@ export const startPollingScheduler = ({
     if (!running || replyInFlight) return;
     replyInFlight = true;
     try {
-      await runReplyPoll({ mcp, listDir, db, globalSuppressionDb, config });
+      await runImapInboundPoll({ listDir, db, config });
     } catch (error) {
       emitActivity({ event: 'poll_error', phase: 'replies', error: String((error as any)?.message || error) });
     } finally {
