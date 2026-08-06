@@ -245,8 +245,14 @@ const MUTATING_ACTIONS = new Set([
 
 const nowIso = () => new Date().toISOString();
 
-app.get('/health', (c) => c.json({ status: 'ok', started_at: nowIso() }));
-app.get('/v1/health', (c) => c.json({ status: 'ok', started_at: nowIso() }));
+// Stamped once at module load, not per request: `started_at` is meant to answer
+// "how long has this process been up", and a request-time clock silently
+// answers "what time is it" instead — which reads as a fresh process forever.
+const PROCESS_STARTED_AT = nowIso();
+
+const health = { status: 'ok', started_at: PROCESS_STARTED_AT };
+app.get('/health', (c) => c.json(health));
+app.get('/v1/health', (c) => c.json(health));
 
 const handleAction = async (c: any) => {
   const action = String(c.req.param('action') || '').trim();
@@ -691,7 +697,8 @@ export const startServeMode = ({ list = '.', port = 49391 } = {}) => {
     }
   })();
 
-  const shutdown = async () => {
+  // Release everything this process owns. Safe to call more than once.
+  const releaseResources = async () => {
     try {
       if (pollingHandle) await pollingHandle.stop();
     } catch {
@@ -713,9 +720,44 @@ export const startServeMode = ({ list = '.', port = 49391 } = {}) => {
       // ignore
     }
   };
+
+  // A signal must actually stop the process. Releasing the pollers and the
+  // database handles while the listening socket stays open leaves a process
+  // that still answers /health with "ok" and still serves the whole API from
+  // per-request connections — but has gone permanently deaf to replies,
+  // bounces, and delivery events. That is worse than not stopping at all,
+  // because every obvious check still passes.
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Never let a wedged handle hold the process open forever.
+    const forceExit = setTimeout(() => process.exit(0), 5_000);
+    forceExit.unref?.();
+    await releaseResources();
+    try {
+      server.close();
+    } catch {
+      // ignore
+    }
+    clearTimeout(forceExit);
+    process.exit(0);
+  };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-  process.on('exit', shutdown);
+  // 'exit' handlers must be synchronous; only best-effort release here.
+  process.on('exit', () => {
+    try {
+      pollingDb?.close();
+    } catch {
+      // ignore
+    }
+    try {
+      pollingGlobalDb?.close();
+    } catch {
+      // ignore
+    }
+  });
 
   return server;
 };
