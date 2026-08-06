@@ -181,7 +181,22 @@ export function validateTaxonomyLabels(input: {
   const originalVertical = vertical;
   const originalSub = sub;
 
-  const vHit = verts.find((v) => v.id === vertical || v.label === vertical);
+  // Match ids and labels without punctuation or case getting in the way:
+  // a model that answers "HVAC" means the `hvac` leaf, and rejecting that
+  // sends a correctly classified account to the fallback vertical, which
+  // permits no outreach at all.
+  //
+  // This deliberately normalizes FORM only. It never guesses meaning — a
+  // model answering "Construction" for an HVAC contractor stays unsupported,
+  // because construction_project_services is a different family from
+  // trades_field_services and quietly picking one would attach the wrong
+  // diagnostics to the account. Fail closed on meaning, forgive formatting.
+  const canonical = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const matches = (candidate: string, value: string) => (
+    Boolean(candidate) && canonical(candidate) === canonical(value)
+  );
+
+  const vHit = verts.find((v) => matches(v.id, vertical) || matches(v.label, vertical));
   if (!vertical) {
     vertical = fallbackV;
     fallback_applied = true;
@@ -198,7 +213,7 @@ export function validateTaxonomyLabels(input: {
   const subs = vertNode?.sub_verticals || [];
 
   if (sub) {
-    const sHit = subs.find((s) => s.id === sub || s.label === sub);
+    const sHit = subs.find((s) => matches(s.id, sub) || matches(s.label, sub));
     if (!sHit && subs.length > 0) {
       reasons.push(`unsupported_sub_vertical:${originalSub || sub}`);
       if (originalSub) candidate_sub_vertical = originalSub;
