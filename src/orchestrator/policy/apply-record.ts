@@ -459,10 +459,15 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     }
   }
 
-  let fitEvidence = num(record.fit_evidence_confidence, null);
-  if (fitEvidence == null && hasCommercialFit && breakdown.length) {
-    fitEvidence = deriveFitEvidenceConfidence(breakdown);
-  }
+  // fit_evidence_confidence is DERIVED from the current breakdown, so a fresh
+  // breakdown must be allowed to move it. Reading the stored value first and
+  // deriving only when null latched it permanently: a lead scored while its
+  // components cited no evidence stored 0, and 0 is a number, so re-scoring it
+  // successfully could never lift it back out of enrichment_hold. The comment
+  // below already promised "until re-scored" — this makes that true.
+  let fitEvidence = hasCommercialFit && breakdown.length
+    ? deriveFitEvidenceConfidence(breakdown)
+    : num(record.fit_evidence_confidence, null);
   // Legacy scores without TV fit components: low evidence until re-scored.
   // 45 is an explicit "thin" band (not invent-high); null would hold treatment.
   if (fitEvidence == null && fitScore != null) {
