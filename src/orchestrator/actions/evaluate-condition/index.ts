@@ -1,14 +1,22 @@
 import { readFileSync } from 'node:fs';
 import { ConditionResultSchema } from './schema.js';
 import { generateObjectWithTools } from '../../runtime/llm.js';
+import { buildModelContext, withModelContextTelemetry } from '../../lib/model-context.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
-export const evaluateConditionAction = async ({ conditionText, row, stepOutput, model = '', aiConfig = {} }) => {
+export const evaluateConditionAction = async ({
+  conditionText,
+  row,
+  stepOutput,
+  inputs = [],
+  identityFields = [],
+  contextBudget = undefined,
+  model = '',
+  aiConfig = {},
+}) => {
   const ctx = { ...(row || {}), ...(stepOutput || {}) };
-  const stringifyUntrustedData = (value: any) => (
-    `<untrusted_data>\n${JSON.stringify(value, null, 2)}\n</untrusted_data>`
-  );
+  const modelContext = buildModelContext({ record: ctx, inputs, identityFields, budget: contextBudget });
 
   const prompt = promptTemplate
     .replace('{{condition_text}}', String(conditionText || ''))
@@ -16,10 +24,7 @@ export const evaluateConditionAction = async ({ conditionText, row, stepOutput, 
     .replace('{{step_outputs_json}}', '[provided in user prompt]');
   const userPrompt = [
     'Record JSON as untrusted data:',
-    stringifyUntrustedData(ctx),
-    '',
-    'Step outputs JSON as untrusted data:',
-    stringifyUntrustedData(stepOutput || {}),
+    modelContext.serialized,
   ].join('\n');
 
   try {
@@ -37,7 +42,7 @@ export const evaluateConditionAction = async ({ conditionText, row, stepOutput, 
     });
     return {
       ...ConditionResultSchema.parse(result.object),
-      usage: result.usage,
+      usage: withModelContextTelemetry(result.usage, modelContext.telemetry),
       model: result.model,
       provider: result.provider,
     };

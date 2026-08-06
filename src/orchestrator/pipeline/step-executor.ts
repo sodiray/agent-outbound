@@ -92,6 +92,9 @@ const executeSemanticFilterBatch = async (
   step: PipelineStepLike,
   rows: Array<Record<string, unknown>>,
 ) => {
+  const modelContextConfig = ctx.config && typeof ctx.config === 'object'
+    ? ctx.config as { source?: { identity?: string[] }; model_context?: unknown }
+    : {};
   const semantic = await evaluateSemanticFilterBatches({
     db: ctx.db,
     listDir: ctx.listDir,
@@ -99,6 +102,8 @@ const executeSemanticFilterBatch = async (
     rows,
     aiConfig: ctx.aiConfig || ctx.config?.ai || {},
     batchSize: Number(step.batch_size || 10),
+    identityFields: modelContextConfig.source?.identity || [],
+    contextBudget: modelContextConfig.model_context,
   });
   const outcomes = new Map<string, StepExecutionOutcome>();
   semantic.forEach((outcome, recordId) => {
@@ -280,6 +285,9 @@ const executeAssignBatch = async (
     const routedBy = assignRuleName(rule, ruleIndex);
     const type = textValue(rule.type, 'field_check').toLowerCase();
     if (type === 'semantic') {
+      const modelContextConfig = ctx.config && typeof ctx.config === 'object'
+        ? ctx.config as { source?: { identity?: string[] }; model_context?: unknown }
+        : {};
       const semanticOutcomes = await evaluateSemanticFilterBatches({
         db: ctx.db,
         listDir: ctx.listDir,
@@ -290,6 +298,8 @@ const executeAssignBatch = async (
         rows: candidates,
         aiConfig: ctx.aiConfig || ctx.config?.ai || {},
         batchSize: Number(step.batch_size || 10),
+        identityFields: modelContextConfig.source?.identity || [],
+        contextBudget: modelContextConfig.model_context,
       });
       const matched = candidates.filter((row) => {
         const result = semanticOutcomes.get(getRecordRowId(row));

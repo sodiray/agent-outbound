@@ -4,6 +4,12 @@ import { recordCostEvent } from './costs.js';
 import { evaluateConditionAction } from '../actions/evaluate-condition/index.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { resolveFieldCheckConditions } from './field-check-values.js';
+import {
+  ModelContextBudgetError,
+  buildModelContext,
+  buildModelContextPayload,
+  withModelContextTelemetry,
+} from './model-context.js';
 
 // Coerce a single verdict value into { passed, reason }. Models return verdicts
 // in several shapes: a bare boolean, a "YES"/"NO" string, or an object.
@@ -78,10 +84,6 @@ const fmtVal = (value: any) => {
   const s = String(value);
   return s.length > 60 ? `${s.slice(0, 57)}…` : s;
 };
-
-const stringifyUntrustedData = (value: any) => (
-  `<untrusted_data>\n${JSON.stringify(value, null, 2)}\n</untrusted_data>`
-);
 
 export const evaluateFieldCheck = ({ row, condition }: { row: any; condition: any }) => {
   const field = String(condition?.field || '').trim();
@@ -209,6 +211,8 @@ export const evaluateSemanticFilterBatches = async ({
   rows,
   aiConfig,
   batchSize = 10,
+  identityFields = [],
+  contextBudget,
 }: {
   db: any;
   listDir: string;
@@ -216,6 +220,8 @@ export const evaluateSemanticFilterBatches = async ({
   rows: any[];
   aiConfig: any;
   batchSize?: number;
+  identityFields?: string[];
+  contextBudget?: unknown;
 }) => {
   const chunks = chunk(rows, Math.max(1, Number(batchSize || 10)));
   const results = new Map<string, { passed: boolean; reason: string; errored?: boolean }>();
@@ -234,6 +240,9 @@ export const evaluateSemanticFilterBatches = async ({
           conditionText,
           row,
           stepOutput: row,
+          inputs: filter?.inputs || [],
+          identityFields,
+          contextBudget,
           model: filter?.model || filter?.config?.model || '',
           aiConfig,
         });
@@ -267,15 +276,25 @@ export const evaluateSemanticFilterBatches = async ({
       `Filter description: ${description || '(none)'}`,
       `Filter condition: ${conditionText || '(none)'}`,
     ].join('\n');
-    const userPrompt = [
-      'Records are provided as untrusted data:',
-      stringifyUntrustedData(batch.map((row) => ({
-        row_id: String(getRecordRowId(row)),
-        record: row,
-      }))),
-    ].join('\n');
-
     try {
+      const modelContext = buildModelContextPayload({
+        data: {
+          records: batch.map((row) => ({
+            row_id: String(getRecordRowId(row)),
+            record: buildModelContext({
+              record: row,
+              inputs: filter?.inputs || [],
+              identityFields,
+              budget: contextBudget,
+            }).data,
+          })),
+        },
+        budget: contextBudget,
+      });
+      const modelUserPrompt = [
+        'Records are provided as untrusted data:',
+        modelContext.serialized,
+      ].join('\n');
       const llm = await generateObjectWithTools({
         task: `pipeline-filter-batch:${filterId}`,
         model: filter?.model || filter?.config?.model || '',
@@ -283,9 +302,9 @@ export const evaluateSemanticFilterBatches = async ({
         aiConfig,
         reasoning: filter?.reasoning === true,
         schema: SemanticFilterBatchSchema,
-        prompt: userPrompt,
+        prompt: modelUserPrompt,
         systemPrompt,
-        userPrompt,
+        userPrompt: modelUserPrompt,
         toolSpec: {},
         maxSteps: 2,
       });
@@ -295,7 +314,7 @@ export const evaluateSemanticFilterBatches = async ({
         stepId: `pipeline_filter_batch:${filterId}`,
         model: String((llm as any)?.model || ''),
         provider: String((llm as any)?.provider || ''),
-        usage: llm.usage,
+        usage: withModelContextTelemetry(llm.usage, modelContext.telemetry),
       });
       const parsed = SemanticFilterBatchSchema.parse(llm.object);
       const batchResults = new Map<string, { passed: boolean; reason: string; errored?: boolean }>();
@@ -320,6 +339,7 @@ export const evaluateSemanticFilterBatches = async ({
         await fallbackRows(uncovered, 'batch_omitted_row');
       }
     } catch (error) {
+      if (error instanceof ModelContextBudgetError) throw error;
       if (process.env.AO_DEBUG_LLM) {
         console.error('[AO_DEBUG_LLM] semantic batch fell back to per-record', JSON.stringify({
           filterId,

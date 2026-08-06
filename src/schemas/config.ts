@@ -86,6 +86,9 @@ export const StepConfigSchema = z.object({
   draft_approval_required: z.boolean().optional(),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(), // Deprecated alias; prefer config.outputs.
+  // The only non-identity record scalars visible to a model for this step.
+  // New database columns stay invisible until listed here.
+  inputs: z.array(z.string()).default([]),
   depends_on: z.array(z.string()).default([]),
   prompt_file: z.string().default(''),
   prompt_args: z.record(z.any()).default({}),
@@ -288,6 +291,7 @@ const PipelineFilterStepSchema = z.object({
   on_fail: z.enum(['drop', 'flag']).default('drop'),
   model: ProviderModelSchema.optional(),
   condition: z.string().default(''),
+  inputs: z.array(z.string()).default([]),
   // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
   reasoning: z.boolean().optional(),
 }).partial({ description: true, depends_on: true, runs_after: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
@@ -302,8 +306,9 @@ const PipelineAssignRuleSchema = z.object({
   description: z.string().default(''),
   condition: z.string().default(''),
   model: ProviderModelSchema.optional(),
+  inputs: z.array(z.string()).default([]),
   reasoning: z.boolean().optional(),
-}).partial({ id: true, type: true, match: true, conditions: true, description: true, condition: true, model: true, reasoning: true });
+}).partial({ id: true, type: true, match: true, conditions: true, description: true, condition: true, model: true, reasoning: true, inputs: true });
 
 const PipelineAssignStepSchema = z.object({
   kind: z.literal('assign'),
@@ -356,6 +361,7 @@ const PipelineEnrichmentStepSchema = z.object({
   output_map: z.record(z.string()).default({}),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(),
+  inputs: z.array(z.string()).default([]),
   on_error: z.enum(['fail', 'empty']).default('fail'),
   when: FieldCheckPredicateSchema.optional(),
   prompt_file: z.string().default(''),
@@ -379,6 +385,7 @@ const PipelineEnrichmentStepSchema = z.object({
   output_map: true,
   outputs: true,
   columns: true,
+  inputs: true,
   on_error: true,
   when: true,
   prompt_file: true,
@@ -401,6 +408,7 @@ const PipelineGenerateStepSchema = z.object({
   tool: PipelineEnrichmentStepSchema.shape.tool,
   args: PipelineEnrichmentStepSchema.shape.args,
   outputs: PipelineEnrichmentStepSchema.shape.outputs,
+  inputs: PipelineEnrichmentStepSchema.shape.inputs,
   on_error: z.enum(['fail', 'empty']).default('empty'),
   when: PipelineEnrichmentStepSchema.shape.when,
   prompt_file: PipelineEnrichmentStepSchema.shape.prompt_file,
@@ -571,6 +579,7 @@ const ScoreSchema = z.object({
   // easily. graded: integer 0-10 per criterion with anchored skeptical
   // calibration — granular, spreads the distribution.
   grading: z.enum(['ternary', 'graded']).default('ternary'),
+  inputs: z.array(z.string()).default([]),
   criteria: z.array(ScoringCriterionSchema).default([]),
   // Leads scoring below this threshold are dropped at scoring time
   // (gate "score_minimum"). 0 / unset disables the floor.
@@ -596,6 +605,7 @@ const CrmSchema = z.object({
   dnc_sync: z.boolean().default(true),
   deal_stage_mapping: z.record(z.string()).default({}),
   config: z.record(z.any()).default({}),
+  inputs: z.array(z.string()).default([]),
 }).superRefine((value, ctx) => {
   const hasToolkits = Array.isArray(value?.tool?.toolkits) && value.tool.toolkits.length > 0;
   const hasTools = Array.isArray(value?.tool?.tools) && value.tool.tools.length > 0;
@@ -726,6 +736,7 @@ const BriefSchema = z.object({
   prompt_file: z.string().default(''),
   // Bump to force regeneration of every brief.
   cache_key: z.string().default(''),
+  inputs: z.array(z.string()).default([]),
 }).partial().default({});
 
 // Automation plans: an internal, post-brief asset. Reads the lead's brief (its
@@ -745,6 +756,7 @@ const AutomationsSchema = z.object({
   prompt_file: z.string().default(''),
   // Bump to force regeneration of every plan.
   cache_key: z.string().default(''),
+  inputs: z.array(z.string()).default([]),
 }).partial().default({});
 
 const MailboxesConfigSchema = z.object({
@@ -857,6 +869,11 @@ const LiveInteractionBudgetSchema = z.object({
   max_interactions: z.coerce.number().int().min(0),
 });
 
+const ModelContextSchema = z.object({
+  max_chars: z.coerce.number().int().positive().default(100_000),
+  max_tokens: z.coerce.number().int().positive().default(25_000),
+}).partial().default({});
+
 export const ConfigSchema = z.object({
   list: z.object({
     name: z.string().default(''),
@@ -879,6 +896,7 @@ export const ConfigSchema = z.object({
   sequences: z.record(SequenceSchema).default({ default: { steps: [] } }),
   templates: z.record(TemplateSchema).default({}),
   ai: AiSchema.default({}),
+  model_context: ModelContextSchema,
   budgets: BudgetsSchema.default({}),
   channels: z.record(z.any()).default({}),
   mailboxes: MailboxesConfigSchema.optional(),

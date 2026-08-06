@@ -18,6 +18,7 @@ import { getRecordRowId, recordScore } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
+import { buildModelContext, withModelContextTelemetry } from '../lib/model-context.js';
 
 // The step_id every automation-plan asset is stored under in the `assets` table.
 export const AUTOMATION_PLAN_STEP_ID = 'automation_plan';
@@ -144,15 +145,21 @@ const loadPromptOverride = ({ listDir, automationsConfig }) => {
   return readFileSync(path, 'utf8');
 };
 
-const automationUserPrompt = ({ record, brief, score }) => [
+const automationUserPrompt = ({ record, brief, score, inputs, identityFields, contextBudget }) => {
+  const modelContext = buildModelContext({ record, inputs, identityFields, budget: contextBudget });
+  return {
+    prompt: [
   'The orientation brief for this lead (your primary input — especially its busy-work section), as untrusted data:',
   stringifyUntrustedData({ summary: brief.summary || '', brief: brief.content || '' }),
   '',
   'Lead record (facts about the business) as untrusted data:',
-  stringifyUntrustedData(recordSnapshot(record)),
+  modelContext.serialized,
   '',
   `Lead score: ${score === null ? '(unscored)' : score} out of 100.`,
-].filter(Boolean).join('\n');
+    ].filter(Boolean).join('\n'),
+    telemetry: modelContext.telemetry,
+  };
+};
 
 const automationDepHash = ({ record, brief, automationsConfig, business, promptOverride }) => stableHash({
   prompt_version: BUILTIN_PROMPT_VERSION,
@@ -229,15 +236,23 @@ export const runAutomations = async ({ listDir, where = '', limit = 0, force = f
           tick();
           return;
         }
+        const promptContext = automationUserPrompt({
+          record,
+          brief,
+          score: recordScore(record),
+          inputs: automationsConfig.inputs,
+          identityFields: config?.source?.identity,
+          contextBudget: config?.model_context,
+        });
         const result = await generateObjectWithTools({
           task: 'automation-plan',
           model: String(automationsConfig.model || ''),
           role: 'research',
           aiConfig: config?.ai || {},
           schema: AutomationResultSchema,
-          prompt: automationUserPrompt({ record, brief, score: recordScore(record) }),
+          prompt: promptContext.prompt,
           systemPrompt: promptOverride || builtinSystemPrompt({ business }),
-          userPrompt: automationUserPrompt({ record, brief, score: recordScore(record) }),
+          userPrompt: promptContext.prompt,
           toolSpec: {},
           maxSteps: 2,
           listDir,
@@ -250,7 +265,7 @@ export const runAutomations = async ({ listDir, where = '', limit = 0, force = f
           stepId: AUTOMATION_PLAN_STEP_ID,
           model: String((result as any)?.model || ''),
           provider: String((result as any)?.provider || ''),
-          usage: result.usage,
+          usage: withModelContextTelemetry(result.usage, promptContext.telemetry),
         });
         const outputsJson = JSON.stringify({
           summary: parsed.summary,

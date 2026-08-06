@@ -84,6 +84,9 @@ export const runCrmSync = async ({ listDir, where = "1=1", limit = 200 }) => {
         toolCatalog,
         aiConfig: config?.ai || {},
         listDir,
+        inputs: crmConfig?.inputs || [],
+        identityFields: config?.source?.identity || [],
+        contextBudget: config?.model_context,
       });
       recordCostEvent({
         db,

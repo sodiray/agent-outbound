@@ -5,6 +5,7 @@ import { generateObjectWithTools } from '../../runtime/llm.js';
 import { assertToolSpecAvailable } from '../../runtime/mcp.js';
 import { renderPromptTemplate } from '../shared.js';
 import type { ToolCatalog } from '../../runtime/tools.js';
+import { buildModelContext, buildModelContextPayload, withModelContextTelemetry } from '../../lib/model-context.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
@@ -15,6 +16,9 @@ export const syncCrmAction = async ({
   toolCatalog,
   aiConfig = {},
   listDir = '',
+  inputs = [],
+  identityFields = [],
+  contextBudget,
 }: {
   mcp: Client;
   record: any;
@@ -22,11 +26,20 @@ export const syncCrmAction = async ({
   toolCatalog?: ToolCatalog;
   aiConfig?: any;
   listDir?: string;
+  inputs?: string[];
+  identityFields?: string[];
+  contextBudget?: unknown;
 }) => {
+  const contacts = Array.isArray(record?.contacts) ? record.contacts : [];
+  const modelRecord = buildModelContext({ record, inputs, identityFields, budget: contextBudget });
+  const modelContext = buildModelContextPayload({
+    data: { ...modelRecord.data, contacts },
+    budget: contextBudget,
+  });
   const prompt = renderPromptTemplate({
     template: promptTemplate,
     vars: {
-      record_json: JSON.stringify(record || {}, null, 2),
+      record_json: modelContext.serialized,
       crm_config_json: JSON.stringify(crmConfig || {}, null, 2),
     },
   });
@@ -59,7 +72,7 @@ export const syncCrmAction = async ({
 
     return {
       ...SyncCrmResultSchema.parse(result.object),
-      usage: result.usage,
+      usage: withModelContextTelemetry(result.usage, modelContext.telemetry),
       model: result.model,
       provider: result.provider,
     };

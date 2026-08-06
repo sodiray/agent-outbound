@@ -11,6 +11,7 @@ import { generateObjectWithTools } from '../runtime/llm.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
+import { buildModelContext, withModelContextTelemetry } from '../lib/model-context.js';
 import {
   applyOutboundPolicy,
   calculateFitScore,
@@ -118,11 +119,11 @@ const rewardOnlyPointsGraded = (criterion, grade) => (
   Math.max(0, Math.round(100 * Math.max(0, numericOr(criterion.weight, 0)) * (grade / 10)))
 );
 
-const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description, criteria, model, aiConfig }) => {
+const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget }) => {
   const recordId = getRecordRowId(record);
   const normalizedCriteria = normalizeCriteria(criteria);
   if (normalizedCriteria.length <= 0) {
-    return scoreAxisSingle({ db, listDir, record, axis, description, model, aiConfig });
+    return scoreAxisSingle({ db, listDir, record, axis, description, model, aiConfig, inputs, identityFields, contextBudget });
   }
 
   const systemPrompt = [
@@ -154,9 +155,10 @@ const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description,
     'Criteria:',
     JSON.stringify(normalizedCriteria, null, 2),
   ].join('\n');
+  const modelContext = buildModelContext({ record, inputs, identityFields, budget: contextBudget });
   const userPrompt = [
     'Record JSON as untrusted data:',
-    stringifyUntrustedData({ ...record, ...parseExtra(record.extra_json) }),
+    modelContext.serialized,
   ].join('\n');
 
   const runAttempt = async () => {
@@ -181,7 +183,7 @@ const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description,
       stepId: `score:${axis}`,
       model: String((result as any)?.model || ''),
       provider: String((result as any)?.provider || ''),
-      usage: result.usage,
+      usage: withModelContextTelemetry(result.usage, modelContext.telemetry),
     });
 
     const configuredIds = new Set(normalizedCriteria.map((criterion) => criterion.id));
@@ -341,32 +343,6 @@ const scoringSnapshot = (record) => {
  * Re-hydrating those columns costs nothing and makes the evidence legible as
  * structure, so a model can actually find an evidence_id to cite.
  */
-const hydrateEmbeddedJson = (record) => {
-  if (!record || typeof record !== 'object') return record;
-  const out = {};
-  for (const [key, value] of Object.entries(record)) {
-    if (typeof value !== 'string') {
-      out[key] = value;
-      continue;
-    }
-    const trimmed = value.trim();
-    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-      out[key] = value;
-      continue;
-    }
-    try {
-      out[key] = JSON.parse(trimmed);
-    } catch {
-      out[key] = value;
-    }
-  }
-  return out;
-};
-
-const stringifyUntrustedData = (value) => (
-  `<untrusted_data>\n${JSON.stringify(hydrateEmbeddedJson(value), null, 2)}\n</untrusted_data>`
-);
-
 const shouldRescore = ({ db, record, type, description, includeDate }) => {
   const recordId = getRecordRowId(record);
   const snapshot = scoringSnapshot(record);
@@ -497,7 +473,7 @@ const fallbackCriterionSummary = (breakdown) => {
   ].filter(Boolean).join('; ') || 'No criteria matched.';
 };
 
-const scoreAxisSingle = async ({ db, listDir, record, axis, description, model, aiConfig }) => {
+const scoreAxisSingle = async ({ db, listDir, record, axis, description, model, aiConfig, inputs, identityFields, contextBudget }) => {
   const recordId = getRecordRowId(record);
   const systemPrompt = [
     `You are scoring outbound leads for axis: ${axis}.`,
@@ -508,9 +484,10 @@ const scoreAxisSingle = async ({ db, listDir, record, axis, description, model, 
     'Scoring description:',
     String(description || '').trim() || '(empty description)',
   ].join('\n');
+  const modelContext = buildModelContext({ record, inputs, identityFields, budget: contextBudget });
   const userPrompt = [
     'Record JSON as untrusted data:',
-    stringifyUntrustedData({ ...record, ...parseExtra(record.extra_json) }),
+    modelContext.serialized,
   ].join('\n');
 
   const runAttempt = async () => {
@@ -535,7 +512,7 @@ const scoreAxisSingle = async ({ db, listDir, record, axis, description, model, 
       stepId: `score:${axis}`,
       model: String((result as any)?.model || ''),
       provider: String((result as any)?.provider || ''),
-      usage: result.usage,
+      usage: withModelContextTelemetry(result.usage, modelContext.telemetry),
     });
 
     return {
@@ -557,14 +534,14 @@ const scoreAxisSingle = async ({ db, listDir, record, axis, description, model, 
   }
 };
 
-const scoreAxisCriteria = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, grading = 'ternary' }) => {
+const scoreAxisCriteria = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, grading = 'ternary', inputs, identityFields, contextBudget }) => {
   if (String(grading || 'ternary') === 'graded') {
-    return scoreAxisCriteriaGraded({ db, listDir, record, axis, description, criteria, model, aiConfig });
+    return scoreAxisCriteriaGraded({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget });
   }
   const recordId = getRecordRowId(record);
   const normalizedCriteria = normalizeCriteria(criteria);
   if (normalizedCriteria.length <= 0) {
-    return scoreAxisSingle({ db, listDir, record, axis, description, model, aiConfig });
+    return scoreAxisSingle({ db, listDir, record, axis, description, model, aiConfig, inputs, identityFields, contextBudget });
   }
 
   const systemPrompt = [
@@ -580,9 +557,10 @@ const scoreAxisCriteria = async ({ db, listDir, record, axis, description, crite
     'Criteria:',
     JSON.stringify(normalizedCriteria, null, 2),
   ].join('\n');
+  const modelContext = buildModelContext({ record, inputs, identityFields, budget: contextBudget });
   const userPrompt = [
     'Record JSON as untrusted data:',
-    stringifyUntrustedData({ ...record, ...parseExtra(record.extra_json) }),
+    modelContext.serialized,
   ].join('\n');
 
   const runAttempt = async () => {
@@ -607,7 +585,7 @@ const scoreAxisCriteria = async ({ db, listDir, record, axis, description, crite
       stepId: `score:${axis}`,
       model: String((result as any)?.model || ''),
       provider: String((result as any)?.provider || ''),
-      usage: result.usage,
+      usage: withModelContextTelemetry(result.usage, modelContext.telemetry),
     });
 
     const configuredIds = new Set(normalizedCriteria.map((criterion) => criterion.id));
@@ -835,6 +813,9 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
               model: scoreModel,
               aiConfig: config?.ai || {},
               grading: scoreGrading,
+              inputs: scoreConfig?.inputs || [],
+              identityFields: config?.source?.identity || [],
+              contextBudget: config?.model_context,
             }).then((value) => ({ ...value, error: '' })).catch((error) => ({
               score: null,
               reasoning: '',

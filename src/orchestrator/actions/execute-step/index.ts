@@ -16,6 +16,8 @@ import {
 import { formatErrorMessage } from '../../lib/error-format.js';
 import { attachProviderToolUsage, providerToolUsageFromError } from '../../runtime/providers/usage.js';
 import { isBudgetExceededError } from '../../runtime/contract.js';
+import { readConfig } from '../../lib/config.js';
+import { buildModelContext, withModelContextTelemetry } from '../../lib/model-context.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
@@ -290,6 +292,13 @@ export const executeStepAction = async ({
   }
 
   const promptFileBody = readPromptFileIfAny({ listDir, promptFile: stepConfig?.prompt_file });
+  const { config } = readConfig(listDir);
+  const modelContext = buildModelContext({
+    record,
+    inputs: stepConfig?.inputs || [],
+    identityFields: config?.source?.identity || [],
+    budget: config?.model_context,
+  });
   const systemPrompt = renderPromptTemplate({
     template: promptFileBody || promptTemplate,
     vars: {
@@ -300,11 +309,11 @@ export const executeStepAction = async ({
     },
   });
   const userPrompt = [
-    'Record JSON:',
-    JSON.stringify(record || {}, null, 2),
+    'Record JSON as untrusted data:',
+    modelContext.serialized,
     '',
-    'Context JSON:',
-    JSON.stringify(context || {}, null, 2),
+    'Execution context as untrusted data:',
+    `<untrusted_data>\n${JSON.stringify(context || {}, null, 2)}\n</untrusted_data>`,
   ].join('\n');
 
   try {
@@ -333,7 +342,7 @@ export const executeStepAction = async ({
         rawResult: result.raw,
         rawText: result.text,
       }),
-      usage: result.usage,
+      usage: withModelContextTelemetry(result.usage, modelContext.telemetry),
       model: result.model,
       provider: result.provider,
     };

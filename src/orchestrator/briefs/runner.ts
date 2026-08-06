@@ -11,6 +11,7 @@ import { getRecordRowId, recordScore } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
+import { buildModelContext, withModelContextTelemetry } from '../lib/model-context.js';
 
 // Bump when the built-in prompt changes materially so existing briefs refresh.
 // v2 (2026-06-12): orientation brief — what they do / how they make money / the
@@ -120,9 +121,12 @@ const loadPromptOverride = ({ listDir, briefConfig }) => {
   return readFileSync(path, 'utf8');
 };
 
-const briefUserPrompt = ({ record, interactions, score, breakdown }) => [
+const briefUserPrompt = ({ record, interactions, score, breakdown, inputs, identityFields, contextBudget }) => {
+  const modelContext = buildModelContext({ record, inputs, identityFields, budget: contextBudget });
+  return {
+    prompt: [
   'Lead record as untrusted data:',
-  stringifyUntrustedData(briefSnapshot(record)),
+  modelContext.serialized,
   '',
   `Lead score: ${score === null ? '(unscored)' : score} out of 100.`,
   breakdown ? `Score breakdown as untrusted data:\n${stringifyUntrustedData(breakdown)}` : '',
@@ -136,7 +140,10 @@ const briefUserPrompt = ({ record, interactions, score, breakdown }) => [
       occurred_at: row.occurred_at,
     })))}`
     : 'No human interactions logged with this lead yet.',
-].filter(Boolean).join('\n');
+    ].filter(Boolean).join('\n'),
+    telemetry: modelContext.telemetry,
+  };
+};
 
 const briefDepHash = ({ record, interactions, briefConfig, business, promptOverride }) => stableHash({
   prompt_version: BUILTIN_PROMPT_VERSION,
@@ -199,15 +206,24 @@ export const runBriefs = async ({ listDir, where = '', limit = 0, force = false 
             return null;
           }
         })();
+        const promptContext = briefUserPrompt({
+          record,
+          interactions,
+          score: recordScore(record),
+          breakdown,
+          inputs: briefConfig.inputs,
+          identityFields: config?.source?.identity,
+          contextBudget: config?.model_context,
+        });
         const result = await generateObjectWithTools({
           task: 'lead-brief',
           model: String(briefConfig.model || ''),
           role: 'research',
           aiConfig: config?.ai || {},
           schema: BriefResultSchema,
-          prompt: briefUserPrompt({ record, interactions, score: recordScore(record), breakdown }),
+          prompt: promptContext.prompt,
           systemPrompt: promptOverride || builtinSystemPrompt({ business }),
-          userPrompt: briefUserPrompt({ record, interactions, score: recordScore(record), breakdown }),
+          userPrompt: promptContext.prompt,
           toolSpec: {},
           maxSteps: 2,
           listDir,
@@ -220,7 +236,7 @@ export const runBriefs = async ({ listDir, where = '', limit = 0, force = false 
           stepId: 'brief',
           model: String((result as any)?.model || ''),
           provider: String((result as any)?.provider || ''),
-          usage: result.usage,
+          usage: withModelContextTelemetry(result.usage, promptContext.telemetry),
         });
         persistBrief({
           db,
