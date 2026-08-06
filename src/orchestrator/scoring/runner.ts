@@ -48,7 +48,15 @@ const CriteriaScoreResultSchema = z.object({
  */
 const GradedCriteriaScoreResultSchema = z.object({
   criteria: z.array(z.object({
-    id: z.coerce.string(),
+    // NOT z.coerce.string(): coercion turns a MISSING id into the literal
+    // string "undefined", which matches no configured criterion, so every
+    // grade silently falls to 0 and the run still reports success. One model
+    // omitted this field on every criterion and produced a confident 0.0 fit
+    // for four real businesses. A malformed response must fail and retry, not
+    // score zero.
+    id: z.string().min(1).refine((value) => value !== 'undefined', {
+      message: 'criterion id missing from model response',
+    }),
     reasoning: z.string().min(1),
     /** The observation/source ids this reasoning drew on — what was read, not what "proves" the grade. */
     evidence_ids: z.array(z.coerce.string()).default([]),
