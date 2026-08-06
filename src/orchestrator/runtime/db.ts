@@ -534,6 +534,26 @@ const SCHEMA_SQL = `
     UNIQUE(idem_key, scope)
   );
 
+  CREATE TABLE IF NOT EXISTS live_interaction_ledger (
+    ledger_id TEXT PRIMARY KEY,
+    identity_key TEXT NOT NULL UNIQUE,
+    record_id TEXT NOT NULL,
+    contact_id TEXT DEFAULT '',
+    channel TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    provider_id TEXT DEFAULT '',
+    provider_message_id TEXT DEFAULT '',
+    delivery_mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_live_interaction_ledger_live
+    ON live_interaction_ledger(delivery_mode, status, record_id);
+  CREATE INDEX IF NOT EXISTS idx_live_interaction_ledger_occurred
+    ON live_interaction_ledger(occurred_at DESC);
+
   CREATE TABLE IF NOT EXISTS cost_events (
     id TEXT PRIMARY KEY,
     record_id TEXT DEFAULT '',

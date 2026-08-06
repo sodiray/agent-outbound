@@ -852,6 +852,11 @@ const PolicySchema = z.object({
   review_required_for: z.array(z.string()).default([]),
 }).partial().default({});
 
+const LiveInteractionBudgetSchema = z.object({
+  max_accounts: z.coerce.number().int().min(0),
+  max_interactions: z.coerce.number().int().min(0),
+});
+
 export const ConfigSchema = z.object({
   list: z.object({
     name: z.string().default(''),
@@ -881,6 +886,7 @@ export const ConfigSchema = z.object({
   crm: CrmSchema.optional(),
   /** Deterministic outbound policy gates (TV and similar projects). */
   policy: PolicySchema,
+  live_interaction_budget: LiveInteractionBudgetSchema.optional(),
   operations: OperationsSchema,
   watch: WatchSchema,
 }).partial().default({});

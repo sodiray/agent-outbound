@@ -80,6 +80,7 @@ export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand 
 export { attioDomainsCommand } from './attio-domains.js';
 export { mailboxesListCommand, mailboxesShowCommand, mailboxesTestCommand } from './mailboxes.js';
 export { inboundListCommand, inboundResolveCommand } from './inbound.js';
+export { liveInteractionBudgetCommand } from './live-interaction-budget.js';
 export { briefCommand, briefShowCommand } from './briefs.js';
 export { sourceTerritoryCommand } from './source-territory.js';
 export { automationsCommand, automationsShowCommand } from './automations.js';

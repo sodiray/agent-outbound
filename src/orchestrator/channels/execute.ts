@@ -27,6 +27,14 @@ import { isBudgetExceededError } from '../runtime/contract.js';
 import { readConfig } from '../lib/config.js';
 import { countMailboxSendsToday, resolveSendMailbox, smtpCredentialEnv } from '../lib/mailboxes.js';
 import {
+  commitLiveInteraction,
+  isSinkOrFixtureMode,
+  recordSinkInteraction,
+  releaseLiveInteractionReservation,
+  reserveLiveInteraction,
+  resolveLiveInteractionBudget,
+} from '../runtime/live-interaction-budget.js';
+import {
   guardChannelExecution,
   assertWorkAllowed,
   advanceAfterSuccessfulAction,
@@ -704,6 +712,113 @@ export const executeChannelStep = async ({
       }
     }
 
+    const liveInteractionBudget = resolveLiveInteractionBudget(projectConfig);
+    const reserveProviderInteraction = ({ providerChannel }: { providerChannel: 'email' | 'linkedin' }) => {
+      const idempotencyClaim = claimExclusiveSend();
+      if (idempotencyClaim.ok === false) return idempotencyClaim;
+      if (!liveInteractionBudget) return { ok: true, mode: 'unlimited' as const };
+      if (isSinkOrFixtureMode(providerChannel)) return { ok: true, mode: 'sink' as const };
+      try {
+        const reservation = reserveLiveInteraction({
+          db,
+          budget: liveInteractionBudget,
+          recordId,
+          contactId: activeContactId,
+          channel: providerChannel,
+          stepId: sequenceStepId,
+          at: now,
+        });
+        if (reservation.allowed) return { ok: true, mode: 'live' as const };
+        if (idemKey) {
+          failIdempotency({
+            db,
+            idemKey,
+            scope: idemConfig?.scope || 'list',
+            claimId: String((sendRecord as any).__idempotency_claim_id || ''),
+            payload: {
+              error: reservation.reason,
+              stepNumber,
+              step_id: sequenceStepId,
+            },
+          });
+        }
+        return {
+          ok: false,
+          result: {
+            status: 'skipped',
+            reason: 'live_interaction_budget_exhausted',
+            provider_id: '',
+            auto_skipped_steps: [],
+          },
+        };
+      } catch {
+        if (idemKey) {
+          failIdempotency({
+            db,
+            idemKey,
+            scope: idemConfig?.scope || 'list',
+            claimId: String((sendRecord as any).__idempotency_claim_id || ''),
+            payload: {
+              error: 'live_interaction_budget_ledger_unreadable',
+              stepNumber,
+              step_id: sequenceStepId,
+            },
+          });
+        }
+        return {
+          ok: false,
+          result: {
+            status: 'skipped',
+            reason: 'live_interaction_budget_ledger_unreadable',
+            provider_id: '',
+            auto_skipped_steps: [],
+          },
+        };
+      }
+    };
+    const releaseProviderInteraction = ({ mode }: { mode: 'live' | 'sink' | 'unlimited' }) => {
+      if (mode !== 'live') return;
+      releaseLiveInteractionReservation({
+        db,
+        recordId,
+        contactId: activeContactId,
+        stepId: sequenceStepId,
+        at: now,
+      });
+    };
+    const commitProviderInteraction = ({
+      mode,
+      providerChannel,
+      providerId,
+    }: {
+      mode: 'live' | 'sink' | 'unlimited';
+      providerChannel: 'email' | 'linkedin';
+      providerId: string;
+    }) => {
+      if (mode === 'unlimited') return;
+      if (mode === 'sink') {
+        recordSinkInteraction({
+          db,
+          recordId,
+          contactId: activeContactId,
+          channel: providerChannel,
+          stepId: sequenceStepId,
+          providerId,
+          at: now,
+        });
+        return;
+      }
+      commitLiveInteraction({
+        db,
+        recordId,
+        contactId: activeContactId,
+        channel: providerChannel,
+        stepId: sequenceStepId,
+        providerId,
+        at: now,
+      });
+    };
+
     // Forbidden channels/work (SMS, automated voice, visits) cannot be created.
     // When policy.enforce_readiness === true, also hard-blocks non-ready external sends
     // (send_email intent=send, linkedin_connect) — not drafts, dryRun, or manual parks.
@@ -1053,7 +1168,7 @@ export const executeChannelStep = async ({
         }
       }
 
-      const liClaim = claimExclusiveSend();
+      const liClaim = reserveProviderInteraction({ providerChannel: 'linkedin' });
       if (liClaim.ok === false) return liClaim.result as any;
 
       const { executeUnipileLinkedinConnect } = await import('./unipile.js');
@@ -1063,6 +1178,7 @@ export const executeChannelStep = async ({
         dryRun,
       });
       if (linkedinResult.status !== 'sent') {
+        releaseProviderInteraction({ mode: liClaim.mode });
         if (idemKey && linkedinResult.status === 'failed') {
           failIdempotency({
             db,
@@ -1111,6 +1227,11 @@ export const executeChannelStep = async ({
 
       // CRITICAL: complete idempotency immediately after provider accept (before bookkeeping).
       (sendRecord as any).__provider_accept_attempted = true;
+      commitProviderInteraction({
+        mode: liClaim.mode,
+        providerChannel: 'linkedin',
+        providerId: liProviderId,
+      });
       if (idemKey && !dryRun) {
         const completed = completeIdempotency({
           db,
@@ -1706,7 +1827,7 @@ export const executeChannelStep = async ({
         }
       }
       // Exclusive claim immediately before provider side-effect (after all gates).
-      const emailClaim = claimExclusiveSend();
+      const emailClaim = reserveProviderInteraction({ providerChannel: 'email' });
       if (emailClaim.ok === false) return emailClaim.result as any;
 
       // Frozen args only — args_map already applied above; do not re-apply in tool-call.
@@ -1732,6 +1853,7 @@ export const executeChannelStep = async ({
         || String(sendOutputs.status || '').toLowerCase() === 'failed'
         || String(sendOutputs.status || '').toLowerCase() === 'rejected';
       if (providerRejected) {
+        releaseProviderInteraction({ mode: emailClaim.mode });
         if (idemKey && !dryRun) {
           failIdempotency({
             db,
@@ -1796,6 +1918,11 @@ export const executeChannelStep = async ({
       // CRITICAL: record provider acceptance immediately — before any bookkeeping
       // that can throw. A later SQLite failure must not leave the claim failed/retryable.
       (sendRecord as any).__provider_accept_attempted = true;
+      commitProviderInteraction({
+        mode: emailClaim.mode,
+        providerChannel: 'email',
+        providerId: sendMessageId,
+      });
       if (idemKey && !dryRun) {
         const completed = completeIdempotency({
           db,

@@ -123,6 +123,7 @@ import {
   mailboxesTestCommand,
   inboundListCommand,
   inboundResolveCommand,
+  liveInteractionBudgetCommand,
   modelsAddCommand,
   modelsListCommand,
   modelsRefreshCommand,
@@ -240,6 +241,7 @@ const printHelp = () => {
   process.stdout.write(`  mailboxes test <list> --id ID --to EMAIL\n`);
   process.stdout.write(`  inbound list <list> [--status matched|unmatched|ambiguous] [--classification reply|bounce|auto_reply]\n`);
   process.stdout.write(`  inbound resolve <list> --message IMAP_MESSAGE_ID --record RECORD_ID\n`);
+  process.stdout.write(`  budget live <list> [--limit N]\n`);
   process.stdout.write(`  list create <list> [--description TEXT]\n`);
   process.stdout.write(`  list info <list>\n`);
   process.stdout.write(`  lists\n`);
@@ -854,6 +856,18 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown inbound subcommand: ${sub}`);
+  }
+
+  if (command === 'budget') {
+    const sub = String(argv.shift() || '').trim();
+    const list = String(argv.shift() || '');
+    setResponseContext({ command: `budget ${sub}`, list });
+    if (sub === 'live') {
+      const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
+      print(liveInteractionBudgetCommand({ list, limit }));
+      return;
+    }
+    throw new Error(`Unknown budget subcommand: ${sub}`);
   }
 
   if (command === 'describe') {
