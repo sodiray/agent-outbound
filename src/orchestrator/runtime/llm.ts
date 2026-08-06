@@ -402,6 +402,16 @@ export const generateObjectWithTools = async ({
   const withProviderOptions = Object.keys(providerOptions || {}).length > 0
     ? { providerOptions }
     : {};
+
+  // Grading and extraction are MEASUREMENTS: the same record must yield the
+  // same answer, or a score means nothing and cannot be compared across runs.
+  // Sampling was never pinned, and it showed: one unchanged Treasure Valley
+  // record scored 41.9, 53.0 and 57.6 on three identical runs — straddling the
+  // 50-point Tier C/D boundary, so whether a real business got contacted at all
+  // depended on which run happened to execute. Copywriting keeps the provider
+  // default; variety is the point there.
+  const deterministicRole = role === 'evaluation' || role === 'research';
+  const sampling = deterministicRole ? { temperature: 0 } : {};
   const preferPlainTextObject = !hasTools && (
     resolved.providerId === 'deepinfra'
     || providerOptionsRequestReasoning(providerOptions)
@@ -413,6 +423,7 @@ export const generateObjectWithTools = async ({
     if (hasTools) {
       const execution = await collectProviderToolUsage(() => callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
         model: selectedModel,
+            ...sampling,
         ...(toolSystem ? { system: toolSystem } : {}),
         prompt: basePrompt,
         maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -430,6 +441,7 @@ export const generateObjectWithTools = async ({
         try {
           const generated = await callWithTimeoutRetry(task, (signal) => aiSdk.generateObject({
             model: selectedModel,
+            ...sampling,
             ...(system ? { system } : {}),
             prompt: basePrompt,
             schema,
@@ -450,6 +462,7 @@ export const generateObjectWithTools = async ({
         if (!result && !preferPlainTextObject) {
           const structured = await callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
             model: selectedModel,
+            ...sampling,
             ...(system ? { system } : {}),
             prompt: basePrompt,
             maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -473,6 +486,7 @@ export const generateObjectWithTools = async ({
       if (!result) {
         result = await callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
           model: selectedModel,
+            ...sampling,
           ...(toolSystem ? { system: toolSystem } : {}),
           prompt: basePrompt,
           maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
@@ -517,6 +531,7 @@ export const generateObjectWithTools = async ({
         const extractionPrompt = `You previously called tools and received these results:\n\n${resultsJson}\n\nOriginal task: ${basePrompt.slice(0, 2000)}\n\nNow respond with a JSON object matching this schema:\n${schemaDescription}\n\nReturn ONLY the JSON object, no other text.`;
         const extraction = await callWithTimeoutRetry(task, (signal) => aiSdk.generateText({
           model: selectedModel,
+            ...sampling,
           ...(system ? { system } : {}),
           prompt: extractionPrompt,
           maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
