@@ -86,7 +86,21 @@ const reduceGradedCriteriaSamples = ({
     const grades = candidates.map((candidate) => Number(candidate.grade)).sort((a, b) => a - b);
     // The lower median keeps even-sized reductions on an observed integer grade.
     const grade = grades[Math.floor((grades.length - 1) / 2)];
-    const representative = candidates.reduce((closest, candidate) => (
+
+    // Prefer a representative that actually cited evidence. Downstream, a
+    // criterion whose evidence_ids are empty is hard-zeroed — so picking the
+    // sample nearest the median WITHOUT regard to citations throws away
+    // citations that other samples did produce, and zeroes a criterion the
+    // model reasoned about perfectly well. Observed: a lead scored 56.7 on a
+    // single sample and 7.5 on median-of-5, with substantive reasoning on every
+    // criterion and evidence on one, because the chosen representatives happened
+    // to be the uncited ones. Citation quality must not depend on which sample
+    // sat nearest the median.
+    const cited = candidates.filter((candidate) => (
+      Array.isArray(candidate.evidence_ids) && candidate.evidence_ids.length > 0
+    ));
+    const pool = cited.length > 0 ? cited : candidates;
+    const representative = pool.reduce((closest, candidate) => (
       Math.abs(Number(candidate.grade) - grade) < Math.abs(Number(closest.grade) - grade)
         ? candidate
         : closest
