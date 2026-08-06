@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { insertCostEvent, logCostEventFile, ensureRecordColumns } from '../runtime/db.js';
+import {
+  enforceCanaryRecordMutation,
+  insertCostEvent,
+  logCostEventFile,
+  ensureRecordColumns,
+} from '../runtime/db.js';
 import { readConfig } from './config.js';
 import { AgentOutboundError } from '../runtime/contract.js';
 import {
@@ -8,6 +13,351 @@ import {
   costEntryKindFromStep,
   type CostEntry,
 } from '../policy/cost-ledger.js';
+
+export type AccountCostTotals = {
+  record_id: string;
+  actual_usd: number;
+  reserved_usd: number;
+  exposure_usd: number;
+};
+
+export type AccountCostReservation = {
+  reservation_id: string;
+  record_id: string;
+  step_id: string;
+  kind: string;
+  status: 'reserved' | 'settled' | 'released';
+  reserved_usd: number;
+  actual_usd: number;
+  ceiling_usd: number;
+  high_cost: boolean;
+  high_cost_eligible: boolean;
+};
+
+const canonicalHighCostEligibility = ({
+  db,
+  recordId,
+}: {
+  db: any;
+  recordId: string;
+}): boolean => {
+  const available = new Set(
+    (db.prepare('PRAGMA table_info(records)').all() || [])
+      .map((column: { name?: string }) => String(column.name || '')),
+  );
+  const fields = ['high_cost_eligible', 'golden_ticket_eligible']
+    .filter((field) => available.has(field));
+  if (fields.length === 0) return false;
+  const row = db.prepare(`
+    SELECT ${fields.join(', ')} FROM records WHERE _row_id = ?
+  `).get(recordId);
+  return fields.some((field) => {
+    const raw = row?.[field];
+    if (raw === true || Number(raw) === 1) return true;
+    return String(raw || '').trim().toLowerCase() === 'true';
+  });
+};
+
+const accountCostTotals = ({
+  db,
+  recordId,
+}: {
+  db: any;
+  recordId: string;
+}): AccountCostTotals => {
+  const actual = db.prepare(`
+    SELECT COALESCE(SUM(usd_cost), 0) AS usd
+    FROM cost_events
+    WHERE record_id = ? AND usd_cost IS NOT NULL
+  `).get(recordId);
+  const reserved = db.prepare(`
+    SELECT COALESCE(SUM(reserved_usd), 0) AS usd
+    FROM cost_reservations
+    WHERE record_id = ? AND status = 'reserved'
+  `).get(recordId);
+  const actualUsd = Math.max(0, Number(actual?.usd || 0));
+  const reservedUsd = Math.max(0, Number(reserved?.usd || 0));
+  return {
+    record_id: recordId,
+    actual_usd: actualUsd,
+    reserved_usd: reservedUsd,
+    exposure_usd: actualUsd + reservedUsd,
+  };
+};
+
+export const getAccountCostTotals = ({
+  db,
+  recordId,
+}: {
+  db: any;
+  recordId: string;
+}): AccountCostTotals => {
+  const rid = String(recordId || '').trim();
+  if (!rid) throw new Error('recordId is required.');
+  return accountCostTotals({ db, recordId: rid });
+};
+
+export const reserveAccountCost = ({
+  db,
+  recordId,
+  stepId,
+  kind,
+  amountUsd,
+  ceilingUsd,
+  reservationId = randomUUID(),
+  highCost = false,
+  highCostEligible,
+}: {
+  db: any;
+  recordId: string;
+  stepId: string;
+  kind: string;
+  amountUsd: number;
+  ceilingUsd: number;
+  reservationId?: string;
+  highCost?: boolean;
+  highCostEligible?: boolean;
+}): {
+  allowed: boolean;
+  reason: string;
+  reservation?: AccountCostReservation;
+  totals: AccountCostTotals;
+} => {
+  const rid = String(recordId || '').trim();
+  const sid = String(stepId || '').trim();
+  const reservationKey = String(reservationId || '').trim();
+  const amount = Number(amountUsd);
+  const ceiling = Number(ceilingUsd);
+  if (!rid || !sid || !reservationKey) {
+    throw new Error('recordId, stepId, and reservationId are required.');
+  }
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error('amountUsd must be greater than zero.');
+  }
+  if (!Number.isFinite(ceiling) || ceiling < 0) {
+    throw new Error('ceilingUsd must be a non-negative number.');
+  }
+  enforceCanaryRecordMutation(db, rid);
+
+  const reserve = db.transaction(() => {
+    const existing = db.prepare(`
+      SELECT * FROM cost_reservations WHERE reservation_id = ?
+    `).get(reservationKey);
+    if (existing) {
+      const sameIdentity =
+        String(existing.record_id) === rid
+        && String(existing.step_id) === sid
+        && Number(existing.reserved_usd) === amount;
+      if (!sameIdentity) {
+        throw new Error(`Cost reservation ${reservationKey} identity mismatch.`);
+      }
+      return {
+        allowed: existing.status !== 'released',
+        reason: existing.status === 'reserved'
+          ? 'already_reserved'
+          : existing.status === 'settled'
+            ? 'already_settled'
+            : 'already_released',
+        reservation: {
+          reservation_id: String(existing.reservation_id),
+          record_id: String(existing.record_id),
+          step_id: String(existing.step_id),
+          kind: String(existing.kind),
+          status: existing.status,
+          reserved_usd: Number(existing.reserved_usd),
+          actual_usd: Number(existing.actual_usd || 0),
+          ceiling_usd: Number(existing.ceiling_usd),
+          high_cost: Number(existing.high_cost || 0) === 1,
+          high_cost_eligible: Number(existing.high_cost_eligible || 0) === 1,
+        } as AccountCostReservation,
+        totals: accountCostTotals({ db, recordId: rid }),
+      };
+    }
+
+    const before = accountCostTotals({ db, recordId: rid });
+    const canonicallyEligible = canonicalHighCostEligibility({ db, recordId: rid });
+    if (highCost && (highCostEligible !== true || !canonicallyEligible)) {
+      return {
+        allowed: false,
+        reason: 'high_cost_not_eligible',
+        totals: before,
+      };
+    }
+    if (before.exposure_usd + amount > ceiling) {
+      return {
+        allowed: false,
+        reason: 'cost_ceiling_exceeded',
+        totals: before,
+      };
+    }
+
+    const now = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO cost_reservations (
+        reservation_id, record_id, step_id, kind, status,
+        reserved_usd, actual_usd, ceiling_usd,
+        high_cost, high_cost_eligible, provider,
+        created_at, updated_at, settled_at, released_at, release_reason
+      ) VALUES (?, ?, ?, ?, 'reserved', ?, 0, ?, ?, ?, '', ?, ?, '', '', '')
+    `).run(
+      reservationKey,
+      rid,
+      sid,
+      String(kind || 'other'),
+      amount,
+      ceiling,
+      highCost ? 1 : 0,
+      highCost && canonicallyEligible && highCostEligible === true ? 1 : 0,
+      now,
+      now,
+    );
+    return {
+      allowed: true,
+      reason: 'reserved',
+      reservation: {
+        reservation_id: reservationKey,
+        record_id: rid,
+        step_id: sid,
+        kind: String(kind || 'other'),
+        status: 'reserved' as const,
+        reserved_usd: amount,
+        actual_usd: 0,
+        ceiling_usd: ceiling,
+        high_cost: highCost,
+        high_cost_eligible: highCost && canonicallyEligible && highCostEligible === true,
+      },
+      totals: accountCostTotals({ db, recordId: rid }),
+    };
+  });
+  return reserve();
+};
+
+export const settleAccountCostReservation = ({
+  db,
+  reservationId,
+  actualUsd,
+  provider = '',
+  occurredAt = new Date().toISOString(),
+}: {
+  db: any;
+  reservationId: string;
+  actualUsd: number;
+  provider?: string;
+  occurredAt?: string;
+}): {
+  settled: boolean;
+  reason: string;
+  totals: AccountCostTotals;
+} => {
+  const reservationKey = String(reservationId || '').trim();
+  const amount = Number(actualUsd);
+  if (!reservationKey) throw new Error('reservationId is required.');
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error('actualUsd must be a non-negative number.');
+  }
+
+  const settle = db.transaction(() => {
+    const row = db.prepare(`
+      SELECT * FROM cost_reservations WHERE reservation_id = ?
+    `).get(reservationKey);
+    if (!row) throw new Error(`Cost reservation ${reservationKey} not found.`);
+    enforceCanaryRecordMutation(db, row.record_id);
+    if (row.status === 'released') {
+      throw new Error(`Cost reservation ${reservationKey} was released.`);
+    }
+    if (row.status === 'settled') {
+      return {
+        settled: false,
+        reason: 'already_settled',
+        totals: accountCostTotals({ db, recordId: String(row.record_id) }),
+      };
+    }
+
+    const costEventId = `cost_reservation_${reservationKey}`;
+    insertCostEvent({
+      db,
+      event: {
+        id: costEventId,
+        record_id: String(row.record_id),
+        step_id: String(row.step_id),
+        usd_cost: amount,
+        provider,
+        payload: {
+          reservation_id: reservationKey,
+          reserved_usd: Number(row.reserved_usd),
+          actual_usd: amount,
+          kind: String(row.kind),
+        },
+        occurred_at: occurredAt,
+      },
+    });
+    db.prepare(`
+      UPDATE cost_reservations
+      SET status = 'settled',
+          actual_usd = ?,
+          provider = ?,
+          settled_at = ?,
+          updated_at = ?
+      WHERE reservation_id = ? AND status = 'reserved'
+    `).run(amount, provider, occurredAt, occurredAt, reservationKey);
+    return {
+      settled: true,
+      reason: 'settled',
+      totals: accountCostTotals({ db, recordId: String(row.record_id) }),
+    };
+  });
+  return settle();
+};
+
+export const releaseAccountCostReservation = ({
+  db,
+  reservationId,
+  reason,
+  releasedAt = new Date().toISOString(),
+}: {
+  db: any;
+  reservationId: string;
+  reason: string;
+  releasedAt?: string;
+}): {
+  released: boolean;
+  reason: string;
+  totals: AccountCostTotals;
+} => {
+  const reservationKey = String(reservationId || '').trim();
+  if (!reservationKey) throw new Error('reservationId is required.');
+  const release = db.transaction(() => {
+    const row = db.prepare(`
+      SELECT * FROM cost_reservations WHERE reservation_id = ?
+    `).get(reservationKey);
+    if (!row) throw new Error(`Cost reservation ${reservationKey} not found.`);
+    enforceCanaryRecordMutation(db, row.record_id);
+    if (row.status === 'settled') {
+      throw new Error(`Cost reservation ${reservationKey} is already settled.`);
+    }
+    if (row.status === 'released') {
+      return {
+        released: false,
+        reason: 'already_released',
+        totals: accountCostTotals({ db, recordId: String(row.record_id) }),
+      };
+    }
+    db.prepare(`
+      UPDATE cost_reservations
+      SET status = 'released',
+          released_at = ?,
+          release_reason = ?,
+          updated_at = ?
+      WHERE reservation_id = ? AND status = 'reserved'
+    `).run(releasedAt, String(reason || 'released'), releasedAt, reservationKey);
+    return {
+      released: true,
+      reason: 'released',
+      totals: accountCostTotals({ db, recordId: String(row.record_id) }),
+    };
+  });
+  return release();
+};
 
 const windowStartAndReset = (window: 'daily' | 'weekly' | 'monthly') => {
   const now = new Date();

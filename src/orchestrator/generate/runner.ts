@@ -479,6 +479,7 @@ export const runGenerateStep = async ({
       {
         const {
           auditClaims,
+          assembleClaimEvidenceCatalog,
           assemblePermittedClaimPacket,
           calculateEconomicScenario,
           claimAuditAssetHash,
@@ -536,6 +537,14 @@ export const runGenerateStep = async ({
             listDir: String(listDir || ''),
           });
           parsedOutputs.permitted_claim_packet_json = JSON.stringify(packet);
+          parsedOutputs.catalog_evidence_json = JSON.stringify(
+            assembleClaimEvidenceCatalog({
+              family_id: String(inputRecord.diagnostic_family || inputRecord.vertical || ''),
+              vertical: String(inputRecord.vertical || ''),
+              economic_inputs: economicInputs,
+              listDir: String(listDir || ''),
+            }),
+          );
         } catch (assembleErr) {
           // Fall back to model packet only if assembler fails; still audit.
           const packetRaw = parsedOutputs.permitted_claim_packet_json

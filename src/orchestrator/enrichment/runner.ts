@@ -449,9 +449,13 @@ export const enrichmentActionNeedsMcp = (stepConfig: unknown) => {
 
 export const enrichmentStepConfig = (step: unknown): Record<string, unknown> => {
   const record = step && typeof step === 'object' ? step as Record<string, unknown> : {};
-  return record.config && typeof record.config === 'object'
+  const nested = record.config && typeof record.config === 'object'
     ? record.config as Record<string, unknown>
-    : record;
+    : {};
+  return {
+    ...record,
+    ...nested,
+  };
 };
 
 export const enrichmentStepNeedsMcp = (step: unknown, options: { listDir?: string } = {}) => {
@@ -479,8 +483,21 @@ export const shouldRunForRecord = ({ record, predicate, listDir = '' }: { record
 
 const applyOutputs = ({ step, outputs }) => {
   const patch: Record<string, any> = {};
-  const declaredOutputs = getDeclaredOutputs(step?.config || {});
-  const legacyColumns = getLegacyColumns(step?.config || {});
+  const stepConfig = enrichmentStepConfig(step);
+  const declaredOutputs = getDeclaredOutputs(stepConfig);
+  const legacyColumns = getLegacyColumns(stepConfig);
+  const action = String(stepConfig.action || '').trim().toLowerCase();
+
+  if (action === 'policy_apply') {
+    return Object.fromEntries(
+      Object.entries(outputs || {}).filter(([, value]) => (
+        value === null
+        || typeof value === 'string'
+        || typeof value === 'number'
+        || typeof value === 'boolean'
+      )),
+    );
+  }
 
   for (const [name, def] of Object.entries(declaredOutputs)) {
     if (!(name in (outputs || {}))) continue;
@@ -535,10 +552,12 @@ const applyOutputsWithEvidence = ({
   error?: string | null;
   failed?: boolean;
 }) => {
-  const rawPatch = applyOutputs({
-    step: { ...step, config: stepConfig },
-    outputs,
-  });
+  const rawPatch = failed
+    ? {}
+    : applyOutputs({
+        step: { ...step, config: stepConfig },
+        outputs,
+      });
   // Never overwrite good site_text (etc.) with empty success/failure outputs.
   const patch = preservePriorNonBlankFields({
     record,
@@ -744,7 +763,6 @@ export const executeEnrichmentAction = async ({
   }
   if (action === 'policy_apply') {
     const { applyOutboundPolicy, loadCampaignContactsFromDb, hydrateRecordCostLedger } = await import('../policy/index.js');
-    const { ensureRecordColumns, upsertRecord } = await import('../runtime/db.js');
     const rowId = String(record._row_id || record.id || '');
     const contacts = db ? loadCampaignContactsFromDb(db, rowId) : [];
     // Production spend lives in cost_events — hydrate ledger before ceilings/GT.
@@ -765,10 +783,6 @@ export const executeEnrichmentAction = async ({
       costLedger: costHydrate?.ledger,
       enrichmentSpendUsd: costHydrate?.enrichment_usd,
     });
-    if (db) {
-      ensureRecordColumns({ db, columns: Object.keys(result.patch) });
-      upsertRecord({ db, row: { ...recordForPolicy, ...result.patch } });
-    }
     // Map declared outputs from patch when present
     const outputs: Record<string, unknown> = { ...result.patch };
     return {
@@ -993,6 +1007,12 @@ export const executeEnrichmentStepOnRecords = async ({
         usage: result.usage,
       });
       if (outcome === 'ok') outputZod.parse(outputs);
+      if (
+        outcome === 'ok'
+        && String(stepConfig.action || '').trim().toLowerCase() === 'policy_apply'
+      ) {
+        ensureRecordColumns({ db, columns: Object.keys(outputs) });
+      }
 
       const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
       // Empty success: still do not clobber prior good site_text; record evidence only when material.
@@ -1132,12 +1152,15 @@ const buildEnrichmentDag = (steps: any[]): {
   levels: EnrichmentStepNode[][];
   ancestors: Map<string, Set<string>>;
 } => {
-  const nodes: EnrichmentStepNode[] = (steps || []).map((step, index) => ({
-    id: resolveStepId(step, index),
-    index,
-    step,
-    dependsOn: Array.isArray(step?.config?.depends_on) ? step.config.depends_on : [],
-  }));
+  const nodes: EnrichmentStepNode[] = (steps || []).map((step, index) => {
+    const stepConfig = enrichmentStepConfig(step);
+    return {
+      id: resolveStepId(step, index),
+      index,
+      step,
+      dependsOn: Array.isArray(stepConfig.depends_on) ? stepConfig.depends_on as string[] : [],
+    };
+  });
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const parents = new Map<string, Set<string>>();
   const children = new Map<string, Set<string>>();
@@ -1237,15 +1260,17 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
   const db = openListDb({ listDir, readonly: false });
   const whereSql = String(where || '').trim();
   const limitN = Number(limit || 0);
-  const params: any[] = [];
-  let rowsSql = `SELECT * FROM records WHERE sequence_status != 'opted_out' AND ${inPlayWhere()}`;
-  if (whereSql) rowsSql += ` AND (${whereSql})`;
-  rowsSql += ' ORDER BY updated_at DESC';
-  if (limitN > 0) {
-    rowsSql += ' LIMIT ?';
-    params.push(limitN);
-  }
-  const rows = db.prepare(rowsSql).all(...params);
+  const {
+    assertListAccessForMutation,
+    filterRecordsForCanary,
+    loadCanaryConfig,
+  } = await import('../policy/canary-isolation.js');
+  assertListAccessForMutation(listDir);
+  const baseRowsSql = `SELECT * FROM records WHERE sequence_status != 'opted_out' AND ${inPlayWhere()}`;
+  const filteredRowsSql = whereSql ? `${baseRowsSql} AND (${whereSql})` : baseRowsSql;
+  const rawRows = db.prepare(`${filteredRowsSql} ORDER BY updated_at DESC`).all();
+  const canaryRows = filterRecordsForCanary(rawRows, loadCanaryConfig({ listDir }));
+  const rows = limitN > 0 ? canaryRows.slice(0, limitN) : canaryRows;
   const recordState = new Map<string, any>();
   for (const row of rows) {
     recordState.set(getRecordRowId(row), row);
@@ -1294,8 +1319,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
       const levelResults = await Promise.all(level.map(async (node) => {
         const step = node.step;
         const id = node.id;
-        const managesContacts = String(step?.config?.action || '').trim().toLowerCase() === 'decision_makers';
-        const rawDependsOn = Array.isArray(step?.config?.depends_on) ? step.config.depends_on : [];
+        const stepConfig = enrichmentStepConfig(step);
+        const managesContacts = String(stepConfig.action || '').trim().toLowerCase() === 'decision_makers';
+        const rawDependsOn = Array.isArray(stepConfig.depends_on) ? stepConfig.depends_on : [];
         const missingDeps = rawDependsOn
           .map((dep: any) => String(dep || '').trim())
           .filter(Boolean)
@@ -1309,13 +1335,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           summary.errors.push({ step: id, warning: detail });
           return { id, patches: [], failures: [], managesContacts };
         }
-        const declaredOutputs = getDeclaredOutputs(step?.config || {});
-        const legacyColumns = getLegacyColumns(step?.config || {});
+        const declaredOutputs = getDeclaredOutputs(stepConfig);
+        const legacyColumns = getLegacyColumns(stepConfig);
         const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
-        const concurrency = Number(step?.config?.concurrency || 3);
-        const targetColumns = getTargetColumnsForStepConfig(step?.config || {});
+        const concurrency = Number(stepConfig.concurrency || 3);
+        const targetColumns = getTargetColumnsForStepConfig(stepConfig);
         const statusColumn = stepStatusColumn(id);
-        const whenPredicate = whenPredicateForStep({ step, stepConfig: step?.config || {} });
+        const whenPredicate = whenPredicateForStep({ step, stepConfig });
         ensureRecordColumns({ db, columns: [...targetColumns, { name: statusColumn, type: 'TEXT' }] });
         ensureEvidenceColumns(db);
 
@@ -1360,20 +1386,20 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             return;
           }
 
-          const dependsOn = Array.isArray(step?.config?.depends_on) ? step.config.depends_on : [];
+          const dependsOn = Array.isArray(stepConfig.depends_on) ? stepConfig.depends_on : [];
           const depValues: Record<string, any> = {};
           const extra = parseExtra(record.extra_json);
           for (const dep of dependsOn) {
             depValues[dep] = dependencyValueForRecord({ dep, record, extra });
           }
-          const depHash = enrichDepHash(step?.config || {}, depValues);
+          const depHash = enrichDepHash(stepConfig, depValues);
           const cached = readStaleness({ db, recordId, stepId: id });
 
           const expectedOutputs = Object.keys(declaredOutputs).length > 0
             ? declaredOutputs
             : legacyColumns;
           if (
-            isEnrichFresh({ cached, stepConfig: step?.config || {}, depValues, force })
+            isEnrichFresh({ cached, stepConfig, depValues, force })
             && declaredOutputsHaveAnyValue({ record, expectedOutputs })
           ) {
             summary.skipped_fresh += 1;
@@ -1382,7 +1408,6 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
 
           try {
             const inputRecord = mergedRecordForEnrichment({ db, record });
-            const stepConfig = step?.config || {};
             const result = await executeEnrichmentAction({
               db,
               mcp: await mcpForStep(stepConfig),
@@ -1452,6 +1477,12 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               usage: result.usage,
             });
             if (outcome === 'ok') outputZod.parse(outputs);
+            if (
+              outcome === 'ok'
+              && String(stepConfig.action || '').trim().toLowerCase() === 'policy_apply'
+            ) {
+              ensureRecordColumns({ db, columns: Object.keys(outputs) });
+            }
 
             const isEmptyOutcome = outcome === 'empty';
             const patch = applyOutputsWithEvidence({
@@ -1471,8 +1502,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               rowLabel,
               patch,
               depHash,
-              cacheTtlSeconds: ttlToSeconds(step?.config?.cache),
-              cacheTtl: String(step?.config?.cache || ''),
+              cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
+              cacheTtl: String(stepConfig.cache || ''),
               skippedWhen: false,
             });
           } catch (error) {
@@ -1484,13 +1515,12 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               error,
             });
             if (isBudgetExceededError(error)) throw error;
-            const neutralStepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
             const detail = formatErrorMessage(error);
-            if (enrichStepUsesEmptyOnError(neutralStepConfig)) {
+            if (enrichStepUsesEmptyOnError(stepConfig)) {
               const outputs = emptyOutputsFor(outputZod);
               const patch = applyOutputsWithEvidence({
                 step: { ...step, __list_dir: listDir },
-                stepConfig: neutralStepConfig as Record<string, unknown>,
+                stepConfig,
                 stepId: id,
                 outputs,
                 record,
@@ -1506,8 +1536,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 rowLabel,
                 patch,
                 depHash,
-                cacheTtlSeconds: ttlToSeconds(neutralStepConfig?.cache),
-                cacheTtl: String(neutralStepConfig?.cache || ''),
+                cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
+                cacheTtl: String(stepConfig.cache || ''),
                 skippedWhen: false,
                 failedError: detail,
               });
@@ -1592,7 +1622,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             const evidencePatch = buildEnrichEvidencePatch({
               record: currentRow,
               step_id: result.id,
-              step_config: (level.find((n) => n.id === result.id)?.step?.config || {}) as Record<string, unknown>,
+              step_config: enrichmentStepConfig(level.find((n) => n.id === result.id)?.step),
               error: failure.error,
               failed: true,
             });

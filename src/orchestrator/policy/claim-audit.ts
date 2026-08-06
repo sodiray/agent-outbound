@@ -171,7 +171,7 @@ export function claimTextAuthorizedByPermitted(
  * operational/business statements. Those require packet authorization.
  */
 const PURE_SOFT_PATTERNS: RegExp[] = [
-  /^(hi|hello|hey|dear|good\s+(morning|afternoon|evening))(\s+[\w.'-]+)?[,!]?\s*$/i,
+  /^(hi|hello|hey|dear|good\s+(morning|afternoon|evening))(\s+[\w.'-]+(?:\s+[\w.'-]+){0,2})?[,!]?\s*$/i,
   /^(thanks|thank you|best|regards|sincerely|cheers|best regards)[,.]?\s*$/i,
   /^(looking forward to (hearing|your reply))[.!]?\s*$/i,
   /^(let me know( if .+)?|reply to this|click here)[.!]?\s*$/i,

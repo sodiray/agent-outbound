@@ -527,6 +527,27 @@ const SCHEMA_SQL = `
     payload_json TEXT DEFAULT '{}',
     occurred_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS cost_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    record_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'reserved',
+    reserved_usd REAL NOT NULL,
+    actual_usd REAL DEFAULT 0,
+    ceiling_usd REAL NOT NULL,
+    high_cost INTEGER DEFAULT 0,
+    high_cost_eligible INTEGER DEFAULT 0,
+    provider TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    settled_at TEXT DEFAULT '',
+    released_at TEXT DEFAULT '',
+    release_reason TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_cost_reservations_record_status
+    ON cost_reservations(record_id, status);
   CREATE INDEX IF NOT EXISTS idx_cost_events_step ON cost_events(step_id, occurred_at DESC);
 
   CREATE TABLE IF NOT EXISTS compliance_log (
@@ -1883,6 +1904,7 @@ export const resolveRecordRef = ({ db, ref }) => {
 export const OVERRIDE_GATE = '__override__';
 
 export const insertOverride = ({ db, recordId, kind, stepId = '', reason, createdBy = '' }) => {
+  enforceCanaryRecordMutation(db, recordId);
   const id = `ovr_${randomUUID().slice(0, 12)}`;
   const now = nowIso();
   db.prepare(`
@@ -1903,6 +1925,7 @@ export const listActiveOverrides = ({ db }) =>
   db.prepare("SELECT * FROM overrides WHERE cleared_at IS NULL OR cleared_at = '' ORDER BY created_at DESC").all();
 
 export const clearOverrides = ({ db, recordId, stepId = null, kind = null, createdBy = null, clearedBy = '' }) => {
+  enforceCanaryRecordMutation(db, recordId);
   const now = nowIso();
   const active = listOverridesForRecord({ db, recordId });
   const matched = active.filter((override) => (
@@ -2016,6 +2039,7 @@ export const FIELD_OVERRIDE_PROTECTED = new Set([
 ]);
 
 export const insertFieldOverride = ({ db, recordId, field, value, reason = '', createdBy = '' }) => {
+  enforceCanaryRecordMutation(db, recordId);
   const fieldName = String(field || '').trim();
   if (!fieldName) throw new Error('A field name is required.');
   if (FIELD_OVERRIDE_PROTECTED.has(fieldName)) {
@@ -2050,6 +2074,7 @@ export const listActiveFieldOverrides = ({ db }) =>
   db.prepare("SELECT * FROM field_overrides WHERE cleared_at IS NULL OR cleared_at = '' ORDER BY created_at DESC").all();
 
 export const clearFieldOverrides = ({ db, recordId, field = null, clearedBy = '' }) => {
+  enforceCanaryRecordMutation(db, recordId);
   const now = nowIso();
   const active = listFieldOverridesForRecord({ db, recordId });
   const matched = active.filter((o) => field === null || String(o.field) === String(field || '').trim());
@@ -2460,9 +2485,10 @@ const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
   return primaryContact ? String(primaryContact.contact_id || '') : null;
 };
 
-export const syncPrimaryContactProjection = ({ db, recordId }) => (
-  db.transaction(() => syncPrimaryContactProjectionInternal({ db, recordId }))()
-);
+export const syncPrimaryContactProjection = ({ db, recordId }) => {
+  enforceCanaryRecordMutation(db, recordId);
+  return db.transaction(() => syncPrimaryContactProjectionInternal({ db, recordId }))();
+};
 
 /**
  * Project a specific contact (campaign active target) onto denormalized record
@@ -2474,6 +2500,7 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
   const normalizedRecordId = String(recordId || '').trim();
   const normalizedContactId = String(contactId || '').trim();
   if (!normalizedRecordId || !normalizedContactId || !db) return null;
+  enforceCanaryRecordMutation(db, normalizedRecordId);
 
   return db.transaction(() => {
     const contact = db.prepare(`
@@ -2664,6 +2691,7 @@ export const deleteContact = ({ db, contactId }) => db.transaction(() => {
   const existing = db.prepare('SELECT contact_id, row_id FROM contacts WHERE contact_id = ? OR id = ? LIMIT 1')
     .get(normalizedContactId, normalizedContactId);
   if (!existing?.row_id) return false;
+  enforceCanaryRecordMutation(db, existing.row_id);
   const deleted = db.prepare('DELETE FROM contacts WHERE contact_id = ?')
     .run(String(existing.contact_id || ''));
   syncPrimaryContactProjectionInternal({ db, recordId: String(existing.row_id) });

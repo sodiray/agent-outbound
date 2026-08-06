@@ -535,6 +535,50 @@ test('executeChannelStep: linkedin_connect in review_required_for, no auth → s
   db.close();
 });
 
+test('executeChannelStep: mail review preserves product identity and resumes canonical send_mail action', async () => {
+  const accountId = 'acct_mail_review';
+  const { listDir, db, rowId } = seedList({
+    rowId: accountId,
+    reviewRequiredFor: ['standard_postcard'],
+    next_action_json: JSON.stringify(
+      nextAction(accountId, { action_type: 'send_mail' }),
+    ),
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const step = {
+    kind: 'manual_task',
+    id: 'standard_postcard_1',
+    config: {
+      task_type: 'standard_postcard',
+      channel: 'mail',
+    },
+  };
+  const out = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Stage Review Gate Test',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step,
+    sequence: { steps: [step] },
+    channelHint: 'mail',
+    intent: 'send',
+    dryRun: false,
+  });
+  assert.equal(out.status, 'skipped');
+  assert.equal(out.reason, 'awaiting_manual');
+
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const review = parseStageReviewJson(after.stage_review_json);
+  assert.ok(review);
+  assert.equal(review.action_type, 'standard_postcard');
+  assert.equal(review.pending_action_snapshot.action_type, 'send_mail');
+  db.close();
+});
+
 test('executeChannelStep: linkedin after authorizeStageReview proceeds past gate (not review-blocked)', async () => {
   const accountId = 'acct_li_auth_exec';
   // Seed first so material asset_version matches execute's recompute sources.

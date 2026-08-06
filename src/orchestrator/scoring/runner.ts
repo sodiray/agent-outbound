@@ -642,10 +642,16 @@ const scoreAxisCriteria = async ({ db, listDir, record, axis, description, crite
   }
 };
 
+const hasScoreOverride = (override) => (
+  override !== null
+  && override !== undefined
+  && String(override).trim() !== ''
+  && Number.isFinite(Number(override))
+);
+
 const applyOverride = ({ score, reasoning, override, overrideReason, axis }) => {
-  if (score === null) return { score, reasoning };
   const value = Number(override);
-  if (!Number.isFinite(value)) return { score, reasoning };
+  if (!hasScoreOverride(override)) return { score, reasoning };
   const reason = String(overrideReason || '').trim();
   const note = reason
     ? `Operator override applied (${axis}): ${reason}`
@@ -766,22 +772,29 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           return;
         }
 
-        const scoreRaw = await scoreAxisCriteria({
-          db,
-          listDir,
-          record,
-          axis: 'score',
-          description: scoreDescription,
-          criteria: scoreCriteria,
-          model: scoreModel,
-          aiConfig: config?.ai || {},
-          grading: scoreGrading,
-        }).then((value) => ({ ...value, error: '' })).catch((error) => ({
-          score: null,
-          reasoning: '',
-          breakdown: [],
-          error: String((error as any)?.message || error),
-        }));
+        const scoreRaw = hasScoreOverride(record.score_override)
+          ? {
+              score: Number(record.score_override),
+              reasoning: '',
+              breakdown: [],
+              error: '',
+            }
+          : await scoreAxisCriteria({
+              db,
+              listDir,
+              record,
+              axis: 'score',
+              description: scoreDescription,
+              criteria: scoreCriteria,
+              model: scoreModel,
+              aiConfig: config?.ai || {},
+              grading: scoreGrading,
+            }).then((value) => ({ ...value, error: '' })).catch((error) => ({
+              score: null,
+              reasoning: '',
+              breakdown: [],
+              error: String((error as any)?.message || error),
+            }));
 
         if (scoreRaw.error && scoreRaw.score === null && !record.score_override) {
           // Scoring failed (provider error, invalid response). Never destroy an

@@ -115,6 +115,13 @@ const findRecordByThreadId = (db: any, threadId: string) => {
 };
 
 export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, config }: PollContext) => {
+  const {
+    assertListAccessForMutation,
+    filterRecordsForCanary,
+    loadCanaryConfig,
+  } = await import('../policy/canary-isolation.js');
+  assertListAccessForMutation(listDir);
+  const canaryConfig = loadCanaryConfig({ listDir });
   const sequenceConfig = config?.sequences?.default || {};
   const replyCheck = sequenceConfig?.reply_check || {};
   const toolSpec = replyCheck?.tool || {};
@@ -157,6 +164,7 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
 
       const record = findRecordByThreadId(db, threadId);
       if (!record) continue;
+      if (filterRecordsForCanary([record], canaryConfig).length === 0) continue;
 
       const recordId = getRecordRowId(record);
       const snippet = extractSnippet(message);
@@ -235,7 +243,7 @@ export const runDeliveryPoll = async ({ mcp, listDir, db, config }: Omit<PollCon
       || 'LOB_GET_POSTCARD',
   );
 
-  const rows = db
+  const rawRows = db
     .prepare(`
       SELECT * FROM records
       WHERE mail_last_piece_id != '' AND mail_last_delivered_at = '' AND mail_last_returned_at = ''
@@ -243,6 +251,13 @@ export const runDeliveryPoll = async ({ mcp, listDir, db, config }: Omit<PollCon
       LIMIT 100
     `)
     .all();
+  const {
+    assertListAccessForMutation,
+    filterRecordsForCanary,
+    loadCanaryConfig,
+  } = await import('../policy/canary-isolation.js');
+  assertListAccessForMutation(listDir);
+  const rows = filterRecordsForCanary(rawRows, loadCanaryConfig({ listDir }));
 
   const summary = { refreshed: 0, delivered: 0, returned: 0, errors: [] as string[] };
   if (rows.length === 0) return summary;

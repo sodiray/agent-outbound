@@ -27,8 +27,19 @@ import {
   applyMailSubmitted,
   resolveMailProvider,
   type MailProvider,
+  type MailSubmitRequest,
+  type MailSubmitResult,
 } from '../channels/mail-provider.js';
+import {
+  buildIdempotencyKey,
+  claimIdempotency,
+  completeIdempotency,
+  failIdempotency,
+  getIdempotencyRecord,
+} from '../runtime/idempotency.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
+import { NEXT_ACTION_POLICY_VERSION } from '../policy/lifecycle.js';
+import { stableHash } from '../lib/record.js';
 import {
   buildAssetClaimBinding,
   claimAuditBlocksExternalSend,
@@ -67,6 +78,152 @@ const resolveMailProductType = ({
   if (sid.includes('postcard') || sid.includes('standard_postcard')) return 'standard_postcard';
   if (sid.includes('mail') || sid.includes('letter')) return 'mail';
   return null;
+};
+
+const parseJsonObject = (raw: unknown): Record<string, unknown> => {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  try {
+    const parsed = JSON.parse(String(raw || '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const ensureMailIdempotencyTable = (db: any) => {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS idempotency (
+      id TEXT PRIMARY KEY,
+      idem_key TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      status TEXT NOT NULL,
+      provider_id TEXT DEFAULT '',
+      payload_json TEXT DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(idem_key, scope)
+    )
+  `);
+};
+
+export const submitMailWithIdempotency = async ({
+  db,
+  provider,
+  request,
+  record,
+  stepId,
+  contentVersion,
+  nowMs = Date.now(),
+}: {
+  db: any;
+  provider: MailProvider;
+  request: MailSubmitRequest;
+  record: Record<string, unknown>;
+  stepId: string;
+  contentVersion: string;
+  nowMs?: number;
+}): Promise<MailSubmitResult> => {
+  ensureMailIdempotencyTable(db);
+  const recipient = JSON.stringify(request.to || {});
+  const idemKey = buildIdempotencyKey({
+    keySource: ['_row_id'],
+    record,
+    context: {
+      step_id: stepId,
+      active_contact_id: record.active_contact_id || record.contact_id || '',
+      channel: 'mail',
+      recipient,
+      content_version: contentVersion,
+    },
+  });
+  const claimPayload = {
+    channel: 'mail',
+    provider: provider.name,
+    request,
+    recipient: request.to,
+    treatment: request.treatment,
+    content_version: contentVersion,
+  };
+  const claim = claimIdempotency({
+    db,
+    idemKey,
+    payload: claimPayload,
+    nowMs,
+  });
+
+  if (!claim.claimed && claim.status === 'sent') {
+    const existing = getIdempotencyRecord({ db, idemKey });
+    const payload = parseJsonObject(existing?.payload_json);
+    const storedResult = parseJsonObject(payload.provider_result);
+    return {
+      ok: true,
+      piece_id: String(existing?.provider_id || storedResult.piece_id || ''),
+      status: 'submitted',
+      reason: 'already_submitted',
+      cost_cents: Number(storedResult.cost_cents || 0),
+      expected_delivery_date: String(storedResult.expected_delivery_date || ''),
+      provider: String(storedResult.provider || payload.provider || provider.name),
+      raw: {
+        idempotent_replay: true,
+        idem_key: idemKey,
+      },
+    };
+  }
+
+  if (!claim.claimed) {
+    throw new Error(
+      `Mail submit blocked for ${request.recordId} step ${stepId}: ${claim.reason}`,
+    );
+  }
+
+  const submitResult = await provider.submit(request).catch((error: unknown) => {
+    failIdempotency({
+      db,
+      idemKey,
+      claimId: claim.claim_id,
+      payload: {
+        ...claimPayload,
+        provider_uncertain: true,
+        error: String((error as Error)?.message || error),
+      },
+    });
+    throw error;
+  });
+
+  if (!submitResult?.ok || submitResult.status === 'failed') {
+    failIdempotency({
+      db,
+      idemKey,
+      claimId: claim.claim_id,
+      payload: {
+        ...claimPayload,
+        provider_result: submitResult,
+      },
+    });
+    return submitResult;
+  }
+
+  const completion = completeIdempotency({
+    db,
+    idemKey,
+    providerId: submitResult.piece_id,
+    claimId: claim.claim_id,
+    payload: {
+      ...claimPayload,
+      provider_result: submitResult,
+    },
+  });
+  if (!completion.completed && completion.reason !== 'already_sent') {
+    throw new Error(
+      `Mail provider accepted ${submitResult.piece_id || '(missing piece id)'} `
+      + `but idempotency completion failed: ${completion.reason}`,
+    );
+  }
+  return submitResult;
 };
 
 /**
@@ -307,6 +464,7 @@ export const completeManualTask = async ({
   note = '',
   skip = false,
   listDir = '',
+  now: suppliedNow,
   /** Inject provider for tests; otherwise resolveMailProvider(env/config). */
   mailProvider,
 }: {
@@ -317,11 +475,20 @@ export const completeManualTask = async ({
   note?: string;
   skip?: boolean;
   listDir?: string;
+  now?: string | number | Date;
   mailProvider?: MailProvider | null;
 }) => {
   const rid = text(recordId);
   const sid = text(stepId);
   if (!rid || !sid) throw new Error('recordId and stepId are required.');
+  const suppliedDate = suppliedNow instanceof Date
+    ? suppliedNow
+    : suppliedNow != null
+      ? new Date(suppliedNow)
+      : null;
+  const effectiveNowMs = suppliedDate && !Number.isNaN(suppliedDate.getTime())
+    ? suppliedDate.getTime()
+    : Date.now();
 
   // Campaign pause / cancel / inbound: refuse outbound manual complete (mail allocate,
   // phone close-out). Residual RES-CAMPAIGN-ORCHESTRATION — sequencer + channel execute
@@ -404,7 +571,7 @@ export const completeManualTask = async ({
           : sid.toLowerCase().includes('linkedin')
             ? 'linkedin'
             : 'manual');
-    const gate = shouldExecuteSequenceOutbound(recordRow, new Date(), {
+    const gate = shouldExecuteSequenceOutbound(recordRow, new Date(effectiveNowMs), {
       channel: channelHint,
       stepKind: 'manual_task',
       taskType: mailProductPreview || channelHint,
@@ -484,8 +651,9 @@ export const completeManualTask = async ({
     `).get(parked.event_id)?.occurred_at || '',
   );
   const parkMs = Date.parse(parkAt);
-  const nowMs = Date.now();
-  const completeMs = Number.isFinite(parkMs) ? Math.max(nowMs, parkMs + 1) : nowMs + 1;
+  const completeMs = Number.isFinite(parkMs)
+    ? Math.max(effectiveNowMs, parkMs + 1)
+    : effectiveNowMs + 1;
   const now = new Date(completeMs).toISOString();
 
   // Mail: allocate (+ optional provider submit) BEFORE writing the completion
@@ -578,7 +746,7 @@ export const completeManualTask = async ({
         providerName: config?.channels?.mail?.provider,
       });
     if (provider) {
-      const submitResult = await provider.submit({
+      const submitRequest: MailSubmitRequest = {
         recordId: rid,
         treatment: mail_treatment,
         to: {
@@ -590,6 +758,31 @@ export const completeManualTask = async ({
         },
         template_id: text(config?.channels?.mail?.template_id),
         metadata: { step_id: sid },
+      };
+      const contentVersion = stableHash({
+        request: submitRequest,
+        mail_copy: text(
+          row.golden_ticket_copy
+          || row.golden_ticket_body
+          || row.mail_copy
+          || row.mail_body
+          || row.postcard_copy
+          || row.postcard_body,
+        ),
+        claim_packet_hash: assetClaimBinding.claim_packet_hash,
+        claim_audit_version: assetClaimBinding.claim_audit_version,
+        preliminary_snapshot_hash: assetClaimBinding.preliminary_snapshot_hash,
+        claim_audit_passed: assetClaimBinding.claim_audit_passed,
+        permitted_claim_ids: assetClaimBinding.permitted_claim_ids,
+      });
+      const submitResult = await submitMailWithIdempotency({
+        db,
+        provider,
+        request: submitRequest,
+        record: row,
+        stepId: sid,
+        contentVersion,
+        nowMs: completeMs,
       });
       if (!submitResult?.ok) {
         // Persist failure markers but DO NOT complete the manual task.
@@ -614,7 +807,7 @@ export const completeManualTask = async ({
         insertChannelEvent({
           db,
           event: {
-            id: randomUUID(),
+            id: `mail_submitted_${stableHash(`${rid}|${sid}|${submitResult.piece_id}`).slice(0, 24)}`,
             row_id: rid,
             channel: 'mail',
             event_type: 'submitted',
@@ -726,13 +919,27 @@ export const completeManualTask = async ({
         sequence_step: 0,
         sequence_status: 'idle',
         next_action_date: quietDate,
+        account_sequence_state: 'waiting',
+        work_state: 'waiting_time_or_event',
         next_action_json: JSON.stringify({
-          type: 'contact_rotation',
-          active_contact_id: rotation.active_contact_id,
-          previous_contact_id: rotation.previous_contact_id,
-          quiet_until: quietDate,
+          action_id: `na_rotate_${rid}_${rotation.active_contact_id}`,
+          action_type: 'wait',
+          account_id: rid,
+          contact_id: rotation.active_contact_id,
+          lifecycle_stage: String(recordRow.lifecycle_stage || 'contacted'),
+          sequence_state: 'waiting',
+          work_state: 'waiting_time_or_event',
+          due_at: quietDate,
           reason: `manual_tail_complete:${sid}`,
+          on_success: 'start_rotated_contact_cycle',
+          related_asset_id: rotation.previous_contact_id || null,
+          policy_version: NEXT_ACTION_POLICY_VERSION,
         }),
+        call_claim_status: 'open',
+        call_claimed_by: '',
+        call_claimed_at: '',
+        call_claim_expires_at: '',
+        call_claim_contact_id: '',
         last_error: '',
       };
       if (rotation.account_contact_plan_json) {
@@ -747,7 +954,14 @@ export const completeManualTask = async ({
           'sequence_step',
           'sequence_status',
           'next_action_date',
+          'account_sequence_state',
+          'work_state',
           'next_action_json',
+          'call_claim_status',
+          'call_claimed_by',
+          'call_claimed_at',
+          'call_claim_expires_at',
+          'call_claim_contact_id',
           'last_error',
         ],
       });

@@ -26,6 +26,7 @@ export type StepExecutionContext = {
   toolCatalog?: unknown;
   aiConfig?: unknown;
   force?: boolean;
+  now?: string;
 };
 
 type PipelineStepLike = Record<string, unknown> & {
@@ -474,6 +475,7 @@ const executeSequenceActionBatch = async (
         dryRun: false,
         intent: sequenceIntent,
         channelHint: channelForPipelineKind(kind),
+        now: ctx.now,
       });
       const status = textValue(result?.status);
       const reason = textValue(result?.reason);
@@ -591,6 +593,7 @@ export const executeStepBatch = async (
     if (kind === 'generate') {
       const { ensureRecordColumns } = await import('../runtime/db.js');
       const {
+        assembleClaimEvidenceCatalog,
         assemblePermittedClaimPacket,
         auditClaims,
         calculateEconomicScenario,
@@ -752,6 +755,17 @@ export const executeStepBatch = async (
               listDir: ctx.listDir,
             });
             outputs.permitted_claim_packet_json = JSON.stringify(packet);
+            outputs.catalog_evidence_json = JSON.stringify(
+              assembleClaimEvidenceCatalog({
+                family_id: String(row.diagnostic_family || row.vertical || outputs.vertical || ''),
+                vertical: String(row.vertical || outputs.vertical || ''),
+                economic_inputs: {
+                  weekly_admin_hours: 10,
+                  hourly_loaded_cost: 45,
+                },
+                listDir: ctx.listDir,
+              }),
+            );
             const extracted = snapshot
               .split(/[.!?\n]+/)
               .map((t) => t.trim())

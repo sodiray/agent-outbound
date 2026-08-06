@@ -91,6 +91,9 @@ export function isClaimLeaseActive(
   if (!row) return false;
   const status = text(row.call_claim_status).toLowerCase();
   if (status !== 'claimed') return false;
+  const claimContactId = text(row.call_claim_contact_id);
+  const activeContactId = text(row.active_contact_id || row.contact_id);
+  if (claimContactId && activeContactId && claimContactId !== activeContactId) return false;
 
   const expiresRaw = text(row.call_claim_expires_at);
   if (expiresRaw) {
@@ -603,8 +606,10 @@ export function claimCallBoardEntry(input: {
       'call_claimed_by',
       'call_claimed_at',
       'call_claim_expires_at',
+      'call_claim_contact_id',
     ],
   });
+  const activeContactId = text(row.active_contact_id || row.contact_id);
   upsertRecord({
     db: input.db,
     row: {
@@ -613,6 +618,7 @@ export function claimCallBoardEntry(input: {
       call_claimed_by: by,
       call_claimed_at: now,
       call_claim_expires_at: expiresAt,
+      call_claim_contact_id: activeContactId,
     },
   });
   return {
@@ -668,6 +674,7 @@ export function releaseCallBoardClaim(input: {
       'call_claimed_by',
       'call_claimed_at',
       'call_claim_expires_at',
+      'call_claim_contact_id',
     ],
   });
   upsertRecord({
@@ -678,6 +685,7 @@ export function releaseCallBoardClaim(input: {
       call_claimed_by: '',
       call_claimed_at: '',
       call_claim_expires_at: '',
+      call_claim_contact_id: '',
     },
   });
   return {
@@ -719,6 +727,7 @@ export function expireCallBoardLeases(input: {
       'call_claimed_by',
       'call_claimed_at',
       'call_claim_expires_at',
+      'call_claim_contact_id',
     ],
   });
 
@@ -734,6 +743,7 @@ export function expireCallBoardLeases(input: {
         call_claimed_by: '',
         call_claimed_at: '',
         call_claim_expires_at: '',
+        call_claim_contact_id: '',
       },
     });
     recordIds.push(rid);
@@ -789,6 +799,19 @@ export function disposeCallBoardEntry(input: {
   if (!row) throw new Error(`Record not found: ${rid}`);
   const now = String(input.at || nowTimestamp());
   const by = String(input.disposedBy || '').trim();
+  const claimContactId = text(row.call_claim_contact_id);
+  const activeContactId = text(row.active_contact_id || row.contact_id);
+  if (
+    text(row.call_claim_status).toLowerCase() === 'claimed'
+    && claimContactId
+    && activeContactId
+    && claimContactId !== activeContactId
+    && !input.force
+  ) {
+    throw new Error(
+      `Cannot dispose: claim belongs to contact ${claimContactId}, active contact is ${activeContactId}`,
+    );
+  }
 
   // Lease owner gate: another operator's unexpired lease blocks dispose.
   if (by && !input.force && !isCallLeaseOwner(row, by)) {

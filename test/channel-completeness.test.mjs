@@ -51,7 +51,16 @@ import {
   parseMailProviderStatus,
   listMailSinkPieces,
 } from '../dist/orchestrator/channels/mail-provider.js';
-import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
+import {
+  completeManualTask,
+  submitMailWithIdempotency,
+} from '../dist/orchestrator/pipeline/manual.js';
+import {
+  getAccountCostTotals,
+  releaseAccountCostReservation,
+  reserveAccountCost,
+  settleAccountCostReservation,
+} from '../dist/orchestrator/lib/costs.js';
 import {
   buildContactPlan,
   allocateMail,
@@ -645,6 +654,211 @@ test('mail provider: sink allocate → submit → confirm', async () => {
     }),
   });
   assert.equal(failApplied.status, 'failed');
+  db.close();
+});
+
+test('mail provider: accepted submission is idempotent across caller replay', async () => {
+  const { db } = createList({ _row_id: 'mail_idempotent_1' });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('mail_idempotent_1');
+  const calls = [];
+  const provider = {
+    name: 'mail_fixture',
+    submit: async (request) => {
+      calls.push(request);
+      return {
+        ok: true,
+        piece_id: 'piece_idempotent_1',
+        status: 'submitted',
+        reason: 'accepted',
+        cost_cents: 125,
+        provider: 'mail_fixture',
+      };
+    },
+    getStatus: async (pieceId) => ({
+      piece_id: pieceId,
+      status: 'submitted',
+      reason: 'accepted',
+      provider: 'mail_fixture',
+    }),
+  };
+  const request = {
+    recordId: 'mail_idempotent_1',
+    treatment: 'standard_postcard',
+    to: {
+      name: 'Channel Fixture',
+      address_line_1: '100 Main St',
+      address_city: 'Boise',
+      address_state: 'ID',
+      address_zip: '83702',
+    },
+    template_id: 'postcard_v1',
+    metadata: { step_id: 'mail_standard' },
+  };
+
+  const first = await submitMailWithIdempotency({
+    db,
+    provider,
+    request,
+    record,
+    stepId: 'mail_standard',
+    contentVersion: 'postcard_asset_v1',
+  });
+  const replay = await submitMailWithIdempotency({
+    db,
+    provider,
+    request,
+    record,
+    stepId: 'mail_standard',
+    contentVersion: 'postcard_asset_v1',
+  });
+  assert.equal(first.piece_id, 'piece_idempotent_1');
+  assert.equal(replay.piece_id, first.piece_id);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    db.prepare(`SELECT status FROM idempotency WHERE provider_id = ?`).get(first.piece_id).status,
+    'sent',
+  );
+  db.close();
+});
+
+test('mail provider: ambiguous network failure becomes uncertain and cannot blind-resend', async () => {
+  const { db } = createList({ _row_id: 'mail_uncertain_1' });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('mail_uncertain_1');
+  const calls = [];
+  const provider = {
+    name: 'mail_fixture',
+    submit: async (request) => {
+      calls.push(request);
+      throw new Error('connection_lost_after_submit');
+    },
+    getStatus: async (pieceId) => ({
+      piece_id: pieceId,
+      status: 'unknown',
+      reason: 'unknown',
+      provider: 'mail_fixture',
+    }),
+  };
+  const input = {
+    db,
+    provider,
+    request: {
+      recordId: 'mail_uncertain_1',
+      treatment: 'golden_ticket',
+      to: {
+        name: 'Channel Fixture',
+        address_line_1: '200 Main St',
+        address_city: 'Boise',
+        address_state: 'ID',
+        address_zip: '83702',
+      },
+      template_id: 'golden_v1',
+      metadata: { step_id: 'mail_golden' },
+    },
+    record,
+    stepId: 'mail_golden',
+    contentVersion: 'golden_asset_v1',
+  };
+
+  await assert.rejects(() => submitMailWithIdempotency(input), /connection_lost_after_submit/);
+  await assert.rejects(
+    () => submitMailWithIdempotency(input),
+    /provider_uncertain_requires_reconcile/,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(
+    db.prepare(`SELECT status FROM idempotency WHERE status = 'uncertain'`).get().status,
+    'uncertain',
+  );
+  db.close();
+});
+
+test('cost reservations: reserve, release, settle, replay, ceiling, and high-cost gates are durable', () => {
+  const { db } = createList({
+    _row_id: 'cost_reservation_1',
+    golden_ticket_eligible: 1,
+  });
+  const standard = reserveAccountCost({
+    db,
+    recordId: 'cost_reservation_1',
+    stepId: 'mail_standard',
+    kind: 'mail',
+    amountUsd: 1.25,
+    ceilingUsd: 10,
+    reservationId: 'cost_standard',
+  });
+  assert.equal(standard.allowed, true);
+  assert.equal(standard.totals.reserved_usd, 1.25);
+
+  const ineligible = reserveAccountCost({
+    db,
+    recordId: 'cost_reservation_1',
+    stepId: 'mail_golden',
+    kind: 'mail',
+    amountUsd: 8,
+    ceilingUsd: 10,
+    reservationId: 'cost_ineligible',
+    highCost: true,
+    highCostEligible: false,
+  });
+  assert.equal(ineligible.allowed, false);
+  assert.equal(ineligible.reason, 'high_cost_not_eligible');
+
+  const released = releaseAccountCostReservation({
+    db,
+    reservationId: 'cost_standard',
+    reason: 'provider_not_called',
+  });
+  assert.equal(released.released, true);
+  assert.equal(released.totals.exposure_usd, 0);
+  assert.equal(
+    Number(
+      db.prepare(`
+        SELECT golden_ticket_eligible FROM records WHERE _row_id = 'cost_reservation_1'
+      `).get().golden_ticket_eligible,
+    ),
+    1,
+  );
+
+  const golden = reserveAccountCost({
+    db,
+    recordId: 'cost_reservation_1',
+    stepId: 'mail_golden',
+    kind: 'mail',
+    amountUsd: 8,
+    ceilingUsd: 10,
+    reservationId: 'cost_golden',
+    highCost: true,
+    highCostEligible: true,
+  });
+  assert.equal(golden.allowed, true, JSON.stringify(golden));
+
+  const settled = settleAccountCostReservation({
+    db,
+    reservationId: 'cost_golden',
+    actualUsd: 7.75,
+    provider: 'mail_fixture',
+  });
+  assert.equal(settled.settled, true);
+  assert.deepEqual(getAccountCostTotals({ db, recordId: 'cost_reservation_1' }), {
+    record_id: 'cost_reservation_1',
+    actual_usd: 7.75,
+    reserved_usd: 0,
+    exposure_usd: 7.75,
+  });
+  const replay = settleAccountCostReservation({
+    db,
+    reservationId: 'cost_golden',
+    actualUsd: 7.75,
+    provider: 'mail_fixture',
+  });
+  assert.equal(replay.reason, 'already_settled');
+  assert.equal(
+    db.prepare(`
+      SELECT COUNT(*) AS n FROM cost_events
+      WHERE id = 'cost_reservation_cost_golden'
+    `).get().n,
+    1,
+  );
   db.close();
 });
 

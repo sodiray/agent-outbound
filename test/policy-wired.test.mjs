@@ -10,7 +10,10 @@ import test from 'node:test';
 import { createRequire } from 'node:module';
 import { openListDb, ensureRecordColumns, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
-import { executeEnrichmentAction } from '../dist/orchestrator/enrichment/runner.js';
+import {
+  executeEnrichmentAction,
+  executeEnrichmentStepOnRecords,
+} from '../dist/orchestrator/enrichment/runner.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
 import { policyApplyCommand } from '../dist/commands/index.js';
@@ -147,6 +150,31 @@ test('enrich action policy_apply writes treatment and next_action via production
   assert.ok(result.outputs.treatment_tier);
   assert.ok(['A', 'B', 'C', 'D', 'enrichment_hold'].includes(String(result.outputs.treatment_tier)));
   assert.notEqual(Number(result.outputs.priority_rank), Number(record.fit_score));
+  assert.equal(
+    db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_hvac_1').treatment_tier,
+    undefined,
+    'action execution must not mutate before runner validation',
+  );
+  const summary = await executeEnrichmentStepOnRecords({
+    db,
+    listDir,
+    config: { ai: {} },
+    mcp: null,
+    toolCatalog: null,
+    step: {
+      kind: 'enrich',
+      id: 'treatment_assignment',
+      action: 'policy_apply',
+      outputs: {
+        treatment_tier: { type: 'string' },
+        priority_rank: { type: 'number' },
+      },
+    },
+    rows: [record],
+    stepId: 'treatment_assignment',
+    force: true,
+  });
+  assert.equal(summary.processed, 1);
   const updated = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_hvac_1');
   assert.ok(updated.treatment_tier);
   assert.ok(String(updated.next_action_json || '').includes('action_id'));

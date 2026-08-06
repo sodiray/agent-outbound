@@ -639,6 +639,8 @@ test('12 empty packet refuses short factual claims (no soft-skip bypass)', async
       `"${phrase}" must not soft-skip`,
     );
   }
+  assert.equal(isSoftOrBoilerplateFragment('Hi Casey Owner,'), true);
+  assert.deepEqual(extractCommercialClaimFragments('Hi Casey Owner,\n\nWorth a conversation?\n\nRay'), []);
   const body = shortFacts.join('. ') + '.';
   const extracted = extractCommercialClaimFragments(body);
   assert.ok(extracted.length >= 3, 'short factual phrases must be extracted as claims');

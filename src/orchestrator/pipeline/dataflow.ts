@@ -670,7 +670,19 @@ const makeApplicable = ({ db, listDir, config, force }: { db: any; listDir: stri
   };
 };
 
-const createLazyExecutionContext = ({ db, listDir, config, force }: { db: any; listDir: string; config: any; force: boolean }) => {
+const createLazyExecutionContext = ({
+  db,
+  listDir,
+  config,
+  force,
+  clock,
+}: {
+  db: any;
+  listDir: string;
+  config: any;
+  force: boolean;
+  clock?: PipelineClock;
+}) => {
   const state: { mcp: any; toolCatalog: any } = { mcp: null, toolCatalog: null };
   return async (step: DataflowStep) => {
     if (
@@ -692,6 +704,7 @@ const createLazyExecutionContext = ({ db, listDir, config, force }: { db: any; l
       mcp: state.mcp,
       toolCatalog: state.toolCatalog,
       force,
+      now: clockIso(clock),
     };
   };
 };
@@ -803,7 +816,13 @@ export const runPipelineDataflow = async ({
     const runId = beginRun(db, { phase: 'pipeline', target: rows.length, message: `Filtering ${rows.length} records` });
     const progressState = { done: 0 };
     const heartbeatTimer = setInterval(() => heartbeat(db, runId), 3000);
-    const contextFor = createLazyExecutionContext({ db, listDir, config, force });
+    const contextFor = createLazyExecutionContext({
+      db,
+      listDir,
+      config,
+      force,
+      clock,
+    });
     const loaders = new Map<string, ReturnType<typeof createBatchLoader<DataflowRecord, StepExecutionOutcome>>>();
     const loaderFor = (step: DataflowStep, inFlight: () => number) => {
       const existing = loaders.get(step.id);

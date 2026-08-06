@@ -30,6 +30,7 @@ import {
   ECONOMIC_RULE_VERSION,
 } from '../dist/orchestrator/policy/claim-audit.js';
 import {
+  assembleClaimEvidenceCatalog,
   assemblePermittedClaimPacket,
   loadDiagnosticFamilies,
   loadProofLibrary,
@@ -628,6 +629,21 @@ test('phase-06: assemblePermittedClaimPacket loads registry + proof + economics'
     'must link approved proof with proof_id',
   );
   assert.ok(packet.permitted_claims.some((c) => c.claim_id === 'snap_preliminary'));
+  const catalog = assembleClaimEvidenceCatalog({
+    family_id: 'trades_field_services',
+    listDir: TV_ROOT,
+    economic_inputs: {
+      weekly_admin_hours: 8,
+      hourly_loaded_cost: 40,
+      missed_leads_per_month: 3,
+      avg_job_value: 2500,
+      close_rate: 0.2,
+    },
+  });
+  assert.ok(catalog.some((entry) => entry.id === 'trades_field_services'));
+  assert.ok(catalog.some((entry) => entry.id === 'diagnostic_partnership'));
+  assert.ok(catalog.some((entry) => entry.proof_id));
+  assert.ok(catalog.some((entry) => entry.id.startsWith('range:')));
 
   // Authoring text drawn only from packet must audit-pass
   const hyp = packet.permitted_claims.find((c) => c.claim_class === 'hypothesis');

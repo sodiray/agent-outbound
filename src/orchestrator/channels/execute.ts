@@ -138,6 +138,9 @@ const applyStageReviewPause = ({
 }) => {
   const accountId = String(record._row_id || record.id || record.account_id || '');
   const lifecycle = String(record.lifecycle_stage || 'contacted');
+  const pendingActionType = String(channel || '').trim().toLowerCase() === 'mail'
+    ? 'send_mail'
+    : actionType;
   const paused = pauseForStageReview({
     account_id: accountId,
     stage_id: stageId,
@@ -146,7 +149,7 @@ const applyStageReviewPause = ({
     channel: channel ?? null,
     action_type: actionType,
     pending_action: {
-      action_type: actionType,
+      action_type: pendingActionType,
       account_id: accountId,
       contact_id: contactId ?? null,
       lifecycle_stage: lifecycle,
@@ -427,8 +430,16 @@ export const executeChannelStep = async ({
   dryRun = false,
   intent = 'send',
   channelHint = '',
+  now: suppliedNow,
 }: any) => {
-  const now = nowTimestamp();
+  const suppliedInstant = suppliedNow instanceof Date
+    ? suppliedNow
+    : suppliedNow
+      ? new Date(String(suppliedNow))
+      : null;
+  const now = suppliedInstant && !Number.isNaN(suppliedInstant.getTime())
+    ? suppliedInstant.toISOString()
+    : nowTimestamp();
   const recordId = getRecordRowId(record);
   const sequenceStepId = String(step?.id || `step_${stepNumber}`);
 
@@ -2025,6 +2036,30 @@ export const executeChannelStep = async ({
           isReviewRequired(projectConfig, stepKind || 'send_email', taskType)
           || isReviewRequired(projectConfig, 'send_email', taskType)
         ) {
+          const draftMailbox = resolveSendMailbox({
+            listDir,
+            config: projectConfig || readConfig(listDir).config,
+            db,
+            record: sendRecord,
+            stepConfig: (step?.config && typeof step.config === 'object')
+              ? step.config as any
+              : {},
+          });
+          const draftFrom = draftMailbox
+            ? String(
+                draftMailbox.credentials.SMTP_FROM
+                || draftMailbox.credentials.SMTP_USER
+                || draftMailbox.id
+                || '',
+              ).trim()
+            : String(sendRecord.email_last_from || '').trim();
+          const draftMailboxId = draftMailbox
+            ? String(draftMailbox.id || '').trim()
+            : String(sendRecord.assigned_mailbox_id || '').trim();
+          (sendRecord as any).assigned_mailbox_id =
+            draftMailboxId || sendRecord.assigned_mailbox_id;
+          (sendRecord as any).email_last_from =
+            draftFrom || sendRecord.email_last_from;
           // Same composition as drafts.composeOutboundReviewVersion / send path:
           // account, contact, recipient, subject/body, claim packet, draft id, step.
           const { composeOutboundReviewVersion } = await import('../../commands/drafts.js');
@@ -2038,11 +2073,8 @@ export const executeChannelStep = async ({
             },
             stageId: sequenceStepId,
             policyVersion: projectConfig?.policy?.version,
-            sender: String(
-              sendRecord.email_last_from
-              || sendRecord.assigned_mailbox_id
-              || '',
-            ) || null,
+            sender: draftFrom || null,
+            mailboxId: draftMailboxId || null,
           });
           const draftAuth = evaluateExternalActionAuthorization({
             config: projectConfig,
@@ -2235,8 +2267,9 @@ export const executeChannelStep = async ({
     }
 
     return {
-      status: 'sent',
-      provider_id: providerMessageId,
+      status: intent === 'draft' ? 'drafted' : 'sent',
+      provider_id: intent === 'draft' ? '' : providerMessageId,
+      ...(intent === 'draft' ? { draft_id: providerMessageId } : {}),
       next_step: Number(stepNumber) + 1,
       deferred: Boolean(stepResult.defer),
       auto_skipped_steps: progression.skippedStepNumbers,

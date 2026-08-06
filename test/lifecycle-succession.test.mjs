@@ -437,7 +437,9 @@ test('draft intent does not advance lifecycle or next_action', async () => {
     dryRun: false,
   });
 
-  assert.equal(result.status, 'sent');
+  assert.equal(result.status, 'drafted');
+  assert.equal(result.provider_id, '');
+  assert.ok(result.draft_id);
   const updated = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_succ_1');
   assert.equal(updated.lifecycle_stage, 'cold');
   assert.equal(updated.next_action_json, before);

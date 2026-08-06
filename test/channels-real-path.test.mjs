@@ -510,6 +510,9 @@ test('enforce_readiness: low identity confidence / no email → send_email skipp
       channelHint: 'email',
       intent: 'draft',
     });
+    assert.equal(draftOk.status, 'drafted');
+    assert.equal(draftOk.provider_id, '');
+    assert.ok(draftOk.draft_id);
     assert.notEqual(String(draftOk.reason || ''), 'readiness_not_ready');
     assert.doesNotMatch(String(draftOk.reason || ''), /^readiness_not_ready/);
 

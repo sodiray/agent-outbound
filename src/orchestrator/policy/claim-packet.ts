@@ -29,6 +29,17 @@ export type DiagnosticFamily = {
   verticals?: string[];
 };
 
+export type ClaimCatalogEvidence = {
+  id: string;
+  kind: 'family' | 'scenario' | 'proof' | 'offer' | 'range';
+  status: 'current';
+  source: string;
+  family_id?: string;
+  scenario_id?: string;
+  proof_id?: string;
+  offer_id?: string;
+};
+
 function loadJson<T>(path: string): T | null {
   if (!existsSync(path)) return null;
   try {
@@ -248,6 +259,89 @@ export function matchProofs(input: {
   // If family categories have no library rows, still return empty rather than inventing proof.
   return ranked;
 }
+
+export const assembleClaimEvidenceCatalog = (input: {
+  family_id?: string;
+  vertical?: string;
+  economic_inputs?: Record<string, number>;
+  scenario_ids?: string[];
+  listDir?: string;
+}): ClaimCatalogEvidence[] => {
+  const resolved = resolveDiagnosticFamily({
+    family_id: input.family_id,
+    vertical: input.vertical,
+    listDir: input.listDir,
+  });
+  if (!resolved.resolved || !resolved.family) return [];
+
+  const family = resolved.family;
+  const scenarioIds = input.scenario_ids?.length
+    ? input.scenario_ids
+    : (family.calculator_ids || []);
+  const economicInputs = input.economic_inputs || {};
+  const scenarioEvidence = scenarioIds.flatMap((scenarioId) => {
+    const calculated = calculateEconomicScenario({
+      scenario_id: scenarioId,
+      weekly_admin_hours:
+        economicInputs.weekly_admin_hours ?? economicInputs.admin_hours_per_week,
+      hourly_loaded_cost:
+        economicInputs.hourly_loaded_cost ?? economicInputs.hourly_rate,
+      missed_leads_per_month: economicInputs.missed_leads_per_month,
+      avg_job_value: economicInputs.avg_job_value,
+      close_rate: economicInputs.close_rate,
+    });
+    const scenarioKey = calculated.evidence_status === 'insufficient'
+      ? `${scenarioId}:insufficient`
+      : scenarioId;
+    const scenario: ClaimCatalogEvidence = {
+      id: scenarioKey,
+      kind: 'scenario',
+      status: 'current',
+      source: 'deterministic_economic_scenario',
+      scenario_id: scenarioKey,
+    };
+    const range = calculated.evidence_status !== 'insufficient'
+      && calculated.annual_low_usd != null
+      && calculated.annual_high_usd != null
+      ? [{
+          id: `range:${calculated.annual_low_usd}-${calculated.annual_high_usd}`,
+          kind: 'range' as const,
+          status: 'current' as const,
+          source: 'deterministic_economic_scenario',
+        }]
+      : [];
+    return [scenario, ...range];
+  });
+  const proofEvidence = matchProofs({
+    family_id: family.family_id,
+    listDir: input.listDir,
+  }).map((proof): ClaimCatalogEvidence => ({
+    id: proof.proof_id,
+    kind: 'proof',
+    status: 'current',
+    source: 'proof_library',
+    proof_id: proof.proof_id,
+  }));
+
+  return [
+    {
+      id: family.family_id,
+      kind: 'family',
+      status: 'current',
+      source: 'diagnostic_family_registry',
+      family_id: family.family_id,
+    },
+    ...scenarioEvidence,
+    ...proofEvidence,
+    {
+      id: 'diagnostic_partnership',
+      kind: 'offer',
+      status: 'current',
+      source: 'code_owned_offer_registry',
+      offer_id: 'diagnostic_partnership',
+    },
+  ];
+};
 
 export function assemblePermittedClaimPacket(input: {
   account_id: string;
