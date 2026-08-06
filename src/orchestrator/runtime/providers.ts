@@ -3,6 +3,7 @@ import { listAnthropicModels } from './anthropic.js';
 import { listDeepInfraModels } from './deepinfra.js';
 import { listXaiModels } from './xai.js';
 import { listOpenAiModels } from './openai.js';
+import { listOpenRouterModels, OPENROUTER_BASE_URL } from './openrouter.js';
 
 type ProviderValidateResult = {
   ok: boolean;
@@ -10,12 +11,19 @@ type ProviderValidateResult = {
   models: string[];
 };
 
+export type ProviderCredentials = {
+  apiKey: string;
+  baseURL?: string;
+};
+
 export type RuntimeProvider = {
   id: string;
   envKey: string;
+  credentialEnvDescription?: string;
   supportsCacheControl: boolean;
   validateKey: (apiKey: string) => Promise<ProviderValidateResult>;
-  buildModel: (modelId: string, apiKey: string) => Promise<any>;
+  buildModel: (modelId: string, apiKey: string, baseURL?: string) => Promise<any>;
+  resolveCredentials?: () => ProviderCredentials;
   getProviderOptions?: (modelId: string, opts?: { reasoning?: boolean }) => Record<string, any>;
   extractUsdCost: (result: any) => number | null;
 };
@@ -39,6 +47,22 @@ const parseDeepInfraUsdFromResponseBody = (rawBody: any): number | null => {
     return parseUsd((rawBody as any)?.usage?.estimated_cost);
   }
   return null;
+};
+
+const parseOpenRouterUsdFromResponseBody = (rawBody: unknown): number | null => {
+  const parsed = typeof rawBody === 'string'
+    ? (() => {
+      try {
+        return JSON.parse(rawBody) as unknown;
+      } catch {
+        return null;
+      }
+    })()
+    : rawBody;
+  if (!parsed || typeof parsed !== 'object') return null;
+  const usage = (parsed as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== 'object') return null;
+  return parseUsd((usage as { cost?: unknown }).cost);
 };
 
 const buildAnthropicModel = async (modelId: string, apiKey: string) => {
@@ -111,6 +135,47 @@ const buildOpenAiModel = async (modelId: string, apiKey: string) => {
     return (providerModule as any).openai(id, { apiKey });
   }
   throw new Error('Failed to initialize OpenAI provider from @ai-sdk/openai.');
+};
+
+const buildOpenRouterModel = async (modelId: string, apiKey: string, baseURL = OPENROUTER_BASE_URL) => {
+  const modName = '@ai-sdk/openai';
+  const providerModule: unknown = await import(modName);
+  const id = String(modelId || '').trim();
+  const resolvedBaseURL = String(baseURL || OPENROUTER_BASE_URL).trim();
+  const openAiModule = providerModule as {
+    createOpenAI?: (settings: {
+      apiKey: string;
+      baseURL: string;
+      name: string;
+    }) => ((modelId: string) => unknown) & { chat?: (modelId: string) => unknown };
+    openai?: (modelId: string, settings: { apiKey: string; baseURL: string }) => unknown;
+  };
+  if (typeof openAiModule.createOpenAI === 'function') {
+    const openrouter = openAiModule.createOpenAI({
+      apiKey,
+      baseURL: resolvedBaseURL,
+      name: 'openrouter',
+    });
+    if (typeof openrouter.chat === 'function') return openrouter.chat(id);
+    return openrouter(id);
+  }
+  if (typeof openAiModule.openai === 'function') {
+    return openAiModule.openai(id, { apiKey, baseURL: resolvedBaseURL });
+  }
+  throw new Error('Failed to initialize OpenRouter provider from @ai-sdk/openai.');
+};
+
+const resolveOpenRouterCredentials = (): ProviderCredentials => {
+  const openRouterKey = String(getEnv('OPENROUTER_API_KEY') || '').trim();
+  if (openRouterKey) return { apiKey: openRouterKey, baseURL: OPENROUTER_BASE_URL };
+
+  const compatibleKey = String(getEnv('OPENAI_COMPATIBLE_API_KEY') || '').trim();
+  const compatibleBaseURL = String(getEnv('OPENAI_COMPATIBLE_BASE_URL') || '').trim();
+  if (compatibleKey && compatibleBaseURL) {
+    return { apiKey: compatibleKey, baseURL: compatibleBaseURL };
+  }
+
+  return { apiKey: '', baseURL: OPENROUTER_BASE_URL };
 };
 
 // OpenAI's API does not return a cost field, so we compute it from token usage.
@@ -212,6 +277,21 @@ export const PROVIDERS: RuntimeProvider[] = [
     extractUsdCost: (result: any) => computeOpenAiUsd(result),
   },
   {
+    id: 'openrouter',
+    envKey: 'OPENROUTER_API_KEY',
+    credentialEnvDescription: 'OPENROUTER_API_KEY or OPENAI_COMPATIBLE_API_KEY + OPENAI_COMPATIBLE_BASE_URL',
+    supportsCacheControl: false,
+    validateKey: async (apiKey: string) => listOpenRouterModels({ apiKey }),
+    buildModel: buildOpenRouterModel,
+    resolveCredentials: resolveOpenRouterCredentials,
+    extractUsdCost: (result) => (
+      parseUsd(result?.providerMetadata?.openrouter?.usage?.cost)
+      ?? parseUsd(result?.usage?.cost)
+      ?? parseOpenRouterUsdFromResponseBody(result?.response?.body)
+      ?? parseOpenRouterUsdFromResponseBody(result?.rawResponse?.body)
+    ),
+  },
+  {
     id: 'xai',
     envKey: 'XAI_API_KEY',
     supportsCacheControl: false,
@@ -230,7 +310,12 @@ export const getProviderById = (providerId: string): RuntimeProvider | null => {
 };
 
 export const getProviderKey = (providerId: string) => {
+  return getProviderCredentials(providerId).apiKey;
+};
+
+export const getProviderCredentials = (providerId: string): ProviderCredentials => {
   const provider = getProviderById(providerId);
-  if (!provider) return '';
-  return String(getEnv(provider.envKey) || '').trim();
+  if (!provider) return { apiKey: '' };
+  if (provider.resolveCredentials) return provider.resolveCredentials();
+  return { apiKey: String(getEnv(provider.envKey) || '').trim() };
 };

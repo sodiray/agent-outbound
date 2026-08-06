@@ -1,6 +1,6 @@
 import { AgentOutboundError } from './contract.js';
 import { assertSupportedModel } from './model-store.js';
-import { getProviderById, getProviderKey } from './providers.js';
+import { getProviderById, getProviderCredentials, type RuntimeProvider } from './providers.js';
 
 export const LEGACY_MODEL_HINTS: Record<string, string> = {
   haiku: 'anthropic/claude-haiku-4-5-20251001',
@@ -97,6 +97,27 @@ export const resolveConfiguredModelRef = ({
   });
 };
 
+export const assertProviderCredentials = ({
+  provider,
+  modelRef,
+  apiKey,
+}: {
+  provider: RuntimeProvider;
+  modelRef: string;
+  apiKey: string;
+}) => {
+  if (apiKey) return;
+  const credentialEnv = provider.credentialEnvDescription || provider.envKey;
+  throw new AgentOutboundError({
+    code: 'INVALID_ARGUMENT',
+    message: `${modelRef} requires ${credentialEnv}, but it is not set.`,
+    retryable: false,
+    hint: `Set ${credentialEnv} and retry.`,
+    fields: { model: modelRef, provider: provider.id, env_key: provider.envKey },
+    status: 400,
+  });
+};
+
 export const resolveRuntimeModel = async ({
   model = '',
   role = 'research',
@@ -122,21 +143,12 @@ export const resolveRuntimeModel = async ({
       status: 400,
     });
   }
-  const apiKey = getProviderKey(provider.id);
-  if (!apiKey) {
-    throw new AgentOutboundError({
-      code: 'INVALID_ARGUMENT',
-      message: `${parsed.modelRef} requires ${provider.envKey}, but it is not set.`,
-      retryable: false,
-      hint: `Run agent-outbound init and configure ${provider.id}.`,
-      fields: { model: parsed.modelRef, provider: provider.id, env_key: provider.envKey },
-      status: 400,
-    });
-  }
+  const credentials = getProviderCredentials(provider.id);
+  assertProviderCredentials({ provider, modelRef: parsed.modelRef, apiKey: credentials.apiKey });
   if (enforceSupported) {
     assertSupportedModel(parsed.modelRef);
   }
-  const built = await provider.buildModel(parsed.modelId, apiKey);
+  const built = await provider.buildModel(parsed.modelId, credentials.apiKey, credentials.baseURL);
   return {
     provider,
     providerId: provider.id,

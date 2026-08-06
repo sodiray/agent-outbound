@@ -54,6 +54,8 @@ import { listAnthropicModels, validateAnthropicKey } from '../orchestrator/runti
 import { listDeepInfraModels, validateDeepInfraModel } from '../orchestrator/runtime/deepinfra.js';
 import { listXaiModels } from '../orchestrator/runtime/xai.js';
 import { listOpenAiModels } from '../orchestrator/runtime/openai.js';
+import { listOpenRouterModels } from '../orchestrator/runtime/openrouter.js';
+import { getProviderCredentials } from '../orchestrator/runtime/providers.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { runCrmSync } from '../orchestrator/crm/runner.js';
 import { getEnv, readGlobalEnv, writeGlobalEnv } from '../orchestrator/runtime/env.js';
@@ -134,11 +136,13 @@ const applyProviderModels = ({
   deepinfraModels = [],
   xaiModels = [],
   openaiModels = [],
+  openrouterModels = [],
 }: {
   anthropicModels?: string[];
   deepinfraModels?: string[];
   xaiModels?: string[];
   openaiModels?: string[];
+  openrouterModels?: string[];
 }) => {
   let state = readModelsState();
   state = setProviderModels({
@@ -160,6 +164,11 @@ const applyProviderModels = ({
     state,
     providerId: 'openai',
     models: openaiModels,
+  });
+  state = setProviderModels({
+    state,
+    providerId: 'openrouter',
+    models: openrouterModels,
   });
   return writeModelsState(state);
 };
@@ -355,8 +364,9 @@ export const modelsRefreshCommand = async ({
   const deepinfraKey = String(getEnv('DEEPINFRA_API_KEY') || '').trim();
   const xaiKey = String(getEnv('XAI_API_KEY') || '').trim();
   const openaiKey = String(getEnv('OPENAI_API_KEY') || '').trim();
-  if (!anthropicKey && !deepinfraKey && !xaiKey && !openaiKey) {
-    throw new Error('At least one provider key is required. Configure Anthropic, DeepInfra, xAI, and/or OpenAI in `agent-outbound init`.');
+  const openrouterCredentials = getProviderCredentials('openrouter');
+  if (!anthropicKey && !deepinfraKey && !xaiKey && !openaiKey && !openrouterCredentials.apiKey) {
+    throw new Error('At least one provider key is required. Configure Anthropic, DeepInfra, xAI, OpenAI, and/or OpenRouter in `agent-outbound init`.');
   }
 
   const current = readModelsState();
@@ -377,6 +387,12 @@ export const modelsRefreshCommand = async ({
     : { ok: false, error: 'not configured', models: [] as string[] };
   if (openaiKey && !openaiList.ok) {
     throw new Error(`OpenAI refresh failed: ${openaiList.error}`);
+  }
+  const openrouterList = openrouterCredentials.apiKey
+    ? await listOpenRouterModels(openrouterCredentials)
+    : { ok: false, error: 'not configured', models: [] as string[] };
+  if (openrouterCredentials.apiKey && !openrouterList.ok) {
+    throw new Error(`OpenRouter refresh failed: ${openrouterList.error}`);
   }
 
   let deepinfraSelected: string[] = [];
@@ -407,6 +423,7 @@ export const modelsRefreshCommand = async ({
     deepinfraModels: deepinfraKey ? deepinfraSelected : (current.providers?.deepinfra?.models || []),
     xaiModels: xaiKey ? (xaiList.models || []) : (current.providers?.xai?.models || []),
     openaiModels: openaiKey ? (openaiList.models || []) : (current.providers?.openai?.models || []),
+    openrouterModels: openrouterCredentials.apiKey ? (openrouterList.models || []) : (current.providers?.openrouter?.models || []),
   });
 
   return {
@@ -428,6 +445,10 @@ export const modelsRefreshCommand = async ({
       openai: {
         configured: Boolean(openaiKey),
         model_count: written.state.providers?.openai?.models?.length || 0,
+      },
+      openrouter: {
+        configured: Boolean(openrouterCredentials.apiKey),
+        model_count: written.state.providers?.openrouter?.models?.length || 0,
       },
     },
   };
