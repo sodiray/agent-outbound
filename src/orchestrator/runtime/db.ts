@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, copyFileSync, existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +29,16 @@ const ensureDriver = () => {
 };
 
 const SCHEMA_SQL = `
+  CREATE TABLE IF NOT EXISTS raw_content (
+    content_hash TEXT PRIMARY KEY,
+    body TEXT NOT NULL,
+    byte_length INTEGER NOT NULL,
+    raw_ref TEXT DEFAULT '',
+    source_provider TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_raw_content_created_at ON raw_content(created_at);
+
   CREATE TABLE IF NOT EXISTS records (
     _row_id TEXT PRIMARY KEY,
     id TEXT DEFAULT '',
@@ -720,6 +730,171 @@ const SCHEMA_SQL = `
 
 const nowIso = () => new Date().toISOString();
 
+type RawContentInput = {
+  content_hash: string;
+  body: string;
+  raw_ref?: string;
+  source_provider?: string;
+  created_at?: string;
+};
+
+type LegacySnapshot = Record<string, unknown>;
+
+type SqliteStatement = {
+  all(...values: unknown[]): unknown[];
+  get(...values: unknown[]): unknown;
+  run(...values: unknown[]): unknown;
+};
+
+type SqliteDatabase = {
+  exec(sql: string): void;
+  prepare(sql: string): SqliteStatement;
+  transaction<T>(fn: () => T): () => T;
+};
+
+const contentHash = (body: string) => createHash('sha256').update(body).digest('hex');
+
+const excerptFromRawContent = (body: string, maxLength = 2000) => (
+  body.length <= maxLength ? body : `${body.slice(0, maxLength)}…`
+);
+
+const parseJson = (value: unknown): unknown => {
+  if (value == null || value === '') return null;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+};
+
+const snapshotList = (value: unknown): LegacySnapshot[] => {
+  const parsed = parseJson(value);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((snapshot): snapshot is LegacySnapshot => Boolean(snapshot && typeof snapshot === 'object'));
+};
+
+const snapshotKey = (snapshot: LegacySnapshot) => (
+  String(snapshot.source_id || snapshot.content_hash || JSON.stringify(snapshot))
+);
+
+export const storeRawContent = ({ db, content }: { db: SqliteDatabase; content: RawContentInput }): boolean => {
+  const body = String(content.body || '');
+  if (!body) return false;
+  const hash = contentHash(body);
+  const requestedHash = String(content.content_hash || '').trim();
+  if (requestedHash && requestedHash !== hash) {
+    throw new Error('raw_content content_hash must match the body SHA-256.');
+  }
+  db.prepare(`
+    INSERT INTO raw_content (content_hash, body, byte_length, raw_ref, source_provider, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(content_hash) DO NOTHING
+  `).run(
+    hash,
+    body,
+    Buffer.byteLength(body, 'utf8'),
+    String(content.raw_ref || ''),
+    String(content.source_provider || ''),
+    String(content.created_at || nowIso()),
+  );
+  return true;
+};
+
+/** Resolve full immutable bytes only where a caller genuinely needs them. */
+export const resolveRawContentBody = ({ db, contentHash: hash }: { db: SqliteDatabase; contentHash: string }): string | null => {
+  const contentHashValue = String(hash || '').trim();
+  if (!contentHashValue) return null;
+  const row = db.prepare('SELECT body FROM raw_content WHERE content_hash = ?').get(contentHashValue) as { body?: unknown } | undefined;
+  return row?.body == null ? null : String(row.body);
+};
+
+const normalizeLegacySnapshot = ({ db, snapshot }: { db: SqliteDatabase; snapshot: LegacySnapshot }): LegacySnapshot => {
+  const body = typeof snapshot.body === 'string' ? snapshot.body : '';
+  const existingExcerpt = typeof snapshot.excerpt === 'string' ? snapshot.excerpt : '';
+  const excerpt = excerptFromRawContent(body || existingExcerpt);
+  const hash = body
+    ? contentHash(body)
+    : String(snapshot.content_hash || '').trim() || (excerpt ? contentHash(excerpt) : '');
+  if (body && hash) {
+    storeRawContent({
+      db,
+      content: {
+        content_hash: hash,
+        body,
+        raw_ref: String(snapshot.raw_ref || ''),
+        source_provider: String(snapshot.provider || snapshot.source || ''),
+      },
+    });
+  }
+  const { body: _body, excerpt: _excerpt, content_hash: _contentHash, ...rest } = snapshot;
+  return {
+    ...rest,
+    ...(hash ? { content_hash: hash } : {}),
+    ...(excerpt ? { excerpt } : {}),
+  };
+};
+
+/**
+ * One-time-compatible migration for the former four-copy snapshot shape.
+ * observations_json.snapshots is the sole persisted snapshot history after this
+ * runs; legacy snapshot columns are cleared only after their bytes are safe in
+ * raw_content and their metadata has been merged.
+ */
+export const migrateContentAddressedEvidence = ({ db }: { db: SqliteDatabase }): number => {
+  try { db.exec("ALTER TABLE records ADD COLUMN observations_json TEXT DEFAULT ''"); } catch {}
+  const columns = new Set(
+    db.prepare('PRAGMA table_info(records)').all().map((row: { name?: unknown }) => String(row.name || '')),
+  );
+  if (!columns.has('observations_json')) return 0;
+  const legacyColumns = [
+    'source_snapshots_json',
+    'retrieval_snapshots_json',
+    'last_retrieval_snapshot_json',
+  ].filter((column) => columns.has(column));
+  const rows = db.prepare('SELECT * FROM records').all() as Array<Record<string, unknown>>;
+  const migrate = db.transaction(() => rows.reduce((count, row) => {
+    const observationValue = parseJson(row.observations_json);
+    const observationStore = observationValue && typeof observationValue === 'object' && !Array.isArray(observationValue)
+      ? observationValue as Record<string, unknown>
+      : {};
+    const observations = Array.isArray(observationValue)
+      ? observationValue
+      : Array.isArray(observationStore.observations) ? observationStore.observations : [];
+    const legacySnapshots = [
+      ...snapshotList(observationStore.snapshots),
+      ...snapshotList(row.source_snapshots_json),
+      ...snapshotList(row.retrieval_snapshots_json),
+      ...snapshotList(row.last_retrieval_snapshot_json),
+    ];
+    const snapshotsByKey = new Map<string, LegacySnapshot>();
+    for (const snapshot of legacySnapshots) {
+      const normalized = normalizeLegacySnapshot({ db, snapshot });
+      snapshotsByKey.set(snapshotKey(normalized), normalized);
+    }
+    const snapshots = [...snapshotsByKey.values()];
+    const nextObservationStore = {
+      ...observationStore,
+      observations,
+      snapshots,
+    };
+    const nextObservationsJson = JSON.stringify(nextObservationStore);
+    const legacyHasValues = legacyColumns.some((column) => String(row[column] || '').trim() !== '');
+    const needsWrite = legacySnapshots.length > 0
+      || legacyHasValues
+      || String(row.observations_json || '') !== nextObservationsJson;
+    if (!needsWrite) return count;
+    const assignments = ['observations_json = @observations_json', ...legacyColumns.map((column) => `${column} = @empty`)];
+    db.prepare(`UPDATE records SET ${assignments.join(', ')} WHERE _row_id = @_row_id`).run({
+      _row_id: row._row_id,
+      observations_json: nextObservationsJson,
+      empty: '',
+    });
+    return count + 1;
+  }, 0));
+  return migrate();
+};
+
 export type Asset = {
   asset_id: string;
   row_id: string;
@@ -1188,6 +1363,7 @@ const openDb = ({ dbPath, readonly = false }) => {
     ensureSuppressionCompatibility(db);
     ensureTerritoryCompatibility(db);
     ensureDraftCompatibility(db);
+    migrateContentAddressedEvidence({ db });
     ensureDataAccessViewsInternal(db);
   }
   return db;
@@ -1243,6 +1419,7 @@ export const openListDb = ({ listDir, readonly = false }) => {
     ensureSuppressionCompatibility(db);
     ensureTerritoryCompatibility(db);
     ensureDraftCompatibility(db);
+    migrateContentAddressedEvidence({ db });
     ensureDataAccessViewsInternal(db);
   }
   return db;

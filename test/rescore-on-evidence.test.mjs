@@ -110,9 +110,7 @@ test('success evidence patch + markScoringStale mirrors enrich success wiring', 
       columns: [
         { name: 'score_status', type: 'TEXT' },
         { name: 'site_text', type: 'TEXT' },
-        { name: 'last_retrieval_snapshot_json', type: 'TEXT' },
         { name: 'observations_json', type: 'TEXT' },
-        { name: 'source_snapshots_json', type: 'TEXT' },
       ],
     });
     db.prepare(`
@@ -151,26 +149,20 @@ test('success evidence patch + markScoringStale mirrors enrich success wiring', 
     db.prepare(`
       UPDATE records SET
         site_text = ?,
-        last_retrieval_snapshot_json = ?,
         observations_json = ?,
-        source_snapshots_json = ?,
         score_status = ?
       WHERE _row_id = ?
     `).run(
       'Acme Plumbing — emergency service Boise ID.',
-      String(evidence.last_retrieval_snapshot_json || ''),
       String(evidence.observations_json || ''),
-      String(evidence.source_snapshots_json || ''),
       stalePatch.score_status,
       'acct_ev',
     );
-    const row = db.prepare('SELECT score_status, last_retrieval_snapshot_json FROM records WHERE _row_id = ?').get('acct_ev');
+    const row = db.prepare('SELECT score_status, observations_json FROM records WHERE _row_id = ?').get('acct_ev');
     assert.equal(row.score_status, 'stale');
-    assert.ok(row.last_retrieval_snapshot_json);
-    const snap = JSON.parse(row.last_retrieval_snapshot_json);
+    const snap = JSON.parse(row.observations_json).snapshots.at(-1);
     assert.notEqual(snap.kind, 'tool_failure');
   } finally {
     db.close();
   }
 });
-

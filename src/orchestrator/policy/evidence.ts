@@ -21,9 +21,6 @@ export const EVIDENCE_CONTRACT_VERSION = 'tv-evidence-v1';
 /** Record JSON columns used for durable evidence (ensureRecordColumns TEXT). */
 export const EVIDENCE_RECORD_COLUMNS = [
   'observations_json',
-  'source_snapshots_json',
-  'retrieval_snapshots_json',
-  'last_retrieval_snapshot_json',
   'identity_resolution_json',
   'contradictions_json',
   'evidence_resolution_json',
@@ -89,10 +86,8 @@ export type SourceSnapshot = {
   step_id?: string;
   /** Dot-path or field path into the tool result (e.g. markdown, place_id). */
   path?: string;
-  /** Truncated body for inspectability without full page storage duplication. */
+  /** Bounded operator-display excerpt; raw bytes live in raw_content. */
   excerpt?: string;
-  /** Optional full body when small enough; prefer excerpt for large scrapes. */
-  body?: string;
   kind?: 'intake' | 'retrieval' | 'tool_failure';
 };
 
@@ -157,7 +152,6 @@ export type ObservationStore = {
 const text = (v: unknown) => String(v ?? '').trim();
 
 const EXCERPT_MAX = 2000;
-const BODY_INLINE_MAX = 8000;
 
 export function excerptFromBody(body: unknown, maxLen = EXCERPT_MAX): string {
   const raw = String(body ?? '');
@@ -175,9 +169,7 @@ export function contentHashFromBody(body: unknown): string {
 
 /** True when record already carries a durable retrieval or observation trail. */
 export function hasDurableEvidenceTrail(record: Record<string, unknown>): boolean {
-  if (parseLastRetrievalSnapshot(record.last_retrieval_snapshot_json)) return true;
-  if (parseSnapshotList(record.source_snapshots_json).some((s) => s.kind === 'retrieval')) return true;
-  if (parseSnapshotList(record.retrieval_snapshots_json).some((s) => s.kind === 'retrieval')) return true;
+  if (collectRetrievalSnapshots(record).some((s) => s.kind === 'retrieval')) return true;
   const obs = parseStoredObservations(record.observations_json);
   return obs.some((o) => o && !o.provisional && text(o.source_id) && !isWeakAuthoritySource(o.source_id));
 }
@@ -195,7 +187,32 @@ export function parseJsonValue(raw: unknown): unknown {
 export function parseSnapshotList(raw: unknown): SourceSnapshot[] {
   const parsed = parseJsonValue(raw);
   if (!Array.isArray(parsed)) return [];
-  return parsed.filter((s) => s && typeof s === 'object' && text((s as SourceSnapshot).source_id || (s as SourceSnapshot).provider)) as SourceSnapshot[];
+  return parsed
+    .filter((s) => s && typeof s === 'object' && text((s as SourceSnapshot).source_id || (s as SourceSnapshot).provider))
+    .map((s) => compactSourceSnapshot(s as SourceSnapshot & { body?: unknown }));
+}
+
+/** Remove legacy inline bytes while retaining a verifiable hash and bounded display excerpt. */
+export function compactSourceSnapshot(snapshot: SourceSnapshot & { body?: unknown }): SourceSnapshot {
+  const body = snapshot.body == null ? '' : String(snapshot.body);
+  const existingExcerpt = text(snapshot.excerpt);
+  const excerpt = body ? excerptFromBody(body) : existingExcerpt ? excerptFromBody(existingExcerpt) : '';
+  const hash = body
+    ? contentHashFromBody(body)
+    : text(snapshot.content_hash) || (excerpt ? contentHashFromBody(excerpt) : '');
+  const { body: _body, excerpt: _excerpt, content_hash: _contentHash, ...rest } = snapshot;
+  return {
+    ...rest,
+    ...(hash ? { content_hash: hash } : {}),
+    ...(excerpt ? { excerpt } : {}),
+  };
+}
+
+/** Snapshot history lives authoritatively in observations_json.snapshots. */
+export function parseAuthoritativeSnapshots(raw: unknown): SourceSnapshot[] {
+  const parsed = parseJsonValue(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return [];
+  return parseSnapshotList((parsed as ObservationStore).snapshots);
 }
 
 /**
@@ -204,6 +221,8 @@ export function parseSnapshotList(raw: unknown): SourceSnapshot[] {
  * Never drops prior retrievals in favor of only last_*.
  */
 export function collectRetrievalSnapshots(record: Record<string, unknown>): SourceSnapshot[] {
+  const authoritative = parseAuthoritativeSnapshots(record.observations_json);
+  if (authoritative.length > 0) return authoritative;
   let list: SourceSnapshot[] = [];
   for (const s of parseSnapshotList(record.retrieval_snapshots_json)) {
     list = appendSourceSnapshot(list, s);
@@ -219,8 +238,16 @@ export function collectRetrievalSnapshots(record: Record<string, unknown>): Sour
 /** Retrieval-kind (or unknown-kind with body) snapshots only — history list for policy. */
 export function retrievalHistoryFromList(snaps: SourceSnapshot[]): SourceSnapshot[] {
   return (snaps || []).filter(
-    (s) => s && (s.kind === 'retrieval' || s.kind === 'tool_failure' || (!s.kind && (s.content_hash || s.excerpt || s.body))),
+    (s) => s && (s.kind === 'retrieval' || s.kind === 'tool_failure' || (!s.kind && (s.content_hash || s.excerpt))),
   );
+}
+
+/** Latest retrieval is derived from the authoritative snapshot history. */
+export function latestRetrievalSnapshot(record: Record<string, unknown>): SourceSnapshot | null {
+  const history = retrievalHistoryFromList(collectRetrievalSnapshots(record));
+  const successful = history.filter((snapshot) => snapshot.kind !== 'tool_failure');
+  if (successful.length > 0) return successful[successful.length - 1];
+  return history.length > 0 ? history[history.length - 1] : null;
 }
 
 export function parseStoredObservations(raw: unknown): Observation[] {
@@ -268,8 +295,9 @@ export function buildSourceSnapshotFromRecord(record: Record<string, unknown>): 
 
 /**
  * Immutable retrieval snapshot written when enrich/tool_call succeeds.
- * Shape: { source, retrieved_at, path, content_hash, excerpt/body, provider, ... }
- * content_hash is always set when body/excerpt material exists.
+ * Shape: { source, retrieved_at, path, content_hash, excerpt, provider, ... }
+ * content_hash is always set when body/excerpt material exists. Full bytes are
+ * persisted by the write path in raw_content and are never embedded in a snapshot.
  * source_id is content-addressed when hash is available so identical retrievals dedupe.
  */
 export function buildRetrievalSnapshot(input: {
@@ -295,11 +323,8 @@ export function buildRetrievalSnapshot(input: {
   const path = text(input.path);
   const retrievedAt = text(input.retrieved_at) || new Date().toISOString();
   const bodyRaw = input.body != null ? String(input.body) : '';
-  const excerpt = text(input.excerpt) || (bodyRaw ? excerptFromBody(bodyRaw) : undefined);
-  const body =
-    bodyRaw && bodyRaw.length <= BODY_INLINE_MAX
-      ? bodyRaw
-      : undefined;
+  const excerptMaterial = text(input.excerpt) || bodyRaw;
+  const excerpt = excerptMaterial ? excerptFromBody(excerptMaterial) : undefined;
   const hashMaterial = bodyRaw || excerpt || '';
   const contentHash = hashMaterial ? contentHashFromBody(hashMaterial) : undefined;
   const bodyRef = text(input.body_ref) || undefined;
@@ -323,7 +348,6 @@ export function buildRetrievalSnapshot(input: {
     step_id: stepId || undefined,
     path: path || undefined,
     excerpt: excerpt || undefined,
-    body,
     kind: input.kind || 'retrieval',
   };
 }
@@ -333,14 +357,17 @@ export function appendSourceSnapshot(
   existing: SourceSnapshot[] | unknown,
   snap: SourceSnapshot | null | undefined,
 ): SourceSnapshot[] {
-  const list = Array.isArray(existing) ? [...existing] : parseSnapshotList(existing);
+  const list = Array.isArray(existing)
+    ? existing.map((item) => compactSourceSnapshot(item as SourceSnapshot & { body?: unknown }))
+    : parseSnapshotList(existing);
   if (!snap || !text(snap.source_id)) return list;
-  const idx = list.findIndex((s) => text(s.source_id) === text(snap.source_id));
+  const compact = compactSourceSnapshot(snap);
+  const idx = list.findIndex((s) => text(s.source_id) === text(compact.source_id));
   if (idx >= 0) {
-    list[idx] = { ...list[idx], ...snap };
+    list[idx] = { ...list[idx], ...compact };
     return list;
   }
-  list.push(snap);
+  list.push(compact);
   return list;
 }
 
@@ -499,7 +526,7 @@ export function extractObservationsFromRecord(record: Record<string, unknown>): 
   const now = new Date().toISOString();
   const accountId = text(record._row_id || record.id || 'unknown');
   const snap = buildSourceSnapshotFromRecord(record);
-  const lastRet = parseLastRetrievalSnapshot(record.last_retrieval_snapshot_json);
+  const lastRet = latestRetrievalSnapshot(record);
   // Prefer retrieval snapshot id when present; intake snap is metadata-only.
   const sourceId = lastRet?.source_id || snap?.source_id;
   // Mutable rereads are provisional even when an intake snap exists — the snap
@@ -539,10 +566,10 @@ export function extractObservationsFromRecord(record: Record<string, unknown>): 
   push('identity_confidence', numOrNull(record.identity_confidence), 'inferred');
   push('website', text(record.website) || text(record.website_url), 'literal_support');
 
-  // Prefer last_retrieval_snapshot body/excerpt for site_text when present
+  // Prefer last retrieval excerpt for site_text when present
   // (immutable trail) over live site_text scalar.
-  if (lastRet && (lastRet.excerpt || lastRet.body) && (lastRet.path === 'markdown' || lastRet.path === 'site_text' || !lastRet.path || text(lastRet.step_id).includes('site') || text(lastRet.path).includes('site'))) {
-    const excerpt = excerptFromBody(lastRet.excerpt || lastRet.body, 400);
+  if (lastRet?.excerpt && (lastRet.path === 'markdown' || lastRet.path === 'site_text' || !lastRet.path || text(lastRet.step_id).includes('site') || text(lastRet.path).includes('site'))) {
+    const excerpt = excerptFromBody(lastRet.excerpt, 400);
     push('site_text', excerpt, 'literal_support', excerpt, {
       provisional: false,
       source_id: lastRet.source_id,
@@ -944,14 +971,14 @@ export function resolveFieldPreferringEvidence(input: {
   if (field === 'site_text' || field === 'markdown') {
     const allSnaps = collectRetrievalSnapshots(record);
     const pickSnap = (preferStrong: boolean): SourceSnapshot | null => {
-      const last = parseLastRetrievalSnapshot(record.last_retrieval_snapshot_json);
+      const last = latestRetrievalSnapshot(record);
       const ordered = [
         ...(last ? [last] : []),
         ...[...allSnaps].reverse(),
       ];
       for (const s of ordered) {
         if (!s || s.kind === 'tool_failure') continue;
-        if (!(s.excerpt || s.body)) continue;
+        if (!s.excerpt) continue;
         const siteLike =
           s.path === 'markdown'
           || s.path === 'site_text'
@@ -973,7 +1000,7 @@ export function resolveFieldPreferringEvidence(input: {
     const strong = pickSnap(true);
     if (strong) {
       return {
-        value: strong.excerpt || strong.body,
+        value: strong.excerpt,
         evidence_ids: [strong.source_id],
         source: 'retrieval_snapshot',
         provisional: false,
@@ -984,7 +1011,7 @@ export function resolveFieldPreferringEvidence(input: {
     const weakSnap = pickSnap(false);
     if (weakSnap) {
       return {
-        value: weakSnap.excerpt || weakSnap.body,
+        value: weakSnap.excerpt,
         evidence_ids: [weakSnap.source_id],
         source: 'retrieval_snapshot_weak_authority',
         provisional: true,
@@ -1143,6 +1170,13 @@ export function buildEnrichEvidencePatch(input: {
   error?: string | null;
   /** When true, treat as failed retrieval even if outputs partially present. */
   failed?: boolean;
+  /** Persists full retrieval bytes while snapshots retain only a bounded excerpt. */
+  storeRawContent?: (input: {
+    content_hash: string;
+    body: string;
+    raw_ref?: string;
+    source_provider?: string;
+  }) => void;
 }): Record<string, unknown> {
   const record = input.record || {};
   const stepId = text(input.step_id) || 'enrich';
@@ -1172,7 +1206,7 @@ export function buildEnrichEvidencePatch(input: {
     || record.rebuild_observations === '1';
   const priorObs = parseStoredObservations(record.observations_json);
   let observations = priorObs;
-  let lastSnap: SourceSnapshot | null = parseLastRetrievalSnapshot(record.last_retrieval_snapshot_json);
+  let lastSnap: SourceSnapshot | null = latestRetrievalSnapshot(record);
 
   if (failed) {
     const failObs = buildToolFailureObservation({
@@ -1246,6 +1280,13 @@ export function buildEnrichEvidencePatch(input: {
     const hasOutputs = Object.keys(outputs).length > 0;
 
     if (hasMaterial || hasOutputs) {
+      const bodyRaw = hasMaterial
+        ? String(bodyVal)
+        : JSON.stringify(
+          Object.fromEntries(
+            Object.entries(outputs).filter(([, v]) => v != null && String(v).trim() !== ''),
+          ),
+        );
       // Always write immutable snapshot BEFORE deriving observations (production-honest).
       const snap = buildRetrievalSnapshot({
         source: toolName || stepId,
@@ -1254,18 +1295,20 @@ export function buildEnrichEvidencePatch(input: {
         record_id: recordId,
         retrieved_at: now,
         path: path || (hasMaterial ? bodyKey : 'outputs'),
-        body: hasMaterial
-          ? bodyVal
-          : JSON.stringify(
-            Object.fromEntries(
-              Object.entries(outputs).filter(([, v]) => v != null && String(v).trim() !== ''),
-            ),
-          ).slice(0, BODY_INLINE_MAX),
+        body: bodyRaw,
         query: text(record.website) || text(record.website_url) || text(record.source_query) || undefined,
         cost_usd: costUsd,
         kind: 'retrieval',
         raw_ref: text(record.website) || text(record.website_url) || undefined,
       });
+      if (snap.content_hash && bodyRaw) {
+        input.storeRawContent?.({
+          content_hash: snap.content_hash,
+          body: bodyRaw,
+          raw_ref: snap.raw_ref,
+          source_provider: provider,
+        });
+      }
       snapshots = appendSourceSnapshot(snapshots, snap);
       lastSnap = snap;
       const outObs = extractObservationsFromOutputs({
@@ -1294,16 +1337,12 @@ export function buildEnrichEvidencePatch(input: {
     generated_at: now,
   };
 
-  const retrievalHistory = retrievalHistoryFromList(snapshots);
   const patch: Record<string, unknown> = {
     observations_json: JSON.stringify(store),
-    source_snapshots_json: JSON.stringify(snapshots),
-    // Explicit retrieval history list — never only last_*.
-    retrieval_snapshots_json: JSON.stringify(retrievalHistory),
+    source_snapshots_json: '',
+    retrieval_snapshots_json: '',
+    last_retrieval_snapshot_json: '',
   };
-  if (lastSnap) {
-    patch.last_retrieval_snapshot_json = JSON.stringify(lastSnap);
-  }
   if (store.identity_resolution) {
     patch.identity_resolution_json = JSON.stringify(store.identity_resolution);
   }

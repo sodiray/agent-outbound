@@ -11,6 +11,8 @@
  *   family:/scenario:/proof:/offer: refs are resolvable.
  */
 
+import { collectRetrievalSnapshots } from './evidence.js';
+
 export type ClaimClass = 'observation' | 'hypothesis' | 'economic_scenario' | 'mission_proof' | 'prohibited';
 
 export type PermittedClaim = {
@@ -352,9 +354,17 @@ export function collectKnownEvidenceIds(record: Record<string, unknown>): Set<st
     }
   }
 
+  for (const s of collectRetrievalSnapshots(record)) {
+    const row = s as Record<string, unknown>;
+    if (!isAdmissibleEvidenceRow(row, { accountId })) continue;
+    push(row?.source_id);
+    push(row?.snapshot_id);
+    push(row?.id);
+    push(row?.evidence_id);
+    push(row?.observation_id);
+  }
+
   for (const key of [
-    'retrieval_snapshots_json',
-    'source_snapshots_json',
     'evidence_resolution_json',
     'claim_evidence_json',
   ]) {
@@ -369,17 +379,6 @@ export function collectKnownEvidenceIds(record: Record<string, unknown>): Set<st
     }
   }
 
-  if (record.last_retrieval_snapshot_json) {
-    try {
-      const s = typeof record.last_retrieval_snapshot_json === 'string'
-        ? JSON.parse(String(record.last_retrieval_snapshot_json))
-        : record.last_retrieval_snapshot_json;
-      if (isAdmissibleEvidenceRow(s as any, { accountId })) {
-        push((s as any)?.source_id);
-        push((s as any)?.snapshot_id);
-      }
-    } catch { /* */ }
-  }
 
   // Record-level identity / catalog pins (independent of claim packets — do NOT
   // accept proof_id/scenario_id declared only on the claim itself; that self-authorized).
@@ -507,7 +506,23 @@ export function collectAdmissibleEvidenceIds(record: Record<string, unknown>): S
     push(row?.id);
     push(row?.evidence_id);
   }
-  for (const key of ['retrieval_snapshots_json', 'source_snapshots_json', 'catalog_evidence_json',
+  for (const s of collectRetrievalSnapshots(record)) {
+    const row = s as Record<string, unknown>;
+    if (!isAdmissibleEvidenceRow(row, { accountId })) continue;
+    push(row?.source_id);
+    push(row?.snapshot_id);
+    push(row?.id);
+    push(row?.proof_id);
+    push(row?.scenario_id);
+    push(row?.offer_id);
+    push(row?.family_id);
+    if (row?.proof_id) push(`proof:${row.proof_id}`);
+    if (row?.scenario_id) push(`scenario:${row.scenario_id}`);
+    if (row?.offer_id) push(`offer:${row.offer_id}`);
+    if (row?.family_id) push(`family:${row.family_id}`);
+    if (row?.id && row?.kind) push(`${row.kind}:${row.id}`);
+  }
+  for (const key of ['catalog_evidence_json',
     'proof_library_json', 'scenario_registry_json', 'family_registry_json', 'offer_registry_json']) {
     for (const s of asArray(record[key])) {
       const row = s as Record<string, unknown>;

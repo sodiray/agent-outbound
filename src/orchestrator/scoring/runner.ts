@@ -19,6 +19,7 @@ import {
   loadCampaignContactsFromDb,
   hydrateRecordCostLedger,
 } from '../policy/index.js';
+import { collectRetrievalSnapshots } from '../policy/evidence.js';
 
 const ScoreResultSchema = z.object({
   score: z.coerce.number().refine((value) => Number.isFinite(value), 'score must be a finite number').pipe(z.number().min(0).max(100)),
@@ -463,21 +464,10 @@ export const collectRecordEvidenceIds = (record: Record<string, unknown> | null 
     push((o as any)?.observation_id);
     push((o as any)?.source_id);
   }
-  for (const s of asArray(record.retrieval_snapshots_json || record.source_snapshots_json)) {
+  for (const s of collectRetrievalSnapshots(record)) {
     if (!isAdmissibleScoreEvidence(s as any, { accountId })) continue;
     push((s as any)?.source_id);
     push((s as any)?.snapshot_id);
-  }
-  if (record.last_retrieval_snapshot_json) {
-    try {
-      const s = typeof record.last_retrieval_snapshot_json === 'string'
-        ? JSON.parse(String(record.last_retrieval_snapshot_json))
-        : record.last_retrieval_snapshot_json;
-      if (isAdmissibleScoreEvidence(s as any, { accountId })) {
-        push((s as any)?.source_id);
-        push((s as any)?.snapshot_id);
-      }
-    } catch { /* */ }
   }
   return [...ids];
 };

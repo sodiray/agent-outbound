@@ -98,7 +98,7 @@ test('residual evidence: observations + contradictions + identity resolution per
   });
   assert.ok(out.patch.observations_json);
   assert.ok(out.patch.identity_resolution_json);
-  assert.ok(out.patch.source_snapshots_json);
+  assert.ok(JSON.parse(String(out.patch.observations_json)).snapshots);
   const env = JSON.parse(String(out.patch.evidence_resolution_json));
   assert.ok(Array.isArray(env.contradictions));
   assert.ok(env.contradictions.length >= 1);

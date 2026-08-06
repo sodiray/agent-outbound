@@ -21,8 +21,8 @@ import test from 'node:test';
 
 import {
   buildEnrichEvidencePatch,
+  latestRetrievalSnapshot,
   preservePriorNonBlankFields,
-  parseLastRetrievalSnapshot,
   parseStoredObservations,
 } from '../dist/orchestrator/policy/evidence.js';
 import {
@@ -62,7 +62,7 @@ const TV_ROOT =
 
 // ── 1. Evidence: site_scrape success + failure preserve ─────────────────────
 
-test('evidence: site_scrape success writes last_retrieval_snapshot_json (retrieval kind)', () => {
+test('evidence: site_scrape success writes authoritative retrieval snapshot', () => {
   const siteMarkdown = '# Acme HVAC\n\nWe service Boise and Meridian. After-hours calls welcome.';
   const patch = buildEnrichEvidencePatch({
     record: {
@@ -80,14 +80,12 @@ test('evidence: site_scrape success writes last_retrieval_snapshot_json (retriev
     provider: 'firecrawl',
   });
 
-  assert.ok(patch.last_retrieval_snapshot_json, 'must persist last_retrieval_snapshot_json');
-  const snap = parseLastRetrievalSnapshot(patch.last_retrieval_snapshot_json);
+  const snap = latestRetrievalSnapshot(patch);
   assert.ok(snap, 'snapshot must parse');
   assert.equal(snap.kind, 'retrieval');
   assert.ok(
-    (snap.excerpt || snap.body || '').includes('Acme HVAC')
-      || (snap.excerpt || snap.body || '').includes('Boise'),
-    'snapshot must carry scrape body/excerpt',
+    snap.excerpt.includes('Acme HVAC') || snap.excerpt.includes('Boise'),
+    'snapshot must carry a bounded scrape excerpt',
   );
   assert.match(String(snap.source || snap.provider || ''), /firecrawl|FIRECRAWL|site_scrape/i);
 
@@ -153,8 +151,8 @@ test('evidence: failure preserves prior site_text + adds tool_failure; keeps goo
     `expected tool_failure observation, got ${JSON.stringify(observations).slice(0, 400)}`,
   );
 
-  // Prior good last_retrieval_snapshot must not be replaced by failure-only snap
-  const last = parseLastRetrievalSnapshot(failPatch.last_retrieval_snapshot_json);
+  // Prior good retrieval must not be replaced by a failure-only snapshot.
+  const last = latestRetrievalSnapshot(failPatch);
   assert.ok(last, 'last snap still present');
   assert.equal(last.kind, 'retrieval', 'must keep prior retrieval, not overwrite with tool_failure');
   assert.equal(last.source_id, 'ret_prior_good');

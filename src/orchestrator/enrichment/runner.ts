@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { z } from 'zod';
-import { ensureRecordColumns, inPlayWhere, openListDb, upsertContact, upsertRecord, nowTimestamp } from '../runtime/db.js';
+import { ensureRecordColumns, inPlayWhere, openListDb, storeRawContent, upsertContact, upsertRecord, nowTimestamp } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
 import { stableHash } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
@@ -26,6 +26,7 @@ import { executeLinkedinCompanyResolutionAction } from './actions/linkedin-compa
 import {
   buildEnrichEvidencePatch,
   EVIDENCE_RECORD_COLUMNS,
+  latestRetrievalSnapshot,
   preservePriorNonBlankFields,
 } from '../policy/evidence.js';
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
@@ -261,26 +262,11 @@ export const markScoringStale = ({
  */
 export const evidencePatchIsMaterialRetrieval = (patch: Record<string, unknown> | null | undefined): boolean => {
   if (!patch || typeof patch !== 'object') return false;
-  const raw = patch.last_retrieval_snapshot_json;
-  if (raw == null || raw === '') return false;
-  try {
-    const snap = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (!snap || typeof snap !== 'object') return false;
-    const kind = String((snap as any).kind || '').trim().toLowerCase();
-    if (kind === 'tool_failure' || kind === 'error') return false;
-    // Success path always stamps kind: retrieval; accept missing kind only when body/hash present.
-    if (kind === 'retrieval' || kind === '') {
-      return Boolean(
-        (snap as any).content_hash
-        || (snap as any).body
-        || (snap as any).excerpt
-        || (snap as any).source_id,
-      );
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  const snap = latestRetrievalSnapshot(patch);
+  if (!snap) return false;
+  const kind = String(snap.kind || '').trim().toLowerCase();
+  if (kind === 'tool_failure' || kind === 'error') return false;
+  return kind === 'retrieval' || Boolean(snap.content_hash || snap.excerpt || snap.source_id);
 };
 
 /** Patch fragment for records when scoring must re-run after evidence mutation. */
@@ -532,6 +518,7 @@ const ensureEvidenceColumns = (db: any) => {
  * and attach immutable retrieval snapshot + observations (or tool_failure).
  */
 const applyOutputsWithEvidence = ({
+  db,
   step,
   stepConfig,
   stepId,
@@ -542,6 +529,7 @@ const applyOutputsWithEvidence = ({
   error,
   failed,
 }: {
+  db: any;
   step: any;
   stepConfig: Record<string, unknown>;
   stepId: string;
@@ -572,6 +560,9 @@ const applyOutputsWithEvidence = ({
     usage,
     error,
     failed: Boolean(failed),
+    storeRawContent: (content) => {
+      storeRawContent({ db, content });
+    },
   });
   return { ...patch, ...evidencePatch };
 };
@@ -1019,6 +1010,7 @@ export const executeEnrichmentStepOnRecords = async ({
       const isEmptyOutcome = outcome === 'empty';
       const failedEmpty = isEmptyOutcome && Object.keys(outputs || {}).every((k) => isBlank(outputs?.[k]));
       const patch = applyOutputsWithEvidence({
+        db,
         step: { ...step, config: stepConfig, __list_dir: listDir },
         stepConfig,
         stepId: id,
@@ -1074,6 +1066,7 @@ export const executeEnrichmentStepOnRecords = async ({
         const outputs = emptyOutputsFor(outputZod);
         const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
         const patch = applyOutputsWithEvidence({
+          db,
           step: { ...step, config: stepConfig, __list_dir: listDir },
           stepConfig,
           stepId: id,
@@ -1486,6 +1479,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
 
             const isEmptyOutcome = outcome === 'empty';
             const patch = applyOutputsWithEvidence({
+              db,
               step: { ...step, __list_dir: listDir },
               stepConfig,
               stepId: id,
@@ -1519,6 +1513,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             if (enrichStepUsesEmptyOnError(stepConfig)) {
               const outputs = emptyOutputsFor(outputZod);
               const patch = applyOutputsWithEvidence({
+                db,
                 step: { ...step, __list_dir: listDir },
                 stepConfig,
                 stepId: id,

@@ -218,7 +218,7 @@ test('applyOutboundPolicy: writes evidence_resolution_json with required envelop
   // Evidence contract surfaces persisted alongside envelope
   assert.ok(r.patch.observations_json, 'observations_json must be set');
   assert.ok(r.patch.identity_resolution_json, 'identity_resolution_json must be set');
-  assert.ok(r.patch.source_snapshots_json, 'source_snapshots_json must be set');
+  assert.ok(JSON.parse(String(r.patch.observations_json)).snapshots, 'authoritative snapshots must be set');
   assert.ok(r.patch.contradictions_json != null, 'contradictions_json must be set');
 
   // Top-level eligibility fields also written for operators
@@ -475,7 +475,7 @@ test('Complete-when: raw-shaped sourced record → canonical account with inspec
   assert.ok(Array.isArray(env.contradictions));
 
   // Source snapshots inspectable
-  const snapshots = JSON.parse(String(r.patch.source_snapshots_json));
+  const snapshots = JSON.parse(String(r.patch.observations_json)).snapshots;
   assert.ok(Array.isArray(snapshots) && snapshots.length >= 1);
   assert.equal(snapshots[0].provider, 'geo_tiles');
   assert.equal(snapshots[0].query, 'hvac_contractor near Boise');

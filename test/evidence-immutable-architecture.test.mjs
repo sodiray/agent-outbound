@@ -20,8 +20,8 @@ import {
   contentHashFromBody,
   extractObservationsFromRecord,
   hasDurableEvidenceTrail,
+  latestRetrievalSnapshot,
   mergeObservationsPreferDurable,
-  parseLastRetrievalSnapshot,
   parseStoredObservations,
   preservePriorNonBlankFields,
   resolveFieldPreferringEvidence,
@@ -82,7 +82,7 @@ test('buildEnrichEvidencePatch success: snapshot before observations, source_id 
     provider: 'firecrawl',
   });
 
-  const snap = parseLastRetrievalSnapshot(patch.last_retrieval_snapshot_json);
+  const snap = latestRetrievalSnapshot(patch);
   assert.ok(snap);
   assert.equal(snap.kind, 'retrieval');
   assert.ok(snap.content_hash, 'retrieval success must set content_hash');
@@ -115,8 +115,8 @@ test('buildEnrichEvidencePatch scalar success still writes retrieval snapshot + 
     },
     provider: 'places',
   });
-  const snap = parseLastRetrievalSnapshot(patch.last_retrieval_snapshot_json);
-  assert.ok(snap, 'scalar success must still write last_retrieval_snapshot');
+  const snap = latestRetrievalSnapshot(patch);
+  assert.ok(snap, 'scalar success must still write a retrieval snapshot');
   assert.ok(snap.content_hash, 'scalar retrieval needs content_hash');
   assert.equal(snap.kind, 'retrieval');
   const store = JSON.parse(String(patch.observations_json));
@@ -248,8 +248,8 @@ test('policy re-apply does not clobber durable observations with thin provisiona
   assert.equal(name.value, 'Durable Corp');
   assert.equal(name.provisional, false);
 
-  // last_retrieval_snapshot preserved through policy apply
-  const last = parseLastRetrievalSnapshot(r.patch.last_retrieval_snapshot_json);
+  // Latest retrieval is derived from the authoritative observation store.
+  const last = latestRetrievalSnapshot(r.patch);
   assert.ok(last);
   assert.equal(last.source_id, 'ret_durable');
   assert.equal(last.kind, 'retrieval');
@@ -326,7 +326,7 @@ test('failure: preserves prior last_retrieval + prior site_text blank-clobber gu
     failed: true,
   });
 
-  const last = parseLastRetrievalSnapshot(failPatch.last_retrieval_snapshot_json);
+  const last = latestRetrievalSnapshot(failPatch);
   assert.equal(last?.source_id, 'ret_prior');
   assert.equal(last?.kind, 'retrieval');
 

@@ -40,7 +40,6 @@ import { assertWorkAllowed } from './forbidden-channels.js';
 import {
   buildObservationStore,
   detectContradictions,
-  parseLastRetrievalSnapshot,
   resolveFieldPreferringEvidence,
 } from './evidence.js';
 import { validateTaxonomyLabels } from './taxonomy.js';
@@ -922,14 +921,6 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     record,
     observations: observationStore.observations,
   });
-  const lastRetrievalSnap =
-    parseLastRetrievalSnapshot(record.last_retrieval_snapshot_json)
-    || observationStore.snapshots.find((s) => s.kind === 'retrieval')
-    || null;
-  const retrievalSnapshots = observationStore.snapshots.filter(
-    (s) => s.kind === 'retrieval' || s.kind === 'tool_failure' || Boolean(s.content_hash),
-  );
-
   const confidenceProfile: EvidenceConfidenceProfile = {
     identity_confidence: identityConfidence,
     // Never invent classification/mail confidence defaults.
@@ -1153,9 +1144,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     evidence_resolution_json: JSON.stringify(evidenceResolution),
     observations_json: JSON.stringify(observationStore),
     identity_resolution_json: JSON.stringify(observationStore.identity_resolution),
-    source_snapshots_json: JSON.stringify(observationStore.snapshots),
-    // Full retrieval history list — never only last_*.
-    retrieval_snapshots_json: JSON.stringify(retrievalSnapshots),
+    source_snapshots_json: '',
+    retrieval_snapshots_json: '',
+    last_retrieval_snapshot_json: '',
     contradictions_json: JSON.stringify(contradictions),
     field_evidence_json: JSON.stringify(field_evidence),
     // Enrichment hold → autonomous repair queue signal.
@@ -1171,10 +1162,6 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     observed_buyer_name: namedBuyer.name ?? '',
     buyer_affiliation_status: buyerAffiliation.status ?? '',
     buying_center_role: buyerAffiliation.role ?? '',
-    // Preserve durable last retrieval; never invent empty retrieval at policy time.
-    ...(lastRetrievalSnap
-      ? { last_retrieval_snapshot_json: JSON.stringify(lastRetrievalSnap) }
-      : {}),
     timing_json: JSON.stringify(timingCalc),
     timing_score: timingScore,
     reachability_json: JSON.stringify(reachability),

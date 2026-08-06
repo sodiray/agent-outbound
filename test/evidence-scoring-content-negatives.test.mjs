@@ -209,11 +209,11 @@ test('RES-EVIDENCE: observation refresh appends history (no wholesale replace)',
     'new observation must be appended',
   );
 
-  // Retrieval history list preserved (not only last_*)
-  const hist = JSON.parse(String(patch.retrieval_snapshots_json || '[]'));
+  // Retrieval history is preserved in the authoritative observation store.
+  const hist = JSON.parse(String(patch.observations_json)).snapshots || [];
   assert.ok(Array.isArray(hist) && hist.length >= 2, 'must preserve retrieval history list');
   assert.ok(hist.some((s) => s.source_id === 'ret_prior'));
-  const last = JSON.parse(String(patch.last_retrieval_snapshot_json));
+  const last = hist[hist.length - 1];
   assert.notEqual(last.source_id, 'ret_prior', 'last_* advances to newest');
 });
 
