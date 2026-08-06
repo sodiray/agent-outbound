@@ -130,7 +130,7 @@ const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description,
     'Use the FULL scale. If most grades you assign are 8+, you are grading too leniently.',
     'When the record lacks the evidence a criterion asks about, grade what the evidence supports (typically 3-5), and say what is missing in the reasoning.',
     'Give each criterion ONE terse reason: a single clause of at most ~12 words citing the key evidence. Do not write multiple sentences.',
-    'For each criterion, return evidence_ids: ONLY observation_id or source_id values from the record that support THAT criterion.',
+    'For each criterion, return evidence_ids: ONLY evidence_id, observation_id or source_id values from the record that support THAT criterion. Observations in observations_json carry their id as evidence_id.',
     'Do not invent evidence ids. Do not reuse a place_id or business name as evidence for commercial fit dimensions.',
     'If no observation supports a criterion, return evidence_ids: [] and grade conservatively (typically 0-4).',
     'Return one result per configured criterion id. Do not invent criterion ids. The final score is computed by code, not by you.',
@@ -404,6 +404,11 @@ export const collectRecordEvidenceIds = (record: Record<string, unknown> | null 
   };
   for (const o of asArray(record.observations_json)) {
     if (!isAdmissibleScoreEvidence(o as any, { accountId })) continue;
+    // Observations produced by the evidence-resolution contract key their id as
+    // `evidence_id`; older shapes used `observation_id`. Admitting only the
+    // latter left the model with nothing citable per observation, so every
+    // criterion came back with evidence_ids: [] and was hard-zeroed downstream.
+    push((o as any)?.evidence_id);
     push((o as any)?.observation_id);
     push((o as any)?.source_id);
   }
