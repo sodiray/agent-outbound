@@ -93,6 +93,26 @@ const planDraftApproval = ({
     stageId: stepId || existing?.stage_id,
   });
 
+  // A review that was REFUSED must not yield a sendable draft. This branch used
+  // to treat "no review exists" and "a review exists but was rejected or
+  // invalidated" identically, marking the draft ready either way — so a message
+  // a human had rejected could still become a fully populated, sendable
+  // provider envelope. It also returned an empty record patch, leaving the
+  // account on `paused_review` while the draft said `ready`: approved and paused
+  // at the same time, with no path out, because the only site that clears
+  // `paused_review` refuses terminal reviews and the only site that opens a
+  // replacement review sits behind that same gate.
+  const refusedStatuses = new Set(['rejected', 'invalidated', 'superseded', 'expired']);
+  if (existing && refusedStatuses.has(String(existing.status || '').trim().toLowerCase())) {
+    return {
+      authorized: false,
+      reason: `stage_review_${String(existing.status).trim().toLowerCase()}`,
+      asset_version: boundVersion,
+      recordPatch: {},
+      markReady: false,
+    };
+  }
+
   if (!existing || (existing.status !== 'pending' && existing.status !== 'edited')) {
     return {
       authorized: true,
