@@ -31,6 +31,12 @@ type Producer = {
   subpipeline: string;
 };
 
+type DeclaredColumnProducer = {
+  column: string;
+  stepId: string;
+  subpipeline: string;
+};
+
 const LINKEDIN_RESOLUTION_ACTION = 'linkedin_company_resolution';
 const LINKEDIN_RESOLUTION_FIELDS = [
   'business_name',
@@ -155,6 +161,44 @@ const producedFieldsByStep = (config: any): Producer[] => {
       }));
   });
   return entries;
+};
+
+const declaredColumnProducers = (config: any): DeclaredColumnProducer[] => (
+  pipelineSteps(config).flatMap((step: any) => {
+    const id = stepId(step);
+    if (!id || !['enrich', 'generate'].includes(String(step?.kind || ''))) return [];
+    const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
+    return getTargetColumnsForStepConfig(stepConfig)
+      .map(({ name }) => String(name || '').trim())
+      .filter(Boolean)
+      .map((column) => ({
+        column,
+        stepId: id,
+        subpipeline: stepSubpipelineName(step),
+      }));
+  })
+);
+
+const canRunForSameRecord = (left: DeclaredColumnProducer, right: DeclaredColumnProducer): boolean => (
+  left.subpipeline === right.subpipeline || !left.subpipeline || !right.subpipeline
+);
+
+const declaredColumnCollisionErrors = (config: any): string[] => {
+  const producers = declaredColumnProducers(config);
+  const columns = [...new Set(producers.map((producer) => producer.column))];
+  return columns.flatMap((column) => {
+    const columnProducers = producers.filter((producer) => producer.column === column);
+    const competing = columnProducers.filter((producer, index) => (
+      columnProducers.some((candidate, candidateIndex) => (
+        candidateIndex > index && canRunForSameRecord(producer, candidate)
+      ))
+    ));
+    if (competing.length === 0) return [];
+    const producerIds = [...new Set(columnProducers
+      .filter((producer) => competing.some((candidate) => canRunForSameRecord(producer, candidate)))
+      .map((producer) => producer.stepId))];
+    return [`record column "${column}" has competing declared producers: ${producerIds.map((id) => `"${id}"`).join(', ')}.`];
+  });
 };
 
 const addDependencyForField = ({
@@ -588,6 +632,7 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
   duplicateIds(ids).forEach((id) => {
     errors.push(`resolved pipeline step id "${id}" is ambiguous because more than one step uses it.`);
   });
+  errors.push(...declaredColumnCollisionErrors(config));
 
   if (hasLinkedinSource && resolutionStepIds.length === 0) {
     errors.push(`source.linkedin_profile_search requires a pipeline enrich step with action "${LINKEDIN_RESOLUTION_ACTION}".`);

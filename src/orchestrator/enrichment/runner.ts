@@ -502,6 +502,26 @@ const applyOutputs = ({ step, outputs }) => {
   return patch;
 };
 
+const declaredOutputWritesFor = ({
+  stepConfig,
+  outputs,
+}: {
+  stepConfig: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+}): Record<string, { provided: boolean; value: unknown }> => {
+  const declaredOutputs = getDeclaredOutputs(stepConfig);
+  const legacyColumns = getLegacyColumns(stepConfig);
+  return Object.fromEntries(Object.entries(declaredOutputs).map(([name, definition]) => {
+    const mappedTarget = String(legacyColumns[name] || '').trim();
+    const target = mappedTarget || name;
+    const provided = Object.prototype.hasOwnProperty.call(outputs, name);
+    return [target, {
+      provided,
+      value: provided ? coerceForSqlite(outputs[name], mappedTarget ? 'string' : definition.type) : undefined,
+    }];
+  }));
+};
+
 /** Ensure evidence JSON columns + score_status exist on the list records table. */
 const ensureEvidenceColumns = (db: any) => {
   ensureRecordColumns({
@@ -953,6 +973,8 @@ export const executeEnrichmentStepOnRecords = async ({
     failed: 0,
     errors: [] as Array<{ record_id: string; error: string }>,
     record_ids: [] as string[],
+    declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
+    non_execution_reasons: {} as Record<string, string>,
   };
 
   await mapWithConcurrency<any, void>((rows || []) as any[], async (record) => {
@@ -972,6 +994,7 @@ export const executeEnrichmentStepOnRecords = async ({
       });
       summary.skipped_when += 1;
       summary.record_ids.push(recordId);
+      summary.non_execution_reasons[recordId] = `skipped:${String(whenOutcome.reason || 'when_not_matched')}`;
       emitActivity({ event: 'row_skipped', phase: 'pipeline', step: id, row: rowLabel, reason: String(whenOutcome.reason || 'when_not_matched') });
       return;
     }
@@ -988,6 +1011,7 @@ export const executeEnrichmentStepOnRecords = async ({
       && declaredOutputsHaveAnyValue({ record: currentRecord, expectedOutputs })
     ) {
       summary.skipped_fresh += 1;
+      summary.non_execution_reasons[recordId] = 'skipped:fresh';
       return;
     }
 
@@ -1027,6 +1051,7 @@ export const executeEnrichmentStepOnRecords = async ({
         upsertRecord({ db, row: { ...currentRow, ...patch } });
         summary.skipped_ceiling += 1;
         summary.record_ids.push(recordId);
+        summary.non_execution_reasons[recordId] = 'skipped:enrichment_ceiling';
         emitActivity({
           event: 'row_skipped',
           phase: 'pipeline',
@@ -1040,6 +1065,7 @@ export const executeEnrichmentStepOnRecords = async ({
 
       const outputs = result.outputs || {};
       const outcome = outputOutcomeFor({ outputs, expectedOutputs });
+      summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs });
 
       recordCostEvent({
         db,

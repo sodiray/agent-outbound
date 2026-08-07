@@ -16,6 +16,7 @@ export type StepExecutionOutcome = {
   passed: boolean;
   reason: string;
   errored?: boolean;
+  declaredOutputWrites?: Record<string, { provided: boolean; value: unknown }>;
 };
 
 export type StepExecutionContext = {
@@ -105,6 +106,36 @@ export const declaredOutputsUnwritten = ({
   record: Record<string, unknown>;
 }): string[] => outputNames.filter((name) => !isPersistedOutputValue(record[name]));
 
+const samePersistedValue = (left: unknown, right: unknown): boolean => {
+  if (typeof left === 'number' && typeof right === 'number') return left === right;
+  if (typeof left === 'boolean' && typeof right === 'boolean') return left === right;
+  return String(left) === String(right);
+};
+
+export const declaredOutputWriteFailures = ({
+  outputNames,
+  record,
+  declaredOutputWrites,
+}: {
+  outputNames: string[];
+  record: Record<string, unknown>;
+  declaredOutputWrites?: Record<string, { provided: boolean; value: unknown }>;
+}): string[] => {
+  if (!declaredOutputWrites) return declaredOutputsUnwritten({ outputNames, record });
+  return outputNames.filter((name) => {
+    const write = declaredOutputWrites[name];
+    if (!write?.provided) return true;
+    if (!isPersistedOutputValue(write.value)) return false;
+    return !isPersistedOutputValue(record[name]) || !samePersistedValue(record[name], write.value);
+  });
+};
+
+const NON_EXECUTION_REASONS = /^(channel_not_permitted:|sequence_outbound_gated|skipped)/i;
+
+export const shouldGuardDeclaredOutputWrites = (outcome: StepExecutionOutcome): boolean => (
+  outcome.passed && !outcome.errored && !NON_EXECUTION_REASONS.test(String(outcome.reason || ''))
+);
+
 const guardDeclaredOutputWrites = (
   ctx: StepExecutionContext,
   step: PipelineStepLike,
@@ -114,14 +145,8 @@ const guardDeclaredOutputWrites = (
   if (outputNames.length === 0) return outcomes;
   const db = ctx.db as QueryableDb;
   const guarded = new Map<string, StepExecutionOutcome>();
-  // A step that deliberately did not execute cannot owe its declared outputs.
-  // Some skips report passed=true so the sequence can advance past them — a
-  // channel refused by readiness is "complete" for routing purposes — and
-  // reading that as "it ran, so its outputs must exist" errored a correct
-  // refusal, which then poisoned the record for every remaining step.
-  const NON_EXECUTION_REASONS = /^(channel_not_permitted:|sequence_outbound_gated|skipped)/i;
   for (const [recordId, outcome] of outcomes) {
-    if (!outcome.passed || outcome.errored || NON_EXECUTION_REASONS.test(String(outcome.reason || ''))) {
+    if (!shouldGuardDeclaredOutputWrites(outcome)) {
       guarded.set(recordId, outcome);
       continue;
     }
@@ -129,15 +154,12 @@ const guardDeclaredOutputWrites = (
     const row = persisted && typeof persisted === 'object' && !Array.isArray(persisted)
       ? persisted as Record<string, unknown>
       : {};
-    // Fail only when the step wrote NONE of its declared outputs — the
-    // "reported success while doing nothing" case this guard exists for.
-    // A blank individual output is usually the correct answer: a business with
-    // no franchise legitimately has no franchise_brand, and failing the step for
-    // that blocks the pipeline on a true negative. Requiring every declared
-    // output to be non-blank turns optional fields into hard requirements.
-    const missing = declaredOutputsUnwritten({ outputNames, record: row });
-    const wroteNothing = missing.length === outputNames.length;
-    guarded.set(recordId, wroteNothing
+    const missing = declaredOutputWriteFailures({
+      outputNames,
+      record: row,
+      declaredOutputWrites: outcome.declaredOutputWrites,
+    });
+    guarded.set(recordId, missing.length > 0
       ? {
         passed: false,
         errored: true,
@@ -225,12 +247,22 @@ const executeEnrichBatch = async (
     String(error.error || ''),
   ]));
   const outcomes = new Map<string, StepExecutionOutcome>();
+  const declaredOutputWrites = result.declared_output_writes && typeof result.declared_output_writes === 'object'
+    ? result.declared_output_writes as Record<string, Record<string, { provided: boolean; value: unknown }>>
+    : {};
+  const nonExecutionReasons = result.non_execution_reasons && typeof result.non_execution_reasons === 'object'
+    ? result.non_execution_reasons as Record<string, string>
+    : {};
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     const failure = failures.get(recordId);
     outcomes.set(recordId, failure
       ? { passed: false, reason: failure, errored: true }
-      : { passed: true, reason: '' });
+      : {
+        passed: true,
+        reason: nonExecutionReasons[recordId] || '',
+        declaredOutputWrites: declaredOutputWrites[recordId],
+      });
   });
   return outcomes;
 };
@@ -777,7 +809,14 @@ const executeStepBatchUnchecked = async (
             db: ctx.db as any,
             row: { ...row, ...outputs },
           });
-          outcomes.set(recordId, { passed: true, reason: `fixture_generate:${stepId}` });
+          outcomes.set(recordId, {
+            passed: true,
+            reason: `fixture_generate:${stepId}`,
+            declaredOutputWrites: Object.fromEntries(Object.keys(outputs).map((key) => [key, {
+              provided: true,
+              value: outputs[key],
+            }])),
+          });
         } catch (error) {
           outcomes.set(recordId, {
             passed: false,

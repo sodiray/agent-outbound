@@ -50,7 +50,6 @@ const REQUIRED_ACCOUNT_INTELLIGENCE_OUTPUTS = [
   'likely_champion_role',
   'size_tier',
   'classification_confidence',
-  'identity_confidence',
   'classification_evidence',
   'account_classification_json',
 ];
@@ -173,7 +172,7 @@ test('phase-04: account_intelligence generate step exists with required outputs'
 
   // Classification confidence is numeric for treatment gates
   assert.equal(outputs.classification_confidence.type, 'number');
-  assert.equal(outputs.identity_confidence.type, 'number');
+  assert.equal(outputs.identity_confidence, undefined);
 });
 
 test('phase-04: treatment_assignment enrich + enrichment_hold route are configured', () => {
