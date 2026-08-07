@@ -1,0 +1,186 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { normalizeConfig } from '../dist/schemas/config.js';
+import { runComposeStep } from '../dist/orchestrator/compose/runner.js';
+import { resolveStepTemplate } from '../dist/orchestrator/lib/templates.js';
+import { getAssetsForRow, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
+
+const listDir = () => mkdtempSync(join(tmpdir(), 'agent-outbound-compose-step-'));
+
+const step = ({ length = { max_words: 12, max_sentences: 2 } } = {}) => ({
+  kind: 'compose',
+  id: 'channel_copy',
+  model: 'anthropic/claude-haiku-4-5-20251001',
+  structure: {
+    headline: 'A short factual headline.',
+    message: ['A greeting.', 'One concise factual point.'],
+  },
+  inputs: {
+    person: { from: 'contact_first_name', required: true },
+    account: { from: 'business_name', required: true },
+  },
+  rules: ['Use a direct tone.'],
+  length,
+  outputs: {
+    headline: { type: 'string', description: 'Short factual headline.' },
+    message: { type: 'string', description: 'Structured text.' },
+  },
+});
+
+const record = {
+  _row_id: 'compose-record-1',
+  contact_first_name: 'Ada',
+  business_name: 'Acme',
+  secret: 'NOT GRANTED',
+};
+
+const withDb = async (callback) => {
+  const root = listDir();
+  const db = openListDb({ listDir: root });
+  upsertRecord({ db, row: record });
+  try {
+    return await callback({ db, listDir: root });
+  } finally {
+    db.close();
+  }
+};
+
+const validObject = {
+  outputs: {
+    headline: 'Hello Ada',
+    message: 'Ada, this is about Acme.',
+  },
+  used_inputs: ['person', 'account'],
+  grounding: [
+    { output: 'headline', text: 'Hello Ada', inputs: ['person'] },
+    { output: 'message', text: 'Ada, this is about Acme.', inputs: ['person', 'account'] },
+  ],
+};
+
+test('substitution templates remain byte-identical and compose is a validated atomic pipeline step', () => {
+  const legacy = resolveStepTemplate({
+    config: { templates: { legacy: { versions: [{ version: 1, subject: 'Hi {{name}}', body: 'A {{missing | default: ok}} note.' }] } } },
+    step: { template: 'legacy' },
+    record: { name: 'Ada' },
+  });
+  assert.equal(legacy.subject, 'Hi Ada');
+  assert.equal(legacy.body, 'A ok note.');
+  assert.deepEqual(normalizeConfig({ pipeline: [step()] }).errors, []);
+  const executor = readFileSync(new URL('../src/orchestrator/pipeline/step-executor.ts', import.meta.url), 'utf8');
+  assert.match(executor, /kind === 'compose'\) return executeComposeBatch/);
+});
+
+test('compose writes arbitrary declared outputs and persists an auditable asset', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async () => ({ object: validObject, usage: { input_tokens: 4, output_tokens: 3, usd_cost: 0 } }),
+    });
+    assert.equal(result.failed, 0, JSON.stringify(result.errors));
+    assert.deepEqual(result.declared_output_writes[record._row_id], {
+      headline: { provided: true, value: 'Hello Ada' },
+      message: { provided: true, value: 'Ada, this is about Acme.' },
+    });
+    const [asset] = getAssetsForRow({ db, rowId: record._row_id });
+    const audit = JSON.parse(asset.outputs_json);
+    assert.deepEqual(audit.inputs, { person: 'Ada', account: 'Acme' });
+    assert.deepEqual(audit.outputs, validObject.outputs);
+    assert.deepEqual(audit.grounding, validObject.grounding);
+  });
+});
+
+test('compose never receives or accepts ungranted facts, and missing required input fails only that record', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const prompt = { value: '' };
+    const denied = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async (request) => {
+        prompt.value = request.prompt;
+        return {
+          object: {
+            ...validObject,
+            outputs: { headline: 'Hello Ada', message: 'NOT GRANTED' },
+            used_inputs: ['secret'],
+            grounding: [
+              { output: 'headline', text: 'Hello Ada', inputs: ['person'] },
+              { output: 'message', text: 'NOT GRANTED', inputs: ['secret'] },
+            ],
+          },
+          usage: {},
+        };
+      },
+    });
+    assert.equal(prompt.value.includes('NOT GRANTED'), false);
+    assert.equal(denied.failed, 1);
+    assert.match(denied.errors[0].error, /ungranted inputs/);
+    assert.equal(getAssetsForRow({ db, rowId: record._row_id }).length, 0);
+
+    const missing = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [{ ...record, contact_first_name: '' }],
+      stepId: 'channel_copy',
+      generateObject: async () => {
+        throw new Error('model must not be called');
+      },
+    });
+    assert.equal(missing.failed, 1);
+    assert.match(missing.errors[0].error, /required input "person"/);
+  });
+});
+
+test('compose rejects over-budget, partial, and hole-bearing outputs without persisting an asset', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const invalid = [
+      {
+        ...validObject,
+        outputs: { headline: 'Hello Ada', message: 'One two three four five six seven eight nine ten eleven twelve.' },
+        grounding: [
+          { output: 'headline', text: 'Hello Ada', inputs: ['person'] },
+          { output: 'message', text: 'One two three four five six seven eight nine ten eleven twelve.', inputs: ['person'] },
+        ],
+      },
+      {
+        ...validObject,
+        outputs: { headline: 'Hello {{person}}', message: 'Ada, this is about Acme.' },
+        grounding: [
+          { output: 'headline', text: 'Hello {{person}}', inputs: ['person'] },
+          { output: 'message', text: 'Ada, this is about Acme.', inputs: ['person', 'account'] },
+        ],
+      },
+      {
+        ...validObject,
+        outputs: { headline: 'Hello Ada' },
+        grounding: [{ output: 'headline', text: 'Hello Ada', inputs: ['person'] }],
+      },
+    ];
+    for (const object of invalid) {
+      const result = await runComposeStep({
+        db,
+        listDir: root,
+        config: { ai: {} },
+        step: step(),
+        rows: [record],
+        stepId: 'channel_copy',
+        generateObject: async () => ({ object, usage: {} }),
+      });
+      assert.equal(result.failed, 1);
+    }
+    assert.equal(getAssetsForRow({ db, rowId: record._row_id }).length, 0);
+  });
+});

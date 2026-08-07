@@ -144,7 +144,7 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
     executable: (() => {
       // generate is executable on the normal path when selected by selectDataflowSteps
       // (critical-path / AO_RUN_GENERATE / run_in_pipeline / fixture).
-      const base = ['filter', 'enrich', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate'];
+      const base = ['filter', 'enrich', 'compose', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate'];
       // Deterministic pipeline fixture mode also executes sourcing-like kinds via fixtures.
       if (String(process.env.AO_PIPELINE_FIXTURE || '').trim() === '1') {
         return [...base, 'geo_tiles', 'linkedin_profile_search', 'pipeline'].includes(kind);
@@ -616,7 +616,7 @@ const initializeResolved = ({
     const initial = new Set(Array.from(passed.get(recordId) || []).filter((stepId) => {
       const step = steps.find((entry) => entry.id === stepId);
       if (!step) return true;
-      if (step.kind === 'enrich' || step.kind === 'generate') return !force;
+      if (step.kind === 'enrich' || step.kind === 'generate' || step.kind === 'compose') return !force;
       if (step.kind === 'review') {
         if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
         return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
@@ -910,7 +910,7 @@ export const runPipelineDataflow = async ({
         const recordId = getRecordRowId(recordState.record);
         const now = clockIso(clock);
         // enrich + generate both write fields then must refresh so dependents (policy_apply) see them.
-        if (step.kind === 'enrich' || step.kind === 'generate') {
+        if (step.kind === 'enrich' || step.kind === 'generate' || step.kind === 'compose') {
           if (outcome.errored) {
             const error = String(outcome.reason || 'failed');
             db.prepare(`

@@ -841,6 +841,51 @@ const PipelineGenerateStepSchema = z.object({
   run_in_pipeline: z.boolean().optional(),
 });
 
+const ComposeInputSchema = z.object({
+  from: z.string().min(1).optional(),
+  value: z.union([z.string().min(1), z.number()]).transform((value) => String(value)).optional(),
+  required: z.boolean().default(true),
+}).strict().superRefine((value, ctx) => {
+  const sources = Number(Boolean(value.from)) + Number(Boolean(value.value));
+  if (sources === 1) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'compose input must declare exactly one of from or value.',
+  });
+});
+
+const ComposeStructureSchema = z.record(z.union([
+  z.string().min(1),
+  z.array(z.string().min(1)).min(1),
+])).refine((structure) => Object.keys(structure).length > 0, 'compose structure must not be empty.');
+
+const PipelineComposeStepSchema = z.object({
+  kind: z.literal('compose'),
+  id: z.string().min(1),
+  description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
+  model: ProviderModelSchema,
+  structure: ComposeStructureSchema,
+  inputs: z.record(ComposeInputSchema).refine(
+    (inputs) => Object.keys(inputs).length > 0,
+    'compose inputs must not be empty.',
+  ),
+  rules: z.array(z.string().min(1)).default([]),
+  length: z.object({
+    max_words: z.coerce.number().int().min(1).max(2000).optional(),
+    max_sentences: z.coerce.number().int().min(1).max(200).optional(),
+  }).refine(
+    (length) => length.max_words !== undefined || length.max_sentences !== undefined,
+    'compose length must declare max_words or max_sentences.',
+  ),
+  outputs: z.record(EnrichmentOutputDefSchema.extend({ type: z.literal('string') })).refine(
+    (outputs) => Object.keys(outputs).length > 0,
+    'compose outputs must not be empty.',
+  ),
+  concurrency: z.coerce.number().int().min(1).max(200).default(10),
+}).strict();
+
 const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
   kind: z.literal('wait'),
   after: z.string()
@@ -897,6 +942,7 @@ const PipelineExitStepSchema = PipelineFilterStepSchema.omit({ kind: true }).ext
 const ExecutablePipelineStepSchemas = [
   PipelineEnrichmentStepSchema,
   PipelineGenerateStepSchema,
+  PipelineComposeStepSchema,
   PipelineFilterStepSchema,
   PipelineAssignStepSchema,
   PipelineReviewStepSchema,
@@ -912,6 +958,7 @@ export const ExecutablePipelineStepSchema = z.discriminatedUnion('kind', Executa
 
 const SubpipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
+  PipelineComposeStepSchema,
   PipelineFilterStepSchema,
   PipelineReviewStepSchema,
   PipelineWaitStepSchema,
@@ -1394,45 +1441,11 @@ const SequenceSchema = z.object({
   steps: z.array(SequenceStepSchema).default([]),
 }).partial();
 
-const TemplateCompositionInputSchema = z.object({
-  from: z.string().min(1).optional(),
-  value: z.union([z.string().min(1), z.number()]).transform((value) => String(value)).optional(),
-  required: z.boolean().default(true),
-}).superRefine((value, ctx) => {
-  const sources = Number(Boolean(value.from)) + Number(Boolean(value.value));
-  if (sources === 1) return;
-  ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    message: 'template composition input must declare exactly one of from or value.',
-  });
-});
-
-const TemplateCompositionSchema = z.object({
-  model: ProviderModelSchema,
-  brief: z.object({
-    subject: z.string().min(1),
-    sections: z.array(z.string().min(1)).min(1),
-  }),
-  inputs: z.record(TemplateCompositionInputSchema).refine(
-    (inputs) => Object.keys(inputs).length > 0,
-    'template composition inputs must not be empty.',
-  ),
-  rules: z.array(z.string().min(1)).default([]),
-  length: z.object({
-    max_words: z.coerce.number().int().min(1).max(2000).optional(),
-    max_sentences: z.coerce.number().int().min(1).max(200).optional(),
-  }).refine(
-    (length) => length.max_words !== undefined || length.max_sentences !== undefined,
-    'template composition length must declare max_words or max_sentences.',
-  ),
-}).strict();
-
 const TemplateVersionSchema = z.object({
   version: z.coerce.number().int().min(1).default(1),
   subject: z.string().default(''),
   body: z.string().default(''),
   variables: z.record(z.any()).default({}),
-  composition: TemplateCompositionSchema.optional(),
   created_at: z.string().default(''),
   note: z.string().default(''),
 }).partial().default({});

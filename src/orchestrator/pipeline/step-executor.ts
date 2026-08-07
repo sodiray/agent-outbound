@@ -334,6 +334,33 @@ const executeGenerateBatch = async (
   return outcomes;
 };
 
+const executeComposeBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+) => {
+  const { runComposeStep } = await import('../compose/runner.js');
+  const result = await runComposeStep({
+    db: ctx.db as { prepare: (sql: string) => { get: (...params: unknown[]) => unknown } },
+    listDir: ctx.listDir,
+    config: (ctx.config || { ai: ctx.aiConfig || {} }) as Record<string, unknown>,
+    step,
+    rows,
+    stepId,
+  });
+  const failures = new Map(result.errors.map((error) => [error.record_id, error.error]));
+  const outcomes = new Map<string, StepExecutionOutcome>();
+  rows.forEach((row) => {
+    const recordId = getRecordRowId(row);
+    const failure = failures.get(recordId);
+    outcomes.set(recordId, failure
+      ? { passed: false, reason: failure, errored: true }
+      : { passed: true, reason: '', declaredOutputWrites: result.declared_output_writes[recordId] });
+  });
+  return outcomes;
+};
+
 const executeReviewBatch = async (
   ctx: StepExecutionContext,
   step: PipelineStepLike,
@@ -773,6 +800,7 @@ const executeStepBatchUnchecked = async (
   }
 
   if (kind === 'enrich') return executeEnrichBatch(ctx, step, stepId, rows);
+  if (kind === 'compose') return executeComposeBatch(ctx, step, stepId, rows);
   if (kind === 'assign') return executeAssignBatch(ctx, step, stepId, rows);
   if (kind === 'review') return executeReviewBatch(ctx, step, stepId, rows);
 
