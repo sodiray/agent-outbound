@@ -144,6 +144,8 @@ const isRecordScopedProviderOutcome = ({
   }
   if (/\b(?:http\s*)?(404|408|410)\b/.test(detail)) return true;
   if (!hasUrlArgument(args)) return false;
+  if (/\binvalid input:\s*http\s*400\b/.test(detail)) return true;
+  if (/unexpected token\s+['\"]?</.test(detail) && /not valid json/.test(detail)) return true;
   return /\b(timeout|timed out|etimedout|econnreset|econnrefused|enotfound|socket hang up)\b/.test(detail);
 };
 

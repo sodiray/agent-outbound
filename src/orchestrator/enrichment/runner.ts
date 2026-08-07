@@ -518,7 +518,7 @@ const applyOutputs = ({ step, outputs }) => {
   return patch;
 };
 
-const declaredOutputWritesFor = ({
+export const declaredOutputWritesFor = ({
   stepConfig,
   outputs,
 }: {
@@ -987,6 +987,7 @@ export const executeEnrichmentStepOnRecords = async ({
   rows,
   stepId = '',
   force = false,
+  executeAction = executeEnrichmentAction,
 }: {
   db: any;
   listDir: string;
@@ -997,6 +998,7 @@ export const executeEnrichmentStepOnRecords = async ({
   rows: any[];
   stepId?: string;
   force?: boolean;
+  executeAction?: typeof executeEnrichmentAction;
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
@@ -1071,7 +1073,7 @@ export const executeEnrichmentStepOnRecords = async ({
 
     const runAttempt = async (attempt: number) => {
       const inputRecord = mergedRecordForEnrichment({ db, record: currentRecord });
-      const result = await executeEnrichmentAction({
+      const result = await executeAction({
         db,
         mcp,
         listDir,

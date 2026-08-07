@@ -306,13 +306,16 @@ const executeGenerateBatch = async (
     String(error.record_id || '').trim(),
     String(error.error || ''),
   ]));
+  const declaredOutputWrites = result.declared_output_writes && typeof result.declared_output_writes === 'object'
+    ? result.declared_output_writes as Record<string, Record<string, { provided: boolean; value: unknown }>>
+    : {};
   const outcomes = new Map<string, StepExecutionOutcome>();
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     const failure = failures.get(recordId);
     outcomes.set(recordId, failure
       ? { passed: false, reason: failure, errored: true }
-      : { passed: true, reason: '' });
+      : { passed: true, reason: '', declaredOutputWrites: declaredOutputWrites[recordId] });
   });
   return outcomes;
 };

@@ -113,6 +113,42 @@ test('on_error: fail keeps a record-local tool failure record-fatal', async () =
   }
 });
 
+test('URL-targeted provider HTTP 400 degrades to empty while the record remains runnable', async () => {
+  const { listDir, db } = createRecord();
+  try {
+    const step = toolStep({ error: new Error('Invalid input: HTTP 400') });
+    const outcome = (await executeStepBatch(
+      { db, listDir, config: { ai: {} }, mcp: null, toolCatalog: null, force: true },
+      step,
+      'remote_lookup',
+      [recordFor(db)],
+    )).get('record_1');
+    assert.equal(outcome.passed, false);
+    assert.equal(outcome.errored, false);
+    assert.equal(recordFor(db).remote_lookup__status, 'failed');
+  } finally {
+    db.close();
+  }
+});
+
+test('URL-targeted HTML parse failure degrades to empty while the record remains runnable', async () => {
+  const { listDir, db } = createRecord();
+  try {
+    const step = toolStep({ error: new Error("Unexpected token '<', \"<!DOCTYPE \"... is not valid JSON") });
+    const outcome = (await executeStepBatch(
+      { db, listDir, config: { ai: {} }, mcp: null, toolCatalog: null, force: true },
+      step,
+      'remote_lookup',
+      [recordFor(db)],
+    )).get('record_1');
+    assert.equal(outcome.passed, false);
+    assert.equal(outcome.errored, false);
+    assert.equal(recordFor(db).remote_lookup__status, 'failed');
+  } finally {
+    db.close();
+  }
+});
+
 test('budget, auth, and configuration failures remain record-fatal with on_error: empty', async () => {
   const budget = createRecord();
   try {
@@ -153,5 +189,54 @@ test('budget, auth, and configuration failures remain record-fatal with on_error
     assert.equal(outcome.errored, true);
   } finally {
     config.db.close();
+  }
+});
+
+test('objectless model output fails only that record cleanly', async () => {
+  const { listDir, db } = createRecord();
+  const now = new Date().toISOString();
+  try {
+    db.prepare(`
+      INSERT INTO records (
+        _row_id, business_name, website, sequence_name, sequence_status,
+        _created_at, _updated_at, created_at, updated_at
+      ) VALUES ('record_2', 'Healthy Account', 'https://healthy.example.test', 'default', 'idle', ?, ?, ?, ?)
+    `).run(now, now, now, now);
+    const rows = db.prepare('SELECT * FROM records WHERE _row_id IN (?, ?) ORDER BY _row_id').all('record_1', 'record_2');
+    const summary = await executeEnrichmentStepOnRecords({
+      db,
+      listDir,
+      config: { ai: {} },
+      mcp: null,
+      toolCatalog: null,
+      step: {
+        id: 'site_profile',
+        kind: 'enrich',
+        outputs: { site_profile_summary: { type: 'string' } },
+      },
+      rows,
+      stepId: 'site_profile',
+      force: true,
+      executeAction: async ({ record }) => {
+        if (record._row_id === 'record_1') {
+          throw new Error('execute-step failed (site_profile): No object generated: response did not match schema.');
+        }
+        return {
+          outputs: { site_profile_summary: 'available' },
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, usd_cost: 0, tool_calls: [], tool_costs: [] },
+          model: 'test',
+          provider: 'test',
+        };
+      },
+    });
+    assert.equal(summary.failed, 1);
+    assert.equal(summary.processed, 1);
+    assert.match(summary.errors[0].error, /No object generated: response did not match schema/i);
+    assert.equal(recordFor(db).site_profile__status, 'failed');
+    assert.match(recordFor(db).last_error, /No object generated: response did not match schema/i);
+    const healthy = db.prepare('SELECT site_profile__status, site_profile_summary FROM records WHERE _row_id = ?').get('record_2');
+    assert.deepEqual(healthy, { site_profile__status: 'ok', site_profile_summary: 'available' });
+  } finally {
+    db.close();
   }
 });

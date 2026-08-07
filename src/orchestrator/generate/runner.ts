@@ -36,6 +36,7 @@ import {
   enrichmentStepConfig,
   enrichmentCeilingSkipPatch,
   executeEnrichmentAction,
+  declaredOutputWritesFor,
   getDeclaredOutputs,
   isEnrichFresh,
   isEnrichmentCeilingSkip,
@@ -340,6 +341,7 @@ export const runGenerateStep = async ({
     failed: 0,
     errors: [] as Array<{ record_id: string; error: string }>,
     record_ids: [] as string[],
+    declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
   };
 
   await mapWithConcurrency<GenerateRecord, void>(rows || [], async (record) => {
@@ -517,6 +519,10 @@ export const runGenerateStep = async ({
       }
 
       const outputsJson = Object.keys(expectedOutputs).length > 0 ? stringifyJson(parsedOutputs) : '{}';
+      summary.declared_output_writes[recordId] = declaredOutputWritesFor({
+        stepConfig,
+        outputs: parsedOutputs,
+      });
       const isReference = isReferenceResult({ toolDriven, resultText: result, executionResult });
       const outputsForReference = Object.keys(expectedOutputs).length > 0 ? parsedOutputs : outputs;
       const referenceAsset = assetResultForReference({

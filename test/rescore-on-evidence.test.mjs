@@ -23,7 +23,10 @@ import {
   openListDb,
   ensureRecordColumns,
 } from '../dist/orchestrator/runtime/db.js';
-import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
+import {
+  declaredOutputWriteFailures,
+  executeStepBatch,
+} from '../dist/orchestrator/pipeline/step-executor.js';
 
 test('evidencePatchIsMaterialRetrieval: retrieval yes, tool_failure no', () => {
   const ok = buildEnrichEvidencePatch({
@@ -118,6 +121,55 @@ test('generate fixtures use pipeline-configured values without output-name speci
       overview: 'Configured fixture overview',
       hypotheses: '[{"hypothesis":"follow-up delay"}]',
     });
+  } finally {
+    if (fixtureBefore === undefined) delete process.env.AO_PIPELINE_FIXTURE;
+    else process.env.AO_PIPELINE_FIXTURE = fixtureBefore;
+    db.close();
+  }
+});
+
+test('declared-output guard permits an explicitly blank generated output and still catches a dropped value', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-generated-empty-output-'));
+  const db = openListDb({ listDir, readonly: false });
+  const fixtureBefore = process.env.AO_PIPELINE_FIXTURE;
+  const now = new Date().toISOString();
+  try {
+    ensureRecordColumns({ db, columns: ['proof_match_ids', 'preliminary_snapshot'] });
+    db.prepare(`
+      INSERT INTO records (
+        _row_id, business_name, proof_match_ids, sequence_name, sequence_status,
+        _created_at, _updated_at, created_at, updated_at
+      ) VALUES ('acct_blank_generated_output', 'Example Co', '', 'default', 'idle', ?, ?, ?, ?)
+    `).run(now, now, now, now);
+    process.env.AO_PIPELINE_FIXTURE = '1';
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('acct_blank_generated_output');
+    const outcomes = await executeStepBatch(
+      { db, listDir, config: {}, aiConfig: {}, mcp: null, toolCatalog: null },
+      {
+        id: 'content_pack',
+        kind: 'generate',
+        outputs: {
+          proof_match_ids: { type: 'string' },
+          preliminary_snapshot: { type: 'string' },
+        },
+        fixture_outputs: { proof_match_ids: '' },
+      },
+      'content_pack',
+      [record],
+    );
+    assert.equal(outcomes.get('acct_blank_generated_output')?.passed, true);
+    const persisted = db.prepare('SELECT proof_match_ids, preliminary_snapshot FROM records WHERE _row_id = ?').get('acct_blank_generated_output');
+    assert.deepEqual(persisted, {
+      proof_match_ids: '',
+      preliminary_snapshot: 'fixture_preliminary_snapshot',
+    });
+    assert.deepEqual(declaredOutputWriteFailures({
+      outputNames: ['proof_match_ids'],
+      record: { proof_match_ids: '' },
+      declaredOutputWrites: {
+        proof_match_ids: { provided: true, value: '["proof-1"]' },
+      },
+    }), ['proof_match_ids']);
   } finally {
     if (fixtureBefore === undefined) delete process.env.AO_PIPELINE_FIXTURE;
     else process.env.AO_PIPELINE_FIXTURE = fixtureBefore;
