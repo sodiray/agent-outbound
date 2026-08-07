@@ -3,8 +3,9 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { zodSchema } from 'ai';
 import { normalizeConfig } from '../dist/schemas/config.js';
-import { runComposeStep } from '../dist/orchestrator/compose/runner.js';
+import { buildComposeResultSchema, runComposeStep } from '../dist/orchestrator/compose/runner.js';
 import { resolveStepTemplate } from '../dist/orchestrator/lib/templates.js';
 import { getAssetsForRow, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 
@@ -71,6 +72,35 @@ test('substitution templates remain byte-identical and compose is a validated at
   assert.deepEqual(normalizeConfig({ pipeline: [step()] }).errors, []);
   const executor = readFileSync(new URL('../src/orchestrator/pipeline/step-executor.ts', import.meta.url), 'utf8');
   assert.match(executor, /kind === 'compose'\) return executeComposeBatch/);
+});
+
+test('compose response schema requires each declared output by name', async () => {
+  const oneOutputStep = {
+    ...step(),
+    structure: { single: 'One short factual sentence.' },
+    outputs: { single: { type: 'string', description: 'One short factual sentence.' } },
+  };
+  const threeOutputStep = {
+    ...step(),
+    structure: { first: 'First.', second: 'Second.', third: 'Third.' },
+    outputs: {
+      first: { type: 'string', description: 'First.' },
+      second: { type: 'string', description: 'Second.' },
+      third: { type: 'string', description: 'Third.' },
+    },
+  };
+  const schemas = await Promise.all([oneOutputStep, threeOutputStep].map(async (configuredStep) => (
+    zodSchema(buildComposeResultSchema(configuredStep)).jsonSchema
+  )));
+
+  assert.deepEqual(schemas[0].properties.outputs.properties, {
+    single: { type: 'string', minLength: 1 },
+  });
+  assert.deepEqual(schemas[0].properties.outputs.required, ['single']);
+  assert.deepEqual(Object.keys(schemas[1].properties.outputs.properties), ['first', 'second', 'third']);
+  assert.deepEqual(schemas[1].properties.outputs.required, ['first', 'second', 'third']);
+  assert.equal(schemas[0].properties.outputs.additionalProperties, false);
+  assert.equal(schemas[1].properties.outputs.additionalProperties, false);
 });
 
 test('compose writes arbitrary declared outputs and persists an auditable asset', async () => {
@@ -144,7 +174,7 @@ test('compose never receives or accepts ungranted facts, and missing required in
   });
 });
 
-test('compose rejects over-budget, partial, and hole-bearing outputs without persisting an asset', async () => {
+test('compose rejects over-budget, partial, hole-bearing, and ungrounded outputs without persisting an asset', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const invalid = [
       {
@@ -166,6 +196,10 @@ test('compose rejects over-budget, partial, and hole-bearing outputs without per
       {
         ...validObject,
         outputs: { headline: 'Hello Ada' },
+        grounding: [{ output: 'headline', text: 'Hello Ada', inputs: ['person'] }],
+      },
+      {
+        ...validObject,
         grounding: [{ output: 'headline', text: 'Hello Ada', inputs: ['person'] }],
       },
     ];

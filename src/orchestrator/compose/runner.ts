@@ -41,15 +41,21 @@ type ComposeGenerator = (input: {
 
 export class ComposeStepError extends Error {}
 
-const resultSchema = z.object({
-  outputs: z.record(z.string().min(1)),
-  used_inputs: z.array(z.string().min(1)).min(1),
-  grounding: z.array(z.object({
-    output: z.string().min(1),
-    text: z.string().min(1),
-    inputs: z.array(z.string().min(1)).min(1),
-  }).strict()).min(1),
-}).strict();
+export const buildComposeResultSchema = (step: ComposeStep) => {
+  const outputShape = Object.fromEntries(
+    Object.keys(step.outputs || {}).map((name) => [name, z.string().min(1)]),
+  ) as z.ZodRawShape;
+
+  return z.object({
+    outputs: z.object(outputShape).strict(),
+    used_inputs: z.array(z.string().min(1)).min(1),
+    grounding: z.array(z.object({
+      output: z.string().min(1),
+      text: z.string().min(1),
+      inputs: z.array(z.string().min(1)).min(1),
+    }).strict()).min(1),
+  }).strict();
+};
 
 const pathGet = (value: unknown, path: string): unknown => {
   const keys = String(path || '').split('.').map((key) => key.trim()).filter(Boolean);
@@ -108,6 +114,7 @@ const validateResult = ({ step, object, inputs }: {
   object: unknown;
   inputs: Record<string, string>;
 }) => {
+  const resultSchema = buildComposeResultSchema(step);
   const parsed = resultSchema.safeParse(object);
   if (!parsed.success) throw new ComposeStepError('Compose returned no usable declared outputs.');
   const expected = Object.keys(step.outputs || {});
@@ -168,6 +175,7 @@ export const runComposeStep = async ({
     const recordId = getRecordRowId(record);
     try {
       const inputs = declaredInputs({ step, record });
+      const resultSchema = buildComposeResultSchema(step);
       const result = await generateObject({
         task: `compose:${stepId}`,
         model: String(step.model || ''),
