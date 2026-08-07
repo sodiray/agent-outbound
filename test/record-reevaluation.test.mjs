@@ -10,6 +10,7 @@ import {
   insertFieldOverride,
   openListDb,
   reconcileFieldOverrides,
+  upsertContact,
   upsertRecord,
 } from '../dist/orchestrator/runtime/db.js';
 
@@ -234,6 +235,85 @@ test('records reevaluate updates records predating a derivation and leaves curre
 
     assert.ok(predating.changes.some((change) => change.field === 'phone_confidence' && change.to === 85));
     assert.deepEqual(current.changes, []);
+  } finally {
+    rmSync(listDir, { recursive: true, force: true });
+  }
+});
+
+test('records reevaluate never resurrects a contact suppressed by a bounce', () => {
+  const listDir = createList();
+  try {
+    const prepared = openListDb({ listDir, readonly: false });
+    try {
+      ensureRecordColumns({
+        db: prepared,
+        columns: ['suppressed_contact_ids_json'],
+      });
+    } finally {
+      prepared.close();
+    }
+    seed({
+      listDir,
+      row: {
+        _row_id: 'bounced-contact',
+        business_name: 'Bounced Contact HVAC',
+        phone: '+12085551212',
+        phone_source_kind: 'structured',
+        phone_confidence: 10,
+        suppressed_contact_ids_json: JSON.stringify(['contact_bounced']),
+      },
+    });
+    const db = openListDb({ listDir, readonly: false });
+    try {
+      upsertContact({
+        db,
+        contact: {
+          row_id: 'bounced-contact',
+          contact_id: 'contact_bounced',
+          name: 'Bounced Person',
+          title: 'Owner',
+          email: 'bounced@example.test',
+          dne_email: 1,
+          email_verification_status: 'valid',
+        },
+      });
+    } finally {
+      db.close();
+    }
+
+    const result = recordsReevaluateCommand({
+      list: listDir,
+      what: 'provenance,confidences',
+      apply: true,
+      declaredPhoneSourceKind: 'structured',
+    });
+    const rescored = openListDb({ listDir, readonly: false });
+    try {
+      upsertContact({
+        db: rescored,
+        contact: {
+          row_id: 'bounced-contact',
+          contact_id: 'contact_bounced',
+          name: 'Bounced Person',
+          title: 'Owner',
+          email: 'bounced@example.test',
+          dne_email: 0,
+          email_verification_status: 'valid',
+        },
+      });
+    } finally {
+      rescored.close();
+    }
+    const checked = openListDb({ listDir, readonly: true });
+    try {
+      const contact = checked.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('contact_bounced');
+      const updated = checked.prepare('SELECT suppressed_contact_ids_json FROM records WHERE _row_id = ?').get('bounced-contact');
+      assert.equal(result.status, 'applied');
+      assert.equal(Number(contact.dne_email), 1);
+      assert.equal(updated.suppressed_contact_ids_json, JSON.stringify(['contact_bounced']));
+    } finally {
+      checked.close();
+    }
   } finally {
     rmSync(listDir, { recursive: true, force: true });
   }

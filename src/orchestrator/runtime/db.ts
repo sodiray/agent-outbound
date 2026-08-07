@@ -2961,9 +2961,10 @@ export const upsertContact = ({ db, contact }) => {
       email_verification_status: String(contact?.email_verification_status ?? existing?.email_verification_status ?? ''),
       email_verification_confidence: Number(contact?.email_verification_confidence ?? existing?.email_verification_confidence ?? 0),
       email_verified_at: String(contact?.email_verified_at ?? existing?.email_verified_at ?? ''),
-      dne_email: contact?.dne_email === undefined
-        ? Number(isAffirmativeFlag(existing?.dne_email, { failClosed: true }))
-        : Number(isAffirmativeFlag(contact.dne_email, { failClosed: true })),
+      dne_email: Number(
+        isAffirmativeFlag(existing?.dne_email, { failClosed: true })
+        || isAffirmativeFlag(contact?.dne_email, { failClosed: true }),
+      ),
       dnc_phone: contact?.dnc_phone === undefined
         ? Number(isAffirmativeFlag(existing?.dnc_phone, { failClosed: true }))
         : Number(isAffirmativeFlag(contact.dnc_phone, { failClosed: true })),

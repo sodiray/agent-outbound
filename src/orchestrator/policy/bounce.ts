@@ -3,10 +3,9 @@
  *
  * Provider bounce events (DSN, SMTP bounce reports, webhook) and classifier-
  * detected inbox bounces share one durable path:
- *   - mark email channel not ready (email_bounced / email_status)
  *   - hard vs soft typing
- *   - soft-suppress contact email path (dne_email + suppressed_contact_ids)
- *   - hard: terminal sequence_status=bounced (channel-level, not full-account DNC)
+ *   - recipient-specific evidence suppresses that contact email path
+ *   - domain-wide or ambiguous evidence closes the account email channel
  *   - soft: increment soft_bounce_count; harden after threshold
  *
  * Idempotency is by provider_message_id (or synthetic key) — reprocessing the
@@ -14,9 +13,11 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { isAffirmativeFlag } from './booleanish.js';
 import { NEXT_ACTION_POLICY_VERSION } from './lifecycle.js';
 
 export type BounceType = 'hard' | 'soft';
+export type BounceScope = 'contact' | 'account';
 export type BounceSource =
   | 'classifier'
   | 'dsn'
@@ -34,6 +35,8 @@ export type ApplyEmailBounceInput = {
   email?: string;
   contactId?: string;
   snippet?: string;
+  /** Provider-confirmed scope. Ambiguous provider events must omit this. */
+  scope?: BounceScope;
   /** Soft bounces at or above this count harden (default 3). */
   softBounceThreshold?: number;
   /**
@@ -61,6 +64,7 @@ export type ApplyEmailBounceResult = {
   patch: Record<string, unknown>;
   channel_event: BounceChannelEvent;
   bounce_type: BounceType;
+  scope: BounceScope;
   sequence_status: string;
   /** True when input.alreadyApplied — patch is identity, event still formed for tracing. */
   already_applied: boolean;
@@ -69,6 +73,54 @@ export type ApplyEmailBounceResult = {
 
 /** Default soft-bounce count before treating as hard suppress. */
 export const SOFT_BOUNCE_HARDEN_THRESHOLD = 3;
+
+/**
+ * Decide whether a delivery failure applies to one named recipient or the
+ * whole account email channel. Domain-wide delivery failures and untyped DSNs
+ * fail closed at account scope; only recipient-specific evidence with a
+ * resolved contact may suppress one contact.
+ */
+export function resolveBounceScope(input: {
+  scope?: BounceScope | string | null;
+  contactId?: string | null;
+  snippet?: string | null;
+}): BounceScope {
+  const explicit = String(input.scope || '').trim().toLowerCase();
+  if (explicit === 'account') return 'account';
+  if (explicit === 'contact' && String(input.contactId || '').trim()) return 'contact';
+
+  const text = String(input.snippet || '').toLowerCase();
+  const domainWideMarkers = [
+    'nxdomain',
+    'no mx',
+    'no mx record',
+    'mx record not found',
+    'domain not found',
+    'domain does not exist',
+    'host not found',
+    'relay denied',
+    'relay access denied',
+  ];
+  if (domainWideMarkers.some((marker) => text.includes(marker))) return 'account';
+
+  const recipientMarkers = [
+    'user unknown',
+    'unknown user',
+    'mailbox not found',
+    'no such user',
+    'recipient rejected',
+    'address rejected',
+    'invalid recipient',
+    'mailbox full',
+    'over quota',
+    '5.1.1',
+    '5.1.2',
+    '4.2.2',
+  ];
+  const contactId = String(input.contactId || '').trim();
+  if (contactId && recipientMarkers.some((marker) => text.includes(marker))) return 'contact';
+  return 'account';
+}
 
 /**
  * Detect bounce/DSN patterns in free text (inbox mailer-daemon, SMTP DSN body).
@@ -213,6 +265,11 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
         occurred_at: bounceAt,
       },
       bounce_type: (String(record.email_bounce_type || 'hard') === 'soft' ? 'soft' : 'hard'),
+      scope: resolveBounceScope({
+        scope: input.scope,
+        contactId: input.contactId || String(record.active_contact_id || record.contact_id || ''),
+        snippet: input.snippet,
+      }),
       sequence_status: String(record.sequence_status || 'bounced'),
       already_applied: true,
       hardened_from_soft: false,
@@ -236,55 +293,61 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
   }
 
   const isHard = bounceType === 'hard';
-
-  // Contact email path soft-suppress (always for hard; for soft after harden only...
-  // Actually: soft also sets dne_email so we don't immediately re-send; readiness
-  // treats email_bounced as not ready either way).
-  let suppressed_contact_ids = parseSuppressedContactIds(record);
   const contactId = String(
-    input.contactId || record.active_contact_id || record.contact_id || record.primary_contact_id || '',
+    input.contactId !== undefined
+      ? input.contactId
+      : record.active_contact_id || record.contact_id || record.primary_contact_id || '',
   ).trim();
-  if (contactId && !suppressed_contact_ids.includes(contactId)) {
-    suppressed_contact_ids = [...suppressed_contact_ids, contactId];
-  }
+  const scope = resolveBounceScope({
+    scope: input.scope,
+    contactId,
+    snippet: input.snippet,
+  });
+
+  const existingSuppressedContactIds = parseSuppressedContactIds(record);
+  const suppressed_contact_ids = scope === 'contact' && contactId && !existingSuppressedContactIds.includes(contactId)
+    ? [...existingSuppressedContactIds, contactId]
+    : existingSuppressedContactIds;
 
   const emailAddress = String(
     input.email || record.contact_email || record.email_primary || '',
   ).trim().toLowerCase();
 
   const nextAction = JSON.stringify({
-    action_id: `na_term_bounce_${recordId}`,
-    action_type: 'terminal_recordkeeping',
+    action_id: scope === 'account' ? `na_term_bounce_${recordId}` : `na_contact_bounce_${recordId}`,
+    action_type: scope === 'account' ? 'terminal_recordkeeping' : 'prepare_outbound',
     account_id: recordId,
     lifecycle_stage: String(record.lifecycle_stage || 'contacted'),
-    sequence_state: isHard ? 'completed' : String(record.account_sequence_state || 'active'),
-    work_state: isHard ? 'terminal_recordkeeping' : 'channel_repair',
-    reason: isHard ? 'hard_bounce' : 'soft_bounce',
-    on_success: isHard ? 'stop' : 'retry_or_repair',
+    sequence_state: scope === 'account' && isHard ? 'completed' : 'active',
+    work_state: scope === 'account' && isHard ? 'terminal_recordkeeping' : 'content_generation',
+    reason: `${scope}_${isHard ? 'hard' : 'soft'}_bounce`,
+    on_success: scope === 'account' && isHard ? 'stop' : 'execute_or_review',
     policy_version: NEXT_ACTION_POLICY_VERSION,
   });
 
   const patch: Record<string, unknown> = {
     ...record,
-    email_bounced: 1,
-    email_status: 'bounced',
+    // Record-level flags close the whole account channel, so recipient bounces
+    // must leave them untouched. The durable contact DNE is applied by the
+    // runtime after the contact identity has been verified against contacts.
+    email_bounced: scope === 'account' ? 1 : Number(isAffirmativeFlag(record.email_bounced, { failClosed: true })),
+    email_status: scope === 'account' ? 'bounced' : String(record.email_status || ''),
     email_bounce_type: bounceType,
     email_bounce_at: bounceAt,
     email_bounce_source: source,
     email_soft_bounce_count: softCount,
     email_last_bounce_message_id: messageId,
-    dne_email: 1,
+    dne_email: scope === 'account'
+      ? 1
+      : Number(isAffirmativeFlag(record.dne_email, { failClosed: true })),
     suppressed_contact_ids,
     suppressed_contact_ids_json: JSON.stringify(suppressed_contact_ids),
-    disposition_latest: isHard ? 'hard_bounce' : 'soft_bounce',
-    // Soft: leave sequence runnable on other channels; hard: bounce terminal.
-    sequence_status: isHard ? 'bounced' : String(record.sequence_status || 'active'),
-    account_sequence_state: isHard
-      ? 'completed'
-      : String(record.account_sequence_state || 'active'),
-    work_state: isHard ? 'terminal_recordkeeping' : 'channel_repair',
+    disposition_latest: `${scope}_${isHard ? 'hard' : 'soft'}_bounce`,
+    sequence_status: scope === 'account' && isHard ? 'bounced' : 'active',
+    account_sequence_state: scope === 'account' && isHard ? 'completed' : 'active',
+    work_state: scope === 'account' && isHard ? 'terminal_recordkeeping' : 'content_generation',
     next_action_json: nextAction,
-    next_action_date: isHard ? '' : record.next_action_date,
+    next_action_date: scope === 'account' && isHard ? '' : record.next_action_date,
   };
 
   if (emailAddress) {
@@ -311,6 +374,7 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
       email: emailAddress,
       snippet: String(input.snippet || '').slice(0, 2000),
       threshold,
+      scope,
     },
     occurred_at: bounceAt,
   };
@@ -319,6 +383,7 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
     patch,
     channel_event,
     bounce_type: bounceType,
+    scope,
     sequence_status: String(patch.sequence_status),
     already_applied: false,
     hardened_from_soft,

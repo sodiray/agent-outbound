@@ -274,6 +274,48 @@ export function applyContactRotation(
 }
 
 /**
+ * Remove permanently suppressed contacts from the remaining campaign queue.
+ *
+ * The active/held queue is authoritative here: using ordered_target_contact_ids
+ * would reintroduce contacts already rotated past. The caller supplies the
+ * suppressed ids from durable contact state, so a policy re-apply cannot put a
+ * suppressed person back into the outbound queue.
+ */
+export function removeSuppressedContactsFromCampaign(input: {
+  campaign: AccountCampaign;
+  suppressedContactIds: Iterable<string>;
+}): { campaign: AccountCampaign; previous_contact_id: string | null; rotated: boolean } {
+  const suppressed = new Set(
+    [...input.suppressedContactIds]
+      .map((contactId) => String(contactId || '').trim())
+      .filter(Boolean),
+  );
+  const previous = input.campaign.active_contact_id;
+  const remaining = [
+    ...(previous ? [previous] : []),
+    ...(input.campaign.held_contact_ids || []),
+  ].filter((contactId) => !suppressed.has(contactId));
+  const active = remaining[0] || null;
+  const held = remaining.slice(1);
+  const excluded = [...new Set([
+    ...(input.campaign.excluded_contact_ids || []),
+    ...[...suppressed],
+  ])];
+
+  return {
+    campaign: {
+      ...input.campaign,
+      ordered_target_contact_ids: active ? [active, ...held] : [],
+      active_contact_id: active,
+      held_contact_ids: held,
+      excluded_contact_ids: excluded,
+    },
+    previous_contact_id: previous,
+    rotated: previous !== active,
+  };
+}
+
+/**
  * Allocate account-level mail once. Never reallocates on contact rotation.
  */
 export function allocateMail(input: {

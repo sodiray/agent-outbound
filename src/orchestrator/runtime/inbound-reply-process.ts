@@ -93,6 +93,23 @@ export async function processInboundReplyText(input: {
     aiConfig: input.aiConfig || {},
   });
   const classification = String(classified.classification || 'unknown');
+  if (classification === 'bounce') {
+    const bounced = processBounceEvent({
+      db: input.db,
+      recordId,
+      messageId: input.messageId,
+      threadId: input.threadId,
+      source: 'classifier',
+      snippet: replyText,
+    });
+    return {
+      classification,
+      record: bounced.record,
+      sequence_status: bounced.sequence_status,
+      lifecycle_stage: String(bounced.record.lifecycle_stage || ''),
+      account_sequence_state: String(bounced.record.account_sequence_state || ''),
+    };
+  }
   const explicitStop = hasExplicitStopIntent(` ${replyText} `);
   // Re-read after pause so apply sees paused_inbound baseline.
   const pausedRecord = input.db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId) || prePause;

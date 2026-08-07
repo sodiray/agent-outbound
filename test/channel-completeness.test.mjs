@@ -13,17 +13,22 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { openListDb, ensureRecordColumns, insertDraft } from '../dist/orchestrator/runtime/db.js';
+import {
+  openListDb,
+  ensureRecordColumns,
+  insertDraft,
+  upsertContact,
+} from '../dist/orchestrator/runtime/db.js';
 import {
   applyEmailBounce,
   detectBounceFromText,
+  resolveBounceScope,
   resolveBounceType,
   SOFT_BOUNCE_HARDEN_THRESHOLD,
 } from '../dist/orchestrator/policy/bounce.js';
 import { processBounceEvent } from '../dist/orchestrator/runtime/bounce-process.js';
 import { processInboundReplyText } from '../dist/orchestrator/runtime/inbound-reply-process.js';
 import { applyInboundReplyClassification } from '../dist/orchestrator/policy/inbound-reply.js';
-import { evaluateReachability } from '../dist/orchestrator/policy/timing-reachability.js';
 import {
   claimCallBoardEntry,
   releaseCallBoardClaim,
@@ -66,6 +71,7 @@ import {
   allocateMail,
   parseAccountCampaignFromRecord,
 } from '../dist/orchestrator/policy/contact-campaign.js';
+import { evaluateCampaignProcess } from '../dist/orchestrator/policy/campaign-process.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -164,6 +170,22 @@ const createList = (recordOverrides = {}) => {
   return { listDir, db, now };
 };
 
+const seedContact = ({ db, rowId, contactId, email, title = 'Manager', primary = false }) => {
+  upsertContact({
+    db,
+    contact: {
+      row_id: rowId,
+      contact_id: contactId,
+      name: contactId,
+      title,
+      email,
+      is_primary: primary ? 1 : 0,
+      email_verification_status: 'valid',
+      email_verification_confidence: 100,
+    },
+  });
+};
+
 // ---------------------------------------------------------------------------
 // 1. Bounce / DSN
 // ---------------------------------------------------------------------------
@@ -176,7 +198,7 @@ test('bounce: detectBounceFromText hard/soft/null', () => {
   assert.equal(resolveBounceType({ classification: 'bounce' }), 'hard');
 });
 
-test('bounce: applyEmailBounce hard marks email not ready + contact suppress', () => {
+test('bounce: recipient-specific hard failure is contact-scoped in pure policy', () => {
   const applied = applyEmailBounce({
     record: {
       _row_id: 'b1',
@@ -192,21 +214,17 @@ test('bounce: applyEmailBounce hard marks email not ready + contact suppress', (
     snippet: 'user unknown',
   });
   assert.equal(applied.bounce_type, 'hard');
+  assert.equal(applied.scope, 'contact');
   assert.equal(applied.already_applied, false);
-  assert.equal(Number(applied.patch.email_bounced), 1);
-  assert.equal(applied.patch.email_status, 'bounced');
+  assert.equal(Number(applied.patch.email_bounced), 0);
+  assert.equal(applied.patch.email_status, '');
   assert.equal(applied.patch.email_bounce_type, 'hard');
-  assert.equal(Number(applied.patch.dne_email), 1);
-  assert.equal(applied.sequence_status, 'bounced');
-  assert.equal(applied.patch.account_sequence_state, 'completed');
+  assert.equal(Number(applied.patch.dne_email), 0);
+  assert.equal(applied.sequence_status, 'active');
+  assert.equal(applied.patch.account_sequence_state, 'active');
   assert.ok(applied.patch.suppressed_contact_ids.includes('c1'));
-  // Not full-account DNC
-  assert.ok(Number(applied.patch.suppressed || 0) !== 1 || applied.patch.suppressed_reason !== 'hard_bounce');
-
-  const reach = evaluateReachability(applied.patch);
-  const email = reach.channels.find((c) => c.channel === 'email');
-  assert.equal(email.ready, false);
-  assert.equal(email.state, 'bounced');
+  assert.equal(resolveBounceScope({ contactId: 'c1', snippet: '550 relay denied for domain' }), 'account');
+  assert.equal(resolveBounceScope({ contactId: 'c1', snippet: 'untyped DSN failure' }), 'account');
 });
 
 test('bounce: soft hardens after threshold; processBounceEvent is idempotent', () => {
@@ -249,6 +267,14 @@ test('bounce: soft hardens after threshold; processBounceEvent is idempotent', (
 
 test('bounce: processInboundReplyText routes DSN text without inventing reply engagement', async () => {
   const { db } = createList({ _row_id: 'b_dsn', email_thread_id: 'thr_dsn' });
+  seedContact({
+    db,
+    rowId: 'b_dsn',
+    contactId: 'c1',
+    email: 'owner@example-cc.test',
+    title: 'Owner',
+    primary: true,
+  });
   const out = await processInboundReplyText({
     db,
     recordId: 'b_dsn',
@@ -257,9 +283,10 @@ test('bounce: processInboundReplyText routes DSN text without inventing reply en
     threadId: 'thr_dsn',
   });
   assert.equal(out.classification, 'bounce');
-  assert.equal(out.sequence_status, 'bounced');
-  assert.equal(Number(out.record.email_bounced), 1);
-  assert.equal(Number(out.record.dne_email), 1);
+  assert.equal(out.sequence_status, 'active');
+  assert.equal(Number(out.record.email_bounced), 0);
+  assert.equal(Number(out.record.dne_email), 0);
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c1').dne_email), 1);
 
   // Idempotent reprocess
   const again = await processInboundReplyText({
@@ -270,7 +297,7 @@ test('bounce: processInboundReplyText routes DSN text without inventing reply en
     threadId: 'thr_dsn',
   });
   assert.equal(again.classification, 'bounce');
-  assert.equal(Number(again.record.email_bounced), 1);
+  assert.equal(Number(again.record.email_bounced), 0);
 
   const events = db.prepare(
     `SELECT action, disposition FROM channel_events WHERE row_id = ?`,
@@ -295,7 +322,147 @@ test('bounce: classifier path via applyInboundReplyClassification uses shared bo
   assert.equal(applied.sequence_status, 'bounced');
   assert.equal(Number(applied.patch.email_bounced), 1);
   assert.equal(applied.channel_event.action, 'bounce_detected');
-  assert.ok(applied.patch.suppressed_contact_ids.includes('c9'));
+  assert.deepEqual(applied.patch.suppressed_contact_ids, []);
+});
+
+test('bounce: recipient hard bounce suppresses one contact and rotates to the next eligible contact', () => {
+  const plan = buildContactPlan({
+    account_id: 'bounce_rotate',
+    campaign_id: 'bounce_rotate_campaign',
+    treatment_tier: 'A',
+    contacts: [
+      { contact_id: 'c_owner', outbound_disposition: 'eligible_target', outreach_rank: 1 },
+      { contact_id: 'c_manager', outbound_disposition: 'eligible_target', outreach_rank: 2 },
+    ],
+  });
+  const { db } = createList({
+    _row_id: 'bounce_rotate',
+    active_contact_id: 'c_owner',
+    contact_id: 'c_owner',
+    account_contact_plan_json: JSON.stringify(plan),
+  });
+  seedContact({ db, rowId: 'bounce_rotate', contactId: 'c_owner', email: 'owner@example.test', title: 'Owner', primary: true });
+  seedContact({ db, rowId: 'bounce_rotate', contactId: 'c_manager', email: 'manager@example.test', title: 'Service Manager' });
+
+  const applied = processBounceEvent({
+    db,
+    recordId: 'bounce_rotate',
+    messageId: 'bounce_rotate_1',
+    bounceType: 'hard',
+    snippet: '550 5.1.1 user unknown',
+    bounceAt: '2026-08-07T16:00:00.000Z',
+  });
+
+  const campaign = parseAccountCampaignFromRecord(applied.record);
+  assert.equal(applied.scope, 'contact');
+  assert.equal(applied.rotated, true);
+  assert.equal(Number(applied.record.dne_email), 0);
+  assert.equal(campaign.active_contact_id, 'c_manager');
+  assert.deepEqual(campaign.held_contact_ids, []);
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_owner').dne_email), 1);
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_manager').dne_email), 0);
+  db.close();
+});
+
+test('bounce: only-contact recipient hard bounce leaves no eligible email target', () => {
+  const plan = buildContactPlan({
+    account_id: 'bounce_only',
+    campaign_id: 'bounce_only_campaign',
+    treatment_tier: 'A',
+    contacts: [{ contact_id: 'c_only', outbound_disposition: 'eligible_target', outreach_rank: 1 }],
+  });
+  const { db } = createList({
+    _row_id: 'bounce_only',
+    active_contact_id: 'c_only',
+    contact_id: 'c_only',
+    account_contact_plan_json: JSON.stringify(plan),
+  });
+  seedContact({ db, rowId: 'bounce_only', contactId: 'c_only', email: 'only@example.test', title: 'Owner', primary: true });
+
+  const applied = processBounceEvent({
+    db,
+    recordId: 'bounce_only',
+    messageId: 'bounce_only_1',
+    bounceType: 'hard',
+    snippet: 'recipient rejected: user unknown',
+  });
+
+  const campaign = parseAccountCampaignFromRecord(applied.record);
+  assert.equal(applied.scope, 'contact');
+  assert.equal(campaign.active_contact_id, null);
+  assert.deepEqual(campaign.held_contact_ids, []);
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_only').dne_email), 1);
+  db.close();
+});
+
+test('bounce: domain-level failure closes the account email channel', () => {
+  const { db } = createList({ _row_id: 'bounce_domain' });
+  seedContact({ db, rowId: 'bounce_domain', contactId: 'c1', email: 'owner@example.test', title: 'Owner', primary: true });
+
+  const applied = processBounceEvent({
+    db,
+    recordId: 'bounce_domain',
+    messageId: 'bounce_domain_1',
+    bounceType: 'hard',
+    snippet: '550 relay denied: no MX record for recipient domain',
+  });
+
+  assert.equal(applied.scope, 'account');
+  assert.equal(applied.sequence_status, 'bounced');
+  assert.equal(Number(applied.record.dne_email), 1);
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c1').dne_email), 0);
+  db.close();
+});
+
+test('bounce: rotation preserves quiet period and per-contact allowance gates', () => {
+  const plan = buildContactPlan({
+    account_id: 'bounce_cadence',
+    campaign_id: 'bounce_cadence_campaign',
+    treatment_tier: 'A',
+    contacts: [
+      { contact_id: 'c_first', outbound_disposition: 'eligible_target', outreach_rank: 1 },
+      { contact_id: 'c_next', outbound_disposition: 'eligible_target', outreach_rank: 2 },
+    ],
+  });
+  const bouncedAt = '2026-08-07T16:00:00.000Z';
+  const { db } = createList({
+    _row_id: 'bounce_cadence',
+    active_contact_id: 'c_first',
+    contact_id: 'c_first',
+    automated_actions_used: 999,
+    account_contact_plan_json: JSON.stringify(plan),
+  });
+  seedContact({ db, rowId: 'bounce_cadence', contactId: 'c_first', email: 'first@example.test', title: 'Owner', primary: true });
+  seedContact({ db, rowId: 'bounce_cadence', contactId: 'c_next', email: 'next@example.test', title: 'Manager' });
+
+  const applied = processBounceEvent({
+    db,
+    recordId: 'bounce_cadence',
+    messageId: 'bounce_cadence_1',
+    bounceType: 'hard',
+    snippet: 'user unknown',
+    bounceAt: bouncedAt,
+  });
+  const campaign = parseAccountCampaignFromRecord(applied.record);
+  const immediatelyAfterRotation = evaluateCampaignProcess({
+    campaign,
+    treatment_tier: 'A',
+    automated_actions_used: Number(applied.record.automated_actions_used),
+    last_rotation_at: String(applied.record.last_contact_rotation_at),
+    asOf: bouncedAt,
+  });
+  const afterQuietPeriodAtAllowance = evaluateCampaignProcess({
+    campaign,
+    treatment_tier: 'A',
+    automated_actions_used: 999,
+    last_rotation_at: String(applied.record.last_contact_rotation_at),
+    asOf: '2026-08-12T16:00:00.000Z',
+  });
+
+  assert.equal(Number(applied.record.automated_actions_used), 0);
+  assert.ok(immediatelyAfterRotation.blockers.some((blocker) => blocker.startsWith('inter_contact_quiet_period:')));
+  assert.ok(afterQuietPeriodAtAllowance.blockers.some((blocker) => blocker.startsWith('per_contact_allowance_exceeded:')));
+  db.close();
 });
 
 // ---------------------------------------------------------------------------
