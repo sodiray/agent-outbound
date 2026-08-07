@@ -8,6 +8,7 @@ import {
   DEFAULT_SCORE_ENRICHMENT_REPAIR,
   type EnrichmentRepairConfigInput,
 } from '../../schemas/config.js';
+import { resolveBuyerEvidenceFromRecord } from './evidence.js';
 
 export type EnrichmentDepth = 'foundational' | 'candidate_tier' | 'targeted';
 
@@ -54,29 +55,12 @@ const AFFILIATION_UNRESOLVED = new Set(['unresolved', 'unknown', 'not_found', 'a
  * Named-person current-affiliation + buying-center role.
  * Never invents confirmed affiliation from blank fields.
  */
-export function resolveBuyerAffiliationFromRecord(
+export const resolveBuyerAffiliationFromRecord = (
   record: Record<string, unknown>,
-): BuyerAffiliationResolution {
-  const statusRaw =
-    record.buyer_affiliation_status
-    ?? record.current_affiliation_status
-    ?? record.affiliation_status
-    ?? null;
-  const status = statusRaw != null && text(statusRaw) !== ''
-    ? lower(statusRaw)
-    : null;
-
-  const roleRaw =
-    record.buying_center_role
-    ?? record.buyer_role
-    ?? record.named_buyer_role
-    ?? null;
-  const role = roleRaw != null && text(roleRaw) !== ''
-    ? text(roleRaw)
-    : null;
-
-  return { status, role };
-}
+): BuyerAffiliationResolution => {
+  const buyer = resolveBuyerEvidenceFromRecord(record);
+  return { status: buyer.affiliationStatus, role: buyer.role };
+};
 
 /**
  * Buyer-resolution hold reasons (fail closed).
@@ -262,12 +246,9 @@ export function planEnrichmentRepair(input: {
   }
 
   // ── Targeted (treatment / high-tier buyer + channel evidence) ───────────
-  const namedStatus = input.named_buyer_status ?? (
-    record.named_buyer_status != null ? lower(record.named_buyer_status) : null
-  );
-  const namedName = input.named_buyer_name ?? (
-    text(record.observed_buyer_name || record.named_buyer_name || record.primary_buyer_name) || null
-  );
+  const buyer = resolveBuyerEvidenceFromRecord(record);
+  const namedStatus = input.named_buyer_status ?? buyer.status;
+  const namedName = input.named_buyer_name ?? buyer.name;
   if (!namedStatus || !['confirmed', 'likely'].includes(lower(namedStatus || ''))) {
     push({
       field: 'named_buyer_status',
@@ -285,7 +266,7 @@ export function planEnrichmentRepair(input: {
     });
   }
 
-  const affiliation = resolveBuyerAffiliationFromRecord(record);
+  const affiliation = { status: buyer.affiliationStatus, role: buyer.role };
   if (!affiliation.status || AFFILIATION_UNRESOLVED.has(affiliation.status)) {
     push({
       field: 'buyer_affiliation_status',

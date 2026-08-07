@@ -44,6 +44,7 @@ import {
   deriveMailConfidence,
   derivePhoneConfidence,
   detectContradictions,
+  resolveBuyerEvidenceFromRecord,
   resolveFieldPreferringEvidence,
 } from './evidence.js';
 import { validateTaxonomyLabels } from './taxonomy.js';
@@ -73,7 +74,6 @@ import {
   planEnrichmentRepair,
   collectEnrichmentHoldReasons,
   collectBuyerResolutionHoldReasons,
-  resolveBuyerAffiliationFromRecord,
   type EnrichmentRepairPlan,
 } from './enrichment-repair.js';
 import {
@@ -156,32 +156,6 @@ const num = (v: unknown, fallback: number | null = null): number | null => {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 };
-
-/** Named-buyer fields for Golden Ticket — never invent confirmed status. */
-export function resolveNamedBuyerFromRecord(record: Record<string, unknown>): {
-  status: string | null;
-  name: string | null;
-} {
-  const statusRaw =
-    record.named_buyer_status
-    ?? record.buyer_named_status
-    ?? record.primary_buyer_status
-    ?? null;
-  const status = statusRaw != null && String(statusRaw).trim() !== ''
-    ? String(statusRaw).trim().toLowerCase()
-    : null;
-  const nameRaw =
-    record.observed_buyer_name
-    ?? record.buyer_name
-    ?? record.primary_buyer_name
-    ?? record.named_buyer_name
-    ?? null;
-  // Do not fall back to generic contact_name alone — that invents a primary buyer.
-  const name = nameRaw != null && String(nameRaw).trim() !== ''
-    ? String(nameRaw).trim()
-    : null;
-  return { status, name };
-}
 
 /**
  * Cohort capacity for Golden Ticket — must be explicitly true.
@@ -554,8 +528,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     listDir,
   });
 
-  const namedBuyer = resolveNamedBuyerFromRecord(record);
-  const buyerAffiliation = resolveBuyerAffiliationFromRecord(record);
+  const buyer = resolveBuyerEvidenceFromRecord(record);
   const cohortCapacityOk = resolveCohortCapacityOk(record);
   const assetReadyExplicit =
     record.golden_ticket_asset_ready === true
@@ -584,10 +557,10 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       record.local_buying_authority != null && String(record.local_buying_authority).trim() !== ''
         ? String(record.local_buying_authority)
         : null,
-    namedBuyerStatus: namedBuyer.status,
-    namedBuyerName: namedBuyer.name,
-    buyerAffiliationStatus: buyerAffiliation.status,
-    buyingCenterRole: buyerAffiliation.role,
+    namedBuyerStatus: buyer.status,
+    namedBuyerName: buyer.name,
+    buyerAffiliationStatus: buyer.affiliationStatus,
+    buyingCenterRole: buyer.role,
     cohortCapacityOk,
     goldenTicketGates: {
       mailReady: mailAddressReady,
@@ -707,9 +680,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   // named-person fields force enrichment_hold (autonomous repair path).
   const buyerHoldReasons = collectBuyerResolutionHoldReasons({
     treatmentTier: treatment.treatment_tier,
-    namedBuyerStatus: namedBuyer.status,
-    namedBuyerName: namedBuyer.name,
-    affiliation: buyerAffiliation,
+    namedBuyerStatus: buyer.status,
+    namedBuyerName: buyer.name,
+    affiliation: { status: buyer.affiliationStatus, role: buyer.role },
     goldenTicketPath: treatment.golden_ticket_eligible || treatment.mail_treatment === 'golden_ticket',
   });
   // Unresolved affiliation holds any non-D tier; high-tier missing gates hold A.
@@ -907,8 +880,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         hold_reasons: [...treatment.reasons, ...buyerHoldReasons],
         treatment_tier: treatment.treatment_tier,
         candidate_tier: candidate.candidate_tier,
-        named_buyer_status: namedBuyer.status,
-        named_buyer_name: namedBuyer.name,
+        named_buyer_status: buyer.status,
+        named_buyer_name: buyer.name,
         missing_fit_inputs: missing_inputs,
       });
       next_action = {
@@ -1148,10 +1121,10 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     hasNextAction: Boolean(next_action),
     confidenceProfile,
     actionConfidence: input.actionConfidence,
-    namedBuyerStatus: namedBuyer.status,
-    namedBuyerName: namedBuyer.name,
-    buyerAffiliationStatus: buyerAffiliation.status,
-    buyingCenterRole: buyerAffiliation.role,
+    namedBuyerStatus: buyer.status,
+    namedBuyerName: buyer.name,
+    buyerAffiliationStatus: buyer.affiliationStatus,
+    buyingCenterRole: buyer.role,
   });
   if (campaignProcessBlockers.length) {
     readiness.blockers.push(...campaignProcessBlockers);
@@ -1187,8 +1160,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       hold_reasons: enrichment_hold_reasons,
       treatment_tier: treatment.treatment_tier,
       candidate_tier: candidate.candidate_tier,
-      named_buyer_status: namedBuyer.status,
-      named_buyer_name: namedBuyer.name,
+      named_buyer_status: buyer.status,
+      named_buyer_name: buyer.name,
       missing_fit_inputs: missing_inputs,
       config: input.enrichmentRepair,
     });
@@ -1341,10 +1314,10 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       }
       : {}),
     // Named-person buyer resolution fields (never invent confirmed).
-    named_buyer_status: namedBuyer.status ?? '',
-    observed_buyer_name: namedBuyer.name ?? '',
-    buyer_affiliation_status: buyerAffiliation.status ?? '',
-    buying_center_role: buyerAffiliation.role ?? '',
+    named_buyer_status: buyer.status ?? '',
+    observed_buyer_name: buyer.name ?? '',
+    buyer_affiliation_status: buyer.affiliationStatus ?? '',
+    buying_center_role: buyer.role ?? '',
     timing_json: JSON.stringify(timingCalc),
     timing_score: timingScore,
     buyer_confidence: buyerConfidence,
@@ -1580,8 +1553,7 @@ export function readinessInputFromRecord(input: {
   // Explicit booleans — undefined must not readiness-pass (fail closed).
   const hasContent = Boolean(record.preliminary_snapshot);
   const hasNext = Boolean(record.next_action_json);
-  const namedBuyer = resolveNamedBuyerFromRecord(record);
-  const buyerAffiliation = resolveBuyerAffiliationFromRecord(record);
+  const buyer = resolveBuyerEvidenceFromRecord(record);
   const mailTreatmentAllows = mailTreatment !== 'none' && mailTreatment !== '';
 
   return {
@@ -1616,10 +1588,10 @@ export function readinessInputFromRecord(input: {
     hasNextAction: hasNext,
     confidenceProfile,
     actionConfidence: input.actionConfidence,
-    namedBuyerStatus: namedBuyer.status,
-    namedBuyerName: namedBuyer.name,
-    buyerAffiliationStatus: buyerAffiliation.status,
-    buyingCenterRole: buyerAffiliation.role,
+    namedBuyerStatus: buyer.status,
+    namedBuyerName: buyer.name,
+    buyerAffiliationStatus: buyer.affiliationStatus,
+    buyingCenterRole: buyer.role,
     proposedAction: proposedChannel
       ? {
         kind: input.stepKind,

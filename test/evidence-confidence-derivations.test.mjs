@@ -5,6 +5,7 @@ import {
   deriveBuyerConfidence,
   deriveMailAddressReady,
   deriveMailConfidence,
+  resolveBuyerEvidenceFromRecord,
 } from '../dist/orchestrator/policy/evidence.js';
 import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
 import { evaluateReachability } from '../dist/orchestrator/policy/timing-reachability.js';
@@ -84,6 +85,95 @@ test('buyer confidence recognizes a resolved, titled, provider-verified primary 
     }),
   };
   assert.equal(deriveBuyerConfidence(primaryContact), 80);
+});
+
+const canonicalBuyerRecord = () => ({
+  ...fullyEvidencedRecord(),
+  named_buyer_status: '',
+  observed_buyer_name: '',
+  buyer_affiliation_status: '',
+  buying_center_role: '',
+  decision_maker_name: 'Jordan Lee',
+  decision_maker_title: 'Owner',
+  decision_maker_email: 'jordan@example.test',
+  decision_maker_confidence: 98,
+  observations_json: JSON.stringify({
+    observations: [
+      durableObservation('website', 'https://example.test'),
+      durableObservation('decision_maker_name', 'Jordan Lee'),
+      durableObservation('decision_maker_title', 'Owner'),
+    ],
+  }),
+});
+
+test('policy Tier A gate accepts a resolved canonical buyer with an affiliated role', () => {
+  const result = applyOutboundPolicy({
+    record: canonicalBuyerRecord(),
+    recomputeFitFromBreakdown: true,
+  });
+  assert.equal(result.treatment_tier, 'A');
+  assert.equal(result.patch.named_buyer_status, 'confirmed');
+  assert.equal(result.patch.observed_buyer_name, 'Jordan Lee');
+  assert.equal(result.patch.buyer_affiliation_status, 'confirmed');
+  assert.equal(result.patch.buying_center_role, 'Owner');
+});
+
+test('policy Tier A gate holds masked or absent buyer evidence', () => {
+  const result = applyOutboundPolicy({
+    record: {
+      ...canonicalBuyerRecord(),
+      decision_maker_name: '',
+      observations_json: JSON.stringify({
+        observations: [
+          durableObservation('website', 'https://example.test'),
+          durableObservation('decision_maker_title', 'Owner'),
+        ],
+      }),
+    },
+    recomputeFitFromBreakdown: true,
+  });
+  assert.equal(result.treatment_tier, 'enrichment_hold');
+  assert.ok(result.enrichment_hold_reasons.includes('named_buyer_status_missing'));
+  assert.ok(result.enrichment_hold_reasons.includes('named_buyer_name_missing'));
+});
+
+test('policy Tier A gate keeps affiliation fail-closed without account-bound evidence', () => {
+  const result = applyOutboundPolicy({
+    record: {
+      ...canonicalBuyerRecord(),
+      decision_maker_email: 'jordan@unrelated.test',
+    },
+    recomputeFitFromBreakdown: true,
+  });
+  assert.equal(result.treatment_tier, 'enrichment_hold');
+  assert.ok(result.enrichment_hold_reasons.includes('buyer_affiliation_status_missing'));
+  assert.ok(!result.enrichment_hold_reasons.includes('named_buyer_name_missing'));
+  assert.ok(!result.enrichment_hold_reasons.includes('buying_center_role_missing'));
+});
+
+test('policy Tier A gate retains legacy buyer fields and requires a buyer', () => {
+  const legacy = applyOutboundPolicy({
+    record: fullyEvidencedRecord(),
+    recomputeFitFromBreakdown: true,
+  });
+  assert.equal(legacy.treatment_tier, 'A');
+
+  const absent = applyOutboundPolicy({
+    record: {
+      ...fullyEvidencedRecord(),
+      named_buyer_status: '',
+      observed_buyer_name: '',
+      buyer_affiliation_status: '',
+      buying_center_role: '',
+      observations_json: JSON.stringify({
+        observations: [durableObservation('website', 'https://example.test')],
+      }),
+    },
+    recomputeFitFromBreakdown: true,
+  });
+  assert.equal(absent.treatment_tier, 'enrichment_hold');
+  assert.ok(absent.enrichment_hold_reasons.includes('named_buyer_name_missing'));
+  assert.equal(resolveBuyerEvidenceFromRecord(absent.patch).name, null);
 });
 
 test('buyer confidence fails closed without a named resolved person', () => {

@@ -165,6 +165,7 @@ const BUYER_ROLE_FIELDS = [
   'named_buyer_role',
 ];
 const BUYER_AFFILIATION_FIELDS = ['buyer_affiliation_status', 'current_affiliation_status', 'affiliation_status'];
+const CANONICAL_CONTACT_EMAIL_FIELDS = ['decision_maker_email', 'contact_email', 'email_primary'];
 
 const hasLiteralSupport = (resolution: FieldResolution | undefined): boolean => (
   Boolean(
@@ -320,6 +321,115 @@ const roleIndicatesDecisionAuthority = (role: string): boolean => (
   /\b(owner|founder|principal|partner|chief|president|vice[ -]?president|vp|director|head|general manager|managing|executive)\b/iu.test(role)
 );
 
+export type BuyerEvidenceResolution = {
+  status: string | null;
+  name: string | null;
+  affiliationStatus: string | null;
+  role: string | null;
+  source: 'legacy' | 'canonical' | null;
+};
+
+const domainFromValue = (value: unknown): string => {
+  const raw = text(value).toLowerCase();
+  if (!raw) return '';
+  const candidate = raw.includes('://') ? raw : `https://${raw}`;
+  try {
+    return new URL(candidate).hostname.replace(/^www\./u, '');
+  } catch {
+    return '';
+  }
+};
+
+const canonicalBuyerAffiliationConfirmed = (input: {
+  record: Record<string, unknown>;
+  buyerEmail: string;
+  roleSupported: boolean;
+}): boolean => {
+  if (!input.roleSupported || !input.buyerEmail.includes('@')) return false;
+  const buyerDomain = domainFromValue(input.buyerEmail.split('@').at(-1));
+  const accountDomain = domainFromValue(fieldValue(input.record, ['domain', 'website', 'site_url']));
+  return Boolean(buyerDomain && accountDomain && buyerDomain === accountDomain);
+};
+
+/**
+ * Resolve a buyer from either legacy buyer fields or the durable canonical
+ * decision-maker projection. Canonical affiliation requires a titled,
+ * provider-backed person whose email domain matches the resolved account.
+ */
+export const resolveBuyerEvidenceFromRecord = (
+  record: Record<string, unknown>,
+): BuyerEvidenceResolution => {
+  const observations = parseStoredObservations(record.observations_json);
+  const legacyStatus = fieldValue(record, LEGACY_BUYER_STATUS_FIELDS).toLowerCase() || null;
+  const legacyName = fieldValue(record, LEGACY_BUYER_NAME_FIELDS) || null;
+  const legacyAffiliation = fieldValue(record, BUYER_AFFILIATION_FIELDS).toLowerCase() || null;
+  const legacyRole = fieldValue(record, ['buying_center_role', 'buyer_role', 'named_buyer_role']) || null;
+
+  if (legacyStatus && !resolvedBuyerStatus(legacyStatus)) {
+    return {
+      status: legacyStatus,
+      name: legacyName,
+      affiliationStatus: legacyAffiliation,
+      role: legacyRole,
+      source: 'legacy',
+    };
+  }
+  if (legacyStatus && legacyName) {
+    return {
+      status: legacyStatus,
+      name: legacyName,
+      affiliationStatus: legacyAffiliation,
+      role: legacyRole,
+      source: 'legacy',
+    };
+  }
+
+  const canonicalName = fieldValue(record, CANONICAL_CONTACT_NAME_FIELDS);
+  const canonicalNameSupported = durableLiteralSupport({
+    observations,
+    fields: CANONICAL_CONTACT_NAME_FIELDS,
+    value: canonicalName,
+  });
+  const canonicalResolved = Boolean(canonicalName)
+    && canonicalNameSupported
+    && (
+      positiveNumber(record.decision_maker_confidence)
+      || verifiedEmailStatus(record.email_verification_status)
+    );
+  if (!canonicalResolved) {
+    return {
+      status: legacyStatus,
+      name: legacyName,
+      affiliationStatus: legacyAffiliation,
+      role: legacyRole,
+      source: legacyStatus || legacyName || legacyAffiliation || legacyRole ? 'legacy' : null,
+    };
+  }
+
+  const canonicalRole = fieldValue(record, BUYER_ROLE_FIELDS);
+  const canonicalRoleSupported = durableLiteralSupport({
+    observations,
+    fields: BUYER_ROLE_FIELDS,
+    value: canonicalRole,
+  });
+  const canonicalEmail = fieldValue(record, CANONICAL_CONTACT_EMAIL_FIELDS);
+  const affiliationStatus = legacyAffiliation || (
+    canonicalBuyerAffiliationConfirmed({
+      record,
+      buyerEmail: canonicalEmail,
+      roleSupported: canonicalRoleSupported,
+    }) ? 'confirmed' : null
+  );
+
+  return {
+    status: 'confirmed',
+    name: canonicalName,
+    affiliationStatus,
+    role: legacyRole || (canonicalRoleSupported ? canonicalRole : null),
+    source: 'canonical',
+  };
+};
+
 /**
  * Deterministic buyer confidence from named-person evidence already persisted on
  * a record. A name needs either an explicit resolved status or a primary-contact
@@ -342,23 +452,11 @@ export const deriveBuyerConfidence = (
       ...(config?.penalties || {}),
     },
   };
-  const legacyBuyerName = fieldValue(record, LEGACY_BUYER_NAME_FIELDS);
-  const legacyResolved = Boolean(legacyBuyerName)
-    && resolvedBuyerStatus(fieldValue(record, LEGACY_BUYER_STATUS_FIELDS));
-  const canonicalBuyerName = fieldValue(record, CANONICAL_CONTACT_NAME_FIELDS);
-  const canonicalNameSupported = durableLiteralSupport({
-    observations,
-    fields: CANONICAL_CONTACT_NAME_FIELDS,
-    value: canonicalBuyerName,
-  });
-  const canonicalResolved = Boolean(canonicalBuyerName)
-    && canonicalNameSupported
-    && (
-      positiveNumber(record.decision_maker_confidence)
-      || verifiedEmailStatus(record.email_verification_status)
-    );
-  const buyerName = legacyResolved ? legacyBuyerName : canonicalResolved ? canonicalBuyerName : '';
-  const nameFields = legacyResolved ? LEGACY_BUYER_NAME_FIELDS : CANONICAL_CONTACT_NAME_FIELDS;
+  const buyer = resolveBuyerEvidenceFromRecord(record);
+  const buyerName = buyer.name || '';
+  const nameFields = buyer.source === 'legacy'
+    ? LEGACY_BUYER_NAME_FIELDS
+    : CANONICAL_CONTACT_NAME_FIELDS;
   if (!buyerName) return 0;
 
   const buyerRole = fieldValue(record, BUYER_ROLE_FIELDS);
