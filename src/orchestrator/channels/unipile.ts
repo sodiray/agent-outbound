@@ -21,6 +21,78 @@ export type UnipileReadiness = {
 
 const nonBlank = (value: unknown) => String(value ?? '').trim();
 
+const linkedinPublicIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9-]{0,99}$/;
+
+const isLinkedinHost = (hostname: string): boolean =>
+  hostname === 'linkedin.com' || hostname.endsWith('.linkedin.com');
+
+/**
+ * Accept a LinkedIn public profile URL or the provider's bare public identifier.
+ * Returns null rather than guessing when the reference cannot identify a profile.
+ */
+export const parseLinkedinPublicIdentifier = (value: string): string | null => {
+  const reference = nonBlank(value);
+  if (linkedinPublicIdentifierPattern.test(reference)) return reference;
+
+  try {
+    const url = new URL(reference);
+    const profileSegments = url.pathname.split('/').filter(Boolean);
+    const publicIdentifier = profileSegments[1] || '';
+    if (
+      (url.protocol !== 'http:' && url.protocol !== 'https:')
+      || !isLinkedinHost(url.hostname.toLowerCase())
+      || profileSegments.length !== 2
+      || profileSegments[0].toLowerCase() !== 'in'
+      || !linkedinPublicIdentifierPattern.test(publicIdentifier)
+    ) {
+      return null;
+    }
+    return publicIdentifier;
+  } catch {
+    return null;
+  }
+};
+
+const linkedinReferenceShape = (value: string): string => {
+  try {
+    const url = new URL(value);
+    if (isLinkedinHost(url.hostname.toLowerCase())) return 'a LinkedIn non-profile URL';
+    return 'a non-LinkedIn URL';
+  } catch {
+    return 'an unrecognised identifier';
+  }
+};
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+
+const responseDetail = (value: unknown): string => {
+  if (typeof value === 'string') return nonBlank(value);
+  if (Array.isArray(value)) {
+    return value.map(responseDetail).filter(Boolean).join('; ');
+  }
+  const record = asRecord(value);
+  if (!record) return '';
+  return [record.detail, record.message, record.error_description, record.error, record.errors]
+    .map(responseDetail)
+    .find(Boolean) || '';
+};
+
+const unipileFailureDetail = (payload: unknown, statusText: string): string =>
+  responseDetail(payload).replace(/\s+/g, ' ').slice(0, 200)
+  || nonBlank(statusText).slice(0, 200)
+  || 'error';
+
+const readUnipileJson = async (response: Response): Promise<unknown> => {
+  try {
+    return await response.json();
+  } catch {
+    return null;
+  }
+};
+
 /**
  * Contract readiness for LinkedIn via Unipile.
  * Ready when API credentials are present, or when AO_UNIPILE_FIXTURE=1 (harness only).
@@ -97,6 +169,15 @@ export async function unipileLiveInvite(input: {
   if (!base) {
     return { ok: false, provider_id: '', reason: 'unipile_dsn_empty', status: 0 };
   }
+  const publicIdentifier = parseLinkedinPublicIdentifier(input.linkedinUrl || '');
+  if (!publicIdentifier) {
+    return {
+      ok: false,
+      provider_id: '',
+      reason: `unipile_invalid_linkedin_reference: field linkedinUrl has ${linkedinReferenceShape(input.linkedinUrl || '')}`,
+      status: 0,
+    };
+  }
   const accountId = String(input.accountId || input.providerId || '').trim();
   // Unipile users invitation endpoint (account-scoped).
   const url = accountId
@@ -104,8 +185,8 @@ export async function unipileLiveInvite(input: {
     : `${base}/api/v1/users/invite`;
   const body: Record<string, unknown> = {
     provider: 'LINKEDIN',
+    provider_public_id: publicIdentifier,
   };
-  if (input.linkedinUrl) body.provider_public_id = input.linkedinUrl;
   if (input.message) body.message = input.message;
 
   const fetchFn = input.fetchImpl || globalThis.fetch;
@@ -124,14 +205,10 @@ export async function unipileLiveInvite(input: {
       body: JSON.stringify(body),
     });
     const status = Number(res.status || 0);
-    let payload: any = null;
-    try {
-      payload = await res.json();
-    } catch {
-      payload = null;
-    }
+    const payload = await readUnipileJson(res);
+    const payloadRecord = asRecord(payload);
     const provider_id = String(
-      payload?.id || payload?.invitation_id || payload?.object || '',
+      payloadRecord?.id || payloadRecord?.invitation_id || payloadRecord?.object || '',
     );
     if (status >= 200 && status < 300) {
       return {
@@ -144,7 +221,7 @@ export async function unipileLiveInvite(input: {
     return {
       ok: false,
       provider_id: provider_id || '',
-      reason: `unipile_live_http_${status}:${String(payload?.message || payload?.error || res.statusText || 'error').slice(0, 200)}`,
+      reason: `unipile_live_http_${status}:${unipileFailureDetail(payload, res.statusText)}`,
       status,
     };
   } catch (err) {
@@ -200,14 +277,25 @@ export async function executeUnipileLinkedinConnect(
 
   const apiKey = nonBlank(env.UNIPILE_API_KEY);
   const dsn = nonBlank(env.UNIPILE_DSN);
-  const linkedinUrl = nonBlank(
-    input.record?.contact_linkedin_url || input.record?.linkedin_url || input.step?.config?.linkedin_url,
-  );
+  const linkedinReference = [
+    { field: 'contact_linkedin_url', value: nonBlank(input.record?.contact_linkedin_url) },
+    { field: 'linkedin_url', value: nonBlank(input.record?.linkedin_url) },
+    { field: 'step.config.linkedin_url', value: nonBlank(input.step?.config?.linkedin_url) },
+  ].find(({ value }) => Boolean(value));
   const accountId = nonBlank(env.UNIPILE_ACCOUNT_ID || input.step?.config?.unipile_account_id);
-  if (!linkedinUrl) {
+  if (!linkedinReference) {
     return {
       status: 'skipped',
       reason: 'unipile_missing_linkedin_url',
+      provider_id: '',
+      readiness,
+    };
+  }
+  const publicIdentifier = parseLinkedinPublicIdentifier(linkedinReference.value);
+  if (!publicIdentifier) {
+    return {
+      status: 'failed',
+      reason: `unipile_invalid_linkedin_reference: field ${linkedinReference.field} has ${linkedinReferenceShape(linkedinReference.value)}`,
       provider_id: '',
       readiness,
     };
@@ -217,7 +305,7 @@ export async function executeUnipileLinkedinConnect(
     dsn,
     apiKey,
     accountId,
-    linkedinUrl,
+    linkedinUrl: publicIdentifier,
     message: nonBlank(input.step?.config?.invite_message || input.step?.description),
     fetchImpl: input.fetchImpl,
   });
