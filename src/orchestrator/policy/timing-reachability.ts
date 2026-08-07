@@ -7,6 +7,7 @@ import {
   DEFAULT_SCORE_REACHABILITY,
   type ReachabilityConfigInput,
 } from '../../schemas/config.js';
+import { isAffirmativeFlag } from './booleanish.js';
 
 export const TIMING_RULE_VERSION = 'tv-timing-v1';
 export const REACHABILITY_RULE_VERSION = 'tv-reachability-v1';
@@ -175,11 +176,29 @@ function readConfidence(...values: unknown[]): number | null {
 
 function emailState(record: Record<string, unknown>, config?: ReachabilityConfigInput): ChannelReachability {
   const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
-  if (record.email_opted_out || record.opted_out_email) {
+  if (
+    isAffirmativeFlag(record.email_opted_out, { failClosed: true })
+    || isAffirmativeFlag(record.opted_out_email, { failClosed: true })
+  ) {
     return { channel: 'email', state: 'opted_out', confidence: 100, ready: false, reason: 'opted_out' };
   }
-  if (record.email_bounced || String(record.email_status || '').toLowerCase() === 'bounced') {
+  if (
+    isAffirmativeFlag(record.email_bounced, { failClosed: true })
+    || String(record.email_status || '').toLowerCase() === 'bounced'
+  ) {
     return { channel: 'email', state: 'bounced', confidence: 100, ready: false, reason: 'bounced' };
+  }
+  if (
+    isAffirmativeFlag(record.dne_email, { failClosed: true })
+    || isAffirmativeFlag(record.email_suppressed, { failClosed: true })
+  ) {
+    return {
+      channel: 'email',
+      state: 'suppressed',
+      confidence: 100,
+      ready: false,
+      reason: isAffirmativeFlag(record.dne_email, { failClosed: true }) ? 'dne_email' : 'email_suppressed',
+    };
   }
   const email = String(record.contact_email || record.email_primary || '').trim();
   if (!email) return { channel: 'email', state: 'missing', confidence: 0, ready: false };
@@ -221,19 +240,16 @@ function phoneState(record: Record<string, unknown>, config?: ReachabilityConfig
   const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
   // dne_phone = structural invalidation (wrong number); phone_suppressed = channel block.
   // Neither is full-account DNC.
-  if (
-    record.phone_suppressed
-    || record.dne_phone === true
-    || record.dne_phone === 1
-    || record.dne_phone === '1'
-    || record.dne_phone === 'true'
-  ) {
+  const dnePhone = isAffirmativeFlag(record.dne_phone, { failClosed: true });
+  const phoneSuppressed = isAffirmativeFlag(record.phone_suppressed, { failClosed: true });
+  const dncPhone = isAffirmativeFlag(record.dnc_phone, { failClosed: true });
+  if (dnePhone || phoneSuppressed || dncPhone) {
     return {
       channel: 'phone',
       state: 'suppressed',
       confidence: 100,
       ready: false,
-      reason: record.dne_phone ? 'dne_phone' : 'phone_suppressed',
+      reason: dnePhone ? 'dne_phone' : dncPhone ? 'dnc_phone' : 'phone_suppressed',
     };
   }
   const phone = String(record.phone || record.contact_phone || '').trim();
@@ -263,7 +279,7 @@ function linkedinState(record: Record<string, unknown>, config?: ReachabilityCon
   const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
   const url = String(record.linkedin_url || record.contact_linkedin_url || '').trim();
   if (!url) return { channel: 'linkedin', state: 'missing', confidence: 0, ready: false };
-  if (record.linkedin_connected) {
+  if (isAffirmativeFlag(record.linkedin_connected)) {
     return { channel: 'linkedin', state: 'connected', confidence: 90, ready: true };
   }
   const conf = readConfidence(record.linkedin_confidence);
@@ -285,14 +301,14 @@ function linkedinState(record: Record<string, unknown>, config?: ReachabilityCon
 
 function mailState(record: Record<string, unknown>, config?: ReachabilityConfigInput): ChannelReachability {
   const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
+  if (isAffirmativeFlag(record.mail_suppressed, { failClosed: true })) {
+    return { channel: 'mail', state: 'suppressed', confidence: 100, ready: false, reason: 'mail_suppressed' };
+  }
   const address = String(record.mailing_address || record.address || '').trim();
   if (!address) return { channel: 'mail', state: 'missing', confidence: 0, ready: false };
   const conf = readConfidence(record.mail_confidence);
-  const addressReadyFlag = Boolean(
-    record.mail_address_ready === true
-    || record.mail_address_ready === 1
-    || String(record.address_rdi || '').toLowerCase() === 'commercial',
-  );
+  const addressReadyFlag = isAffirmativeFlag(record.mail_address_ready)
+    || String(record.address_rdi || '').toLowerCase() === 'commercial';
   // Raw street string alone is never ready — require confidence or CASS/RDI readiness.
   // Never invent mail_confidence from address_rdi alone (fail closed on the number).
   if (conf == null && !addressReadyFlag) {

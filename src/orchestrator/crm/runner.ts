@@ -7,6 +7,7 @@ import { getRecordRowId } from '../lib/record.js';
 import { assertToolSpecAvailable, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 const stableHash = (value: any) => createHash('sha256').update(JSON.stringify(value || {})).digest('hex');
 
@@ -99,7 +100,8 @@ export const runCrmSync = async ({ listDir, where = "1=1", limit = 200 }) => {
       });
 
       if (result.status === 'synced') {
-        const remoteDnc = Boolean(result.remote_dnc) && (crmConfig?.dnc_sync !== false);
+        const remoteDnc = isAffirmativeFlag(result.remote_dnc, { failClosed: true })
+          && (crmConfig?.dnc_sync !== false);
         const updated = {
           ...record,
           crm_company_id: result.company_id || record.crm_company_id,

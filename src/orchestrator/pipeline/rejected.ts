@@ -9,6 +9,7 @@ import {
 } from '../runtime/db.js';
 import { clearReviewDecision, configuredReviewStages } from './review.js';
 import { flattenPipelineSteps } from '../lib/subpipelines.js';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 export const DEFAULT_REJECTED_RESTORE_REASON = 'restored by operator from rejected view';
 
@@ -313,7 +314,8 @@ export const restoreRejectedRecord = ({
       business_name: String(after.business_name || after.name || ''),
     },
     state: {
-      in_play: !String(after.disqualified_at || '').trim() && !after.suppressed,
+      in_play: !String(after.disqualified_at || '').trim()
+        && !isAffirmativeFlag(after.suppressed, { failClosed: true }),
       disqualified_at: String(after.disqualified_at || ''),
       disqualified_gate: String(after.disqualified_gate || ''),
       disqualify_reason: String(after.disqualify_reason || ''),

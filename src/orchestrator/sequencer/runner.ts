@@ -47,6 +47,7 @@ import {
   loadCanaryConfig,
 } from '../policy/canary-isolation.js';
 import { applyContactRotation } from '../policy/contact-campaign.js';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 const parseExtra = (value) => {
   try {
@@ -516,11 +517,14 @@ const planVisitRoutesIfNeeded = async ({ mcp, db, listDir, config, visitCandidat
 };
 
 const checkSuppressionGate = ({ intent, record, primaryContact, extra, globalSuppressionDb, listDb, channelsConfig }) => {
-  if (record.suppressed) return { blocked: true, reason: 'record_suppressed' };
+  if (isAffirmativeFlag(record.suppressed, { failClosed: true })) return { blocked: true, reason: 'record_suppressed' };
 
   if (intent.uses_email) {
-    const contactDne = Number(primaryContact?.dne_email || 0) > 0;
-    if (record.dne_email || contactDne) return { blocked: true, reason: 'dne_email' };
+    const contactDne = isAffirmativeFlag(primaryContact?.dne_email, { failClosed: true });
+    const emailSuppressed = isAffirmativeFlag(record.email_suppressed, { failClosed: true });
+    if (isAffirmativeFlag(record.dne_email, { failClosed: true }) || contactDne || emailSuppressed) {
+      return { blocked: true, reason: emailSuppressed ? 'email_suppressed' : 'dne_email' };
+    }
     const email = String(primaryContact?.email || record.email_primary || '').trim();
     if (email && (hasSuppression({ db: globalSuppressionDb, value: email, valueType: 'email' })
       || hasSuppression({ db: listDb, value: email, valueType: 'email' }))) {
@@ -547,11 +551,11 @@ const checkSuppressionGate = ({ intent, record, primaryContact, extra, globalSup
   }
 
   if (intent.uses_phone) {
-    const contactDnc = Number(primaryContact?.dnc_phone || 0) > 0;
-    if (record.dnc_phone || contactDnc) {
+    const contactDnc = isAffirmativeFlag(primaryContact?.dnc_phone, { failClosed: true });
+    if (isAffirmativeFlag(record.dnc_phone, { failClosed: true }) || contactDnc) {
       return { blocked: true, reason: 'dnc_phone' };
     }
-    if (intent.uses_sms && Number(record.do_not_sms || 0) > 0) {
+    if (intent.uses_sms && isAffirmativeFlag(record.do_not_sms, { failClosed: true })) {
       return { blocked: true, reason: 'do_not_sms' };
     }
     const phone = String(primaryContact?.phone || record.phone || '').trim();
@@ -562,6 +566,9 @@ const checkSuppressionGate = ({ intent, record, primaryContact, extra, globalSup
   }
 
   if (intent.uses_mail) {
+    if (isAffirmativeFlag(record.mail_suppressed, { failClosed: true })) {
+      return { blocked: true, reason: 'mail_suppressed' };
+    }
     const verificationRequired = Boolean(channelsConfig?.mail?.address_verification?.required);
     const allowedStatuses = Array.isArray(channelsConfig?.mail?.address_verification?.gate_statuses)
       ? channelsConfig.mail.address_verification.gate_statuses.map((v) => String(v || '').toLowerCase()).filter(Boolean)
@@ -594,7 +601,7 @@ const checkSuppressionGate = ({ intent, record, primaryContact, extra, globalSup
     }
   }
 
-  if (intent.uses_visit && record.dnk_visit) return { blocked: true, reason: 'dnk_visit' };
+  if (intent.uses_visit && isAffirmativeFlag(record.dnk_visit, { failClosed: true })) return { blocked: true, reason: 'dnk_visit' };
   return { blocked: false, reason: '' };
 };
 
@@ -1765,7 +1772,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
       },
     });
 
-    if (updated.suppressed && updated.email_primary) {
+    if (isAffirmativeFlag(updated.suppressed, { failClosed: true }) && updated.email_primary) {
       const suppressionEntry = {
         id: randomUUID(),
         value: updated.email_primary,
@@ -1783,7 +1790,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
       status: 'updated',
       record_id: getRecordRowId(updated),
       sequence_status: updated.sequence_status,
-      suppressed: Boolean(updated.suppressed),
+      suppressed: isAffirmativeFlag(updated.suppressed, { failClosed: true }),
     };
   } finally {
     db.close();

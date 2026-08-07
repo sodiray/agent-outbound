@@ -9,6 +9,7 @@ import {
   type EnrichmentRepairConfigInput,
 } from '../../schemas/config.js';
 import { resolveBuyerEvidenceFromRecord } from './evidence.js';
+import { isAffirmativeFlag } from './booleanish.js';
 
 export type EnrichmentDepth = 'foundational' | 'candidate_tier' | 'targeted';
 
@@ -324,8 +325,7 @@ export function planEnrichmentRepair(input: {
     if (
       blank(record.mailing_address)
       && blank(record.address)
-      && record.mail_address_ready !== true
-      && record.mail_address_ready !== 1
+      && !isAffirmativeFlag(record.mail_address_ready)
     ) {
       push({
         field: 'mailing_address',

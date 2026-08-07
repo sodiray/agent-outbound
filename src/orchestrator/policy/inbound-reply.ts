@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { NEXT_ACTION_POLICY_VERSION, type LifecycleStage, type SequenceState, type WorkState } from './lifecycle.js';
 import { assertLifecycleTransition, canTransitionLifecycle } from './lifecycle.js';
 import { applyEmailBounce, resolveBounceType } from './bounce.js';
+import { isAffirmativeFlag } from './booleanish.js';
 
 export type InboundReplyClassification =
   | 'objection'
@@ -115,7 +116,7 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
   let disposition_follow_up_at = String(record.disposition_follow_up_at || '');
   let meeting_booked_at = String(record.meeting_booked_at || '');
   let next_action_json = record.next_action_json;
-  let suppressed = Number(record.suppressed || 0);
+  let suppressed = Number(isAffirmativeFlag(record.suppressed, { failClosed: true }));
   let suppressed_reason = String(record.suppressed_reason || '');
   let suppressed_at = String(record.suppressed_at || '');
 
@@ -245,9 +246,9 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
     };
   }
 
-  let email_bounced = Number(record.email_bounced || 0);
+  let email_bounced = Number(isAffirmativeFlag(record.email_bounced, { failClosed: true }));
   let email_status = String(record.email_status || '');
-  let dne_email = Number(record.dne_email || 0);
+  let dne_email = Number(isAffirmativeFlag(record.dne_email, { failClosed: true }));
   let suppressed_contact_ids: string[] = Array.isArray(record.suppressed_contact_ids)
     ? [...(record.suppressed_contact_ids as string[])]
     : (() => {

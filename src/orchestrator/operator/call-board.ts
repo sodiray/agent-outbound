@@ -23,6 +23,7 @@
 import { rankCallCapacity } from '../policy/campaign-process.js';
 import { parseNextActionFromRecord } from '../policy/lifecycle.js';
 import { SEQUENCE_STATES_BLOCK_OUTBOUND } from '../policy/sequence-outbound.js';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 import {
   applyPhoneDisposition,
   assertPhoneCallDisposition,
@@ -163,8 +164,7 @@ export function recordHasPhone(row: Record<string, unknown> | null | undefined):
 
 export function isRecordSuppressed(row: Record<string, unknown> | null | undefined): boolean {
   if (!row) return true;
-  const s = row.suppressed;
-  return s === true || s === 1 || s === '1' || s === 'true';
+  return isAffirmativeFlag(row.suppressed, { failClosed: true });
 }
 
 export function isTerminalLifecycle(row: Record<string, unknown> | null | undefined): boolean {

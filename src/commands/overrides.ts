@@ -12,6 +12,7 @@ import {
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
+import { isAffirmativeFlag } from '../orchestrator/policy/booleanish.js';
 
 const recordLabel = (record: any) => ({
   row_id: String(record._row_id || record.id || ''),
@@ -28,7 +29,7 @@ const recordDecisionState = (record: any) => {
     }
   })();
   return {
-    in_play: disqualifiedAt === '' && !record.suppressed,
+    in_play: disqualifiedAt === '' && !isAffirmativeFlag(record.suppressed, { failClosed: true }),
     disqualified_at: disqualifiedAt,
     disqualified_gate: String(record.disqualified_gate || ''),
     disqualify_reason: String(record.disqualify_reason || ''),

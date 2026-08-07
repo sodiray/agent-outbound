@@ -19,6 +19,7 @@ import {
   resolveContactPolicy,
   type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
+import { isAffirmativeFlag } from './booleanish.js';
 
 export const LIFECYCLE_STAGES = [
   'cold',
@@ -661,7 +662,7 @@ export function advanceAfterSuccessfulAction(
     sequence_state,
     work_state,
     next_action,
-    suppressed: Boolean(record.suppressed),
+    suppressed: isAffirmativeFlag(record.suppressed, { failClosed: true }),
     treatment_tier: record.treatment_tier != null && record.treatment_tier !== ''
       ? String(record.treatment_tier)
       : null,

@@ -6,6 +6,7 @@
 import { checkStateIntegrity, parseNextActionFromRecord } from '../policy/lifecycle.js';
 import { parseAccountCampaignFromRecord } from '../policy/contact-campaign.js';
 import { OUTBOUND_ACTION_TYPES } from '../policy/sequence-outbound.js';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 export type HealthIssue = {
   code: string;
@@ -266,7 +267,7 @@ export function runHealthChecks(input: {
          OR lower(COALESCE(e.step_id, '')) LIKE 'sourced%'
        )
        AND COALESCE(r.disqualified_at, '') = ''
-       AND COALESCE(r.suppressed, 0) = 0
+       AND lower(trim(CAST(COALESCE(r.suppressed, 0) AS TEXT))) IN ('', '0', 'false', 'no', 'off')
        AND NOT EXISTS (
          SELECT 1 FROM pipeline_events done
          WHERE done.record_id = e.record_id
@@ -412,7 +413,7 @@ export function runHealthChecks(input: {
         sequence_state: String(row.account_sequence_state || row.sequence_status || 'not_started') as any,
         work_state: String(row.work_state || 'idle') as any,
         next_action: next as any,
-        suppressed: Boolean(row.suppressed),
+        suppressed: isAffirmativeFlag(row.suppressed, { failClosed: true }),
         treatment_tier: String(row.treatment_tier || ''),
         active_contact_id: String(row.active_contact_id || '') || null,
       });

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 /**
  * Test-only clock override, honoured by every caller of `nowIso` — including
@@ -127,13 +128,13 @@ export const rowToRecordShape = ({ listName, row }) => {
     visit_route_position: Number(row.visit_route_position || 0),
     sms_last_message_id: String(row.sms_last_message_id || ''),
     call_last_disposition: String(row.call_last_disposition || ''),
-    suppressed: Boolean(row.suppressed),
+    suppressed: isAffirmativeFlag(row.suppressed, { failClosed: true }),
     suppressed_reason: String(row.suppressed_reason || ''),
     suppressed_at: String(row.suppressed_at || ''),
-    dne_email: Boolean(row.dne_email),
-    dnc_phone: Boolean(row.dnc_phone),
-    dnk_visit: Boolean(row.dnk_visit),
-    do_not_sms: Boolean(row.do_not_sms),
+    dne_email: isAffirmativeFlag(row.dne_email, { failClosed: true }),
+    dnc_phone: isAffirmativeFlag(row.dnc_phone, { failClosed: true }),
+    dnk_visit: isAffirmativeFlag(row.dnk_visit, { failClosed: true }),
+    do_not_sms: isAffirmativeFlag(row.do_not_sms, { failClosed: true }),
     crm_company_id: String(row.crm_company_id || ''),
     crm_person_id: String(row.crm_person_id || ''),
     crm_deal_id: String(row.crm_deal_id || ''),

@@ -17,6 +17,7 @@ import {
   resolveContactPolicy,
   type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
+import { isAffirmativeFlag } from './booleanish.js';
 
 export const PHONE_ATTEMPT_POLICY_VERSION = 'phone-attempt-v1';
 
@@ -146,13 +147,6 @@ export const resolvePhoneAttemptPolicyConfig = (config: unknown): PhoneAttemptPo
 
 const text = (value: unknown) => String(value ?? '').trim();
 
-const truthyFlag = (value: unknown): boolean => {
-  if (value === true || value === 1) return true;
-  if (value === false || value === 0 || value == null || value === '') return false;
-  const s = String(value).trim().toLowerCase();
-  return s === '1' || s === 'true' || s === 'yes';
-};
-
 /** Local wall-clock hour (0–23) in an IANA timezone. */
 export function getZonedHour(
   now: Date | string | number = Date.now(),
@@ -232,10 +226,10 @@ export function isPhonePathSuppressed(
   record: Record<string, unknown> | null | undefined,
 ): boolean {
   if (!record) return true;
-  if (truthyFlag(record.dne_phone)) return true;
-  if (truthyFlag(record.phone_suppressed)) return true;
+  if (isAffirmativeFlag(record.dne_phone, { failClosed: true })) return true;
+  if (isAffirmativeFlag(record.phone_suppressed, { failClosed: true })) return true;
   // dnc_phone is opt-out (person said don't call) — also blocks board.
-  if (truthyFlag(record.dnc_phone)) return true;
+  if (isAffirmativeFlag(record.dnc_phone, { failClosed: true })) return true;
   return false;
 }
 

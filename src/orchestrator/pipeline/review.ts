@@ -8,6 +8,7 @@ import {
   resolveRecordRef,
 } from '../runtime/db.js';
 import { flattenPipelineSteps } from '../lib/subpipelines.js';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 export type ReviewStage = {
   id: string;
@@ -266,7 +267,7 @@ export const reviewRecordDecisionState = (record: any) => {
     }
   })();
   return {
-    in_play: disqualifiedAt === '' && !record?.suppressed,
+    in_play: disqualifiedAt === '' && !isAffirmativeFlag(record?.suppressed, { failClosed: true }),
     disqualified_at: disqualifiedAt,
     disqualified_gate: String(record?.disqualified_gate || ''),
     disqualify_reason: String(record?.disqualify_reason || ''),

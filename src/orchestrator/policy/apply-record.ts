@@ -36,6 +36,7 @@ import {
 } from './contact-campaign.js';
 import { classifyEligibility, evaluateOutboundReadiness } from './readiness.js';
 import { assertWorkAllowed } from './forbidden-channels.js';
+import { isAffirmativeFlag } from './booleanish.js';
 import {
   buildIdentityResolution,
   buildObservationStore,
@@ -530,16 +531,10 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   const buyer = resolveBuyerEvidenceFromRecord(record);
   const cohortCapacityOk = resolveCohortCapacityOk(record);
-  const assetReadyExplicit =
-    record.golden_ticket_asset_ready === true
-    || record.golden_ticket_asset_ready === 1
-    || record.golden_ticket_asset_ready === '1'
-      ? true
-      : record.golden_ticket_asset_ready === false
-        || record.golden_ticket_asset_ready === 0
-        || record.golden_ticket_asset_ready === '0'
-        ? false
-        : null;
+  const assetReadyExplicit = record.golden_ticket_asset_ready == null
+    || String(record.golden_ticket_asset_ready).trim() === ''
+    ? null
+    : isAffirmativeFlag(record.golden_ticket_asset_ready);
 
   let treatment = assignTreatmentAndMail({
     fitScore,
@@ -551,7 +546,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     timingScore,
     strongTimingSignalCount,
     mailAddressReady,
-    suppressed: Boolean(record.suppressed),
+    suppressed: isAffirmativeFlag(record.suppressed, { failClosed: true }),
     materialContradiction: Boolean(record.material_contradiction),
     localBuyingAuthority:
       record.local_buying_authority != null && String(record.local_buying_authority).trim() !== ''
@@ -751,7 +746,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     corporateNoLocalAuthority: String(record.local_buying_authority || '') === 'no'
       && String(record.ownership_type || '') === 'corporate',
     identityUnresolved: companyResolution === 'unresolvable',
-    suppressed: Boolean(record.suppressed),
+    suppressed: isAffirmativeFlag(record.suppressed, { failClosed: true }),
   });
 
   let lifecycle_stage = String(record.lifecycle_stage || 'cold') as LifecycleStage;
@@ -1017,7 +1012,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       }
       const reentry = evaluateReentry({
         campaigns_in_last_12_months: num(record.campaigns_in_last_12_months, 0) ?? 0,
-        suppressed: Boolean(record.suppressed),
+        suppressed: isAffirmativeFlag(record.suppressed, { failClosed: true }),
         still_eligible: eligibility.outcome === 'eligible' || eligibility.outcome === 'active',
         contactPolicy,
       });
@@ -1036,7 +1031,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     sequence_state: next_action?.sequence_state || sequence_state,
     work_state,
     next_action,
-    suppressed: Boolean(record.suppressed),
+    suppressed: isAffirmativeFlag(record.suppressed, { failClosed: true }),
     treatment_tier: treatment.treatment_tier,
     active_contact_id: activeFromPlan,
   };
@@ -1090,7 +1085,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const mailTreatmentAllows = treatment.mail_treatment !== 'none';
   const readiness = evaluateOutboundReadiness({
     eligible: eligibility.outcome === 'eligible' || eligibility.outcome === 'active',
-    suppressed: Boolean(record.suppressed),
+    suppressed: isAffirmativeFlag(record.suppressed, { failClosed: true }),
     identityConfidence,
     materialContradiction: Boolean(record.material_contradiction) || contradictions.length > 0,
     treatmentTier: treatment.treatment_tier,
@@ -1524,7 +1519,7 @@ export function readinessInputFromRecord(input: {
   const eligible = eligibilityOutcome
     ? (eligibilityOutcome === 'eligible' || eligibilityOutcome === 'active')
     : (isBusiness
-      && !record.suppressed
+      && !isAffirmativeFlag(record.suppressed, { failClosed: true })
       && companyResolution !== 'unresolvable');
 
   const treatmentTier = String(record.treatment_tier || '');
@@ -1558,7 +1553,7 @@ export function readinessInputFromRecord(input: {
 
   return {
     eligible,
-    suppressed: Boolean(record.suppressed),
+    suppressed: isAffirmativeFlag(record.suppressed, { failClosed: true }),
     identityConfidence,
     materialContradiction: Boolean(record.material_contradiction),
     treatmentTier,

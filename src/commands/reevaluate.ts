@@ -11,6 +11,7 @@ import {
 import { findNearDuplicateMatch, findNearDuplicatePairs } from '../orchestrator/sourcing/near-duplicate.js';
 import { ensureRecordColumns, listFieldOverridesForRecord, openListDb } from '../orchestrator/runtime/db.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
+import { isAffirmativeFlag } from '../orchestrator/policy/booleanish.js';
 
 const REEVALUATION_AREAS = ['provenance', 'confidences', 'near_duplicates'] as const;
 
@@ -61,7 +62,7 @@ const terminalRecord = (record: Record<string, unknown>): boolean => {
   const lifecycle = text(record.lifecycle_stage).toLowerCase();
   const sequence = text(record.sequence_status).toLowerCase();
   const accountSequence = text(record.account_sequence_state).toLowerCase();
-  return Boolean(record.suppressed)
+  return isAffirmativeFlag(record.suppressed, { failClosed: true })
     || ['won', 'lost', 'disqualified'].includes(lifecycle)
     || ['completed', 'cancelled', 'opted_out', 'bounced'].includes(sequence)
     || ['completed', 'cancelled'].includes(accountSequence);

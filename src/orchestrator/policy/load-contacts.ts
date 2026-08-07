@@ -13,6 +13,7 @@ import {
   type ContactDisposition,
 } from './contact-campaign.js';
 import { deriveContactFirstName } from './contact-name.js';
+import { isAffirmativeFlag } from './booleanish.js';
 
 export type ContactRow = {
   contact_id?: string;
@@ -53,13 +54,6 @@ const DISPOSITIONS = new Set<ContactDisposition>([
   'unresolved',
 ]);
 
-const truthyFlag = (value: unknown): boolean => {
-  if (value === true || value === 1) return true;
-  if (value === false || value === 0 || value == null || value === '') return false;
-  const s = String(value).trim().toLowerCase();
-  return s === '1' || s === 'true' || s === 'yes';
-};
-
 /**
  * Derive outbound disposition from a contacts-table row.
  *
@@ -86,9 +80,9 @@ export function dispositionFromContactRow(contact: ContactRow | null | undefined
   const linkedin = String(contact.linkedin_url || '').trim();
   const name = String(contact.full_name || contact.name || '').trim();
   const contactId = String(contact.contact_id || contact.id || '').trim();
-  const dneEmail = truthyFlag(contact.dne_email);
-  const dncPhone = truthyFlag(contact.dnc_phone);
-  const dnePhone = truthyFlag(contact.dne_phone);
+  const dneEmail = isAffirmativeFlag(contact.dne_email, { failClosed: true });
+  const dncPhone = isAffirmativeFlag(contact.dnc_phone, { failClosed: true });
+  const dnePhone = isAffirmativeFlag(contact.dne_phone, { failClosed: true });
 
   // Role-based routers never enter the named outreach queue.
   const role = String(contact.role || '').trim().toLowerCase();

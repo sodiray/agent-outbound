@@ -29,6 +29,7 @@ import {
   type PhoneConfidenceConfig,
   type PhoneConfidenceConfigInput,
 } from '../../schemas/config.js';
+import { isAffirmativeFlag } from './booleanish.js';
 
 export const EVIDENCE_CONTRACT_VERSION = 'tv-evidence-v1';
 
@@ -223,12 +224,6 @@ export const deriveIdentityConfidence = (
   return Math.max(0, Math.min(100, supportedScore - penalty));
 };
 
-const truthyFlag = (value: unknown): boolean => {
-  if (value === true || value === 1) return true;
-  if (value === false || value === 0 || value == null || value === '') return false;
-  return ['1', 'true', 'yes'].includes(String(value).trim().toLowerCase());
-};
-
 const phoneIsWellFormed = (value: unknown): boolean => {
   const phone = text(value);
   if (!phone || !/^\+?[\d().\-\s]+$/u.test(phone)) return false;
@@ -247,7 +242,10 @@ export const derivePhoneConfidence = (
 ): number => {
   const phone = text(record.phone) || text(record.contact_phone);
   if (!phone) return 0;
-  if (truthyFlag(record.dne_phone) || truthyFlag(record.phone_suppressed)) return 0;
+  if (
+    isAffirmativeFlag(record.dne_phone, { failClosed: true })
+    || isAffirmativeFlag(record.phone_suppressed, { failClosed: true })
+  ) return 0;
 
   const policy: PhoneConfidenceConfig = {
     weights: {
@@ -280,9 +278,9 @@ const confirmedAffiliation = (value: unknown): boolean => (
   ['confirmed', 'likely'].includes(text(value).toLowerCase())
 );
 
-const affirmative = (value: unknown): boolean => (
-  ['1', 'true', 'yes', 'confirmed', 'verified'].includes(text(value).toLowerCase())
-);
+const affirmative = (value: unknown): boolean => isAffirmativeFlag(value, {
+  affirmativeAliases: ['confirmed', 'verified'],
+});
 
 const verifiedEmailStatus = (value: unknown): boolean => (
   ['valid', 'verified', 'deliverable'].includes(text(value).toLowerCase())

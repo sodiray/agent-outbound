@@ -15,6 +15,7 @@ import {
   getSourcingLogPath,
 } from './paths.js';
 import { deriveContactFirstName } from '../policy/contact-name.js';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 const require = createRequire(import.meta.url);
 
@@ -1704,7 +1705,7 @@ export const inPlayWhere = (alias = '') => {
   const prefix = String(alias || '').trim();
   const disqualifiedCol = prefix ? `${prefix}.disqualified_at` : 'disqualified_at';
   const suppressedCol = prefix ? `${prefix}.suppressed` : 'suppressed';
-  return `((${disqualifiedCol} IS NULL OR ${disqualifiedCol} = '') AND (${suppressedCol} IS NULL OR ${suppressedCol} = 0))`;
+  return `((${disqualifiedCol} IS NULL OR ${disqualifiedCol} = '') AND lower(trim(CAST(COALESCE(${suppressedCol}, 0) AS TEXT))) IN ('', '0', 'false', 'no', 'off'))`;
 };
 
 const getTableColumns = (db, table) => {
@@ -1724,6 +1725,36 @@ const isDynamicRecordValue = (value) => (
     || typeof value === 'number'
     || typeof value === 'boolean'
     || typeof value === 'bigint'
+);
+
+const SUPPRESSION_FLAG_FIELDS = new Set([
+  'suppressed',
+  'phone_suppressed',
+  'dne_phone',
+  'dne_email',
+  'dnc_phone',
+  'dnk_visit',
+  'do_not_sms',
+  'email_suppressed',
+  'mail_suppressed',
+]);
+
+const BOOLEANISH_RECORD_FIELDS = new Set([
+  ...SUPPRESSION_FLAG_FIELDS,
+  'email_opted_out',
+  'opted_out_email',
+  'email_bounced',
+  'linkedin_connected',
+]);
+
+const normalizeBooleanishRecordFields = (row) => Object.fromEntries(
+  Object.entries(row).map(([field, value]) => {
+    const isSuppressionFlag = SUPPRESSION_FLAG_FIELDS.has(field);
+    const isBooleanishFlag = BOOLEANISH_RECORD_FIELDS.has(field);
+    const isReadinessFlag = field.endsWith('_validated') || field.endsWith('_ready');
+    if (!isBooleanishFlag && !isReadinessFlag) return [field, value];
+    return [field, Number(isAffirmativeFlag(value, { failClosed: isSuppressionFlag }))];
+  }),
 );
 
 const PRIMARY_CONTACT_PROJECTION_FIELDS = new Set([
@@ -1761,7 +1792,11 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     FROM records
     WHERE _row_id = ? OR id = ?
   `).get(rowId, rowId);
-  const row = withFieldOverrides({ db, recordId: String(current?._row_id || rowId), row: inputRow });
+  const row = normalizeBooleanishRecordFields(withFieldOverrides({
+    db,
+    recordId: String(current?._row_id || rowId),
+    row: inputRow,
+  }));
   const timestamp = nowIso();
 
   // Prefer _row_id existence: many records leave legacy `id` empty.
@@ -1846,11 +1881,11 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       disqualified_gate: row.disqualified_gate || '',
       disqualify_reason: row.disqualify_reason || '',
       workflow_signals: typeof row.workflow_signals === 'string' ? row.workflow_signals : safeJson(row.workflow_signals),
-      suppressed: row.suppressed ? 1 : 0,
-      do_not_sms: row.do_not_sms ? 1 : 0,
-      dne_email: row.dne_email ? 1 : 0,
-      dnc_phone: row.dnc_phone ? 1 : 0,
-      dnk_visit: row.dnk_visit ? 1 : 0,
+      suppressed: Number(isAffirmativeFlag(row.suppressed, { failClosed: true })),
+      do_not_sms: Number(isAffirmativeFlag(row.do_not_sms, { failClosed: true })),
+      dne_email: Number(isAffirmativeFlag(row.dne_email, { failClosed: true })),
+      dnc_phone: Number(isAffirmativeFlag(row.dnc_phone, { failClosed: true })),
+      dnk_visit: Number(isAffirmativeFlag(row.dnk_visit, { failClosed: true })),
       is_franchise: row.is_franchise ? 1 : 0,
       extra_json: typeof row.extra_json === 'string' ? row.extra_json : safeJson(row.extra_json),
       _row_id_current: current._row_id || current.id,
@@ -2026,13 +2061,13 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     visit_route_position: Number(row.visit_route_position || 0),
     sms_last_message_id: row.sms_last_message_id || '',
     call_last_disposition: row.call_last_disposition || '',
-    suppressed: row.suppressed ? 1 : 0,
+    suppressed: Number(isAffirmativeFlag(row.suppressed, { failClosed: true })),
     suppressed_reason: row.suppressed_reason || '',
     suppressed_at: row.suppressed_at || '',
-    do_not_sms: row.do_not_sms ? 1 : 0,
-    dne_email: row.dne_email ? 1 : 0,
-    dnc_phone: row.dnc_phone ? 1 : 0,
-    dnk_visit: row.dnk_visit ? 1 : 0,
+    do_not_sms: Number(isAffirmativeFlag(row.do_not_sms, { failClosed: true })),
+    dne_email: Number(isAffirmativeFlag(row.dne_email, { failClosed: true })),
+    dnc_phone: Number(isAffirmativeFlag(row.dnc_phone, { failClosed: true })),
+    dnk_visit: Number(isAffirmativeFlag(row.dnk_visit, { failClosed: true })),
     crm_company_id: row.crm_company_id || '',
     crm_person_id: row.crm_person_id || '',
     crm_deal_id: row.crm_deal_id || '',
@@ -2926,8 +2961,12 @@ export const upsertContact = ({ db, contact }) => {
       email_verification_status: String(contact?.email_verification_status ?? existing?.email_verification_status ?? ''),
       email_verification_confidence: Number(contact?.email_verification_confidence ?? existing?.email_verification_confidence ?? 0),
       email_verified_at: String(contact?.email_verified_at ?? existing?.email_verified_at ?? ''),
-      dne_email: contact?.dne_email === undefined ? Number(Boolean(existing?.dne_email)) : Number(Boolean(contact.dne_email)),
-      dnc_phone: contact?.dnc_phone === undefined ? Number(Boolean(existing?.dnc_phone)) : Number(Boolean(contact.dnc_phone)),
+      dne_email: contact?.dne_email === undefined
+        ? Number(isAffirmativeFlag(existing?.dne_email, { failClosed: true }))
+        : Number(isAffirmativeFlag(contact.dne_email, { failClosed: true })),
+      dnc_phone: contact?.dnc_phone === undefined
+        ? Number(isAffirmativeFlag(existing?.dnc_phone, { failClosed: true }))
+        : Number(isAffirmativeFlag(contact.dnc_phone, { failClosed: true })),
       crm_person_id: String(contact?.crm_person_id ?? existing?.crm_person_id ?? ''),
       created_at: existing?.created_at || now,
       updated_at: now,
