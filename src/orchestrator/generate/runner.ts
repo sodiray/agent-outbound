@@ -119,6 +119,14 @@ const objectValue = (value: unknown): Record<string, unknown> => (
     : {}
 );
 
+const outputsFromAsset = (asset: Asset | null): Record<string, unknown> => {
+  try {
+    return objectValue(JSON.parse(String(asset?.outputs_json || '{}')));
+  } catch {
+    return {};
+  }
+};
+
 const valueSignalsReference = (value: unknown): boolean | null => {
   const record = objectValue(value);
   if (Object.keys(record).length === 0) return null;
@@ -352,6 +360,7 @@ export const runGenerateStep = async ({
 
     const whenOutcome = shouldRunForRecord({ record: currentRecord, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) {
+      summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
       summary.skipped_when += 1;
       summary.record_ids.push(recordId);
       emit({ logger, event: { event: 'row_skipped', phase: 'generate', step: id, row: rowLabel, reason: String(whenOutcome.reason || 'when_not_matched') } });
@@ -359,6 +368,10 @@ export const runGenerateStep = async ({
     }
 
     if (isLockedAsset(existing)) {
+      summary.declared_output_writes[recordId] = declaredOutputWritesFor({
+        stepConfig,
+        outputs: outputsFromAsset(existing),
+      });
       summary.skipped_locked += 1;
       return;
     }
@@ -366,6 +379,7 @@ export const runGenerateStep = async ({
     if (stepConfig.requires_evidence === true && !businessEvidenceIsAvailable(currentRecord)) {
       const reason = 'needs_discovery: no_business_evidence';
       const emptyOutputs = emptyOutputsFor(outputZod);
+      summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: emptyOutputs });
       ensureRecordColumns({
         db,
         columns: [...Object.keys(emptyOutputs), { name: 'score_status', type: 'TEXT' }],
@@ -398,6 +412,10 @@ export const runGenerateStep = async ({
     const depHash = enrichDepHash(stepConfig, depValues);
     const cached = readStaleness({ db, recordId, stepId: id });
     if (existing && isEnrichFresh({ cached, stepConfig, depValues, force })) {
+      summary.declared_output_writes[recordId] = declaredOutputWritesFor({
+        stepConfig,
+        outputs: outputsFromAsset(existing),
+      });
       summary.skipped_fresh += 1;
       return;
     }
@@ -425,6 +443,8 @@ export const runGenerateStep = async ({
       // Expensive generate steps skip the provider when over ceiling.
       if (isEnrichmentCeilingSkip(executionResult)) {
         const detail = String(executionResult.skip_detail || 'enrichment_ceiling');
+        const emptyOutputs = emptyOutputsFor(outputZod);
+        summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: emptyOutputs });
         const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId)
           || inputRecord
           || record;
@@ -443,7 +463,7 @@ export const runGenerateStep = async ({
           stepId: id,
           label: String(stepConfig.label || ''),
           result: '',
-          outputsJson: stringifyJson(emptyOutputsFor(outputZod)),
+          outputsJson: stringifyJson(emptyOutputs),
           isReference: false,
           status: 'skipped',
           reason: detail,
@@ -478,6 +498,7 @@ export const runGenerateStep = async ({
       })();
       if (Object.prototype.hasOwnProperty.call(parsedOutputs, '__parse_error')) {
         const detail = `Declared output parsing failed; stored raw result with empty structured outputs. ${String(parsedOutputs.__parse_error || '')}`.trim();
+        summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
         const isReference = isReferenceResult({ toolDriven, resultText: result, executionResult });
         const referenceAsset = assetResultForReference({
           isReference,
@@ -574,6 +595,7 @@ export const runGenerateStep = async ({
       if (isBudgetExceededError(error)) throw error;
       const detail = formatErrorMessage(error);
       if (onErrorEmpty) {
+        summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
         persistAsset({
           db,
           existing,

@@ -12,9 +12,11 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import {
+  enrichDepHash,
   markScoringStale,
   evidencePatchIsMaterialRetrieval,
   scoringStaleRecordPatch,
+  writeStaleness,
 } from '../dist/orchestrator/enrichment/runner.js';
 import {
   buildEnrichEvidencePatch,
@@ -22,6 +24,7 @@ import {
 import {
   openListDb,
   ensureRecordColumns,
+  insertAsset,
 } from '../dist/orchestrator/runtime/db.js';
 import {
   declaredOutputWriteFailures,
@@ -173,6 +176,91 @@ test('declared-output guard permits an explicitly blank generated output and sti
   } finally {
     if (fixtureBefore === undefined) delete process.env.AO_PIPELINE_FIXTURE;
     else process.env.AO_PIPELINE_FIXTURE = fixtureBefore;
+    db.close();
+  }
+});
+
+test('fresh generate assets carry write metadata through the live batch guard', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-fresh-generate-output-'));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const diagnosticStep = {
+    id: 'diagnostic_content_pack',
+    kind: 'generate',
+    outputs: {
+      proof_match_ids: { type: 'string' },
+      preliminary_snapshot: { type: 'string' },
+    },
+  };
+  const intelligenceStep = {
+    id: 'account_intelligence',
+    kind: 'generate',
+    outputs: {
+      classification_confidence: { type: 'number' },
+    },
+  };
+  try {
+    ensureRecordColumns({ db, columns: ['proof_match_ids', 'preliminary_snapshot', 'classification_confidence'] });
+    db.prepare(`
+      INSERT INTO records (
+        _row_id, business_name, proof_match_ids, preliminary_snapshot, classification_confidence,
+        sequence_name, sequence_status, _created_at, _updated_at, created_at, updated_at
+      ) VALUES
+        ('fresh_diagnostic', 'Fresh diagnostic', '', 'No approved proof matches.', NULL, 'default', 'idle', ?, ?, ?, ?),
+        ('fresh_intelligence', 'Fresh intelligence', '', '', NULL, 'default', 'idle', ?, ?, ?, ?)
+    `).run(now, now, now, now, now, now, now, now);
+
+    insertAsset({
+      db,
+      rowId: 'fresh_diagnostic',
+      stepId: diagnosticStep.id,
+      outputsJson: JSON.stringify({ preliminary_snapshot: 'No approved proof matches.' }),
+    });
+    insertAsset({
+      db,
+      rowId: 'fresh_intelligence',
+      stepId: intelligenceStep.id,
+      outputsJson: JSON.stringify({ classification_confidence: 82 }),
+    });
+    writeStaleness({
+      db,
+      recordId: 'fresh_diagnostic',
+      stepId: diagnosticStep.id,
+      depHash: enrichDepHash(diagnosticStep),
+      cacheTtlSeconds: 0,
+      cacheTtl: '',
+    });
+    writeStaleness({
+      db,
+      recordId: 'fresh_intelligence',
+      stepId: intelligenceStep.id,
+      depHash: enrichDepHash(intelligenceStep),
+      cacheTtlSeconds: 0,
+      cacheTtl: '',
+    });
+
+    const context = { db, listDir, config: { ai: {} }, aiConfig: {}, mcp: null, toolCatalog: null };
+    const diagnosticRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fresh_diagnostic');
+    const diagnosticOutcome = (await executeStepBatch(
+      context,
+      diagnosticStep,
+      diagnosticStep.id,
+      [diagnosticRecord],
+    )).get('fresh_diagnostic');
+    assert.equal(diagnosticOutcome?.passed, true);
+    assert.equal(diagnosticOutcome?.errored, undefined);
+
+    const intelligenceRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fresh_intelligence');
+    const intelligenceOutcome = (await executeStepBatch(
+      context,
+      intelligenceStep,
+      intelligenceStep.id,
+      [intelligenceRecord],
+    )).get('fresh_intelligence');
+    assert.equal(intelligenceOutcome?.passed, false);
+    assert.equal(intelligenceOutcome?.errored, true);
+    assert.equal(intelligenceOutcome?.reason, 'declared_outputs_unwritten:classification_confidence');
+  } finally {
     db.close();
   }
 });
