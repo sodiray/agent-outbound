@@ -28,9 +28,86 @@ import {
   assertActionTarget,
   parseAccountCampaignFromRecord,
 } from '../dist/orchestrator/policy/contact-campaign.js';
-import { openListDb, ensureRecordColumns, projectContactOntoRecord } from '../dist/orchestrator/runtime/db.js';
+import {
+  openListDb,
+  ensureRecordColumns,
+  projectContactOntoRecord,
+  syncPrimaryContactProjection,
+} from '../dist/orchestrator/runtime/db.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../dist/orchestrator/policy/lifecycle.js';
+
+const openProjectionDb = () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-contact-projection-'));
+  writeFileSync(join(listDir, 'outbound.yaml'), `
+list:
+  name: Contact Projection
+business:
+  name: Mission
+  description: Test
+  icp: Test
+  offer: Test
+pipeline: []
+sequences:
+  default:
+    steps: []
+policy:
+  version: tv-pipeline-v1
+`);
+  writeFileSync(join(listDir, 'operator.md'), 'test');
+  writeFileSync(join(listDir, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const db = openListDb({ listDir, readonly: false });
+  ensureRecordColumns({
+    db,
+    columns: ['active_contact_id', 'account_contact_plan_json'],
+  });
+  return db;
+};
+
+const insertProjectionRecord = ({ db, rowId, plan = null }) => {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO records (
+      _row_id, business_name, active_contact_id, account_contact_plan_json,
+      _created_at, _updated_at, created_at, updated_at
+    ) VALUES (?, 'Projection HVAC', '', ?, ?, ?, ?, ?)
+  `).run(rowId, plan ? JSON.stringify(plan) : '', now, now, now, now);
+};
+
+const insertProjectionContact = ({
+  db,
+  rowId,
+  contactId,
+  name,
+  title,
+  email,
+  primary = 0,
+  dneEmail = 0,
+  dncPhone = 0,
+  linkedinSuppressed = 0,
+}) => {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO contacts (
+      contact_id, id, row_id, name, full_name, title, email, is_primary,
+      dne_email, dnc_phone, linkedin_suppressed, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    contactId,
+    contactId,
+    rowId,
+    name,
+    name,
+    title,
+    email,
+    primary,
+    dneEmail,
+    dncPhone,
+    linkedinSuppressed,
+    now,
+    now,
+  );
+};
 
 // --- Pure: hydrateActiveContactOntoRecord ----------------------------------
 
@@ -481,6 +558,165 @@ test('mapContactRowsToCampaignContacts: disposition from table, not always eligi
   assert.deepEqual(plan.held_contact_ids, []);
   assert.deepEqual(plan.routing_contact_ids, ['c_route']);
   assert.deepEqual(plan.excluded_contact_ids, ['c_block']);
+});
+
+test('contact selection: suppressed primary is skipped for the next eligible contact', () => {
+  const mapped = mapContactRowsToCampaignContacts([
+    {
+      contact_id: 'c_suppressed_primary',
+      name: 'Suppressed Primary',
+      email: 'primary@example.test',
+      is_primary: 1,
+      dne_email: 1,
+    },
+    {
+      contact_id: 'c_eligible',
+      name: 'Eligible Contact',
+      email: 'eligible@example.test',
+      is_primary: 0,
+    },
+  ]);
+  const plan = buildContactPlan({
+    account_id: 'selection_primary',
+    campaign_id: 'camp_selection_primary',
+    treatment_tier: 'B',
+    contacts: mapped,
+  });
+
+  assert.equal(mapped[0].outbound_disposition, 'excluded');
+  assert.equal(plan.active_contact_id, 'c_eligible');
+  assert.deepEqual(plan.held_contact_ids, []);
+});
+
+test('contact selection: suppression beats primary preference and seniority projection', () => {
+  const db = openProjectionDb();
+  const rowId = 'selection_seniority';
+  insertProjectionRecord({ db, rowId });
+  insertProjectionContact({
+    db,
+    rowId,
+    contactId: 'c_owner_suppressed',
+    name: 'Suppressed Owner',
+    title: 'Owner',
+    email: 'owner@example.test',
+    primary: 1,
+    dneEmail: 1,
+  });
+  insertProjectionContact({
+    db,
+    rowId,
+    contactId: 'c_manager_eligible',
+    name: 'Eligible Manager',
+    title: 'Service Manager',
+    email: 'manager@example.test',
+  });
+
+  syncPrimaryContactProjection({ db, recordId: rowId });
+  const record = db.prepare(
+    'SELECT contact_name, contact_email FROM records WHERE _row_id = ?',
+  ).get(rowId);
+  const contacts = db.prepare(
+    'SELECT contact_id, is_primary FROM contacts WHERE row_id = ? ORDER BY contact_id',
+  ).all(rowId);
+
+  assert.deepEqual(record, {
+    contact_name: 'Eligible Manager',
+    contact_email: 'manager@example.test',
+  });
+  assert.deepEqual(contacts, [
+    { contact_id: 'c_manager_eligible', is_primary: 1 },
+    { contact_id: 'c_owner_suppressed', is_primary: 0 },
+  ]);
+  db.close();
+});
+
+test('contact selection: all suppressed contacts leave no active target', () => {
+  const mapped = mapContactRowsToCampaignContacts([
+    { contact_id: 'c_email', name: 'Email Suppressed', email: 'email@example.test', dne_email: 1 },
+    { contact_id: 'c_phone', name: 'Phone Suppressed', phone: '555-0100', dnc_phone: 1 },
+    { contact_id: 'c_linkedin', name: 'LinkedIn Suppressed', linkedin_url: 'https://linkedin.com/in/suppressed', linkedin_suppressed: 1 },
+  ]);
+  const plan = buildContactPlan({
+    account_id: 'selection_all_suppressed',
+    campaign_id: 'camp_selection_all_suppressed',
+    treatment_tier: 'B',
+    contacts: mapped,
+  });
+
+  assert.deepEqual(mapped.map((contact) => contact.outbound_disposition), ['excluded', 'excluded', 'excluded']);
+  assert.equal(plan.active_contact_id, null);
+  assert.deepEqual(plan.held_contact_ids, []);
+});
+
+test('contact selection: campaign plan and record projection agree after selection', () => {
+  const rowId = 'selection_projection';
+  const plan = buildContactPlan({
+    account_id: rowId,
+    campaign_id: 'camp_selection_projection',
+    treatment_tier: 'B',
+    contacts: [
+      { contact_id: 'c_jeremy', outbound_disposition: 'eligible_target', outreach_rank: 1 },
+      { contact_id: 'c_randy', outbound_disposition: 'eligible_target', outreach_rank: 2 },
+    ],
+  });
+  const db = openProjectionDb();
+  insertProjectionRecord({ db, rowId, plan });
+  insertProjectionContact({
+    db,
+    rowId,
+    contactId: 'c_andy_suppressed',
+    name: 'Andy Suppressed',
+    title: 'Owner',
+    email: 'andy@example.test',
+    primary: 1,
+    dneEmail: 1,
+  });
+  insertProjectionContact({
+    db,
+    rowId,
+    contactId: 'c_jeremy',
+    name: 'Jeremy Pearson',
+    title: 'Service Manager',
+    email: 'jeremy@example.test',
+  });
+  insertProjectionContact({
+    db,
+    rowId,
+    contactId: 'c_randy',
+    name: 'Randy Thomas',
+    title: 'Operations Manager',
+    email: 'randy@example.test',
+  });
+
+  syncPrimaryContactProjection({ db, recordId: rowId });
+  const record = db.prepare(
+    'SELECT active_contact_id, contact_name, contact_email, account_contact_plan_json FROM records WHERE _row_id = ?',
+  ).get(rowId);
+  const storedPlan = parseAccountCampaignFromRecord(record);
+
+  assert.equal(storedPlan.active_contact_id, 'c_jeremy');
+  assert.equal(record.active_contact_id, 'c_jeremy');
+  assert.equal(record.contact_name, 'Jeremy Pearson');
+  assert.equal(record.contact_email, 'jeremy@example.test');
+  db.close();
+});
+
+test('contact selection: each channel suppression skips only the suppressed contact', () => {
+  const mapped = mapContactRowsToCampaignContacts([
+    { contact_id: 'c_email', name: 'Email Suppressed', email: 'email@example.test', dne_email: 1 },
+    { contact_id: 'c_phone', name: 'Phone Suppressed', phone: '555-0100', dnc_phone: 1 },
+    { contact_id: 'c_linkedin', name: 'LinkedIn Suppressed', linkedin_url: 'https://linkedin.com/in/suppressed', linkedin_suppressed: 1 },
+    { contact_id: 'c_eligible', name: 'Eligible Contact', email: 'eligible@example.test' },
+  ]);
+  const plan = buildContactPlan({
+    account_id: 'selection_channel_suppression',
+    campaign_id: 'camp_selection_channel_suppression',
+    treatment_tier: 'B',
+    contacts: mapped,
+  });
+
+  assert.deepEqual(plan.excluded_contact_ids, ['c_email', 'c_phone', 'c_linkedin']);
+  assert.equal(plan.active_contact_id, 'c_eligible');
 });
 
 test('resolveActiveContactEmailForSend: contacts table blank does not soft-pass email_primary', () => {

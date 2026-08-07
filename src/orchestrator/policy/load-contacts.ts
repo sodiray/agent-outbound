@@ -33,6 +33,8 @@ export type ContactRow = {
   email_verified_at?: string;
   /** Structural phone invalidation (wrong number) — not full-account DNC. */
   dne_phone?: number | boolean;
+  /** Per-contact LinkedIn opt-out / suppression. */
+  linkedin_suppressed?: number | boolean;
   /** Optional persisted disposition from contacts table / enrichment. */
   outbound_disposition?: string;
   suppression_state?: string | null;
@@ -83,6 +85,7 @@ export function dispositionFromContactRow(contact: ContactRow | null | undefined
   const dneEmail = isAffirmativeFlag(contact.dne_email, { failClosed: true });
   const dncPhone = isAffirmativeFlag(contact.dnc_phone, { failClosed: true });
   const dnePhone = isAffirmativeFlag(contact.dne_phone, { failClosed: true });
+  const linkedinSuppressed = isAffirmativeFlag(contact.linkedin_suppressed, { failClosed: true });
 
   // Role-based routers never enter the named outreach queue.
   const role = String(contact.role || '').trim().toLowerCase();
@@ -95,8 +98,11 @@ export function dispositionFromContactRow(contact: ContactRow | null | undefined
     return 'routing_only';
   }
 
-  // Fully suppressed on every named channel we track → excluded.
-  if (dneEmail && (dncPhone || dnePhone) && !linkedin) {
+  // The campaign plan has one active person. A channel-suppressed person must
+  // not become that active target through primary preference or seniority: a
+  // later projection would otherwise close that channel while eligible peers
+  // remain untried. Channel execution independently keeps its own gates.
+  if (dneEmail || dncPhone || dnePhone || linkedinSuppressed) {
     return 'excluded';
   }
 
@@ -108,7 +114,7 @@ export function dispositionFromContactRow(contact: ContactRow | null | undefined
   // No usable outreach channel left (email blocked + no phone/linkedin, or empty).
   const emailUsable = Boolean(email) && !dneEmail;
   const phoneUsable = Boolean(phone) && !dncPhone && !dnePhone;
-  const linkedinUsable = Boolean(linkedin);
+  const linkedinUsable = Boolean(linkedin) && !linkedinSuppressed;
   if (!emailUsable && !phoneUsable && !linkedinUsable) {
     // Keep a named person with blocked channels as excluded (not eligible).
     if (name || contactId) return 'excluded';
@@ -152,7 +158,7 @@ export function loadCampaignContactsFromDb(
   try {
     const contacts = db.prepare(`
       SELECT contact_id, id, name, full_name, title, email, phone, linkedin_url,
-             role, is_primary, dne_email, dnc_phone, dne_phone
+             role, is_primary, dne_email, dnc_phone, dne_phone, linkedin_suppressed
       FROM contacts WHERE row_id = ?
       ORDER BY is_primary DESC, created_at ASC, contact_id ASC
     `).all(id);

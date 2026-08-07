@@ -16,6 +16,7 @@ import {
 } from './paths.js';
 import { deriveContactFirstName } from '../policy/contact-name.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
+import { parseAccountCampaignFromRecord } from '../policy/contact-campaign.js';
 
 const require = createRequire(import.meta.url);
 
@@ -208,6 +209,8 @@ const SCHEMA_SQL = `
     email_verified_at TEXT DEFAULT '',
     dne_email INTEGER DEFAULT 0,
     dnc_phone INTEGER DEFAULT 0,
+    dne_phone INTEGER DEFAULT 0,
+    linkedin_suppressed INTEGER DEFAULT 0,
     crm_person_id TEXT DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -1096,6 +1099,8 @@ const ensureContactCompatibility = (db) => {
   try { db.exec("ALTER TABLE contacts ADD COLUMN source_query TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE contacts ADD COLUMN sourced_at TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE contacts ADD COLUMN confidence REAL DEFAULT 0"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN dne_phone INTEGER DEFAULT 0"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN linkedin_suppressed INTEGER DEFAULT 0"); } catch {}
 
   db.transaction(() => {
     db.exec('DROP INDEX IF EXISTS idx_contacts_row_email');
@@ -1891,6 +1896,12 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       _row_id_current: current._row_id || current.id,
       updated_at: timestamp,
     });
+    // account_contact_plan_json owns the record-level recipient. Rehydrate it
+    // whenever that plan is written because upsertRecord intentionally locks
+    // contact_* projection fields against arbitrary pipeline outputs.
+    if (row.account_contact_plan_json !== undefined) {
+      syncPrimaryContactProjectionInternal({ db, recordId: String(current._row_id || current.id || rowId) });
+    }
     return;
   }
 
@@ -2692,9 +2703,26 @@ const stablePrimaryContactKey = (contact) => [
   String(contact?.linkedin_urn || '').trim(),
 ].join('\u0000');
 
+const contactIsSuppressedForProjection = (contact) => (
+  isAffirmativeFlag(contact?.dne_email, { failClosed: true })
+  || isAffirmativeFlag(contact?.dnc_phone, { failClosed: true })
+  || isAffirmativeFlag(contact?.dne_phone, { failClosed: true })
+  || isAffirmativeFlag(contact?.linkedin_suppressed, { failClosed: true })
+  || (String(contact?.suppression_state || '').trim().toLowerCase() !== ''
+    && String(contact?.suppression_state || '').trim().toLowerCase() !== 'none')
+);
+
+const contactByIdForRecord = ({ db, recordId, contactId }) => db.prepare(`
+  SELECT rowid AS contact_rowid, *
+  FROM contacts
+  WHERE row_id = ? AND (contact_id = ? OR id = ?)
+  ORDER BY CASE WHEN contact_id = ? THEN 0 ELSE 1 END
+  LIMIT 1
+`).get(recordId, contactId, contactId, contactId) || null;
+
 const primaryContactForRecord = ({ db, recordId }) => {
   const contacts = db.prepare('SELECT rowid AS contact_rowid, * FROM contacts WHERE row_id = ? ORDER BY rowid ASC').all(recordId);
-  return [...contacts].sort((left, right) => {
+  return contacts.filter((contact) => !contactIsSuppressedForProjection(contact)).sort((left, right) => {
     const seniorityDifference = contactSeniorityRank(right) - contactSeniorityRank(left);
     if (seniorityDifference !== 0) return seniorityDifference;
     const emailDifference = Number(Boolean(String(right?.email || '').trim()))
@@ -2711,7 +2739,22 @@ const primaryContactForRecord = ({ db, recordId }) => {
 const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
   const normalizedRecordId = String(recordId || '').trim();
   if (!normalizedRecordId) return null;
-  const primaryContact = primaryContactForRecord({ db, recordId: normalizedRecordId });
+  const campaignRecordColumns = new Set(
+    db.prepare('PRAGMA table_info(records)').all().map((row) => String(row.name || '')),
+  );
+  const record = campaignRecordColumns.has('account_contact_plan_json')
+    ? db.prepare(`
+      SELECT account_contact_plan_json
+      FROM records WHERE _row_id = ?
+    `).get(normalizedRecordId)
+    : null;
+  const campaign = record ? parseAccountCampaignFromRecord(record) : null;
+  const plannedContactId = String(campaign?.active_contact_id || '').trim();
+  const primaryContact = campaign
+    ? (plannedContactId
+      ? contactByIdForRecord({ db, recordId: normalizedRecordId, contactId: plannedContactId })
+      : null)
+    : primaryContactForRecord({ db, recordId: normalizedRecordId });
   db.prepare(`
     UPDATE contacts
     SET is_primary = CASE WHEN contact_id = ? THEN 1 ELSE 0 END
@@ -2742,6 +2785,10 @@ const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
     linkedin_confidence: primaryContact?.linkedin_url
       ? Math.max(0, Math.min(100, Number(primaryContact?.confidence || 0)))
       : 0,
+    ...(campaign ? {
+      active_contact_id: plannedContactId,
+      contact_id: plannedContactId,
+    } : {}),
   };
   const writableProjection = Object.entries(projection)
     .filter(([column]) => recordColumns.has(column));
@@ -2908,13 +2955,15 @@ export const upsertContact = ({ db, contact }) => {
         contact_id, id, row_id, name, full_name, first_name, last_name, title, seniority,
         email, phone, linkedin_url, linkedin_urn, role, is_primary, source, source_query,
         sourced_at, confidence, email_verification_status, email_verification_confidence,
-        email_verified_at, dne_email, dnc_phone, crm_person_id, created_at, updated_at
+        email_verified_at, dne_email, dnc_phone, dne_phone, linkedin_suppressed,
+        crm_person_id, created_at, updated_at
       )
       VALUES (
         @contact_id, @id, @row_id, @name, @full_name, @first_name, @last_name, @title, @seniority,
         @email, @phone, @linkedin_url, @linkedin_urn, @role, 0, @source, @source_query,
         @sourced_at, @confidence, @email_verification_status, @email_verification_confidence,
-        @email_verified_at, @dne_email, @dnc_phone, @crm_person_id, @created_at, @updated_at
+        @email_verified_at, @dne_email, @dnc_phone, @dne_phone, @linkedin_suppressed,
+        @crm_person_id, @created_at, @updated_at
       )
       ON CONFLICT(contact_id) DO UPDATE SET
         name = excluded.name,
@@ -2937,6 +2986,8 @@ export const upsertContact = ({ db, contact }) => {
         email_verified_at = excluded.email_verified_at,
         dne_email = excluded.dne_email,
         dnc_phone = excluded.dnc_phone,
+        dne_phone = excluded.dne_phone,
+        linkedin_suppressed = excluded.linkedin_suppressed,
         crm_person_id = excluded.crm_person_id,
         updated_at = excluded.updated_at
     `).run({
@@ -2968,6 +3019,13 @@ export const upsertContact = ({ db, contact }) => {
       dnc_phone: contact?.dnc_phone === undefined
         ? Number(isAffirmativeFlag(existing?.dnc_phone, { failClosed: true }))
         : Number(isAffirmativeFlag(contact.dnc_phone, { failClosed: true })),
+      dne_phone: Number(
+        isAffirmativeFlag(existing?.dne_phone, { failClosed: true })
+        || isAffirmativeFlag(contact?.dne_phone, { failClosed: true }),
+      ),
+      linkedin_suppressed: contact?.linkedin_suppressed === undefined
+        ? Number(isAffirmativeFlag(existing?.linkedin_suppressed, { failClosed: true }))
+        : Number(isAffirmativeFlag(contact.linkedin_suppressed, { failClosed: true })),
       crm_person_id: String(contact?.crm_person_id ?? existing?.crm_person_id ?? ''),
       created_at: existing?.created_at || now,
       updated_at: now,
