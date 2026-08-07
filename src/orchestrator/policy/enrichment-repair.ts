@@ -13,8 +13,6 @@ export type EnrichmentRepairStep = {
   depth: EnrichmentDepth;
   /** Lower runs first within a depth. */
   priority: number;
-  /** Optional pipeline / enrich step hint (not a dual path — advisory for operators). */
-  step_hint?: string;
 };
 
 export type EnrichmentRepairPlan = {
@@ -156,7 +154,6 @@ export function planEnrichmentRepair(input: {
       reason: companyRes === 'unresolvable' ? 'identity_unresolved' : 'company_resolution_missing',
       depth: 'foundational',
       priority: 10,
-      step_hint: 'identity_contact_resolution',
     });
   }
   if (blank(record.business_name) && blank(record.name)) {
@@ -165,7 +162,6 @@ export function planEnrichmentRepair(input: {
       reason: 'business_name_missing',
       depth: 'foundational',
       priority: 20,
-      step_hint: 'foundational_enrichment',
     });
   }
   if (blank(record.place_id) && blank(record.google_place_id)) {
@@ -174,7 +170,6 @@ export function planEnrichmentRepair(input: {
       reason: 'place_id_missing',
       depth: 'foundational',
       priority: 30,
-      step_hint: 'foundational_enrichment',
     });
   }
   if (blank(record.website) && blank(record.site_url)) {
@@ -183,7 +178,6 @@ export function planEnrichmentRepair(input: {
       reason: 'website_missing',
       depth: 'foundational',
       priority: 40,
-      step_hint: 'site_profile',
     });
   }
   if (blank(record.address) && blank(record.formatted_address)) {
@@ -192,7 +186,6 @@ export function planEnrichmentRepair(input: {
       reason: 'address_missing',
       depth: 'foundational',
       priority: 50,
-      step_hint: 'foundational_enrichment',
     });
   }
   const identityConf = num(record.identity_confidence);
@@ -202,7 +195,6 @@ export function planEnrichmentRepair(input: {
       reason: identityConf == null ? 'identity_confidence_missing' : 'identity_confidence_below_80',
       depth: 'foundational',
       priority: 60,
-      step_hint: 'identity_contact_resolution',
     });
   }
 
@@ -214,7 +206,6 @@ export function planEnrichmentRepair(input: {
       reason: 'unscored_fit',
       depth: 'candidate_tier',
       priority: 10,
-      step_hint: 'score_fit',
     });
   }
   if (candidate_tier === 'hold' || !candidate_tier) {
@@ -223,7 +214,6 @@ export function planEnrichmentRepair(input: {
       reason: 'candidate_tier_unassigned',
       depth: 'candidate_tier',
       priority: 20,
-      step_hint: 'score_fit',
     });
   }
   const fitEvidence = num(record.fit_evidence_confidence);
@@ -233,7 +223,6 @@ export function planEnrichmentRepair(input: {
       reason: fitEvidence == null ? 'fit_evidence_missing' : 'fit_evidence_thin',
       depth: 'candidate_tier',
       priority: 30,
-      step_hint: 'account_intelligence',
     });
   }
   for (const mid of input.missing_fit_inputs || []) {
@@ -242,7 +231,6 @@ export function planEnrichmentRepair(input: {
       reason: 'fit_component_missing',
       depth: 'candidate_tier',
       priority: 40,
-      step_hint: 'score_fit',
     });
   }
   if (blank(record.vertical)) {
@@ -251,7 +239,6 @@ export function planEnrichmentRepair(input: {
       reason: 'vertical_missing',
       depth: 'candidate_tier',
       priority: 50,
-      step_hint: 'account_intelligence',
     });
   }
   const classConf = num(record.classification_confidence);
@@ -261,7 +248,6 @@ export function planEnrichmentRepair(input: {
       reason: classConf == null ? 'classification_confidence_missing' : 'classification_confidence_low',
       depth: 'candidate_tier',
       priority: 60,
-      step_hint: 'account_intelligence',
     });
   }
 
@@ -278,7 +264,6 @@ export function planEnrichmentRepair(input: {
       reason: !namedStatus ? 'named_buyer_status_missing' : 'named_buyer_not_confirmed',
       depth: 'targeted',
       priority: 10,
-      step_hint: 'decision_makers',
     });
   }
   if (!namedName) {
@@ -287,7 +272,6 @@ export function planEnrichmentRepair(input: {
       reason: 'named_buyer_name_missing',
       depth: 'targeted',
       priority: 20,
-      step_hint: 'decision_makers',
     });
   }
 
@@ -300,7 +284,6 @@ export function planEnrichmentRepair(input: {
         : 'buyer_affiliation_unresolved',
       depth: 'targeted',
       priority: 30,
-      step_hint: 'decision_makers',
     });
   }
   if (!affiliation.role) {
@@ -309,7 +292,6 @@ export function planEnrichmentRepair(input: {
       reason: 'buying_center_role_missing',
       depth: 'targeted',
       priority: 40,
-      step_hint: 'decision_makers',
     });
   }
   const buyerConf = num(record.buyer_confidence);
@@ -319,7 +301,6 @@ export function planEnrichmentRepair(input: {
       reason: buyerConf == null ? 'buyer_confidence_missing' : 'buyer_confidence_low',
       depth: 'targeted',
       priority: 50,
-      step_hint: 'decision_makers',
     });
   }
 
@@ -330,7 +311,6 @@ export function planEnrichmentRepair(input: {
       reason: 'strong_fit_insufficient_evidence',
       depth: 'targeted',
       priority: 5,
-      step_hint: 'account_intelligence',
     });
   }
 
@@ -343,7 +323,6 @@ export function planEnrichmentRepair(input: {
         reason: 'email_missing',
         depth: 'targeted',
         priority: 70,
-        step_hint: 'contact_enrichment',
       });
     }
     if (
@@ -357,7 +336,6 @@ export function planEnrichmentRepair(input: {
         reason: 'mail_address_not_ready',
         depth: 'targeted',
         priority: 80,
-        step_hint: 'mail_address_validation',
       });
     }
   }

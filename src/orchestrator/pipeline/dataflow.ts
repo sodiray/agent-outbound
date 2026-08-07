@@ -153,7 +153,7 @@ const envFlag = (name: string) => String(process.env[name] || '').trim() === '1'
 
 /**
  * Generate steps that non-generate pipeline steps (transitively) depend on.
- * e.g. treatment_assignment (policy_apply) → account_intelligence.
+ * e.g. a policy application step → a required generated dependency.
  */
 export const criticalPathGenerateIds = (
   steps: Array<{ id: string; kind: string; deps: string[] }>,
@@ -191,7 +191,7 @@ export const criticalPathGenerateIds = (
  *
  * Generate policy (production-first; fixtures only for $0 tests):
  * - **Critical path** (depended on transitively by any non-generate step, e.g.
- *   `account_intelligence` → `treatment_assignment`): always on the normal path.
+ *   a generated dependency feeding a policy application): always on the normal path.
  *   Never requires AO_PIPELINE_FIXTURE.
  * - **Honest opt-in** (`run_in_pipeline: true` on the step or step.config):
  *   e.g. a configured generated asset — runs on production dataflow without
@@ -773,7 +773,7 @@ export const runPipelineDataflow = async ({
   const rawSteps: any[] = flattenPipelineSteps(config);
   const db = openListDb({ listDir, readonly: dryRun });
   try {
-    // Keep critical-path generate (e.g. account_intelligence → treatment/policy_apply).
+    // Keep generates required by a non-generate policy step.
     // Non-critical generate stays deferred unless AO_RUN_GENERATE=1 or run_in_pipeline.
     // Fixture mode still includes the full generate graph for deterministic dry runs.
     const steps = selectDataflowSteps(buildSteps({ db, steps: rawSteps }));

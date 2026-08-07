@@ -10,7 +10,6 @@ import {
   upsertRecord,
 } from '../runtime/db.js';
 import { EVIDENCE_RECORD_COLUMNS } from '../policy/evidence.js';
-import { calculateEconomicScenario } from '../policy/economics.js';
 import { readConfig } from '../lib/config.js';
 import { getRecordRowId } from '../lib/record.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
@@ -540,29 +539,6 @@ export const runGenerateStep = async ({
         reason: referenceAsset.reason,
       });
 
-      const economicInputs: Record<string, number> = {};
-      for (const key of [
-        'weekly_admin_hours',
-        'admin_hours_per_week',
-        'hourly_loaded_cost',
-        'hourly_rate',
-        'missed_leads_per_month',
-        'avg_job_value',
-        'close_rate',
-      ]) {
-        const value = Number(inputRecord[key] ?? parsedOutputs[key]);
-        if (Number.isFinite(value)) economicInputs[key] = value;
-      }
-      parsedOutputs.economic_scenarios_json = JSON.stringify(
-        ['admin_labor_leak', 'missed_lead_revenue'].map((scenario_id) => calculateEconomicScenario({
-          scenario_id,
-          weekly_admin_hours: economicInputs.weekly_admin_hours ?? economicInputs.admin_hours_per_week,
-          hourly_loaded_cost: economicInputs.hourly_loaded_cost ?? economicInputs.hourly_rate,
-          missed_leads_per_month: economicInputs.missed_leads_per_month,
-          avg_job_value: economicInputs.avg_job_value,
-          close_rate: economicInputs.close_rate,
-        })),
-      );
       ensureRecordColumns({ db, columns: Object.keys(parsedOutputs) });
       upsertRecord({ db, row: { ...inputRecord, ...parsedOutputs } });
 

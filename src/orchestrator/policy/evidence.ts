@@ -38,7 +38,7 @@ export function isWeakAuthoritySource(source: unknown): boolean {
   const s = text(source).toLowerCase();
   if (!s) return false;
   if (WEAK_AUTHORITY_SOURCES.has(s)) return true;
-  // Composite labels: fixture_account_intelligence, model_score, self_report, etc.
+  // Composite labels preserve weak-authority prefixes, such as fixture_* or model_*.
   for (const weak of WEAK_AUTHORITY_SOURCES) {
     if (s === weak || s.startsWith(`${weak}_`) || s.endsWith(`_${weak}`) || s.includes(`.${weak}`) || s.includes(`/${weak}`)) {
       return true;

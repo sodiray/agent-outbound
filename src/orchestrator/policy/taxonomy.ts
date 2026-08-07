@@ -3,18 +3,19 @@
  *
  * Accepts both registry shapes:
  * - array: { verticals: [{ id, sub_verticals: [{ id }] }] }
- * - map (TV seed): { verticals: { trades_field_services: { sub_verticals: ["hvac"] } } }
+ * - map: { verticals: { services: { sub_verticals: ["maintenance"] } } }
  * Sub-verticals may be string ids or { id } objects.
  *
  * Fallback behavior (customer-vertical-taxonomy.md):
- * - Unknown top-level → other_local_smb / other_local_smb
- * - Known top-level, unknown leaf → that vertical's other_* leaf (never invent production ids)
+ * - Unknown top-level → the taxonomy-declared global fallback pair
+ * - Known top-level, unknown leaf → that vertical's declared fallback leaf
  */
 
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-export const TAXONOMY_VERSION_FALLBACK = 'tv-vertical-v1';
+/** Marker for a failed taxonomy resolution; never a pipeline taxonomy version. */
+export const TAXONOMY_VERSION_UNRESOLVED = 'unresolved';
 
 export type VerticalNode = {
   id: string;
@@ -28,7 +29,7 @@ export type VerticalTaxonomy = {
     | VerticalNode[]
     | Record<string, { label?: string; sub_verticals?: Array<{ id: string; label?: string } | string> }>;
   fallbacks?: { vertical?: string; sub_vertical?: string };
-  /** TV map-shaped registry uses top-level fallback_* keys */
+  /** Map-shaped registries may use top-level fallback_* keys. */
   fallback_vertical?: string;
   fallback_sub_vertical?: string;
 };
@@ -52,7 +53,7 @@ type NormalizedVertical = {
 
 let cached: { path: string; data: VerticalTaxonomy } | null = null;
 
-/** Resolve taxonomy JSON path: env override, TV project default, or relative. */
+/** Resolve taxonomy JSON path: env override or a conventional list-relative registry location. */
 export function resolveTaxonomyPath(listDir?: string): string | null {
   if (process.env.AO_VERTICAL_TAXONOMY_PATH && existsSync(process.env.AO_VERTICAL_TAXONOMY_PATH)) {
     return process.env.AO_VERTICAL_TAXONOMY_PATH;
@@ -60,7 +61,7 @@ export function resolveTaxonomyPath(listDir?: string): string | null {
   const candidates = [
     listDir ? resolve(listDir, 'build/registries/vertical-taxonomy.json') : '',
     listDir ? resolve(listDir, 'registries/vertical-taxonomy.json') : '',
-    // Common Mission TV project path when list is treasure-valley
+    // A workspace may build shared registries next to its list directories.
     listDir ? resolve(listDir, '../build/registries/vertical-taxonomy.json') : '',
   ].filter(Boolean);
   for (const p of candidates) {
@@ -70,14 +71,9 @@ export function resolveTaxonomyPath(listDir?: string): string | null {
 }
 
 export function loadVerticalTaxonomy(listDirOrPath?: string): VerticalTaxonomy | null {
-  let path = listDirOrPath && existsSync(listDirOrPath) && listDirOrPath.endsWith('.json')
+  const path = listDirOrPath && existsSync(listDirOrPath) && listDirOrPath.endsWith('.json')
     ? listDirOrPath
     : resolveTaxonomyPath(listDirOrPath);
-  if (!path) {
-    // Hard-coded Mission TV path as last resort for production wiring tests.
-    const tv = '/Users/rayepps/projects/mission/.outbound/treasure-valley/build/registries/vertical-taxonomy.json';
-    if (existsSync(tv)) path = tv;
-  }
   if (!path || !existsSync(path)) return null;
   if (cached?.path === path) return cached.data;
   const data = JSON.parse(readFileSync(path, 'utf8')) as VerticalTaxonomy;
@@ -113,13 +109,9 @@ export function normalizeVerticals(taxonomy: VerticalTaxonomy | null | undefined
 function fallbackPair(taxonomy: VerticalTaxonomy): { vertical: string; sub_vertical: string } {
   return {
     vertical:
-      taxonomy.fallbacks?.vertical ||
-      taxonomy.fallback_vertical ||
-      'other_local_smb',
+      String(taxonomy.fallbacks?.vertical || taxonomy.fallback_vertical || '').trim(),
     sub_vertical:
-      taxonomy.fallbacks?.sub_vertical ||
-      taxonomy.fallback_sub_vertical ||
-      'other_local_smb',
+      String(taxonomy.fallbacks?.sub_vertical || taxonomy.fallback_sub_vertical || '').trim(),
   };
 }
 
@@ -162,14 +154,34 @@ export function validateTaxonomyLabels(input: {
       ok: false,
       vertical: String(input.vertical || ''),
       sub_vertical: String(input.sub_vertical || ''),
-      taxonomy_version: TAXONOMY_VERSION_FALLBACK,
+      taxonomy_version: TAXONOMY_VERSION_UNRESOLVED,
       fallback_applied: false,
       reasons: ['taxonomy_not_loaded'],
     };
   }
-  const version = taxonomy.taxonomy_version || TAXONOMY_VERSION_FALLBACK;
+  const version = String(taxonomy.taxonomy_version || '').trim();
+  if (!version) {
+    return {
+      ok: false,
+      vertical: String(input.vertical || ''),
+      sub_vertical: String(input.sub_vertical || ''),
+      taxonomy_version: TAXONOMY_VERSION_UNRESOLVED,
+      fallback_applied: false,
+      reasons: ['taxonomy_version_missing'],
+    };
+  }
   const verts = normalizeVerticals(taxonomy);
   const fb = fallbackPair(taxonomy);
+  if (!fb.vertical || !fb.sub_vertical) {
+    return {
+      ok: false,
+      vertical: String(input.vertical || ''),
+      sub_vertical: String(input.sub_vertical || ''),
+      taxonomy_version: version,
+      fallback_applied: false,
+      reasons: ['taxonomy_fallback_missing'],
+    };
+  }
   const fallbackV = fb.vertical;
   const fallbackS = fb.sub_vertical;
 
@@ -181,16 +193,7 @@ export function validateTaxonomyLabels(input: {
   const originalVertical = vertical;
   const originalSub = sub;
 
-  // Match ids and labels without punctuation or case getting in the way:
-  // a model that answers "HVAC" means the `hvac` leaf, and rejecting that
-  // sends a correctly classified account to the fallback vertical, which
-  // permits no outreach at all.
-  //
-  // This deliberately normalizes FORM only. It never guesses meaning — a
-  // model answering "Construction" for an HVAC contractor stays unsupported,
-  // because construction_project_services is a different family from
-  // trades_field_services and quietly picking one would attach the wrong
-  // diagnostics to the account. Fail closed on meaning, forgive formatting.
+  // Normalize form only. Semantic matches must be explicit in the taxonomy.
   const canonical = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '');
   const matches = (candidate: string, value: string) => (
     Boolean(candidate) && canonical(candidate) === canonical(value)

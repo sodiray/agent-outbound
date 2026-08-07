@@ -416,6 +416,9 @@ const PipelineGenerateStepSchema = z.object({
   tool: PipelineEnrichmentStepSchema.shape.tool,
   args: PipelineEnrichmentStepSchema.shape.args,
   outputs: PipelineEnrichmentStepSchema.shape.outputs,
+  // Test-only typed fixtures are pipeline-owned. The engine never infers
+  // semantic output values from a field name.
+  fixture_outputs: z.record(z.unknown()).default({}),
   inputs: PipelineEnrichmentStepSchema.shape.inputs,
   on_error: z.enum(['fail', 'empty']).default('empty'),
   when: PipelineEnrichmentStepSchema.shape.when,

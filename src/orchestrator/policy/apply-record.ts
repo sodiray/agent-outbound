@@ -556,6 +556,29 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     cumulativeEnrichmentCostUsd: enrichmentUsd,
   });
 
+  const taxonomyResolutionFailed = taxonomy.reasons.includes('taxonomy_not_loaded')
+    || taxonomy.reasons.includes('taxonomy_version_missing')
+    || taxonomy.reasons.includes('taxonomy_fallback_missing');
+  const taxonomyValidationRequired = record.vertical != null || record.sub_vertical != null;
+  if (taxonomyResolutionFailed && taxonomyValidationRequired) {
+    const taxonomyReason = taxonomy.reasons.find((reason) => (
+      reason === 'taxonomy_not_loaded'
+        || reason === 'taxonomy_version_missing'
+        || reason === 'taxonomy_fallback_missing'
+    )) || 'taxonomy_unresolved';
+    treatment = {
+      ...treatment,
+      treatment_tier: 'enrichment_hold',
+      mail_treatment: 'none',
+      golden_ticket_eligible: false,
+      reasons: [...treatment.reasons, taxonomyReason, 'taxonomy_resolution_forced_hold'],
+      mail_withheld_reasons: [
+        ...treatment.mail_withheld_reasons,
+        `taxonomy:${taxonomyReason}`,
+      ],
+    };
+  }
+
   // RES-SCORING: thin / unknown evidence must not yield A/B/C or Tier D as weak fit.
   // All-unknown → enrichment_hold (not D). Any missing component → not Tier A.
   const thinEvidenceByConf = fitEvidence != null && Number(fitEvidence) < 40;

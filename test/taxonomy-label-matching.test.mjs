@@ -1,9 +1,29 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { validateTaxonomyLabels } from '../dist/orchestrator/policy/taxonomy.js';
+import {
+  loadVerticalTaxonomy,
+  validateTaxonomyLabels,
+} from '../dist/orchestrator/policy/taxonomy.js';
+import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
 
-const listDir = '/Users/rayepps/projects/mission/.outbound/treasure-valley';
+const taxonomy = {
+  taxonomy_version: 'example-taxonomy-v1',
+  fallback_vertical: 'other_services',
+  fallback_sub_vertical: 'other_services',
+  verticals: {
+    services: {
+      label: 'Services',
+      sub_verticals: ['maintenance', 'other_services'],
+    },
+    other_services: {
+      sub_verticals: ['other_services'],
+    },
+  },
+};
 
 /**
  * Regression for a live-validation defect. A model classified an HVAC
@@ -14,26 +34,26 @@ const listDir = '/Users/rayepps/projects/mission/.outbound/treasure-valley';
  * step reported success.
  */
 test('taxonomy: formatting differences in an id do not send an account to the fallback', () => {
-  for (const sub of ['HVAC', 'Hvac', 'hvac', 'H.V.A.C.', ' hvac ']) {
+  for (const sub of ['Maintenance', 'MAINTENANCE', 'maintenance', 'M.A.I.N.T.E.N.A.N.C.E.', ' maintenance ']) {
     const result = validateTaxonomyLabels({
-      vertical: 'trades_field_services',
+      vertical: 'services',
       sub_vertical: sub,
-      listDir,
+      taxonomy,
     });
-    assert.equal(result.vertical, 'trades_field_services', `vertical for ${JSON.stringify(sub)}`);
-    assert.equal(result.sub_vertical, 'hvac', `sub_vertical for ${JSON.stringify(sub)}`);
+    assert.equal(result.vertical, 'services', `vertical for ${JSON.stringify(sub)}`);
+    assert.equal(result.sub_vertical, 'maintenance', `sub_vertical for ${JSON.stringify(sub)}`);
     assert.equal(result.fallback_applied, false, `fallback for ${JSON.stringify(sub)}`);
   }
 });
 
 test('taxonomy: a vertical label differing only in spacing and case still resolves', () => {
   const result = validateTaxonomyLabels({
-    vertical: 'Trades Field Services',
-    sub_vertical: 'Hvac',
-    listDir,
+    vertical: 'SERVICES',
+    sub_vertical: 'Maintenance',
+    taxonomy,
   });
-  assert.equal(result.vertical, 'trades_field_services');
-  assert.equal(result.sub_vertical, 'hvac');
+  assert.equal(result.vertical, 'services');
+  assert.equal(result.sub_vertical, 'maintenance');
   assert.equal(result.fallback_applied, false);
 });
 
@@ -46,12 +66,12 @@ test('taxonomy: a vertical label differing only in spacing and case still resolv
  */
 test('taxonomy: a semantically wrong vertical still fails closed rather than being guessed', () => {
   const result = validateTaxonomyLabels({
-    vertical: 'Construction',
-    sub_vertical: 'HVAC',
-    listDir,
+    vertical: 'Different market',
+    sub_vertical: 'Maintenance',
+    taxonomy,
   });
   assert.equal(result.fallback_applied, true);
-  assert.equal(result.vertical, 'other_local_smb');
+  assert.equal(result.vertical, 'other_services');
   assert.ok(
     result.reasons.some((r) => r.startsWith('unsupported_vertical:')),
     'the unsupported vertical must be reported, not silently mapped',
@@ -59,7 +79,47 @@ test('taxonomy: a semantically wrong vertical still fails closed rather than bei
 });
 
 test('taxonomy: an empty classification still falls back and says so', () => {
-  const result = validateTaxonomyLabels({ vertical: '', sub_vertical: '', listDir });
+  const result = validateTaxonomyLabels({ vertical: '', sub_vertical: '', taxonomy });
   assert.equal(result.fallback_applied, true);
   assert.ok(result.reasons.includes('vertical_empty_fallback'));
+});
+
+test('taxonomy: a missing list-local registry never resolves another pipeline taxonomy', () => {
+  const missingListDir = join(tmpdir(), `agent-outbound-no-taxonomy-${randomUUID()}`);
+  assert.equal(loadVerticalTaxonomy(missingListDir), null);
+
+  const result = validateTaxonomyLabels({
+    vertical: 'services',
+    sub_vertical: 'maintenance',
+    listDir: missingListDir,
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    vertical: 'services',
+    sub_vertical: 'maintenance',
+    taxonomy_version: 'unresolved',
+    fallback_applied: false,
+    reasons: ['taxonomy_not_loaded'],
+  });
+});
+
+test('taxonomy: policy application holds records when taxonomy resolution fails', () => {
+  const missingListDir = join(tmpdir(), `agent-outbound-no-taxonomy-${randomUUID()}`);
+  const result = applyOutboundPolicy({
+    listDir: missingListDir,
+    record: {
+      _row_id: 'taxonomy_unresolved',
+      is_a_business: true,
+      vertical: 'services',
+      sub_vertical: 'maintenance',
+      fit_score: 90,
+      fit_evidence_confidence: 80,
+      identity_confidence: 90,
+      classification_confidence: 90,
+    },
+  });
+  assert.equal(result.treatment_tier, 'enrichment_hold');
+  assert.equal(result.mail_treatment, 'none');
+  assert.ok(result.patch.treatment_reasons.includes('taxonomy_not_loaded'));
+  assert.ok(result.patch.treatment_reasons.includes('taxonomy_resolution_forced_hold'));
 });

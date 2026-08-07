@@ -81,6 +81,50 @@ test('declared but unwritten pipeline output fails instead of passing silently',
   }
 });
 
+test('generate fixtures use pipeline-configured values without output-name special cases', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-configured-fixture-'));
+  const db = openListDb({ listDir, readonly: false });
+  const fixtureBefore = process.env.AO_PIPELINE_FIXTURE;
+  const now = new Date().toISOString();
+  try {
+    process.env.AO_PIPELINE_FIXTURE = '1';
+    db.prepare(`
+      INSERT INTO records (
+        _row_id, business_name, sequence_name, sequence_status,
+        _created_at, _updated_at, created_at, updated_at
+      ) VALUES ('acct_configured_fixture', 'Example Co', 'default', 'idle', ?, ?, ?, ?)
+    `).run(now, now, now, now);
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('acct_configured_fixture');
+    const outcomes = await executeStepBatch(
+      { db, listDir, config: {}, aiConfig: {}, mcp: null, toolCatalog: null },
+      {
+        id: 'configured_fixture',
+        kind: 'generate',
+        outputs: {
+          overview: { type: 'string' },
+          hypotheses: { type: 'string' },
+        },
+        fixture_outputs: {
+          overview: 'Configured fixture overview',
+          hypotheses: '[{"hypothesis":"follow-up delay"}]',
+        },
+      },
+      'configured_fixture',
+      [record],
+    );
+    assert.equal(outcomes.get('acct_configured_fixture')?.passed, true);
+    const persisted = db.prepare('SELECT overview, hypotheses FROM records WHERE _row_id = ?').get('acct_configured_fixture');
+    assert.deepEqual(persisted, {
+      overview: 'Configured fixture overview',
+      hypotheses: '[{"hypothesis":"follow-up delay"}]',
+    });
+  } finally {
+    if (fixtureBefore === undefined) delete process.env.AO_PIPELINE_FIXTURE;
+    else process.env.AO_PIPELINE_FIXTURE = fixtureBefore;
+    db.close();
+  }
+});
+
 test('markScoringStale deletes score:* staleness rows and scoringStaleRecordPatch sets status', () => {
   const listDir = mkdtempSync(join(tmpdir(), 'ao-rescore-'));
   const db = openListDb({ listDir });

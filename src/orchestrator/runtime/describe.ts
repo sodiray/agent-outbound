@@ -45,7 +45,7 @@ const CATALOG: CommandDefinition[] = [
         configVersion: 'string',
       },
     },
-    examples: ['agent-outbound context --list treasure-valley --json'],
+    examples: ['agent-outbound context --list example-list --json'],
   },
   {
     name: 'pending',
@@ -62,7 +62,7 @@ const CATALOG: CommandDefinition[] = [
     input_schema: { list: 'optional string', all_lists: 'optional boolean' },
     output_schema: { ...COMMON_OUTPUT, result: { projects: 'array', summary: 'object' } },
     examples: [
-      'agent-outbound pending --list treasure-valley --summary --json',
+      'agent-outbound pending --list example-list --summary --json',
       'agent-outbound pending --all-lists --json',
     ],
   },
@@ -100,7 +100,7 @@ const CATALOG: CommandDefinition[] = [
     ],
     input_schema: { list: 'optional string', all_lists: 'optional boolean' },
     output_schema: { ...COMMON_OUTPUT, result: { projects: 'array' } },
-    examples: ['agent-outbound monitor --list treasure-valley', 'agent-outbound monitor --all-lists --once'],
+    examples: ['agent-outbound monitor --list example-list', 'agent-outbound monitor --all-lists --once'],
   },
   {
     name: 'describe',

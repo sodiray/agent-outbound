@@ -62,10 +62,6 @@ const PRODUCTION_IMPORTERS = [
     mustInclude: ['isForbiddenTaskType', 'isForbiddenChannelKind', 'forbidden_work:send_sms'],
   },
   {
-    path: 'src/orchestrator/generate/runner.ts',
-    mustInclude: ['calculateEconomicScenario'],
-  },
-  {
     path: 'src/commands/index.ts',
     mustInclude: ['applyOutboundPolicy', 'policyApplyCommand'],
   },

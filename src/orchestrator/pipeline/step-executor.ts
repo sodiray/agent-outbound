@@ -10,7 +10,6 @@ import {
   SUBPIPELINE_STEP_INDEX_FIELD,
 } from '../lib/subpipelines.js';
 import { isReviewRequired } from '../policy/stage-review-gate.js';
-import { calculateEconomicScenario } from '../policy/economics.js';
 import { executePipelineSequenceAction } from './sequence-step-runtime.js';
 
 export type StepExecutionOutcome = {
@@ -714,11 +713,14 @@ const executeStepBatchUnchecked = async (
       const declared = (step.outputs && typeof step.outputs === 'object')
         ? step.outputs as Record<string, unknown>
         : {};
+      const fixtureOutputs = step.fixture_outputs && typeof step.fixture_outputs === 'object'
+        && !Array.isArray(step.fixture_outputs)
+        ? step.fixture_outputs as Record<string, unknown>
+        : {};
       const outcomes = new Map<string, StepExecutionOutcome>();
       for (const row of rows) {
         const recordId = getRecordRowId(row);
         try {
-          const name = String(row.business_name || 'business').trim() || 'business';
           const outputs: Record<string, unknown> = {};
           const declaredType = (key: string) => {
             const spec = declared[key];
@@ -748,93 +750,13 @@ const executeStepBatchUnchecked = async (
               outputs[key] = coerceFixture(key, existing);
               continue;
             }
-            switch (key) {
-              case 'vertical':
-                outputs[key] = row.vertical || 'trades_field_services';
-                break;
-              case 'sub_vertical':
-                outputs[key] = row.sub_vertical || 'hvac';
-                break;
-              case 'regulatory_context':
-                outputs[key] = row.regulatory_context || 'none';
-                break;
-              case 'ownership_type':
-                outputs[key] = row.ownership_type || 'independent';
-                break;
-              case 'owner_operated':
-                outputs[key] = row.owner_operated || 'yes';
-                break;
-              case 'local_buying_authority':
-                outputs[key] = row.local_buying_authority || 'yes';
-                break;
-              case 'primary_buyer_role':
-                outputs[key] = row.primary_buyer_role || 'owner';
-                break;
-              case 'likely_champion_role':
-                outputs[key] = row.likely_champion_role || 'office_manager';
-                break;
-              case 'size_tier':
-                outputs[key] = row.size_tier || 'small';
-                break;
-              case 'is_franchise':
-                outputs[key] = false;
-                break;
-              case 'locally_accessible':
-                outputs[key] = true;
-                break;
-              case 'franchise_brand':
-                outputs[key] = '';
-                break;
-              case 'accessibility_reasoning':
-                outputs[key] = 'Fixture: independent local business with on-site buyer access.';
-                break;
-              case 'classification_confidence':
-                outputs[key] = Number(row.classification_confidence ?? row.fit_evidence_confidence ?? 85);
-                break;
-              case 'identity_confidence':
-                outputs[key] = Number(row.identity_confidence ?? 90);
-                break;
-              case 'classification_evidence':
-                outputs[key] = `Fixture public evidence for ${name}`;
-                break;
-              case 'account_classification_json':
-                outputs[key] = JSON.stringify({
-                  vertical: row.vertical || 'trades_field_services',
-                  sub_vertical: row.sub_vertical || 'hvac',
-                  ownership_type: row.ownership_type || 'independent',
-                  local_buying_authority: row.local_buying_authority || 'yes',
-                  primary_buyer_role: row.primary_buyer_role || 'owner',
-                  likely_champion_role: row.likely_champion_role || 'office_manager',
-                  size_tier: row.size_tier || 'small',
-                  regulatory_context: row.regulatory_context || 'none',
-                  confidence: 85,
-                  source: 'fixture_account_intelligence',
-                });
-                break;
-              case 'preliminary_snapshot':
-                outputs[key] = `Fixture preliminary operational snapshot for ${name}: public evidence of inquiry follow-up and scheduling friction in the Treasure Valley.`;
-                break;
-              case 'diagnostic_hypotheses_json':
-                outputs[key] = JSON.stringify([
-                  { hypothesis: 'missed inquiry follow-up', falsifier: 'CRM reply latency data', class: 'hypothesis' },
-                ]);
-                break;
-              case 'economic_scenarios_json':
-                outputs[key] = JSON.stringify([
-                  calculateEconomicScenario({
-                    scenario_id: 'admin_labor_leak',
-                    weekly_admin_hours: 10,
-                    hourly_loaded_cost: 45,
-                  }),
-                ]);
-                break;
-              default:
-                outputs[key] = declaredType(key) === 'boolean'
-                  ? false
-                  : declaredType(key) === 'number' || declaredType(key) === 'integer'
-                    ? 0
-                    : `fixture_${key}`;
-            }
+            outputs[key] = Object.prototype.hasOwnProperty.call(fixtureOutputs, key)
+              ? fixtureOutputs[key]
+              : declaredType(key) === 'boolean'
+                ? false
+                : declaredType(key) === 'number' || declaredType(key) === 'integer'
+                  ? 0
+                  : `fixture_${key}`;
             outputs[key] = coerceFixture(key, outputs[key]);
           }
 
@@ -865,7 +787,7 @@ const executeStepBatchUnchecked = async (
   }
 
   // Production generate on the normal path (no AO_PIPELINE_FIXTURE required):
-  // - critical-path generates (e.g. account_intelligence → treatment_assignment)
+  // - critical-path generates that feed a non-generate policy step
   // - honest opt-in via run_in_pipeline for non-critical generated assets
   // Fixture branch above is only for $0 deterministic tests.
   if (kind === 'generate') {
