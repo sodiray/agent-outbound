@@ -2684,6 +2684,9 @@ const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
     contact_name_primary: name,
     contact_title_primary: String(primaryContact?.title || ''),
     owner_name: name,
+    email_verification_status: String(primaryContact?.email_verification_status || ''),
+    email_verification_confidence: String(primaryContact?.email_verification_confidence || 0),
+    email_verified_at: String(primaryContact?.email_verified_at || ''),
   };
   const writableProjection = Object.entries(projection)
     .filter(([column]) => recordColumns.has(column));
@@ -2743,7 +2746,10 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
       db.prepare('PRAGMA table_info(records)').all().map((row) => String(row.name || '')),
     );
     // Ensure optional outreach fields exist before projecting.
-    for (const col of ['contact_phone', 'contact_linkedin_url', 'active_contact_id']) {
+    for (const col of [
+      'contact_phone', 'contact_linkedin_url', 'active_contact_id',
+      'email_verification_status', 'email_verification_confidence', 'email_verified_at',
+    ]) {
       if (!recordColumns.has(col) && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
         try {
           db.exec(`ALTER TABLE records ADD COLUMN ${col} TEXT DEFAULT '';`);
@@ -2765,6 +2771,9 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
       contact_phone: String(contact?.phone || ''),
       contact_linkedin_url: String(contact?.linkedin_url || ''),
       active_contact_id: String(contact?.contact_id || contact?.id || normalizedContactId),
+      email_verification_status: String(contact?.email_verification_status || ''),
+      email_verification_confidence: String(contact?.email_verification_confidence || 0),
+      email_verified_at: String(contact?.email_verified_at || ''),
     };
     const writableProjection = Object.entries(projection)
       .filter(([column]) => recordColumns.has(column));

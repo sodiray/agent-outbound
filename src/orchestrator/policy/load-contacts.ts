@@ -26,6 +26,9 @@ export type ContactRow = {
   is_primary?: number | boolean;
   dne_email?: number | boolean;
   dnc_phone?: number | boolean;
+  email_verification_status?: string;
+  email_verification_confidence?: number | string;
+  email_verified_at?: string;
   /** Structural phone invalidation (wrong number) — not full-account DNC. */
   dne_phone?: number | boolean;
   /** Optional persisted disposition from contacts table / enrichment. */
@@ -205,6 +208,9 @@ export function denormalizedFieldsFromContact(
   const email = String(contact.email || '').trim();
   const phone = String(contact.phone || '').trim();
   const linkedin = String(contact.linkedin_url || '').trim();
+  const emailVerificationStatus = String(contact.email_verification_status || '').trim();
+  const emailVerificationConfidence = Number(contact.email_verification_confidence || 0);
+  const emailVerifiedAt = String(contact.email_verified_at || '').trim();
   const out: Record<string, string> = {};
   if (name) {
     out.contact_name = name;
@@ -217,6 +223,16 @@ export function denormalizedFieldsFromContact(
   }
   // Always project email when a contact row is provided — blank means blank.
   out.contact_email = email;
+  const hasVerificationFields = contact.email_verification_status !== undefined
+    || contact.email_verification_confidence !== undefined
+    || contact.email_verified_at !== undefined;
+  if (hasVerificationFields) {
+    out.email_verification_status = emailVerificationStatus;
+    out.email_verification_confidence = Number.isFinite(emailVerificationConfidence)
+      ? String(emailVerificationConfidence)
+      : '0';
+    out.email_verified_at = emailVerifiedAt;
+  }
   if (phone) out.contact_phone = phone;
   if (linkedin) out.contact_linkedin_url = linkedin;
   return out;

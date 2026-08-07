@@ -177,43 +177,38 @@ function emailState(record: Record<string, unknown>): ChannelReachability {
   }
   const email = String(record.contact_email || record.email_primary || '').trim();
   if (!email) return { channel: 'email', state: 'missing', confidence: 0, ready: false };
-  const conf = readConfidence(
-    record.email_verification_confidence,
-    record.email_confidence,
-    record.confidence_email,
-  );
-  const validatedFlag = Boolean(record.email_validated)
-    || String(record.email_verification_status || '').toLowerCase() === 'valid'
-    || String(record.email_verification_status || '').toLowerCase() === 'verified';
-  // Raw address alone is never ready — require validation flag or confidence field.
-  // Never invent a passing confidence when the field is missing (fail closed).
-  if (conf == null && !validatedFlag) {
+  const verificationStatus = String(record.email_verification_status || '').trim().toLowerCase();
+  const verificationConfidence = readConfidence(record.email_verification_confidence);
+  const verificationAccepted = verificationStatus === 'valid' || verificationStatus === 'verified';
+  if (verificationStatus && !verificationAccepted) {
     return {
       channel: 'email',
       state: 'unvalidated',
-      confidence: 0,
+      confidence: verificationConfidence ?? 0,
       ready: false,
-      reason: 'confidence_missing',
+      reason: verificationStatus === 'invalid' ? 'invalid_verification' : `verification_${verificationStatus}`,
     };
   }
-  const confVal = conf ?? 0;
-  const validated = validatedFlag || confVal >= 70;
-  if (validated) {
+  const validatedFlag = Boolean(record.email_validated)
+    || verificationAccepted
+    // Legacy verifier results may predate the status field. This accepts only
+    // the dedicated verification confidence, never discovery confidence.
+    || (!verificationStatus && (verificationConfidence ?? 0) >= 70);
+  if (!validatedFlag) {
     return {
       channel: 'email',
-      state: 'named_validated',
-      // Validated flag is evidence for readiness; confidence stays 0 when unobserved.
-      confidence: Math.min(100, confVal),
-      ready: true,
-      reason: validatedFlag ? 'validated_address' : 'confidence_ok',
+      state: 'unvalidated',
+      confidence: verificationConfidence ?? 0,
+      ready: false,
+      reason: verificationStatus ? `verification_${verificationStatus}` : 'verification_missing',
     };
   }
   return {
     channel: 'email',
-    state: 'unvalidated',
-    confidence: confVal,
-    ready: confVal >= 50,
-    reason: 'low_confidence',
+    state: 'named_validated',
+    confidence: verificationConfidence ?? 0,
+    ready: true,
+    reason: 'validated_address',
   };
 }
 
