@@ -1011,6 +1011,13 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           phoneConfidence: scoreConfig?.phone_confidence,
           buyerConfidence: scoreConfig?.buyer_confidence,
           mailConfidence: scoreConfig?.mail_confidence,
+          goldenTicket: scoreConfig?.golden_ticket,
+          actionConfidence: scoreConfig?.action_confidence,
+          reachability: scoreConfig?.reachability,
+          candidateTier: scoreConfig?.candidate_tier,
+          postcard: scoreConfig?.postcard,
+          enrichmentRepair: scoreConfig?.enrichment_repair,
+          enrichmentBudget: scoreConfig?.enrichment_budget,
         });
         const updated = {
           ...prePolicy,

@@ -3,12 +3,35 @@
  * Implements the provisional matrix in treatment-thresholds-and-physical-mail-programs.md.
  */
 
-import { DEFAULT_SCORE_TREATMENT_BANDS } from '../../schemas/config.js';
+import {
+  DEFAULT_SCORE_ENRICHMENT_BUDGET,
+  DEFAULT_SCORE_GOLDEN_TICKET,
+  DEFAULT_SCORE_POSTCARD,
+  DEFAULT_SCORE_TREATMENT_BANDS,
+  type EnrichmentBudgetConfigInput,
+  type GoldenTicketConfigInput,
+  type PostcardConfigInput,
+} from '../../schemas/config.js';
 
 export const CALCULATION_RULE_VERSION = 'tv-treatment-v1';
 
 export type TreatmentTier = 'A' | 'B' | 'C' | 'D' | 'enrichment_hold';
 export type MailTreatment = 'none' | 'standard_postcard' | 'golden_ticket';
+/** @deprecated Use score.enrichment_budget; retained for compatibility with policy consumers. */
+export const ENRICHMENT_COST_CEILINGS = DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings;
+/** @deprecated Use score.golden_ticket.minimums; retained for compatibility with policy consumers. */
+export const GOLDEN_TICKET_MIN = {
+  fitScore: DEFAULT_SCORE_GOLDEN_TICKET.minimums.fit_score,
+  fitEvidenceConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.fit_evidence_confidence,
+  identityConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.identity_confidence,
+  classificationConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.classification_confidence,
+  buyerConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.buyer_confidence,
+  mailConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.mail_confidence,
+  timingScore: DEFAULT_SCORE_GOLDEN_TICKET.minimums.timing_score,
+  strongSignalStrength: DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_strength,
+  strongSignalCount: DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_count,
+  enrichmentBudgetUsd: DEFAULT_SCORE_GOLDEN_TICKET.minimums.enrichment_budget_usd,
+} as const;
 export type TreatmentBandLadders = {
   fit?: readonly number[];
   fit_evidence_confidence?: readonly number[];
@@ -51,6 +74,9 @@ export type TreatmentInput = {
   cumulativeEnrichmentCostUsd?: number;
   goldenTicketBudgetCeilingUsd?: number;
   treatmentBands?: TreatmentBandLadders;
+  goldenTicket?: GoldenTicketConfigInput;
+  postcard?: PostcardConfigInput;
+  enrichmentBudget?: EnrichmentBudgetConfigInput;
 };
 
 export type GoldenTicketGates = {
@@ -64,25 +90,6 @@ export type GoldenTicketGates = {
   budgetOk?: boolean;
   cohortCapacityOk?: boolean;
 };
-
-/**
- * Production Golden Ticket thresholds (treatment-thresholds-and-physical-mail-programs.md).
- * Any missing required gate fails closed — never invent pass.
- */
-export const GOLDEN_TICKET_MIN = {
-  fitScore: 85,
-  fitEvidenceConfidence: 80,
-  identityConfidence: 90,
-  classificationConfidence: 90,
-  buyerConfidence: 80,
-  mailConfidence: 90,
-  /** Timing score gate; alternative is multi-signal path below. */
-  timingScore: 70,
-  /** Independent strong signals (decayed strength ≥ this) count toward multi-signal path. */
-  strongSignalStrength: 60,
-  strongSignalCount: 2,
-  enrichmentBudgetUsd: 8,
-} as const;
 
 const GT_LOCAL_AUTHORITY_OK = new Set(['confirmed', 'likely', 'yes']);
 const GT_NAMED_BUYER_OK = new Set(['confirmed', 'likely']);
@@ -172,19 +179,23 @@ export function evaluateStandardPostcard(input: {
   fitEvidenceConfidence: number | null;
   mailAddressReady: boolean;
   identityConfidence?: number | null;
+  postcard?: PostcardConfigInput;
 }): { eligible: boolean; reasons: string[]; withheld: string[] } {
   const reasons: string[] = [];
   const withheld: string[] = [];
+  const mins = { ...DEFAULT_SCORE_POSTCARD.minimums, ...input.postcard?.minimums };
   if (!input.mailAddressReady) {
     withheld.push('mail_address_not_ready');
   }
-  if (input.identityConfidence != null && input.identityConfidence < 80) {
-    withheld.push('identity_confidence_below_80');
+  if (input.identityConfidence != null && input.identityConfidence < mins.identity_confidence) {
+    withheld.push(`identity_confidence_below_${mins.identity_confidence}`);
   }
   const fit = input.fitScore ?? 0;
   const conf = input.fitEvidenceConfidence ?? 0;
   const tierOk = input.treatmentTier === 'A' || input.treatmentTier === 'B';
-  const strongFitException = fit >= 80 && conf >= 40 && conf < 60;
+  const strongFitException = fit >= mins.strong_fit
+    && conf >= mins.fit_evidence
+    && conf < mins.fit_evidence_exclusive_maximum;
   if (!tierOk && !strongFitException) {
     withheld.push('treatment_or_exception_not_met');
   }
@@ -202,7 +213,7 @@ export function evaluateStandardPostcard(input: {
  */
 export function countStrongTimingSignals(
   signals: Array<{ id?: string; decayed_strength?: number; strength?: number }> | null | undefined,
-  minStrength: number = GOLDEN_TICKET_MIN.strongSignalStrength,
+  minStrength: number = DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_strength,
 ): number {
   if (!Array.isArray(signals) || !signals.length) return 0;
   let n = 0;
@@ -250,42 +261,43 @@ export function evaluateGoldenTicket(input: {
   cohortCapacityOk?: boolean | null;
   cumulativeEnrichmentCostUsd?: number;
   goldenTicketBudgetCeilingUsd?: number;
+  goldenTicket?: GoldenTicketConfigInput;
 }): { eligible: boolean; reasons: string[]; withheld: string[] } {
   const reasons: string[] = [];
   const withheld: string[] = [];
-  const mins = GOLDEN_TICKET_MIN;
+  const mins = { ...DEFAULT_SCORE_GOLDEN_TICKET.minimums, ...input.goldenTicket?.minimums };
 
   if (input.treatmentTier !== 'A') withheld.push('not_tier_a');
 
   if (isMissingScore(input.fitScore)) withheld.push('fit_score_missing');
-  else if ((input.fitScore as number) < mins.fitScore) {
-    withheld.push(`fit_below_${mins.fitScore}`);
+  else if ((input.fitScore as number) < mins.fit_score) {
+    withheld.push(`fit_below_${mins.fit_score}`);
   }
 
   if (isMissingScore(input.fitEvidenceConfidence)) withheld.push('fit_evidence_missing');
-  else if ((input.fitEvidenceConfidence as number) < mins.fitEvidenceConfidence) {
-    withheld.push(`fit_evidence_below_${mins.fitEvidenceConfidence}`);
+  else if ((input.fitEvidenceConfidence as number) < mins.fit_evidence_confidence) {
+    withheld.push(`fit_evidence_below_${mins.fit_evidence_confidence}`);
   }
 
   if (isMissingScore(input.identityConfidence)) withheld.push('identity_confidence_missing');
-  else if ((input.identityConfidence as number) < mins.identityConfidence) {
-    withheld.push(`identity_confidence_below_${mins.identityConfidence}`);
+  else if ((input.identityConfidence as number) < mins.identity_confidence) {
+    withheld.push(`identity_confidence_below_${mins.identity_confidence}`);
   }
 
   if (isMissingScore(input.classificationConfidence)) {
     withheld.push('classification_confidence_missing');
-  } else if ((input.classificationConfidence as number) < mins.classificationConfidence) {
-    withheld.push(`classification_confidence_below_${mins.classificationConfidence}`);
+  } else if ((input.classificationConfidence as number) < mins.classification_confidence) {
+    withheld.push(`classification_confidence_below_${mins.classification_confidence}`);
   }
 
   if (isMissingScore(input.buyerConfidence)) withheld.push('buyer_confidence_missing');
-  else if ((input.buyerConfidence as number) < mins.buyerConfidence) {
-    withheld.push(`buyer_confidence_below_${mins.buyerConfidence}`);
+  else if ((input.buyerConfidence as number) < mins.buyer_confidence) {
+    withheld.push(`buyer_confidence_below_${mins.buyer_confidence}`);
   }
 
   if (isMissingScore(input.mailConfidence)) withheld.push('mail_confidence_missing');
-  else if ((input.mailConfidence as number) < mins.mailConfidence) {
-    withheld.push(`mail_confidence_below_${mins.mailConfidence}`);
+  else if ((input.mailConfidence as number) < mins.mail_confidence) {
+    withheld.push(`mail_confidence_below_${mins.mail_confidence}`);
   }
 
   // mailAddressReady is required for GT: null/undefined/false all fail closed.
@@ -337,8 +349,8 @@ export function evaluateGoldenTicket(input: {
   const timingMissing = isMissingScore(input.timingScore);
   const signalCount = input.strongTimingSignalCount;
   const signalCountMissing = signalCount == null || Number.isNaN(Number(signalCount));
-  const timingOk = !timingMissing && (input.timingScore as number) >= mins.timingScore;
-  const multiSignalOk = !signalCountMissing && Number(signalCount) >= mins.strongSignalCount;
+  const timingOk = !timingMissing && (input.timingScore as number) >= mins.timing_score;
+  const multiSignalOk = !signalCountMissing && Number(signalCount) >= mins.strong_signal_count;
   if (!timingOk && !multiSignalOk) {
     if (timingMissing && signalCountMissing) {
       withheld.push('timing_or_signals_missing');
@@ -359,7 +371,7 @@ export function evaluateGoldenTicket(input: {
   if (input.suppressed === true) withheld.push('suppressed');
   if (input.materialContradiction === true) withheld.push('material_contradiction');
 
-  const ceiling = input.goldenTicketBudgetCeilingUsd ?? mins.enrichmentBudgetUsd;
+  const ceiling = input.goldenTicketBudgetCeilingUsd ?? mins.enrichment_budget_usd;
   if ((input.cumulativeEnrichmentCostUsd ?? 0) > ceiling) {
     withheld.push('enrichment_budget_exceeded');
   }
@@ -386,6 +398,7 @@ export function assignTreatmentAndMail(input: TreatmentInput): TreatmentResult {
     fitEvidenceConfidence: input.fitEvidenceConfidence,
     mailAddressReady: Boolean(input.mailAddressReady),
     identityConfidence: input.identityConfidence,
+    postcard: input.postcard,
   });
 
   const assetReady = input.goldenTicketGates?.assetReady;
@@ -420,7 +433,8 @@ export function assignTreatmentAndMail(input: TreatmentInput): TreatmentResult {
     cohortCapacityOk,
     cumulativeEnrichmentCostUsd: input.cumulativeEnrichmentCostUsd,
     goldenTicketBudgetCeilingUsd:
-      input.goldenTicketBudgetCeilingUsd ?? GOLDEN_TICKET_MIN.enrichmentBudgetUsd,
+      input.goldenTicketBudgetCeilingUsd ?? input.goldenTicket?.minimums?.enrichment_budget_usd,
+    goldenTicket: input.goldenTicket,
   });
 
   let mail_treatment: MailTreatment = 'none';
@@ -451,24 +465,16 @@ export function assignTreatmentAndMail(input: TreatmentInput): TreatmentResult {
 }
 
 /** Provisional cumulative enrichment ceilings (USD). */
-export const ENRICHMENT_COST_CEILINGS: Record<TreatmentTier | 'foundational' | 'golden_ticket_total', number> = {
-  foundational: 0.15,
-  C: 0.3,
-  B: 1.0,
-  A: 3.0,
-  D: 0.15,
-  enrichment_hold: 0.3,
-  golden_ticket_total: GOLDEN_TICKET_MIN.enrichmentBudgetUsd,
-};
-
 export function enrichmentBudgetRemaining(input: {
   candidateOrTreatment: TreatmentTier | 'foundational';
   spentUsd: number;
   forGoldenTicket?: boolean;
+  enrichmentBudget?: EnrichmentBudgetConfigInput;
 }): { ceiling: number; remaining: number; withinBudget: boolean } {
+  const ceilings = { ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings, ...input.enrichmentBudget?.ceilings };
   const ceiling = input.forGoldenTicket
-    ? ENRICHMENT_COST_CEILINGS.golden_ticket_total
-    : ENRICHMENT_COST_CEILINGS[input.candidateOrTreatment] ?? 0.15;
+    ? ceilings.golden_ticket_total
+    : ceilings[input.candidateOrTreatment] ?? ceilings.foundational;
   const remaining = Math.max(0, ceiling - (input.spentUsd || 0));
   return { ceiling, remaining, withinBudget: remaining > 0 || (input.spentUsd || 0) <= ceiling };
 }

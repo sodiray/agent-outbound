@@ -4,6 +4,10 @@
 
 import { actionConfidenceAllows, type EvidenceConfidenceProfile } from './scoring.js';
 import { assertWorkAllowed } from './forbidden-channels.js';
+import {
+  DEFAULT_SCORE_ACTION_CONFIDENCE,
+  type ActionConfidenceConfigInput,
+} from '../../schemas/config.js';
 
 export type ReadinessInput = {
   eligible: boolean;
@@ -27,6 +31,7 @@ export type ReadinessInput = {
   collision?: boolean;
   hasNextAction?: boolean;
   confidenceProfile?: EvidenceConfidenceProfile;
+  actionConfidence?: ActionConfidenceConfigInput;
   /**
    * Named buyer for Tier A / GT readiness — never invent confirmed status.
    * When treatmentTier is A, status confirmed|likely + non-empty name required.
@@ -118,7 +123,13 @@ export function evaluateOutboundReadiness(input: ReadinessInput): ReadinessResul
 
   if (!input.eligible) blockers.push('not_eligible');
   if (input.suppressed) blockers.push('suppressed');
-  if (input.identityConfidence < 80) blockers.push('identity_confidence_below_80');
+  const actionConfidence = {
+    ...DEFAULT_SCORE_ACTION_CONFIDENCE.minimums,
+    ...input.actionConfidence?.minimums,
+  };
+  if (input.identityConfidence < actionConfidence.identity) {
+    blockers.push(`identity_confidence_below_${actionConfidence.identity}`);
+  }
   if (input.materialContradiction) blockers.push('material_contradiction');
   if (input.treatmentTier === 'enrichment_hold') blockers.push('enrichment_hold');
   if (input.treatmentTier === 'D' && input.proposedAction?.channel) {
@@ -224,6 +235,7 @@ export function evaluateOutboundReadiness(input: ReadinessInput): ReadinessResul
     const gate = actionConfidenceAllows({
       action: input.proposedAction.channel,
       profile: input.confidenceProfile,
+      config: input.actionConfidence,
     });
     if (!gate.allowed) blockers.push(...gate.failing.map((f) => `confidence:${f}`));
   }

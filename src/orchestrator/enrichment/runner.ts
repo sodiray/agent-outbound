@@ -32,10 +32,17 @@ import {
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
 import type { TreatmentBandLadders } from '../policy/treatment.js';
 import type {
+  ActionConfidenceConfigInput,
   BuyerConfidenceConfigInput,
+  CandidateTierConfigInput,
+  EnrichmentBudgetConfigInput,
+  EnrichmentRepairConfigInput,
+  GoldenTicketConfigInput,
   IdentityConfidenceConfigInput,
   MailConfidenceConfigInput,
   PhoneConfidenceConfigInput,
+  PostcardConfigInput,
+  ReachabilityConfigInput,
 } from '../../schemas/config.js';
 
 const zeroUsage = () => ({
@@ -716,6 +723,13 @@ export const executeEnrichmentAction = async ({
   phoneConfidence,
   buyerConfidence,
   mailConfidence,
+  goldenTicket,
+  actionConfidence,
+  reachability,
+  candidateTier,
+  postcard,
+  enrichmentRepair,
+  enrichmentBudget,
   outputSchema,
   toolCatalog,
 }: {
@@ -733,6 +747,13 @@ export const executeEnrichmentAction = async ({
   phoneConfidence?: PhoneConfidenceConfigInput;
   buyerConfidence?: BuyerConfidenceConfigInput;
   mailConfidence?: MailConfidenceConfigInput;
+  goldenTicket?: GoldenTicketConfigInput;
+  actionConfidence?: ActionConfidenceConfigInput;
+  reachability?: ReachabilityConfigInput;
+  candidateTier?: CandidateTierConfigInput;
+  postcard?: PostcardConfigInput;
+  enrichmentRepair?: EnrichmentRepairConfigInput;
+  enrichmentBudget?: EnrichmentBudgetConfigInput;
   outputSchema: z.ZodTypeAny;
   toolCatalog?: ToolCatalog;
 }) => {
@@ -742,7 +763,7 @@ export const executeEnrichmentAction = async ({
   // Pre-provider spend gate: when a tiered record is already over its enrichment
   // ceiling, skip tool_call / model generate / decision_makers without calling the provider.
   if (!fixtureMode) {
-    const gate = evaluateEnrichmentCeilingGate({ db, record, stepConfig });
+    const gate = evaluateEnrichmentCeilingGate({ db, record, stepConfig, enrichmentBudget });
     if (gate.apply && !gate.within_budget) {
       const detail = String(gate.detail || gate.reason || 'enrichment_ceiling');
       return {
@@ -858,6 +879,13 @@ export const executeEnrichmentAction = async ({
       phoneConfidence,
       buyerConfidence,
       mailConfidence,
+      goldenTicket,
+      actionConfidence,
+      reachability,
+      candidateTier,
+      postcard,
+      enrichmentRepair,
+      enrichmentBudget,
     });
     // Map declared outputs from patch when present
     const outputs: Record<string, unknown> = { ...result.patch };
@@ -1056,6 +1084,13 @@ export const executeEnrichmentStepOnRecords = async ({
         phoneConfidence: config?.score?.phone_confidence,
         buyerConfidence: config?.score?.buyer_confidence,
         mailConfidence: config?.score?.mail_confidence,
+        goldenTicket: config?.score?.golden_ticket,
+        actionConfidence: config?.score?.action_confidence,
+        reachability: config?.score?.reachability,
+        candidateTier: config?.score?.candidate_tier,
+        postcard: config?.score?.postcard,
+        enrichmentRepair: config?.score?.enrichment_repair,
+        enrichmentBudget: config?.score?.enrichment_budget,
         outputSchema: outputZod,
         toolCatalog,
       });
@@ -1518,6 +1553,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               phoneConfidence: config?.score?.phone_confidence,
               buyerConfidence: config?.score?.buyer_confidence,
               mailConfidence: config?.score?.mail_confidence,
+              goldenTicket: config?.score?.golden_ticket,
+              actionConfidence: config?.score?.action_confidence,
+              reachability: config?.score?.reachability,
+              candidateTier: config?.score?.candidate_tier,
+              postcard: config?.score?.postcard,
+              enrichmentRepair: config?.score?.enrichment_repair,
+              enrichmentBudget: config?.score?.enrichment_budget,
               outputSchema: outputZod,
               toolCatalog,
             });

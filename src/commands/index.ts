@@ -1298,6 +1298,13 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       phoneConfidence: config?.score?.phone_confidence,
       buyerConfidence: config?.score?.buyer_confidence,
       mailConfidence: config?.score?.mail_confidence,
+      goldenTicket: config?.score?.golden_ticket,
+      actionConfidence: config?.score?.action_confidence,
+      reachability: config?.score?.reachability,
+      candidateTier: config?.score?.candidate_tier,
+      postcard: config?.score?.postcard,
+      enrichmentRepair: config?.score?.enrichment_repair,
+      enrichmentBudget: config?.score?.enrichment_budget,
     });
     summary.tiers[result.treatment_tier] = (summary.tiers[result.treatment_tier] || 0) + 1;
     if (result.integrity_errors.length) summary.integrity_errors += 1;

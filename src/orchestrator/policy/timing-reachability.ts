@@ -3,6 +3,11 @@
  * named channel reachability state vectors.
  */
 
+import {
+  DEFAULT_SCORE_REACHABILITY,
+  type ReachabilityConfigInput,
+} from '../../schemas/config.js';
+
 export const TIMING_RULE_VERSION = 'tv-timing-v1';
 export const REACHABILITY_RULE_VERSION = 'tv-reachability-v1';
 
@@ -168,7 +173,8 @@ function readConfidence(...values: unknown[]): number | null {
   return null;
 }
 
-function emailState(record: Record<string, unknown>): ChannelReachability {
+function emailState(record: Record<string, unknown>, config?: ReachabilityConfigInput): ChannelReachability {
+  const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
   if (record.email_opted_out || record.opted_out_email) {
     return { channel: 'email', state: 'opted_out', confidence: 100, ready: false, reason: 'opted_out' };
   }
@@ -192,7 +198,7 @@ function emailState(record: Record<string, unknown>): ChannelReachability {
   const validatedFlag = verificationAccepted
     // Legacy verifier results may predate the status field. This accepts only
     // the dedicated verification confidence, never discovery confidence.
-    || (!verificationStatus && (verificationConfidence ?? 0) >= 70);
+    || (!verificationStatus && (verificationConfidence ?? 0) >= mins.email_verification);
   if (!validatedFlag) {
     return {
       channel: 'email',
@@ -211,7 +217,8 @@ function emailState(record: Record<string, unknown>): ChannelReachability {
   };
 }
 
-function phoneState(record: Record<string, unknown>): ChannelReachability {
+function phoneState(record: Record<string, unknown>, config?: ReachabilityConfigInput): ChannelReachability {
+  const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
   // dne_phone = structural invalidation (wrong number); phone_suppressed = channel block.
   // Neither is full-account DNC.
   if (
@@ -242,17 +249,18 @@ function phoneState(record: Record<string, unknown>): ChannelReachability {
     };
   }
   const confVal = conf;
-  const validated = confVal >= 70;
+  const validated = confVal >= mins.phone_named_validated;
   return {
     channel: 'phone',
     state: validated ? 'named_validated' : 'unvalidated',
     confidence: confVal,
-    ready: validated || confVal >= 60,
+    ready: validated || confVal >= mins.phone_ready,
     reason: validated ? 'validated_phone' : 'low_confidence',
   };
 }
 
-function linkedinState(record: Record<string, unknown>): ChannelReachability {
+function linkedinState(record: Record<string, unknown>, config?: ReachabilityConfigInput): ChannelReachability {
+  const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
   const url = String(record.linkedin_url || record.contact_linkedin_url || '').trim();
   if (!url) return { channel: 'linkedin', state: 'missing', confidence: 0, ready: false };
   if (record.linkedin_connected) {
@@ -269,13 +277,14 @@ function linkedinState(record: Record<string, unknown>): ChannelReachability {
       reason: 'confidence_missing',
     };
   }
-  if (conf >= 60) {
+  if (conf >= mins.linkedin_invite_ready) {
     return { channel: 'linkedin', state: 'invite_ready', confidence: conf, ready: true };
   }
   return { channel: 'linkedin', state: 'unvalidated', confidence: conf, ready: false };
 }
 
-function mailState(record: Record<string, unknown>): ChannelReachability {
+function mailState(record: Record<string, unknown>, config?: ReachabilityConfigInput): ChannelReachability {
+  const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
   const address = String(record.mailing_address || record.address || '').trim();
   if (!address) return { channel: 'mail', state: 'missing', confidence: 0, ready: false };
   const conf = readConfidence(record.mail_confidence);
@@ -298,16 +307,19 @@ function mailState(record: Record<string, unknown>): ChannelReachability {
   const confVal = conf ?? 0;
   return {
     channel: 'mail',
-    state: confVal >= 60 || addressReadyFlag ? 'named_validated' : 'unvalidated',
+    state: confVal >= mins.mail_ready || addressReadyFlag ? 'named_validated' : 'unvalidated',
     confidence: confVal,
-    ready: confVal >= 60 || addressReadyFlag,
-    reason: addressReadyFlag ? 'address_validated' : confVal >= 60 ? 'confidence_ok' : 'low_confidence',
+    ready: confVal >= mins.mail_ready || addressReadyFlag,
+    reason: addressReadyFlag ? 'address_validated' : confVal >= mins.mail_ready ? 'confidence_ok' : 'low_confidence',
   };
 }
 
-export function evaluateReachability(record: Record<string, unknown>): ReachabilityVector {
+export function evaluateReachability(
+  record: Record<string, unknown>,
+  config?: ReachabilityConfigInput,
+): ReachabilityVector {
   return {
-    channels: [emailState(record), phoneState(record), linkedinState(record), mailState(record)],
+    channels: [emailState(record, config), phoneState(record, config), linkedinState(record, config), mailState(record, config)],
     calculation_rule_version: REACHABILITY_RULE_VERSION,
     generated_at: new Date().toISOString(),
   };

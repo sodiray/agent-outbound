@@ -80,10 +80,17 @@ import {
 } from './enrichment-repair.js';
 import {
   DEFAULT_SCORE_MIN_COVERAGE,
+  type ActionConfidenceConfigInput,
   type BuyerConfidenceConfigInput,
+  type CandidateTierConfigInput,
+  type EnrichmentBudgetConfigInput,
+  type EnrichmentRepairConfigInput,
+  type GoldenTicketConfigInput,
   type IdentityConfidenceConfigInput,
   type MailConfidenceConfigInput,
+  type PostcardConfigInput,
   type PhoneConfidenceConfigInput,
+  type ReachabilityConfigInput,
 } from '../../schemas/config.js';
 
 export type PolicyApplyInput = {
@@ -118,6 +125,13 @@ export type PolicyApplyInput = {
   buyerConfidence?: BuyerConfidenceConfigInput;
   /** Configured mail evidence weights and contradiction deductions. */
   mailConfidence?: MailConfidenceConfigInput;
+  goldenTicket?: GoldenTicketConfigInput;
+  actionConfidence?: ActionConfidenceConfigInput;
+  reachability?: ReachabilityConfigInput;
+  candidateTier?: CandidateTierConfigInput;
+  postcard?: PostcardConfigInput;
+  enrichmentRepair?: EnrichmentRepairConfigInput;
+  enrichmentBudget?: EnrichmentBudgetConfigInput;
 };
 
 export type PolicyApplyResult = {
@@ -495,12 +509,18 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const classificationConfidence = num(record.classification_confidence, null) ?? 0;
   const timingCalc = calculateTimingScore(record);
   const timingScore = timingCalc.timing_score;
-  const strongTimingSignalCount = countStrongTimingSignals(timingCalc.signals);
+  const strongTimingSignalCount = countStrongTimingSignals(
+    timingCalc.signals,
+    input.goldenTicket?.minimums?.strong_signal_strength,
+  );
   const storedPhoneConfidence = num(record.phone_confidence, null);
   const phoneConfidence = input.phoneConfidence
     ? derivePhoneConfidence(record, input.phoneConfidence)
     : storedPhoneConfidence ?? derivePhoneConfidence(record);
-  const reachability = evaluateReachability({ ...record, phone_confidence: phoneConfidence });
+  const reachability = evaluateReachability(
+    { ...record, phone_confidence: phoneConfidence },
+    input.reachability,
+  );
   const reachFlags = reachabilityToChannelFlags(reachability);
   // Prefer production cost_events rebuild (input.costLedger / override) over stale JSON.
   const costLedger = input.costLedger
@@ -515,6 +535,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     treatment_tier: String(record.treatment_tier || ''),
     enrichment_usd: enrichmentUsd,
     golden_ticket: Boolean(record.golden_ticket_eligible),
+    enrichmentBudget: input.enrichmentBudget,
   });
   const mailAddressReady = deriveMailAddressReady(record);
   const mailConfidence = deriveMailConfidence(record, input.mailConfidence);
@@ -572,6 +593,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     },
     cumulativeEnrichmentCostUsd: enrichmentUsd,
     treatmentBands: input.treatmentBands,
+    goldenTicket: input.goldenTicket,
+    postcard: input.postcard,
+    enrichmentBudget: input.enrichmentBudget,
   });
 
   const taxonomyResolutionFailed = taxonomy.reasons.includes('taxonomy_not_loaded')
@@ -703,7 +727,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     };
   }
 
-  const candidate = assignCandidateTier(fitScore);
+  const candidate = assignCandidateTier(fitScore, input.candidateTier);
 
   const priority = calculatePriority({
     fitScore,
@@ -1114,6 +1138,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     collision: collision.collision || Boolean(record.channel_or_contact_collision),
     hasNextAction: Boolean(next_action),
     confidenceProfile,
+    actionConfidence: input.actionConfidence,
     namedBuyerStatus: namedBuyer.status,
     namedBuyerName: namedBuyer.name,
     buyerAffiliationStatus: buyerAffiliation.status,
@@ -1156,6 +1181,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       named_buyer_status: namedBuyer.status,
       named_buyer_name: namedBuyer.name,
       missing_fit_inputs: missing_inputs,
+      config: input.enrichmentRepair,
     });
     // Install / refresh repair next_action (idempotent shape).
     if (
@@ -1449,6 +1475,9 @@ export function readinessInputFromRecord(input: {
   /** Optional production spend override (sum of cost_events). */
   enrichmentSpendUsd?: number;
   costLedger?: CostLedger;
+  actionConfidence?: ActionConfidenceConfigInput;
+  reachability?: ReachabilityConfigInput;
+  enrichmentBudget?: EnrichmentBudgetConfigInput;
 }): Parameters<typeof evaluateOutboundReadiness>[0] {
   const record = input.record || {};
   const rowId = String(record._row_id || record.id || 'unknown');
@@ -1459,7 +1488,7 @@ export function readinessInputFromRecord(input: {
   const timingCalc = calculateTimingScore(record);
   const timingScore = timingCalc.timing_score;
   const fitEvidence = num(record.fit_evidence_confidence, null) ?? 0;
-  const reachability = evaluateReachability(record);
+  const reachability = evaluateReachability(record, input.reachability);
   const reachFlags = reachabilityToChannelFlags(reachability);
 
   // Prefer production cost_events rebuild when caller hydrates; else ledger JSON / scalar.
@@ -1479,6 +1508,7 @@ export function readinessInputFromRecord(input: {
       || record.golden_ticket_eligible === 1
       || record.golden_ticket_eligible === '1',
     ),
+    enrichmentBudget: input.enrichmentBudget,
   });
   // Prefer live ledger check; honor explicit false flags from apply patch / operators.
   const withinBudgetFlag =
@@ -1576,6 +1606,7 @@ export function readinessInputFromRecord(input: {
     withinBudget: withinBudgetFlag,
     hasNextAction: hasNext,
     confidenceProfile,
+    actionConfidence: input.actionConfidence,
     namedBuyerStatus: namedBuyer.status,
     namedBuyerName: namedBuyer.name,
     buyerAffiliationStatus: buyerAffiliation.status,
@@ -1678,6 +1709,9 @@ export function guardChannelExecution(input: {
     taskType: input.taskType,
     channel: input.channel,
     stepId: input.stepId,
+    actionConfidence: input.config?.score?.action_confidence,
+    reachability: input.config?.score?.reachability,
+    enrichmentBudget: input.config?.score?.enrichment_budget,
   }));
 
   if (!readiness.ready) {

@@ -14,6 +14,108 @@ export const DEFAULT_SCORE_TREATMENT_BANDS = {
   fit_evidence_confidence: [0, 40, 60, 80, 100],
 } as const;
 
+export const DEFAULT_SCORE_GOLDEN_TICKET = {
+  minimums: {
+    fit_score: 85,
+    fit_evidence_confidence: 80,
+    identity_confidence: 90,
+    classification_confidence: 90,
+    buyer_confidence: 80,
+    mail_confidence: 90,
+    timing_score: 70,
+    strong_signal_strength: 60,
+    strong_signal_count: 2,
+    enrichment_budget_usd: 8,
+  },
+} as const;
+
+export const DEFAULT_SCORE_ACTION_CONFIDENCE = {
+  minimums: {
+    identity: 80,
+    email: 60,
+    phone: 70,
+    linkedin: 60,
+    mail: 80,
+    fit_evidence: 40,
+  },
+} as const;
+
+export const DEFAULT_SCORE_REACHABILITY = {
+  minimums: {
+    email_verification: 70,
+    phone_ready: 60,
+    phone_named_validated: 70,
+    linkedin_invite_ready: 60,
+    mail_ready: 60,
+  },
+} as const;
+
+export const DEFAULT_SCORE_CANDIDATE_TIER = {
+  bands: [0, 50, 65, 80, 100],
+} as const;
+
+export const DEFAULT_SCORE_POSTCARD = {
+  minimums: {
+    identity_confidence: 80,
+    strong_fit: 80,
+    fit_evidence: 40,
+    fit_evidence_exclusive_maximum: 60,
+  },
+} as const;
+
+export const DEFAULT_SCORE_ENRICHMENT_REPAIR = {
+  minimums: {
+    identity_confidence: 80,
+    fit_evidence_confidence: 40,
+    classification_confidence: 40,
+    buyer_confidence: 60,
+    strong_fit: 65,
+    strong_fit_evidence: 60,
+  },
+  channel_evidence_candidate_tiers: ['A', 'B', 'hold'],
+} as const;
+
+export const DEFAULT_SCORE_ENRICHMENT_BUDGET = {
+  ceilings: {
+    foundational: 0.15,
+    A: 3,
+    B: 1,
+    C: 0.3,
+    D: 0.15,
+    enrichment_hold: 0.3,
+    golden_ticket_total: 8,
+  },
+} as const;
+
+export type GoldenTicketConfigInput = {
+  minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_GOLDEN_TICKET.minimums, number>>;
+};
+
+export type ActionConfidenceConfigInput = {
+  minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_ACTION_CONFIDENCE.minimums, number>>;
+};
+
+export type ReachabilityConfigInput = {
+  minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_REACHABILITY.minimums, number>>;
+};
+
+export type CandidateTierConfigInput = {
+  bands?: number[];
+};
+
+export type PostcardConfigInput = {
+  minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_POSTCARD.minimums, number>>;
+};
+
+export type EnrichmentRepairConfigInput = {
+  minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums, number>>;
+  channel_evidence_candidate_tiers?: Array<'A' | 'B' | 'C' | 'D' | 'hold'>;
+};
+
+export type EnrichmentBudgetConfigInput = {
+  ceilings?: Partial<Record<keyof typeof DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings, number>>;
+};
+
 export type IdentityConfidenceConfig = {
   weights: {
     business_name: number;
@@ -758,6 +860,106 @@ const ScoreTreatmentBandsSchema = z.object({
   fit_evidence_confidence: [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
 });
 
+const ConfidenceMinimumSchema = z.coerce.number().min(0).max(100);
+const NonNegativePolicyValueSchema = z.coerce.number().nonnegative();
+
+const GoldenTicketConfigSchema = z.object({
+  minimums: z.object({
+    fit_score: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.fit_score),
+    fit_evidence_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.fit_evidence_confidence),
+    identity_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.identity_confidence),
+    classification_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.classification_confidence),
+    buyer_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.buyer_confidence),
+    mail_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.mail_confidence),
+    timing_score: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.timing_score),
+    strong_signal_strength: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_strength),
+    strong_signal_count: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_count),
+    enrichment_budget_usd: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.enrichment_budget_usd),
+  }).partial().default(() => ({ ...DEFAULT_SCORE_GOLDEN_TICKET.minimums })),
+}).default(() => ({ minimums: { ...DEFAULT_SCORE_GOLDEN_TICKET.minimums } }));
+
+const ActionConfidenceConfigSchema = z.object({
+  minimums: z.object({
+    identity: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ACTION_CONFIDENCE.minimums.identity),
+    email: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ACTION_CONFIDENCE.minimums.email),
+    phone: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ACTION_CONFIDENCE.minimums.phone),
+    linkedin: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ACTION_CONFIDENCE.minimums.linkedin),
+    mail: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ACTION_CONFIDENCE.minimums.mail),
+    fit_evidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ACTION_CONFIDENCE.minimums.fit_evidence),
+  }).partial().default(() => ({ ...DEFAULT_SCORE_ACTION_CONFIDENCE.minimums })),
+}).default(() => ({ minimums: { ...DEFAULT_SCORE_ACTION_CONFIDENCE.minimums } }));
+
+const ReachabilityConfigSchema = z.object({
+  minimums: z.object({
+    email_verification: ConfidenceMinimumSchema.default(DEFAULT_SCORE_REACHABILITY.minimums.email_verification),
+    phone_ready: ConfidenceMinimumSchema.default(DEFAULT_SCORE_REACHABILITY.minimums.phone_ready),
+    phone_named_validated: ConfidenceMinimumSchema.default(DEFAULT_SCORE_REACHABILITY.minimums.phone_named_validated),
+    linkedin_invite_ready: ConfidenceMinimumSchema.default(DEFAULT_SCORE_REACHABILITY.minimums.linkedin_invite_ready),
+    mail_ready: ConfidenceMinimumSchema.default(DEFAULT_SCORE_REACHABILITY.minimums.mail_ready),
+  }).partial().superRefine((minimums, ctx) => {
+    if (minimums.phone_named_validated === undefined || minimums.phone_ready === undefined) return;
+    if (minimums.phone_named_validated >= minimums.phone_ready) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'score.reachability.minimums.phone_named_validated must be at least phone_ready.',
+      path: ['phone_named_validated'],
+    });
+  }).default(() => ({ ...DEFAULT_SCORE_REACHABILITY.minimums })),
+}).default(() => ({ minimums: { ...DEFAULT_SCORE_REACHABILITY.minimums } }));
+
+const CandidateTierConfigSchema = z.object({
+  bands: ScoreTreatmentBandLadderSchema.default(() => [...DEFAULT_SCORE_CANDIDATE_TIER.bands]),
+}).default(() => ({ bands: [...DEFAULT_SCORE_CANDIDATE_TIER.bands] }));
+
+const PostcardConfigSchema = z.object({
+  minimums: z.object({
+    identity_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_POSTCARD.minimums.identity_confidence),
+    strong_fit: ConfidenceMinimumSchema.default(DEFAULT_SCORE_POSTCARD.minimums.strong_fit),
+    fit_evidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_POSTCARD.minimums.fit_evidence),
+    fit_evidence_exclusive_maximum: ConfidenceMinimumSchema.default(
+      DEFAULT_SCORE_POSTCARD.minimums.fit_evidence_exclusive_maximum,
+    ),
+  }).partial().superRefine((minimums, ctx) => {
+    if (minimums.fit_evidence === undefined || minimums.fit_evidence_exclusive_maximum === undefined) return;
+    if (minimums.fit_evidence_exclusive_maximum > minimums.fit_evidence) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'score.postcard.minimums.fit_evidence_exclusive_maximum must exceed fit_evidence.',
+      path: ['fit_evidence_exclusive_maximum'],
+    });
+  }).default(() => ({ ...DEFAULT_SCORE_POSTCARD.minimums })),
+}).default(() => ({ minimums: { ...DEFAULT_SCORE_POSTCARD.minimums } }));
+
+const EnrichmentRepairConfigSchema = z.object({
+  minimums: z.object({
+    identity_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums.identity_confidence),
+    fit_evidence_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums.fit_evidence_confidence),
+    classification_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums.classification_confidence),
+    buyer_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums.buyer_confidence),
+    strong_fit: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums.strong_fit),
+    strong_fit_evidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums.strong_fit_evidence),
+  }).partial().default(() => ({ ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums })),
+  channel_evidence_candidate_tiers: z.array(z.enum(['A', 'B', 'C', 'D', 'hold']))
+    .min(1)
+    .refine((tiers) => new Set(tiers).size === tiers.length, 'Candidate tiers must be unique.')
+    .default(() => [...DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers]),
+}).default(() => ({
+  minimums: { ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums },
+  channel_evidence_candidate_tiers: [...DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers],
+}));
+
+const EnrichmentBudgetConfigSchema = z.object({
+  ceilings: z.object({
+    foundational: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.foundational),
+    A: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.A),
+    B: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.B),
+    C: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.C),
+    D: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.D),
+    enrichment_hold: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.enrichment_hold),
+    golden_ticket_total: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.golden_ticket_total),
+  }).partial().default(() => ({ ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings })),
+}).default(() => ({ ceilings: { ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings } }));
+
 const validateConfidenceWeightTotal = (path: string) => (
   (weights: Record<string, number>, ctx: z.RefinementCtx) => {
     const total = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
@@ -890,6 +1092,13 @@ const ScoreSchema = z.object({
   phone_confidence: PhoneConfidenceConfigSchema,
   buyer_confidence: BuyerConfidenceConfigSchema,
   mail_confidence: MailConfidenceConfigSchema,
+  golden_ticket: GoldenTicketConfigSchema,
+  action_confidence: ActionConfidenceConfigSchema,
+  reachability: ReachabilityConfigSchema,
+  candidate_tier: CandidateTierConfigSchema,
+  postcard: PostcardConfigSchema,
+  enrichment_repair: EnrichmentRepairConfigSchema,
+  enrichment_budget: EnrichmentBudgetConfigSchema,
 }).partial().default({});
 
 const SuppressionSchema = z.object({
@@ -1254,6 +1463,13 @@ const coerceLegacyScore = (raw) => {
     ...(score.phone_confidence !== undefined ? { phone_confidence: score.phone_confidence } : {}),
     ...(score.buyer_confidence !== undefined ? { buyer_confidence: score.buyer_confidence } : {}),
     ...(score.mail_confidence !== undefined ? { mail_confidence: score.mail_confidence } : {}),
+    ...(score.golden_ticket !== undefined ? { golden_ticket: score.golden_ticket } : {}),
+    ...(score.action_confidence !== undefined ? { action_confidence: score.action_confidence } : {}),
+    ...(score.reachability !== undefined ? { reachability: score.reachability } : {}),
+    ...(score.candidate_tier !== undefined ? { candidate_tier: score.candidate_tier } : {}),
+    ...(score.postcard !== undefined ? { postcard: score.postcard } : {}),
+    ...(score.enrichment_repair !== undefined ? { enrichment_repair: score.enrichment_repair } : {}),
+    ...(score.enrichment_budget !== undefined ? { enrichment_budget: score.enrichment_budget } : {}),
   };
   return { ...(raw as any), score: single };
 };
@@ -1436,6 +1652,48 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
               ?? DEFAULT_SCORE_MAIL_CONFIDENCE.penalties.open_contradiction,
             maximum_total: parsed.data?.score?.mail_confidence?.penalties?.maximum_total
               ?? DEFAULT_SCORE_MAIL_CONFIDENCE.penalties.maximum_total,
+          },
+        },
+        golden_ticket: {
+          minimums: {
+            ...DEFAULT_SCORE_GOLDEN_TICKET.minimums,
+            ...(parsed.data?.score?.golden_ticket?.minimums || {}),
+          },
+        },
+        action_confidence: {
+          minimums: {
+            ...DEFAULT_SCORE_ACTION_CONFIDENCE.minimums,
+            ...(parsed.data?.score?.action_confidence?.minimums || {}),
+          },
+        },
+        reachability: {
+          minimums: {
+            ...DEFAULT_SCORE_REACHABILITY.minimums,
+            ...(parsed.data?.score?.reachability?.minimums || {}),
+          },
+        },
+        candidate_tier: {
+          bands: parsed.data?.score?.candidate_tier?.bands ?? [...DEFAULT_SCORE_CANDIDATE_TIER.bands],
+        },
+        postcard: {
+          minimums: {
+            ...DEFAULT_SCORE_POSTCARD.minimums,
+            ...(parsed.data?.score?.postcard?.minimums || {}),
+          },
+        },
+        enrichment_repair: {
+          minimums: {
+            ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums,
+            ...(parsed.data?.score?.enrichment_repair?.minimums || {}),
+          },
+          channel_evidence_candidate_tiers:
+            parsed.data?.score?.enrichment_repair?.channel_evidence_candidate_tiers
+            ?? [...DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers],
+        },
+        enrichment_budget: {
+          ceilings: {
+            ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings,
+            ...(parsed.data?.score?.enrichment_budget?.ceilings || {}),
           },
         },
       },

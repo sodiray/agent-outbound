@@ -3,6 +3,13 @@
  * Models supply component grades; this module owns final numbers.
  */
 
+import {
+  DEFAULT_SCORE_ACTION_CONFIDENCE,
+  DEFAULT_SCORE_CANDIDATE_TIER,
+  type ActionConfidenceConfigInput,
+  type CandidateTierConfigInput,
+} from '../../schemas/config.js';
+
 export const FIT_RULE_VERSION = 'tv-fit-v1';
 export const PRIORITY_RULE_VERSION = 'tv-priority-v1';
 
@@ -108,14 +115,11 @@ export function actionConfidenceAllows(input: {
   action: 'email' | 'phone' | 'linkedin' | 'mail' | 'fit_treatment' | 'outbound_baseline';
   profile: EvidenceConfidenceProfile;
   minimums?: Partial<Record<string, number>>;
+  config?: ActionConfidenceConfigInput;
 }): { allowed: boolean; failing: string[]; used: Record<string, number> } {
   const mins = {
-    identity: 80,
-    email: 60,
-    phone: 70,
-    linkedin: 60,
-    mail: 80,
-    fit_evidence: 40,
+    ...DEFAULT_SCORE_ACTION_CONFIDENCE.minimums,
+    ...input.config?.minimums,
     ...input.minimums,
   };
   const p = input.profile;
@@ -236,17 +240,18 @@ export function calculatePriority(input: PriorityInput): PriorityResult {
 }
 
 /** Candidate tier from preliminary fit (controls research depth, not outreach). */
-export function assignCandidateTier(preliminaryFit: number | null): {
+export function assignCandidateTier(preliminaryFit: number | null, config?: CandidateTierConfigInput): {
   candidate_tier: 'A' | 'B' | 'C' | 'D' | 'hold';
   reasons: string[];
 } {
+  const bands = config?.bands || DEFAULT_SCORE_CANDIDATE_TIER.bands;
   if (preliminaryFit == null || Number.isNaN(preliminaryFit)) {
     return { candidate_tier: 'hold', reasons: ['unscored'] };
   }
-  if (preliminaryFit >= 80) return { candidate_tier: 'A', reasons: ['prelim_fit_80_100'] };
-  if (preliminaryFit >= 65) return { candidate_tier: 'B', reasons: ['prelim_fit_65_79'] };
-  if (preliminaryFit >= 50) return { candidate_tier: 'C', reasons: ['prelim_fit_50_64'] };
-  return { candidate_tier: 'D', reasons: ['prelim_fit_below_50'] };
+  if (preliminaryFit >= bands[3]) return { candidate_tier: 'A', reasons: [`prelim_fit_${bands[3]}_100`] };
+  if (preliminaryFit >= bands[2]) return { candidate_tier: 'B', reasons: [`prelim_fit_${bands[2]}_${bands[3] - 1}`] };
+  if (preliminaryFit >= bands[1]) return { candidate_tier: 'C', reasons: [`prelim_fit_${bands[1]}_${bands[2] - 1}`] };
+  return { candidate_tier: 'D', reasons: [`prelim_fit_below_${bands[1]}`] };
 }
 
 function clamp(n: number, lo: number, hi: number) {

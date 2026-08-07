@@ -4,6 +4,11 @@
  * planEnrichmentRepair is pure — policy apply persists the plan + hold reasons.
  */
 
+import {
+  DEFAULT_SCORE_ENRICHMENT_REPAIR,
+  type EnrichmentRepairConfigInput,
+} from '../../schemas/config.js';
+
 export type EnrichmentDepth = 'foundational' | 'candidate_tier' | 'targeted';
 
 export type EnrichmentRepairStep = {
@@ -131,6 +136,7 @@ export function planEnrichmentRepair(input: {
   named_buyer_status?: string | null;
   named_buyer_name?: string | null;
   missing_fit_inputs?: string[];
+  config?: EnrichmentRepairConfigInput;
 }): EnrichmentRepairPlan {
   const record = input.record || {};
   const account_id = text(record._row_id || record.id || 'unknown');
@@ -139,6 +145,10 @@ export function planEnrichmentRepair(input: {
   const hold_reasons = [...(input.hold_reasons || [])];
   const steps: EnrichmentRepairStep[] = [];
   const seen = new Set<string>();
+  const config = input.config;
+  const mins = { ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums, ...config?.minimums };
+  const channelEvidenceCandidateTiers: readonly string[] = config?.channel_evidence_candidate_tiers
+    || DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers;
 
   const push = (step: EnrichmentRepairStep) => {
     if (seen.has(step.field)) return;
@@ -189,10 +199,10 @@ export function planEnrichmentRepair(input: {
     });
   }
   const identityConf = num(record.identity_confidence);
-  if (identityConf == null || identityConf < 80) {
+  if (identityConf == null || identityConf < mins.identity_confidence) {
     push({
       field: 'identity_confidence',
-      reason: identityConf == null ? 'identity_confidence_missing' : 'identity_confidence_below_80',
+      reason: identityConf == null ? 'identity_confidence_missing' : `identity_confidence_below_${mins.identity_confidence}`,
       depth: 'foundational',
       priority: 60,
     });
@@ -217,7 +227,7 @@ export function planEnrichmentRepair(input: {
     });
   }
   const fitEvidence = num(record.fit_evidence_confidence);
-  if (fitEvidence == null || fitEvidence < 40) {
+  if (fitEvidence == null || fitEvidence < mins.fit_evidence_confidence) {
     push({
       field: 'fit_evidence_confidence',
       reason: fitEvidence == null ? 'fit_evidence_missing' : 'fit_evidence_thin',
@@ -242,7 +252,7 @@ export function planEnrichmentRepair(input: {
     });
   }
   const classConf = num(record.classification_confidence);
-  if (classConf == null || classConf < 40) {
+  if (classConf == null || classConf < mins.classification_confidence) {
     push({
       field: 'classification_confidence',
       reason: classConf == null ? 'classification_confidence_missing' : 'classification_confidence_low',
@@ -295,7 +305,7 @@ export function planEnrichmentRepair(input: {
     });
   }
   const buyerConf = num(record.buyer_confidence);
-  if (buyerConf == null || buyerConf < 60) {
+  if (buyerConf == null || buyerConf < mins.buyer_confidence) {
     push({
       field: 'buyer_confidence',
       reason: buyerConf == null ? 'buyer_confidence_missing' : 'buyer_confidence_low',
@@ -305,7 +315,11 @@ export function planEnrichmentRepair(input: {
   }
 
   // Strong-fit thin-evidence path: targeted evidence lifts for A/B candidacy.
-  if (fitScore != null && fitScore >= 65 && (fitEvidence == null || fitEvidence < 60)) {
+  if (
+    fitScore != null
+    && fitScore >= mins.strong_fit
+    && (fitEvidence == null || fitEvidence < mins.strong_fit_evidence)
+  ) {
     push({
       field: 'fit_evidence_deepening',
       reason: 'strong_fit_insufficient_evidence',
@@ -315,7 +329,8 @@ export function planEnrichmentRepair(input: {
   }
 
   // Channel evidence for candidate A/B depth (mail / email when tier allows).
-  const depthAllowsChannels = ['A', 'B', 'hold'].includes(candidate_tier) || treatment_tier === 'enrichment_hold';
+  const depthAllowsChannels = channelEvidenceCandidateTiers.includes(candidate_tier)
+    || treatment_tier === 'enrichment_hold';
   if (depthAllowsChannels) {
     if (blank(record.contact_email) && blank(record.email)) {
       push({

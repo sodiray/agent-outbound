@@ -2,7 +2,10 @@
  * Enrichment + execution cost ledger with configured ceilings.
  */
 
-import { ENRICHMENT_COST_CEILINGS } from './treatment.js';
+import {
+  DEFAULT_SCORE_ENRICHMENT_BUDGET,
+  type EnrichmentBudgetConfigInput,
+} from '../../schemas/config.js';
 
 export const COST_LEDGER_VERSION = 'tv-cost-ledger-v1';
 
@@ -87,15 +90,17 @@ export function withinEnrichmentCeiling(input: {
   treatment_tier?: string;
   enrichment_usd: number;
   golden_ticket?: boolean;
+  enrichmentBudget?: EnrichmentBudgetConfigInput;
 }): { within_budget: boolean; ceiling: number; reason?: string } {
+  const ceilings = { ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings, ...input.enrichmentBudget?.ceilings };
   const tier = String(input.candidate_tier || input.treatment_tier || 'foundational').toLowerCase();
-  let ceiling = ENRICHMENT_COST_CEILINGS.foundational ?? 0.15;
-  if (tier === 'a' || tier === 'tier_a') ceiling = ENRICHMENT_COST_CEILINGS.A ?? 3;
-  else if (tier === 'b' || tier === 'tier_b') ceiling = ENRICHMENT_COST_CEILINGS.B ?? 1.0;
-  else if (tier === 'c' || tier === 'tier_c') ceiling = ENRICHMENT_COST_CEILINGS.C ?? 0.3;
-  else if (tier === 'd' || tier === 'tier_d') ceiling = ENRICHMENT_COST_CEILINGS.D ?? 0.15;
-  else if (tier === 'enrichment_hold') ceiling = ENRICHMENT_COST_CEILINGS.enrichment_hold ?? 0.3;
-  if (input.golden_ticket) ceiling = Math.max(ceiling, ENRICHMENT_COST_CEILINGS.golden_ticket_total ?? 8);
+  let ceiling: number = ceilings.foundational;
+  if (tier === 'a' || tier === 'tier_a') ceiling = ceilings.A;
+  else if (tier === 'b' || tier === 'tier_b') ceiling = ceilings.B;
+  else if (tier === 'c' || tier === 'tier_c') ceiling = ceilings.C;
+  else if (tier === 'd' || tier === 'tier_d') ceiling = ceilings.D;
+  else if (tier === 'enrichment_hold') ceiling = ceilings.enrichment_hold;
+  if (input.golden_ticket) ceiling = Math.max(ceiling, ceilings.golden_ticket_total);
   if (input.enrichment_usd > ceiling) {
     return { within_budget: false, ceiling, reason: `enrichment_cost_exceeded:${input.enrichment_usd}>${ceiling}` };
   }
@@ -310,6 +315,7 @@ export function evaluateEnrichmentCeilingGate(input: {
   db?: any;
   record: Record<string, unknown>;
   stepConfig?: Record<string, unknown> | null;
+  enrichmentBudget?: EnrichmentBudgetConfigInput;
 }): EnrichmentCeilingGateResult {
   const record = input.record || {};
   if (!isExpensiveEnrichProviderAction(input.stepConfig)) {
@@ -351,6 +357,7 @@ export function evaluateEnrichmentCeilingGate(input: {
       || working.golden_ticket_eligible === 1
       || String(working.golden_ticket_eligible || '').toLowerCase() === 'true',
     ),
+    enrichmentBudget: input.enrichmentBudget,
   });
 
   if (check.within_budget) {
