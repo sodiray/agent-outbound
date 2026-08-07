@@ -778,10 +778,39 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
    * record had long left. The sequencer gates outbound on the action type, so
    * that stale field alone prevented every send.
    */
-  const holdsStaleRepairAction = () => (
-    ['enrichment_repair', 'enrichment_hold'].includes(String(next_action?.action_type || ''))
-    && !needsEnrichmentRepairAction()
-  );
+  /**
+   * A holding action the record has outgrown must be recomputed.
+   *
+   * These action types all encode the premise "this account is not currently
+   * worth outreach". When the premise stops holding — the tier improves, the
+   * hold clears — the action must be recomputed, or the record is stuck in the
+   * absorbing state described above.
+   *
+   * `enrichment_repair`/`enrichment_hold` were the first instance found. The
+   * same trap then caught a record that improved from D to C: its next action
+   * still read `reentry_evaluation` with reason `tier_d_no_campaign_age`, a
+   * premise written when it was Tier D, so it could never be sequenced. Fixing
+   * one action type and not the class left the pattern alive.
+   *
+   * Deliberately NOT included: `terminal_recordkeeping`, which encodes a real
+   * terminal outcome (hard bounce, suppression, disqualification) and must
+   * survive a tier change.
+   */
+  const OUTGROWABLE_HOLDING_ACTIONS = [
+    'enrichment_repair',
+    'enrichment_hold',
+    'recycle_monitor',
+    'reentry_evaluation',
+  ];
+
+  const tierPermitsOutreach = () => ['A', 'B', 'C'].includes(String(treatment.treatment_tier || ''));
+
+  const holdsStaleRepairAction = () => {
+    const actionType = String(next_action?.action_type || '');
+    if (!OUTGROWABLE_HOLDING_ACTIONS.includes(actionType)) return false;
+    if (['enrichment_repair', 'enrichment_hold'].includes(actionType)) return !needsEnrichmentRepairAction();
+    return tierPermitsOutreach();
+  };
 
   if (!next_action || String(next_action.action_type || '').includes('reprocess') || !next_action.action_id
     || needsEnrichmentRepairAction() || holdsStaleRepairAction()) {
