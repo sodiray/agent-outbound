@@ -77,7 +77,19 @@ const declaredOutputNames = (step: PipelineStepLike): string[] => {
     : step.outputs && typeof step.outputs === 'object' && !Array.isArray(step.outputs)
       ? step.outputs as Record<string, unknown>
       : {};
-  return Object.keys(outputs);
+  // An output is frequently persisted under a DIFFERENT column via `columns:`
+  // — the email step declares `message_id` and stores it as
+  // `email_last_message_id`. Checking the declared name against the record
+  // marked a SUCCESSFUL live send as errored, which is the worst possible
+  // false positive here: an errored send invites a retry, and a retry to a real
+  // person is a duplicate email.
+  const columns = config.columns && typeof config.columns === 'object' && !Array.isArray(config.columns)
+    ? config.columns as Record<string, unknown>
+    : {};
+  return Object.keys(outputs).map((name) => {
+    const mapped = String(columns[name] ?? '').trim();
+    return mapped || name;
+  });
 };
 
 const isPersistedOutputValue = (value: unknown): boolean => {
