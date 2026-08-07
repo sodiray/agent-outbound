@@ -64,6 +64,7 @@ import {
   createTransitionAudit,
   appendTransitionAudit,
   detectCollision,
+  parseStageReviewJson,
 } from './transition-audit.js';
 import {
   evaluateCampaignProcess,
@@ -801,14 +802,27 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     'enrichment_hold',
     'recycle_monitor',
     'reentry_evaluation',
+    'pending_human_review',
   ];
 
   const tierPermitsOutreach = () => ['A', 'B', 'C'].includes(String(treatment.treatment_tier || ''));
+
+  /**
+   * `pending_human_review` is legitimate only while a review is actually
+   * pending. Once the review is gone — rejected, withdrawn, or cleared — the
+   * action describes a wait that will never end, and the sequencer refuses
+   * every send with `non_outbound_action_pending_human_review`.
+   */
+  const awaitsLiveHumanReview = () => {
+    const status = String(parseStageReviewJson(record.stage_review_json)?.status || '').toLowerCase();
+    return status === 'pending' || status === 'edited';
+  };
 
   const holdsStaleRepairAction = () => {
     const actionType = String(next_action?.action_type || '');
     if (!OUTGROWABLE_HOLDING_ACTIONS.includes(actionType)) return false;
     if (['enrichment_repair', 'enrichment_hold'].includes(actionType)) return !needsEnrichmentRepairAction();
+    if (actionType === 'pending_human_review') return !awaitsLiveHumanReview();
     return tierPermitsOutreach();
   };
 
