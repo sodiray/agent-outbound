@@ -109,6 +109,20 @@ export const declaredOutputsUnwritten = ({
 const samePersistedValue = (left: unknown, right: unknown): boolean => {
   if (typeof left === 'number' && typeof right === 'number') return left === right;
   if (typeof left === 'boolean' && typeof right === 'boolean') return left === right;
+  // A value that survives a round trip through SQLite comes back in that
+  // column's storage type, not the type the step produced. An INTEGER output of
+  // 82 read back from a REAL column is 82.0, and comparing their string forms
+  // ("82" vs "82.0") reported a correctly persisted value as dropped.
+  //
+  // Compare numerically whenever both sides are finite numbers; fall back to
+  // string equality only for genuinely non-numeric values.
+  const leftNumber = Number(left);
+  const rightNumber = Number(right);
+  const bothNumeric = String(left).trim() !== ''
+    && String(right).trim() !== ''
+    && Number.isFinite(leftNumber)
+    && Number.isFinite(rightNumber);
+  if (bothNumeric) return leftNumber === rightNumber;
   return String(left) === String(right);
 };
 
