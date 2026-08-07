@@ -32,7 +32,7 @@ import {
   toZonedIsoDate,
 } from '../lib/working-days.js';
 import { evaluateStructuredCondition } from '../lib/sequence-conditions.js';
-import { resolveStepTemplate } from '../lib/templates.js';
+import { composeStepTemplate, TemplateCompositionError } from '../lib/templates.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import {
@@ -977,23 +977,6 @@ export const runSequencer = async ({
       }
 
       const stepDescriptionText = String(step?.description || '').toLowerCase();
-      const templateResolved = resolveStepTemplate({ config, step, record }) || null;
-      const executableStep = templateResolved
-        ? {
-          ...step,
-          description: templateResolved.rendered_description || String(step?.description || ''),
-          config: {
-            ...(step?.config || {}),
-            template_context: {
-              template_id: templateResolved.template_id,
-              template_version: templateResolved.template_version,
-              subject: templateResolved.subject,
-              body: templateResolved.body,
-              variables: templateResolved.variables,
-            },
-          },
-        }
-        : step;
       const channelHint = stepIntent.uses_email
         ? 'email'
         : (stepIntent.uses_mail
@@ -1033,6 +1016,37 @@ export const runSequencer = async ({
         return;
       }
       const sequenceIntent: 'send' | 'draft' = approvalRequired && !readyDraft ? 'draft' : 'send';
+      const templateOutcome = approvalRequired && readyDraft
+        ? { ok: true as const, template: null }
+        : await composeStepTemplate({ config, step, record, db, listDir })
+          .then((template) => ({ ok: true as const, template }))
+          .catch((error) => ({ ok: false as const, error }));
+      if (templateOutcome.ok === false) {
+        const detail = templateOutcome.error instanceof TemplateCompositionError
+          ? templateOutcome.error.message
+          : String(templateOutcome.error);
+        upsertRecord({ db, row: { ...record, last_error: `template_composition_failed: ${detail}` } });
+        summary.failed += 1;
+        summary.errors.push({ record_id: recordId, step: step.id || stepNumber, error: detail });
+        return;
+      }
+      const templateResolved = templateOutcome.template;
+      const executableStep = templateResolved
+        ? {
+          ...step,
+          description: templateResolved.rendered_description || String(step?.description || ''),
+          config: {
+            ...(step?.config || {}),
+            template_context: {
+              template_id: templateResolved.template_id,
+              template_version: templateResolved.template_version,
+              subject: templateResolved.subject,
+              body: templateResolved.body,
+              variables: templateResolved.variables,
+            },
+          },
+        }
+        : step;
 
       const result = await executeChannelStep({
         mcp,
@@ -1301,7 +1315,19 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
           }
         }
 
-        const templateResolved = resolveStepTemplate({ config, step: firstStep, record }) || null;
+        const templateOutcome = await composeStepTemplate({ config, step: firstStep, record, db, listDir })
+          .then((template) => ({ ok: true as const, template }))
+          .catch((error) => ({ ok: false as const, error }));
+        if (templateOutcome.ok === false) {
+          const detail = templateOutcome.error instanceof TemplateCompositionError
+            ? templateOutcome.error.message
+            : String(templateOutcome.error);
+          upsertRecord({ db, row: { ...record, last_error: `template_composition_failed: ${detail}` } });
+          summary.failed += 1;
+          summary.errors.push({ record_id: getRecordRowId(record), step: firstStep.id || 1, error: detail });
+          continue;
+        }
+        const templateResolved = templateOutcome.template;
         const executableStep = templateResolved
           ? {
             ...firstStep,
@@ -1488,7 +1514,19 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
             continue;
           }
 
-          const templateResolved = resolveStepTemplate({ config, step: firstStep, record: row }) || null;
+          const templateOutcome = await composeStepTemplate({ config, step: firstStep, record: row, db, listDir })
+            .then((template) => ({ ok: true as const, template }))
+            .catch((error) => ({ ok: false as const, error }));
+          if (templateOutcome.ok === false) {
+            const detail = templateOutcome.error instanceof TemplateCompositionError
+              ? templateOutcome.error.message
+              : String(templateOutcome.error);
+            upsertRecord({ db, row: { ...row, last_error: `template_composition_failed: ${detail}` } });
+            summary.failed += 1;
+            summary.errors.push({ record_id: getRecordRowId(row), step: firstStep.id || 1, error: detail });
+            continue;
+          }
+          const templateResolved = templateOutcome.template;
           const executableStep = templateResolved
             ? {
               ...firstStep,

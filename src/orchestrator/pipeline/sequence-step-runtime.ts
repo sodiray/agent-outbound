@@ -4,7 +4,7 @@ import {
   type NonWorkingDayPolicy,
   type SequenceWorkingDay,
 } from '../lib/working-days.js';
-import { resolveStepTemplate } from '../lib/templates.js';
+import { composeStepTemplate } from '../lib/templates.js';
 
 const isBlank = (value: unknown) => (
   value === undefined || value === null || String(value).trim() === ''
@@ -79,7 +79,13 @@ export const executePipelineSequenceAction = async ({
   step: Record<string, unknown>;
   [key: string]: unknown;
 }) => {
-  const template = resolveStepTemplate({ config, step, record });
+  const template = await composeStepTemplate({
+    config: config && typeof config === 'object' ? config as Record<string, unknown> : {},
+    step,
+    record,
+    db: db as { prepare: (sql: string) => { run: (...params: unknown[]) => unknown } },
+    listDir: String(options.listDir || ''),
+  });
   const stepConfig = step.config && typeof step.config === 'object'
     ? step.config as Record<string, unknown>
     : {};

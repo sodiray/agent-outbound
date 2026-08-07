@@ -1394,11 +1394,45 @@ const SequenceSchema = z.object({
   steps: z.array(SequenceStepSchema).default([]),
 }).partial();
 
+const TemplateCompositionInputSchema = z.object({
+  from: z.string().min(1).optional(),
+  value: z.union([z.string().min(1), z.number()]).transform((value) => String(value)).optional(),
+  required: z.boolean().default(true),
+}).superRefine((value, ctx) => {
+  const sources = Number(Boolean(value.from)) + Number(Boolean(value.value));
+  if (sources === 1) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'template composition input must declare exactly one of from or value.',
+  });
+});
+
+const TemplateCompositionSchema = z.object({
+  model: ProviderModelSchema,
+  brief: z.object({
+    subject: z.string().min(1),
+    sections: z.array(z.string().min(1)).min(1),
+  }),
+  inputs: z.record(TemplateCompositionInputSchema).refine(
+    (inputs) => Object.keys(inputs).length > 0,
+    'template composition inputs must not be empty.',
+  ),
+  rules: z.array(z.string().min(1)).default([]),
+  length: z.object({
+    max_words: z.coerce.number().int().min(1).max(2000).optional(),
+    max_sentences: z.coerce.number().int().min(1).max(200).optional(),
+  }).refine(
+    (length) => length.max_words !== undefined || length.max_sentences !== undefined,
+    'template composition length must declare max_words or max_sentences.',
+  ),
+}).strict();
+
 const TemplateVersionSchema = z.object({
   version: z.coerce.number().int().min(1).default(1),
   subject: z.string().default(''),
   body: z.string().default(''),
   variables: z.record(z.any()).default({}),
+  composition: TemplateCompositionSchema.optional(),
   created_at: z.string().default(''),
   note: z.string().default(''),
 }).partial().default({});
