@@ -411,7 +411,9 @@ export const generateObjectWithTools = async ({
   // depended on which run happened to execute. Copywriting keeps the provider
   // default; variety is the point there.
   const deterministicRole = role === 'evaluation' || role === 'research';
-  const sampling = deterministicRole ? { temperature: 0 } : {};
+  // OpenRouter reasoning models reject temperature; grading determinism comes
+  // from median-of-N sampling (score.samples), not temperature.
+  const sampling = deterministicRole && resolved.providerId !== 'openrouter' ? { temperature: 0 } : {};
   const preferPlainTextObject = !hasTools && (
     resolved.providerId === 'deepinfra'
     || providerOptionsRequestReasoning(providerOptions)

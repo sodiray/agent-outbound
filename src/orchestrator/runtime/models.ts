@@ -148,7 +148,8 @@ export const resolveRuntimeModel = async ({
   if (enforceSupported) {
     assertSupportedModel(parsed.modelRef);
   }
-  const built = await provider.buildModel(parsed.modelId, credentials.apiKey, credentials.baseURL);
+  const providerOptions = provider.getProviderOptions ? provider.getProviderOptions(parsed.modelId, { reasoning }) : {};
+  const built = await provider.buildModel(parsed.modelId, credentials.apiKey, credentials.baseURL, providerOptions);
   return {
     provider,
     providerId: provider.id,
@@ -156,7 +157,7 @@ export const resolveRuntimeModel = async ({
     modelRef: parsed.modelRef,
     resolvedFrom: resolved.source,
     built,
-    providerOptions: provider.getProviderOptions ? provider.getProviderOptions(parsed.modelId, { reasoning }) : {},
+    providerOptions,
   };
 };
 

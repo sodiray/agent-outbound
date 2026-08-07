@@ -22,7 +22,12 @@ export type RuntimeProvider = {
   credentialEnvDescription?: string;
   supportsCacheControl: boolean;
   validateKey: (apiKey: string) => Promise<ProviderValidateResult>;
-  buildModel: (modelId: string, apiKey: string, baseURL?: string) => Promise<any>;
+  buildModel: (
+    modelId: string,
+    apiKey: string,
+    baseURL?: string,
+    providerOptions?: Record<string, unknown>,
+  ) => Promise<any>;
   resolveCredentials?: () => ProviderCredentials;
   getProviderOptions?: (modelId: string, opts?: { reasoning?: boolean }) => Record<string, any>;
   extractUsdCost: (result: any) => number | null;
@@ -137,16 +142,75 @@ const buildOpenAiModel = async (modelId: string, apiKey: string) => {
   throw new Error('Failed to initialize OpenAI provider from @ai-sdk/openai.');
 };
 
-const buildOpenRouterModel = async (modelId: string, apiKey: string, baseURL = OPENROUTER_BASE_URL) => {
+type OpenRouterReasoningEffort = 'low' | 'medium' | 'high';
+
+const isOpenRouterReasoningEffort = (value: string): value is OpenRouterReasoningEffort => (
+  value === 'low' || value === 'medium' || value === 'high'
+);
+
+const getOpenRouterReasoningEffort = (): OpenRouterReasoningEffort => {
+  const configured = String(getEnv('AO_OPENROUTER_REASONING_EFFORT') || 'high').trim().toLowerCase();
+  return isOpenRouterReasoningEffort(configured) ? configured : 'high';
+};
+
+const getOpenRouterReasoningEffortFromOptions = (providerOptions?: Record<string, unknown>) => {
+  const openRouterOptions = providerOptions?.openrouter;
+  if (!openRouterOptions || typeof openRouterOptions !== 'object') return getOpenRouterReasoningEffort();
+  const reasoning = (openRouterOptions as { reasoning?: unknown }).reasoning;
+  if (!reasoning || typeof reasoning !== 'object') return getOpenRouterReasoningEffort();
+  const effort = String((reasoning as { effort?: unknown }).effort || '').trim().toLowerCase();
+  return isOpenRouterReasoningEffort(effort) ? effort : getOpenRouterReasoningEffort();
+};
+
+const withOpenRouterReasoning = (
+  fetchFn: typeof globalThis.fetch,
+  effort: OpenRouterReasoningEffort,
+): typeof globalThis.fetch => async (input, init) => {
+  if (typeof init?.body !== 'string') return fetchFn(input, init);
+  try {
+    const body = JSON.parse(init.body) as unknown;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return fetchFn(input, init);
+    const existingReasoning = (body as { reasoning?: unknown }).reasoning;
+    const reasoning = existingReasoning && typeof existingReasoning === 'object' && !Array.isArray(existingReasoning)
+      ? existingReasoning
+      : {};
+    return fetchFn(input, {
+      ...init,
+      body: JSON.stringify({
+        ...body,
+        reasoning: { ...reasoning, effort },
+      }),
+    });
+  } catch {
+    return fetchFn(input, init);
+  }
+};
+
+const getOpenRouterProviderOptions = () => ({
+  openrouter: {
+    reasoning: {
+      effort: getOpenRouterReasoningEffort(),
+    },
+  },
+});
+
+const buildOpenRouterModel = async (
+  modelId: string,
+  apiKey: string,
+  baseURL = OPENROUTER_BASE_URL,
+  providerOptions?: Record<string, unknown>,
+) => {
   const modName = '@ai-sdk/openai';
   const providerModule: unknown = await import(modName);
   const id = String(modelId || '').trim();
   const resolvedBaseURL = String(baseURL || OPENROUTER_BASE_URL).trim();
+  const reasoningEffort = getOpenRouterReasoningEffortFromOptions(providerOptions);
   const openAiModule = providerModule as {
     createOpenAI?: (settings: {
       apiKey: string;
       baseURL: string;
       name: string;
+      fetch: typeof globalThis.fetch;
     }) => ((modelId: string) => unknown) & { chat?: (modelId: string) => unknown };
     openai?: (modelId: string, settings: { apiKey: string; baseURL: string }) => unknown;
   };
@@ -155,6 +219,7 @@ const buildOpenRouterModel = async (modelId: string, apiKey: string, baseURL = O
       apiKey,
       baseURL: resolvedBaseURL,
       name: 'openrouter',
+      fetch: withOpenRouterReasoning(globalThis.fetch, reasoningEffort),
     });
     if (typeof openrouter.chat === 'function') return openrouter.chat(id);
     return openrouter(id);
@@ -283,6 +348,7 @@ export const PROVIDERS: RuntimeProvider[] = [
     supportsCacheControl: false,
     validateKey: async (apiKey: string) => listOpenRouterModels({ apiKey }),
     buildModel: buildOpenRouterModel,
+    getProviderOptions: getOpenRouterProviderOptions,
     resolveCredentials: resolveOpenRouterCredentials,
     extractUsdCost: (result) => (
       parseUsd(result?.providerMetadata?.openrouter?.usage?.cost)
