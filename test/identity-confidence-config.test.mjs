@@ -125,7 +125,7 @@ test('identity confidence remains fail-closed and config rejects malformed polic
     {
       score: {
         identity_confidence: {
-          weights: { business_name: 30, address: 30, website: 10, place_id: 20 },
+          weights: { business_name: 30, address: 30, website: 30, place_id: 20 },
         },
       },
     },

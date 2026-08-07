@@ -1295,6 +1295,9 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       minFitCoverage: config?.score?.min_coverage,
       treatmentBands: config?.score?.treatment_bands,
       identityConfidence: config?.score?.identity_confidence,
+      phoneConfidence: config?.score?.phone_confidence,
+      buyerConfidence: config?.score?.buyer_confidence,
+      mailConfidence: config?.score?.mail_confidence,
     });
     summary.tiers[result.treatment_tier] = (summary.tiers[result.treatment_tier] || 0) + 1;
     if (result.integrity_errors.length) summary.integrity_errors += 1;

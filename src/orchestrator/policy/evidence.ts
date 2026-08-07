@@ -16,9 +16,18 @@
 
 import { createHash } from 'node:crypto';
 import {
+  DEFAULT_SCORE_BUYER_CONFIDENCE,
   DEFAULT_SCORE_IDENTITY_CONFIDENCE,
+  DEFAULT_SCORE_MAIL_CONFIDENCE,
+  DEFAULT_SCORE_PHONE_CONFIDENCE,
+  type BuyerConfidenceConfig,
+  type BuyerConfidenceConfigInput,
   type IdentityConfidenceConfig,
   type IdentityConfidenceConfigInput,
+  type MailConfidenceConfig,
+  type MailConfidenceConfigInput,
+  type PhoneConfidenceConfig,
+  type PhoneConfidenceConfigInput,
 } from '../../schemas/config.js';
 
 export const EVIDENCE_CONTRACT_VERSION = 'tv-evidence-v1';
@@ -144,21 +153,6 @@ export type IdentityResolution = {
   generated_at: string;
 };
 
-const PHONE_CONFIDENCE_WEIGHTS = {
-  present: 15,
-  well_formed: 35,
-  structured_source: 35,
-} as const;
-
-const BUYER_CONFIDENCE_WEIGHTS = {
-  named: 25,
-  named_literal_support: 25,
-  decision_authority: 20,
-  role_literal_support: 10,
-  affiliation: 10,
-  affiliation_literal_support: 10,
-} as const;
-
 const LEGACY_BUYER_NAME_FIELDS = ['observed_buyer_name', 'buyer_name', 'primary_buyer_name', 'named_buyer_name'];
 const LEGACY_BUYER_STATUS_FIELDS = ['named_buyer_status', 'buyer_named_status', 'primary_buyer_status'];
 const CANONICAL_CONTACT_NAME_FIELDS = ['decision_maker_name', 'contact_name', 'contact_name_primary'];
@@ -171,13 +165,6 @@ const BUYER_ROLE_FIELDS = [
   'named_buyer_role',
 ];
 const BUYER_AFFILIATION_FIELDS = ['buyer_affiliation_status', 'current_affiliation_status', 'affiliation_status'];
-
-const MAIL_CONFIDENCE_WEIGHTS = {
-  address_present: 15,
-  address_complete: 25,
-  commercial_delivery_indicator: 30,
-  validation_evidence: 30,
-} as const;
 
 const hasLiteralSupport = (resolution: FieldResolution | undefined): boolean => (
   Boolean(
@@ -253,20 +240,36 @@ const phoneIsWellFormed = (value: unknown): boolean => {
  * A canonical phone needs both a well-formed value and structured-field provenance;
  * free text alone cannot satisfy the reachability threshold.
  */
-export function derivePhoneConfidence(record: Record<string, unknown>): number {
+export const derivePhoneConfidence = (
+  record: Record<string, unknown>,
+  config?: PhoneConfidenceConfigInput,
+): number => {
   const phone = text(record.phone) || text(record.contact_phone);
   if (!phone) return 0;
   if (truthyFlag(record.dne_phone) || truthyFlag(record.phone_suppressed)) return 0;
 
-  const present = PHONE_CONFIDENCE_WEIGHTS.present;
+  const policy: PhoneConfidenceConfig = {
+    weights: {
+      ...DEFAULT_SCORE_PHONE_CONFIDENCE.weights,
+      ...(config?.weights || {}),
+    },
+    penalties: {
+      ...DEFAULT_SCORE_PHONE_CONFIDENCE.penalties,
+      ...(config?.penalties || {}),
+    },
+  };
+  const present = policy.weights.present;
   if (!phoneIsWellFormed(phone)) return present;
 
   const structuredSource = text(record.phone_source_kind).toLowerCase() === 'structured';
   const evidenceScore = present
-    + PHONE_CONFIDENCE_WEIGHTS.well_formed
-    + (structuredSource ? PHONE_CONFIDENCE_WEIGHTS.structured_source : 0);
-  return Math.max(0, Math.min(100, evidenceScore));
-}
+    + policy.weights.well_formed
+    + (structuredSource ? policy.weights.structured_source : 0);
+  const cappedScore = structuredSource
+    ? evidenceScore
+    : Math.min(evidenceScore, policy.penalties.unstructured_maximum);
+  return Math.max(0, Math.min(100, cappedScore));
+};
 
 const resolvedBuyerStatus = (value: unknown): boolean => (
   ['confirmed', 'likely', 'resolved'].includes(text(value).toLowerCase())
@@ -324,8 +327,21 @@ const roleIndicatesDecisionAuthority = (role: string): boolean => (
  * resolution evidence. Unresolved contradictions distinguish a researched
  * decision-maker from an unverified contact string.
  */
-export function deriveBuyerConfidence(record: Record<string, unknown>): number {
+export const deriveBuyerConfidence = (
+  record: Record<string, unknown>,
+  config?: BuyerConfidenceConfigInput,
+): number => {
   const observations = parseStoredObservations(record.observations_json);
+  const policy: BuyerConfidenceConfig = {
+    weights: {
+      ...DEFAULT_SCORE_BUYER_CONFIDENCE.weights,
+      ...(config?.weights || {}),
+    },
+    penalties: {
+      ...DEFAULT_SCORE_BUYER_CONFIDENCE.penalties,
+      ...(config?.penalties || {}),
+    },
+  };
   const legacyBuyerName = fieldValue(record, LEGACY_BUYER_NAME_FIELDS);
   const legacyResolved = Boolean(legacyBuyerName)
     && resolvedBuyerStatus(fieldValue(record, LEGACY_BUYER_STATUS_FIELDS));
@@ -350,24 +366,27 @@ export function deriveBuyerConfidence(record: Record<string, unknown>): number {
   const authorityConfirmed = affirmative(record.local_buying_authority);
   const decisionAuthority = authorityConfirmed || roleIndicatesDecisionAuthority(buyerRole);
   const score =
-    BUYER_CONFIDENCE_WEIGHTS.named
+    policy.weights.named
     + (durableLiteralSupport({ observations, fields: nameFields, value: buyerName })
-      ? BUYER_CONFIDENCE_WEIGHTS.named_literal_support
+      ? policy.weights.named_literal_support
       : 0)
-    + (decisionAuthority ? BUYER_CONFIDENCE_WEIGHTS.decision_authority : 0)
+    + (decisionAuthority ? policy.weights.decision_authority : 0)
     + (buyerRole && durableLiteralSupport({ observations, fields: BUYER_ROLE_FIELDS, value: buyerRole })
-      ? BUYER_CONFIDENCE_WEIGHTS.role_literal_support
+      ? policy.weights.role_literal_support
       : 0)
-    + (confirmedAffiliation(affiliation) ? BUYER_CONFIDENCE_WEIGHTS.affiliation : 0)
+    + (confirmedAffiliation(affiliation) ? policy.weights.affiliation : 0)
     + (confirmedAffiliation(affiliation)
       && durableLiteralSupport({ observations, fields: BUYER_AFFILIATION_FIELDS, value: affiliation })
-      ? BUYER_CONFIDENCE_WEIGHTS.affiliation_literal_support
+      ? policy.weights.affiliation_literal_support
       : 0);
   const openContradictions = detectContradictions({ record, observations })
     .filter((contradiction) => contradiction.status === 'open').length;
-  const penalty = Math.min(60, openContradictions * 30);
+  const penalty = Math.min(
+    policy.penalties.maximum_total,
+    openContradictions * policy.penalties.open_contradiction,
+  );
   return Math.max(0, Math.min(100, score - penalty));
-}
+};
 
 const completeAddress = (record: Record<string, unknown>, address: string): boolean => {
   if (!address) return false;
@@ -394,17 +413,38 @@ const validatedAddress = (record: Record<string, unknown>): boolean => {
  * reachability. RDI is one independently observed delivery signal; a high score
  * additionally requires a complete normalized address and validation evidence.
  */
-export function deriveMailConfidence(record: Record<string, unknown>): number {
+export const deriveMailConfidence = (
+  record: Record<string, unknown>,
+  config?: MailConfidenceConfigInput,
+): number => {
   const address = fieldValue(record, ['mailing_address', 'address']);
   if (!address) return 0;
+  const policy: MailConfidenceConfig = {
+    weights: {
+      ...DEFAULT_SCORE_MAIL_CONFIDENCE.weights,
+      ...(config?.weights || {}),
+    },
+    penalties: {
+      ...DEFAULT_SCORE_MAIL_CONFIDENCE.penalties,
+      ...(config?.penalties || {}),
+    },
+  };
   const commercial = text(record.address_rdi).toLowerCase() === 'commercial';
   const score =
-    MAIL_CONFIDENCE_WEIGHTS.address_present
-    + (completeAddress(record, address) ? MAIL_CONFIDENCE_WEIGHTS.address_complete : 0)
-    + (commercial ? MAIL_CONFIDENCE_WEIGHTS.commercial_delivery_indicator : 0)
-    + (validatedAddress(record) ? MAIL_CONFIDENCE_WEIGHTS.validation_evidence : 0);
-  return Math.max(0, Math.min(100, score));
-}
+    policy.weights.address_present
+    + (completeAddress(record, address) ? policy.weights.address_complete : 0)
+    + (commercial ? policy.weights.commercial_delivery_indicator : 0)
+    + (validatedAddress(record) ? policy.weights.validation_evidence : 0);
+  const openContradictions = detectContradictions({
+    record,
+    observations: parseStoredObservations(record.observations_json),
+  }).filter((contradiction) => contradiction.status === 'open').length;
+  const penalty = Math.min(
+    policy.penalties.maximum_total,
+    openContradictions * policy.penalties.open_contradiction,
+  );
+  return Math.max(0, Math.min(100, score - penalty));
+};
 
 /** The persisted mail-ready field mirrors the existing commercial-RDI readiness evidence. */
 export function deriveMailAddressReady(record: Record<string, unknown>): boolean {

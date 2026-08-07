@@ -31,7 +31,12 @@ import {
 } from '../policy/evidence.js';
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
 import type { TreatmentBandLadders } from '../policy/treatment.js';
-import type { IdentityConfidenceConfigInput } from '../../schemas/config.js';
+import type {
+  BuyerConfidenceConfigInput,
+  IdentityConfidenceConfigInput,
+  MailConfidenceConfigInput,
+  PhoneConfidenceConfigInput,
+} from '../../schemas/config.js';
 
 const zeroUsage = () => ({
   input_tokens: 0,
@@ -708,6 +713,9 @@ export const executeEnrichmentAction = async ({
   context,
   treatmentBands,
   identityConfidence,
+  phoneConfidence,
+  buyerConfidence,
+  mailConfidence,
   outputSchema,
   toolCatalog,
 }: {
@@ -722,6 +730,9 @@ export const executeEnrichmentAction = async ({
   context: Record<string, unknown>;
   treatmentBands?: TreatmentBandLadders;
   identityConfidence?: IdentityConfidenceConfigInput;
+  phoneConfidence?: PhoneConfidenceConfigInput;
+  buyerConfidence?: BuyerConfidenceConfigInput;
+  mailConfidence?: MailConfidenceConfigInput;
   outputSchema: z.ZodTypeAny;
   toolCatalog?: ToolCatalog;
 }) => {
@@ -844,6 +855,9 @@ export const executeEnrichmentAction = async ({
       minFitCoverage: Number(context?.min_fit_coverage),
       treatmentBands,
       identityConfidence,
+      phoneConfidence,
+      buyerConfidence,
+      mailConfidence,
     });
     // Map declared outputs from patch when present
     const outputs: Record<string, unknown> = { ...result.patch };
@@ -1039,6 +1053,9 @@ export const executeEnrichmentStepOnRecords = async ({
         },
         treatmentBands: config?.score?.treatment_bands,
         identityConfidence: config?.score?.identity_confidence,
+        phoneConfidence: config?.score?.phone_confidence,
+        buyerConfidence: config?.score?.buyer_confidence,
+        mailConfidence: config?.score?.mail_confidence,
         outputSchema: outputZod,
         toolCatalog,
       });
@@ -1498,6 +1515,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               },
               treatmentBands: config?.score?.treatment_bands,
               identityConfidence: config?.score?.identity_confidence,
+              phoneConfidence: config?.score?.phone_confidence,
+              buyerConfidence: config?.score?.buyer_confidence,
+              mailConfidence: config?.score?.mail_confidence,
               outputSchema: outputZod,
               toolCatalog,
             });

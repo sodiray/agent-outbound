@@ -33,6 +33,60 @@ export type IdentityConfidenceConfigInput = {
   penalties?: Partial<IdentityConfidenceConfig['penalties']>;
 };
 
+export type PhoneConfidenceConfig = {
+  weights: {
+    present: number;
+    well_formed: number;
+    structured_source: number;
+  };
+  penalties: {
+    unstructured_maximum: number;
+  };
+};
+
+export type PhoneConfidenceConfigInput = {
+  weights?: Partial<PhoneConfidenceConfig['weights']>;
+  penalties?: Partial<PhoneConfidenceConfig['penalties']>;
+};
+
+export type BuyerConfidenceConfig = {
+  weights: {
+    named: number;
+    named_literal_support: number;
+    decision_authority: number;
+    role_literal_support: number;
+    affiliation: number;
+    affiliation_literal_support: number;
+  };
+  penalties: {
+    open_contradiction: number;
+    maximum_total: number;
+  };
+};
+
+export type BuyerConfidenceConfigInput = {
+  weights?: Partial<BuyerConfidenceConfig['weights']>;
+  penalties?: Partial<BuyerConfidenceConfig['penalties']>;
+};
+
+export type MailConfidenceConfig = {
+  weights: {
+    address_present: number;
+    address_complete: number;
+    commercial_delivery_indicator: number;
+    validation_evidence: number;
+  };
+  penalties: {
+    open_contradiction: number;
+    maximum_total: number;
+  };
+};
+
+export type MailConfidenceConfigInput = {
+  weights?: Partial<MailConfidenceConfig['weights']>;
+  penalties?: Partial<MailConfidenceConfig['penalties']>;
+};
+
 export const DEFAULT_SCORE_IDENTITY_CONFIDENCE: IdentityConfidenceConfig = {
   weights: {
     business_name: 30,
@@ -44,6 +98,45 @@ export const DEFAULT_SCORE_IDENTITY_CONFIDENCE: IdentityConfidenceConfig = {
     unresolved_alternative: 10,
     open_contradiction: 25,
     maximum_total: 40,
+  },
+};
+
+export const DEFAULT_SCORE_PHONE_CONFIDENCE: PhoneConfidenceConfig = {
+  weights: {
+    present: 15,
+    well_formed: 35,
+    structured_source: 35,
+  },
+  penalties: {
+    unstructured_maximum: 50,
+  },
+};
+
+export const DEFAULT_SCORE_BUYER_CONFIDENCE: BuyerConfidenceConfig = {
+  weights: {
+    named: 25,
+    named_literal_support: 25,
+    decision_authority: 20,
+    role_literal_support: 10,
+    affiliation: 10,
+    affiliation_literal_support: 10,
+  },
+  penalties: {
+    open_contradiction: 30,
+    maximum_total: 60,
+  },
+};
+
+export const DEFAULT_SCORE_MAIL_CONFIDENCE: MailConfidenceConfig = {
+  weights: {
+    address_present: 15,
+    address_complete: 25,
+    commercial_delivery_indicator: 30,
+    validation_evidence: 30,
+  },
+  penalties: {
+    open_contradiction: 0,
+    maximum_total: 0,
   },
 };
 
@@ -665,19 +758,23 @@ const ScoreTreatmentBandsSchema = z.object({
   fit_evidence_confidence: [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
 });
 
+const validateConfidenceWeightTotal = (path: string) => (
+  (weights: Record<string, number>, ctx: z.RefinementCtx) => {
+    const total = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
+    if (total <= 100 + Number.EPSILON) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `${path}.weights must total no more than 100.`,
+    });
+  }
+);
+
 const IdentityConfidenceWeightsSchema = z.object({
   business_name: z.coerce.number().nonnegative().default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.business_name),
   address: z.coerce.number().nonnegative().default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.address),
   website: z.coerce.number().nonnegative().default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.website),
   place_id: z.coerce.number().nonnegative().default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.place_id),
-}).superRefine((weights, ctx) => {
-  const total = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
-  if (Math.abs(total - 100) <= Number.EPSILON) return;
-  ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    message: 'score.identity_confidence.weights must sum to exactly 100.',
-  });
-});
+}).superRefine(validateConfidenceWeightTotal('score.identity_confidence'));
 
 const IdentityConfidencePenaltiesSchema = z.object({
   unresolved_alternative: z.coerce.number().nonnegative()
@@ -694,6 +791,77 @@ const IdentityConfidenceConfigSchema = z.object({
 }).default(() => ({
   weights: { ...DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights },
   penalties: { ...DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties },
+}));
+
+const PhoneConfidenceWeightsSchema = z.object({
+  present: z.coerce.number().nonnegative().default(DEFAULT_SCORE_PHONE_CONFIDENCE.weights.present),
+  well_formed: z.coerce.number().nonnegative().default(DEFAULT_SCORE_PHONE_CONFIDENCE.weights.well_formed),
+  structured_source: z.coerce.number().nonnegative().default(DEFAULT_SCORE_PHONE_CONFIDENCE.weights.structured_source),
+}).superRefine(validateConfidenceWeightTotal('score.phone_confidence'));
+
+const PhoneConfidencePenaltiesSchema = z.object({
+  unstructured_maximum: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_PHONE_CONFIDENCE.penalties.unstructured_maximum),
+});
+
+const PhoneConfidenceConfigSchema = z.object({
+  weights: PhoneConfidenceWeightsSchema.default(() => ({ ...DEFAULT_SCORE_PHONE_CONFIDENCE.weights })),
+  penalties: PhoneConfidencePenaltiesSchema.default(() => ({ ...DEFAULT_SCORE_PHONE_CONFIDENCE.penalties })),
+}).default(() => ({
+  weights: { ...DEFAULT_SCORE_PHONE_CONFIDENCE.weights },
+  penalties: { ...DEFAULT_SCORE_PHONE_CONFIDENCE.penalties },
+}));
+
+const BuyerConfidenceWeightsSchema = z.object({
+  named: z.coerce.number().nonnegative().default(DEFAULT_SCORE_BUYER_CONFIDENCE.weights.named),
+  named_literal_support: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_BUYER_CONFIDENCE.weights.named_literal_support),
+  decision_authority: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_BUYER_CONFIDENCE.weights.decision_authority),
+  role_literal_support: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_BUYER_CONFIDENCE.weights.role_literal_support),
+  affiliation: z.coerce.number().nonnegative().default(DEFAULT_SCORE_BUYER_CONFIDENCE.weights.affiliation),
+  affiliation_literal_support: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_BUYER_CONFIDENCE.weights.affiliation_literal_support),
+}).superRefine(validateConfidenceWeightTotal('score.buyer_confidence'));
+
+const BuyerConfidencePenaltiesSchema = z.object({
+  open_contradiction: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_BUYER_CONFIDENCE.penalties.open_contradiction),
+  maximum_total: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_BUYER_CONFIDENCE.penalties.maximum_total),
+});
+
+const BuyerConfidenceConfigSchema = z.object({
+  weights: BuyerConfidenceWeightsSchema.default(() => ({ ...DEFAULT_SCORE_BUYER_CONFIDENCE.weights })),
+  penalties: BuyerConfidencePenaltiesSchema.default(() => ({ ...DEFAULT_SCORE_BUYER_CONFIDENCE.penalties })),
+}).default(() => ({
+  weights: { ...DEFAULT_SCORE_BUYER_CONFIDENCE.weights },
+  penalties: { ...DEFAULT_SCORE_BUYER_CONFIDENCE.penalties },
+}));
+
+const MailConfidenceWeightsSchema = z.object({
+  address_present: z.coerce.number().nonnegative().default(DEFAULT_SCORE_MAIL_CONFIDENCE.weights.address_present),
+  address_complete: z.coerce.number().nonnegative().default(DEFAULT_SCORE_MAIL_CONFIDENCE.weights.address_complete),
+  commercial_delivery_indicator: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_MAIL_CONFIDENCE.weights.commercial_delivery_indicator),
+  validation_evidence: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_MAIL_CONFIDENCE.weights.validation_evidence),
+}).superRefine(validateConfidenceWeightTotal('score.mail_confidence'));
+
+const MailConfidencePenaltiesSchema = z.object({
+  open_contradiction: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_MAIL_CONFIDENCE.penalties.open_contradiction),
+  maximum_total: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_MAIL_CONFIDENCE.penalties.maximum_total),
+});
+
+const MailConfidenceConfigSchema = z.object({
+  weights: MailConfidenceWeightsSchema.default(() => ({ ...DEFAULT_SCORE_MAIL_CONFIDENCE.weights })),
+  penalties: MailConfidencePenaltiesSchema.default(() => ({ ...DEFAULT_SCORE_MAIL_CONFIDENCE.penalties })),
+}).default(() => ({
+  weights: { ...DEFAULT_SCORE_MAIL_CONFIDENCE.weights },
+  penalties: { ...DEFAULT_SCORE_MAIL_CONFIDENCE.penalties },
 }));
 
 // A single lead score (0-100). One weighted criteria list, one LLM pass.
@@ -717,8 +885,11 @@ const ScoreSchema = z.object({
   // Inclusive lower boundaries for the four treatment matrix bands. The final
   // 100 boundary closes the ladder so every score is in exactly one band.
   treatment_bands: ScoreTreatmentBandsSchema,
-  // Literal-support identity points must total 100; penalties deduct from that total.
+  // Confidence evidence weights total no more than 100; penalties deduct from that evidence.
   identity_confidence: IdentityConfidenceConfigSchema,
+  phone_confidence: PhoneConfidenceConfigSchema,
+  buyer_confidence: BuyerConfidenceConfigSchema,
+  mail_confidence: MailConfidenceConfigSchema,
 }).partial().default({});
 
 const SuppressionSchema = z.object({
@@ -1080,6 +1251,9 @@ const coerceLegacyScore = (raw) => {
     ...(score.min_coverage !== undefined ? { min_coverage: score.min_coverage } : {}),
     ...(score.treatment_bands !== undefined ? { treatment_bands: score.treatment_bands } : {}),
     ...(score.identity_confidence !== undefined ? { identity_confidence: score.identity_confidence } : {}),
+    ...(score.phone_confidence !== undefined ? { phone_confidence: score.phone_confidence } : {}),
+    ...(score.buyer_confidence !== undefined ? { buyer_confidence: score.buyer_confidence } : {}),
+    ...(score.mail_confidence !== undefined ? { mail_confidence: score.mail_confidence } : {}),
   };
   return { ...(raw as any), score: single };
 };
@@ -1208,6 +1382,60 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
               ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties.open_contradiction,
             maximum_total: parsed.data?.score?.identity_confidence?.penalties?.maximum_total
               ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties.maximum_total,
+          },
+        },
+        phone_confidence: {
+          weights: {
+            present: parsed.data?.score?.phone_confidence?.weights?.present
+              ?? DEFAULT_SCORE_PHONE_CONFIDENCE.weights.present,
+            well_formed: parsed.data?.score?.phone_confidence?.weights?.well_formed
+              ?? DEFAULT_SCORE_PHONE_CONFIDENCE.weights.well_formed,
+            structured_source: parsed.data?.score?.phone_confidence?.weights?.structured_source
+              ?? DEFAULT_SCORE_PHONE_CONFIDENCE.weights.structured_source,
+          },
+          penalties: {
+            unstructured_maximum: parsed.data?.score?.phone_confidence?.penalties?.unstructured_maximum
+              ?? DEFAULT_SCORE_PHONE_CONFIDENCE.penalties.unstructured_maximum,
+          },
+        },
+        buyer_confidence: {
+          weights: {
+            named: parsed.data?.score?.buyer_confidence?.weights?.named
+              ?? DEFAULT_SCORE_BUYER_CONFIDENCE.weights.named,
+            named_literal_support: parsed.data?.score?.buyer_confidence?.weights?.named_literal_support
+              ?? DEFAULT_SCORE_BUYER_CONFIDENCE.weights.named_literal_support,
+            decision_authority: parsed.data?.score?.buyer_confidence?.weights?.decision_authority
+              ?? DEFAULT_SCORE_BUYER_CONFIDENCE.weights.decision_authority,
+            role_literal_support: parsed.data?.score?.buyer_confidence?.weights?.role_literal_support
+              ?? DEFAULT_SCORE_BUYER_CONFIDENCE.weights.role_literal_support,
+            affiliation: parsed.data?.score?.buyer_confidence?.weights?.affiliation
+              ?? DEFAULT_SCORE_BUYER_CONFIDENCE.weights.affiliation,
+            affiliation_literal_support: parsed.data?.score?.buyer_confidence?.weights?.affiliation_literal_support
+              ?? DEFAULT_SCORE_BUYER_CONFIDENCE.weights.affiliation_literal_support,
+          },
+          penalties: {
+            open_contradiction: parsed.data?.score?.buyer_confidence?.penalties?.open_contradiction
+              ?? DEFAULT_SCORE_BUYER_CONFIDENCE.penalties.open_contradiction,
+            maximum_total: parsed.data?.score?.buyer_confidence?.penalties?.maximum_total
+              ?? DEFAULT_SCORE_BUYER_CONFIDENCE.penalties.maximum_total,
+          },
+        },
+        mail_confidence: {
+          weights: {
+            address_present: parsed.data?.score?.mail_confidence?.weights?.address_present
+              ?? DEFAULT_SCORE_MAIL_CONFIDENCE.weights.address_present,
+            address_complete: parsed.data?.score?.mail_confidence?.weights?.address_complete
+              ?? DEFAULT_SCORE_MAIL_CONFIDENCE.weights.address_complete,
+            commercial_delivery_indicator: parsed.data?.score?.mail_confidence?.weights?.commercial_delivery_indicator
+              ?? DEFAULT_SCORE_MAIL_CONFIDENCE.weights.commercial_delivery_indicator,
+            validation_evidence: parsed.data?.score?.mail_confidence?.weights?.validation_evidence
+              ?? DEFAULT_SCORE_MAIL_CONFIDENCE.weights.validation_evidence,
+          },
+          penalties: {
+            open_contradiction: parsed.data?.score?.mail_confidence?.penalties?.open_contradiction
+              ?? DEFAULT_SCORE_MAIL_CONFIDENCE.penalties.open_contradiction,
+            maximum_total: parsed.data?.score?.mail_confidence?.penalties?.maximum_total
+              ?? DEFAULT_SCORE_MAIL_CONFIDENCE.penalties.maximum_total,
           },
         },
       },

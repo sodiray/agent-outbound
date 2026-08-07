@@ -1008,6 +1008,9 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           minFitCoverage: minimumCoverage,
           treatmentBands: scoreConfig?.treatment_bands,
           identityConfidence: scoreConfig?.identity_confidence,
+          phoneConfidence: scoreConfig?.phone_confidence,
+          buyerConfidence: scoreConfig?.buyer_confidence,
+          mailConfidence: scoreConfig?.mail_confidence,
         });
         const updated = {
           ...prePolicy,

@@ -80,7 +80,10 @@ import {
 } from './enrichment-repair.js';
 import {
   DEFAULT_SCORE_MIN_COVERAGE,
+  type BuyerConfidenceConfigInput,
   type IdentityConfidenceConfigInput,
+  type MailConfidenceConfigInput,
+  type PhoneConfidenceConfigInput,
 } from '../../schemas/config.js';
 
 export type PolicyApplyInput = {
@@ -109,6 +112,12 @@ export type PolicyApplyInput = {
   treatmentBands?: TreatmentBandLadders;
   /** Configured literal-support identity weights and deductions. */
   identityConfidence?: IdentityConfidenceConfigInput;
+  /** Configured phone evidence weights and unstructured-source maximum. */
+  phoneConfidence?: PhoneConfidenceConfigInput;
+  /** Configured buyer evidence weights and contradiction deductions. */
+  buyerConfidence?: BuyerConfidenceConfigInput;
+  /** Configured mail evidence weights and contradiction deductions. */
+  mailConfidence?: MailConfidenceConfigInput;
 };
 
 export type PolicyApplyResult = {
@@ -482,13 +491,15 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   // Never invent confidence defaults (70/40/50) — missing fails closed as 0.
   const identityConfidence = buildIdentityResolution(record, input.identityConfidence).identity_confidence ?? 0;
-  const buyerConfidence = deriveBuyerConfidence(record);
+  const buyerConfidence = deriveBuyerConfidence(record, input.buyerConfidence);
   const classificationConfidence = num(record.classification_confidence, null) ?? 0;
   const timingCalc = calculateTimingScore(record);
   const timingScore = timingCalc.timing_score;
   const strongTimingSignalCount = countStrongTimingSignals(timingCalc.signals);
   const storedPhoneConfidence = num(record.phone_confidence, null);
-  const phoneConfidence = storedPhoneConfidence ?? derivePhoneConfidence(record);
+  const phoneConfidence = input.phoneConfidence
+    ? derivePhoneConfidence(record, input.phoneConfidence)
+    : storedPhoneConfidence ?? derivePhoneConfidence(record);
   const reachability = evaluateReachability({ ...record, phone_confidence: phoneConfidence });
   const reachFlags = reachabilityToChannelFlags(reachability);
   // Prefer production cost_events rebuild (input.costLedger / override) over stale JSON.
@@ -506,7 +517,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     golden_ticket: Boolean(record.golden_ticket_eligible),
   });
   const mailAddressReady = deriveMailAddressReady(record);
-  const mailConfidence = deriveMailConfidence(record);
+  const mailConfidence = deriveMailConfidence(record, input.mailConfidence);
 
   // Taxonomy validation when classification labels present — reject unsupported at write time.
   const listDir =
