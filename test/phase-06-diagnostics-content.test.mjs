@@ -109,7 +109,7 @@ test('phase-06: diagnostic families retain supported workflow and calculator met
   }
 });
 
-test('phase-06: diagnostic content step remains tier-gated with declared outputs', () => {
+test('phase-06: diagnostic content is not gated on the treatment it feeds', () => {
   const config = yaml.load(readFileSync(TV_YAML, 'utf8'));
   const step = config.pipeline.find((candidate) => candidate.id === 'diagnostic_content_pack');
   assert.ok(step);
@@ -121,6 +121,19 @@ test('phase-06: diagnostic content step remains tier-gated with declared outputs
   for (const output of REQUIRED_DIAG_OUTPUTS) {
     assert.ok(outputs.includes(output), `missing output: ${output}`);
   }
+  // Content is an INPUT to treatment, so it must not be gated on treatment's
+  // output. Gating on `treatment_tier in [A,B,C]` produced a live deadlock:
+  // no content -> treatment assigns enrichment_hold -> the content step skips
+  // itself for not being A/B/C -> content is never produced. Every Treasure
+  // Valley account was stuck in it and could never send.
+  //
+  // Tier D is the one legitimate exclusion: it permits no proactive outbound,
+  // so generating content for it is wasted spend.
   const treatmentTier = step.when.conditions.find((condition) => condition.field === 'treatment_tier');
-  assert.deepEqual(treatmentTier.value, ['A', 'B', 'C']);
+  assert.equal(treatmentTier.operator, 'not_in');
+  assert.deepEqual(treatmentTier.value, ['D']);
+  assert.ok(
+    !(treatmentTier.value || []).some((tier) => ['A', 'B', 'C'].includes(tier)),
+    'content generation must not require a tier that depends on content',
+  );
 });

@@ -711,8 +711,29 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     treatment.treatment_tier === 'enrichment_hold'
     || eligibility.outcome === 'enrichment_hold';
 
+  /**
+   * A repair action the record has outgrown must be recomputed.
+   *
+   * next_action is carried forward from the stored column, and the only site
+   * that emits `prepare_outbound` lives inside the guard below. So once a
+   * record was written as `enrichment_repair` with a valid action_id, it could
+   * never leave: an absorbing state. Both intended escapes are dead —
+   * `reapply_policy_after_repair` is written twice and read nowhere, and no
+   * code path ever produces an action_type containing `reprocess`.
+   *
+   * Observed on all six Treasure Valley accounts: one was tier B, fit 66,
+   * `readiness.ready: true` with zero blockers, while its next_action still
+   * read `treatment_enrichment_hold; fit_band=below50; weak_fit` — a state the
+   * record had long left. The sequencer gates outbound on the action type, so
+   * that stale field alone prevented every send.
+   */
+  const holdsStaleRepairAction = () => (
+    ['enrichment_repair', 'enrichment_hold'].includes(String(next_action?.action_type || ''))
+    && !needsEnrichmentRepairAction()
+  );
+
   if (!next_action || String(next_action.action_type || '').includes('reprocess') || !next_action.action_id
-    || needsEnrichmentRepairAction()) {
+    || needsEnrichmentRepairAction() || holdsStaleRepairAction()) {
     if (eligibility.outcome === 'disqualified' || eligibility.outcome === 'suppressed') {
       next_action = {
         action_id: `na_terminal_${rowId}`,
