@@ -568,6 +568,7 @@ export const completeManualTask = async ({
       channel: channelHint,
       stepKind: 'manual_task',
       taskType: mailProductPreview || channelHint,
+      timeZone: config?.operations?.timezone,
     });
     if (!gate.execute) {
       throw new Error(

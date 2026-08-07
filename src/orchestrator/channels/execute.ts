@@ -527,6 +527,7 @@ export const executeChannelStep = async ({
     }),
     stepKind: earlyStepKind,
     taskType: earlyTaskType,
+    timeZone: sequence?.timezone,
   });
   if (!outboundGate.execute) {
     return {

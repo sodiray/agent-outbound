@@ -17,6 +17,8 @@ import {
   NON_OUTBOUND_ACTION_TYPES,
 } from '../dist/orchestrator/policy/sequence-outbound.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../dist/orchestrator/policy/lifecycle.js';
+import { addIsoDays } from '../dist/orchestrator/lib/working-days.js';
+import { resolveSequencerClock } from '../dist/orchestrator/sequencer/runner.js';
 
 const NOW = '2026-08-04T15:00:00.000Z';
 const TODAY = '2026-08-04';
@@ -116,6 +118,74 @@ test('wait allows when due_at has passed (advance wait)', () => {
   }), NOW);
   assert.equal(d.execute, true);
   assert.equal(d.reason, 'wait_due');
+});
+
+test('wait due on day D fires on D and not D-1 in the pipeline timezone', () => {
+  const waitingRecord = record({
+    next_action_date: '2026-08-10',
+    next_action_json: JSON.stringify(nextAction('wait', {
+      due_at: '2026-08-10',
+      work_state: 'waiting_time_or_event',
+      sequence_state: 'waiting',
+    })),
+    account_sequence_state: 'waiting',
+  });
+  const onDueDate = shouldExecuteSequenceOutbound(
+    waitingRecord,
+    '2026-08-10T12:00:00.000Z',
+    { today: '2026-08-10', timeZone: 'America/Boise' },
+  );
+  const dayBefore = shouldExecuteSequenceOutbound(
+    waitingRecord,
+    '2026-08-09T12:00:00.000Z',
+    { today: '2026-08-09', timeZone: 'America/Boise' },
+  );
+
+  assert.equal(onDueDate.execute, true);
+  assert.equal(onDueDate.reason, 'wait_due');
+  assert.equal(dayBefore.execute, false);
+  assert.equal(dayBefore.reason, 'wait_not_due');
+});
+
+test('three-day cadence from the 7th becomes due on the 10th', () => {
+  const dueAt = addIsoDays('2026-08-07', 3);
+  assert.equal(dueAt, '2026-08-10');
+
+  const waitingRecord = record({
+    next_action_date: dueAt,
+    next_action_json: JSON.stringify(nextAction('wait', {
+      due_at: dueAt,
+      work_state: 'waiting_time_or_event',
+      sequence_state: 'waiting',
+    })),
+    account_sequence_state: 'waiting',
+  });
+  const decision = shouldExecuteSequenceOutbound(
+    waitingRecord,
+    '2026-08-10T12:00:00.000Z',
+    { today: dueAt, timeZone: 'America/Boise' },
+  );
+
+  assert.equal(decision.execute, true);
+  assert.equal(decision.reason, 'wait_due');
+});
+
+test('date-only AO_NOW retains its named pipeline date', () => {
+  const previousAoNow = process.env.AO_NOW;
+  process.env.AO_NOW = '2026-08-10';
+  try {
+    assert.deepEqual(
+      resolveSequencerClock({ timeZone: 'America/Boise' }),
+      { logicalNow: new Date('2026-08-10T00:00:00.000Z'), today: '2026-08-10' },
+    );
+    assert.equal(
+      resolveSequencerClock({ now: '2026-08-10T00:00:00.000Z', timeZone: 'America/Boise' }).today,
+      '2026-08-09',
+    );
+  } finally {
+    if (previousAoNow === undefined) delete process.env.AO_NOW;
+    else process.env.AO_NOW = previousAoNow;
+  }
 });
 
 test('wait without due_at falls back to next_action_date for due check', () => {

@@ -11,7 +11,7 @@ import {
   upsertRecord,
 } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
-import { getRecordRowId, stableHash, todayIsoDate } from '../lib/record.js';
+import { getRecordRowId, nowIso, stableHash, todayIsoDate } from '../lib/record.js';
 import { executeChannelStep } from '../channels/execute.js';
 import { evaluateConditionAction } from '../actions/evaluate-condition/index.js';
 import { planRouteAction } from '../actions/plan-route/index.js';
@@ -27,6 +27,7 @@ import {
   addIsoDays,
   applyWorkingDaysFilterInTimezone,
   computeNextScheduledAction,
+  isActionDueOnDate,
   resolveWorkingDayConfig,
   toIsoDate,
   toZonedIsoDate,
@@ -63,6 +64,29 @@ const addDays = (isoDate, days) => {
   const base = new Date(`${isoDate}T00:00:00.000Z`);
   base.setUTCDate(base.getUTCDate() + Number(days || 0));
   return formatDate(base);
+};
+
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+export const resolveSequencerClock = ({
+  now,
+  timeZone,
+}: {
+  now?: string | Date;
+  timeZone?: string;
+}): { logicalNow: Date; today: string } => {
+  const environmentDateOverride = now == null
+    ? String(process.env.AO_NOW || '').trim()
+    : '';
+  const requestedNow = now ?? nowIso();
+  const logicalNow = requestedNow instanceof Date ? requestedNow : new Date(String(requestedNow));
+  const dateOverride = typeof now === 'string' && ISO_DATE_PATTERN.test(now)
+    ? now
+    : ISO_DATE_PATTERN.test(environmentDateOverride)
+      ? environmentDateOverride
+    : '';
+  const today = dateOverride || toZonedIsoDate(logicalNow, timeZone) || todayIsoDate();
+  return { logicalNow, today };
 };
 
 const parseWaitDays = (raw) => {
@@ -230,6 +254,8 @@ export const collectDueRecords = ({
   sequenceName = '',
   holdingNames = new Set(),
   now = new Date(),
+  today,
+  timeZone,
   listDir = '',
   canaryConfig,
 }: {
@@ -238,6 +264,10 @@ export const collectDueRecords = ({
   sequenceName?: string;
   holdingNames?: Set<string> | Set<unknown>;
   now?: string | Date;
+  /** Pipeline-local date for date-only waits. */
+  today?: string;
+  /** Pipeline timezone for date-only waits when today is omitted. */
+  timeZone?: string;
   /** When set, canary isolation filters due records to the allowlist. */
   listDir?: string;
   canaryConfig?: import('../policy/canary-isolation.js').CanaryIsolationConfig;
@@ -257,7 +287,10 @@ export const collectDueRecords = ({
     ORDER BY updated_at DESC
     ${fetchLimit > 0 ? 'LIMIT ?' : ''}
   `).all(...scope.params, ...(fetchLimit > 0 ? [fetchLimit] : []));
-  const due = (rows || []).filter((record: any) => shouldExecuteSequenceOutbound(record, now).execute);
+  const due = (rows || []).filter((record: any) => shouldExecuteSequenceOutbound(record, now, {
+    today,
+    timeZone,
+  }).execute);
   const isolation = canaryConfig
     || (listDir ? loadCanaryConfig({ listDir }) : null);
   const scoped = isolation ? filterRecordsForCanary(due, isolation) : due;
@@ -350,7 +383,7 @@ const resolveDueStep = ({
   db?: any;
 }) => {
   const dueDate = String(record.next_action_date || '').trim();
-  if (dueDate && dueDate > today) {
+  if (dueDate && !isActionDueOnDate({ nextActionDate: dueDate, today })) {
     return { step: null, stepNumber: Number(record.sequence_step || 0) + 1 };
   }
 
@@ -710,8 +743,10 @@ export const runSequencer = async ({
   if (sequenceFilter && !holdingNames.has(sequenceFilter)) getSequence(config, sequenceFilter);
 
   const db = openListDb({ listDir, readonly: false });
-  const logicalNow = now != null ? (now instanceof Date ? now : new Date(String(now))) : new Date();
-  const today = toZonedIsoDate(logicalNow, config?.operations?.timezone) || todayIsoDate();
+  const { logicalNow, today } = resolveSequencerClock({
+    now,
+    timeZone: config?.operations?.timezone,
+  });
   const sampleLimit = Math.max(0, Number(sample || 0));
   const scope = sequenceScope({ sequenceName: sequenceFilter, holdingNames });
   const sequenceState = (() => {
@@ -723,6 +758,8 @@ export const runSequencer = async ({
         sequenceName: sequenceFilter,
         holdingNames,
         now: logicalNow,
+        today,
+        timeZone: config?.operations?.timezone,
         listDir,
         canaryConfig,
       });
@@ -735,7 +772,10 @@ export const runSequencer = async ({
             WHERE ${inPlayWhere()}
               ${scope.sql}
             ORDER BY updated_at DESC
-          `).all(...scope.params).filter((r) => shouldExecuteSequenceOutbound(r, logicalNow).execute),
+          `).all(...scope.params).filter((r) => shouldExecuteSequenceOutbound(r, logicalNow, {
+            today,
+            timeZone: config?.operations?.timezone,
+          }).execute),
           canaryConfig,
         );
       const finalRecords = sampleLimit > 0 ? records : allScoped;
@@ -804,7 +844,10 @@ export const runSequencer = async ({
         group.records.reduce((groupCounts, record) => {
           if (record.sequence_status === 'completed' || record.sequence_status === 'opted_out') return groupCounts;
           // next_action_json / account_sequence_state gate (not only sequence_step integers)
-          if (!shouldExecuteSequenceOutbound(record, dryRunNow).execute) return groupCounts;
+          if (!shouldExecuteSequenceOutbound(record, dryRunNow, {
+            today,
+            timeZone: config?.operations?.timezone,
+          }).execute) return groupCounts;
           const { step } = resolveDueStep({ record, steps: group.steps, today });
           return {
             due: groupCounts.due + (step ? 1 : 0),
@@ -842,6 +885,8 @@ export const runSequencer = async ({
       sequenceName: sequenceFilter,
       holdingNames,
       now: logicalNow,
+      today,
+      timeZone: config?.operations?.timezone,
       listDir,
       canaryConfig,
     });

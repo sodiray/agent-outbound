@@ -10,6 +10,7 @@
  */
 
 import { parseNextActionFromRecord, type SequenceState } from './lifecycle.js';
+import { isActionDueOnDate, toZonedIsoDate } from '../lib/working-days.js';
 
 /** Sequence states that must never auto-execute outbound. */
 export const SEQUENCE_STATES_BLOCK_OUTBOUND = new Set<SequenceState | string>([
@@ -104,11 +105,26 @@ export type SequenceOutboundOptions = {
   channel?: SequenceOutboundChannel | null;
   stepKind?: string | null;
   taskType?: string | null;
+  /** Pipeline-local date for date-only waits. Takes precedence over instant conversion. */
+  today?: string | null;
+  /** Pipeline timezone for date-only waits when no logical date is supplied. */
+  timeZone?: string | null;
 };
 
-const isDueAtOrBefore = (dueRaw: string | null | undefined, now: string | Date): boolean => {
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+const isDueAtOrBefore = (
+  dueRaw: string | null | undefined,
+  now: string | Date,
+  options?: SequenceOutboundOptions | null,
+): boolean => {
   const due = String(dueRaw || '').trim();
   if (!due) return true; // no explicit due → defer timing to next_action_date / resolveDueStep
+  if (ISO_DATE_PATTERN.test(due)) {
+    const today = String(options?.today || '').trim()
+      || toZonedIsoDate(now, String(options?.timeZone || '').trim() || undefined);
+    return isActionDueOnDate({ nextActionDate: due, today });
+  }
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(String(now));
   const dueMs = Date.parse(due.includes('T') || due.includes(' ') ? due : `${due}T00:00:00.000Z`);
   if (Number.isNaN(nowMs) || Number.isNaN(dueMs)) {
@@ -314,7 +330,7 @@ export function shouldExecuteSequenceOutbound(
 
   if (WAIT_ACTION_TYPES.has(action_type)) {
     const dueHint = next.due_at || row.next_action_date || null;
-    if (!isDueAtOrBefore(dueHint != null ? String(dueHint) : null, now)) {
+    if (!isDueAtOrBefore(dueHint != null ? String(dueHint) : null, now, options)) {
       return {
         execute: false,
         reason: 'wait_not_due',

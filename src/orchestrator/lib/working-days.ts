@@ -98,6 +98,21 @@ export const applyWorkingDaysFilterInTimezone = ({
   throw new Error('Failed to resolve next working day in timezone.');
 };
 
+/** True when a calendar-date schedule is due on or before its logical today. */
+export const isActionDueOnDate = ({
+  nextActionDate,
+  today,
+}: {
+  nextActionDate: string;
+  today: string;
+}): boolean => {
+  const due = toIsoDate(nextActionDate);
+  if (!due) return true;
+  const logicalToday = toIsoDate(today);
+  if (!logicalToday) return false;
+  return due <= logicalToday;
+};
+
 /** True when next_action_date is due relative to "today" in timezone. */
 export const isActionDueInTimezone = ({
   nextActionDate,
@@ -108,10 +123,8 @@ export const isActionDueInTimezone = ({
   now: string | Date;
   timeZone?: string;
 }): boolean => {
-  const due = toIsoDate(nextActionDate);
-  if (!due) return true;
   const today = toZonedIsoDate(now, timeZone);
-  return due <= today;
+  return isActionDueOnDate({ nextActionDate, today });
 };
 
 export const addIsoDays = (isoDate: string, days: number) => {
