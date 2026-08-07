@@ -234,6 +234,107 @@ test('compose rejects invented specifics with an accurate per-record reason', as
   });
 });
 
+test('compose discounts capitalized sentence openers without allowing invented mid-sentence names', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const initialCapitalCases = [
+      'Quick question about scheduling.\nSaw your booking page.',
+      'A note. Novel opener! Remarkable opener? Splendid opener.\nFresh line.\n- Bulletword item.\n* Starword item.\n• Dotword item.',
+    ];
+    for (const message of initialCapitalCases) {
+      const result = await runComposeStep({
+        db,
+        listDir: root,
+        config: { ai: {} },
+        step: step({ length: { max_words: 100, max_sentences: 20 } }),
+        rows: [record],
+        stepId: 'channel_copy',
+        generateObject: async () => ({
+          object: { outputs: { headline: 'Hello Ada', message } },
+          usage: {},
+        }),
+      });
+      assert.equal(result.failed, 0, JSON.stringify(result.errors));
+    }
+
+    const inventedNameCases = [
+      { text: 'I can meet you on Fairview Avenue.', reason: /proper name or place "Fairview"/ },
+      { text: 'I spoke with Dave.', reason: /proper name or place "Dave"/ },
+    ];
+    for (const claim of inventedNameCases) {
+      const result = await runComposeStep({
+        db,
+        listDir: root,
+        config: { ai: {} },
+        step: step(),
+        rows: [record],
+        stepId: 'channel_copy',
+        generateObject: async () => ({
+          object: { outputs: { headline: 'Hello Ada', message: claim.text } },
+          usage: {},
+        }),
+      });
+      assert.equal(result.failed, 1, claim.text);
+      assert.match(result.errors[0].error, claim.reason);
+    }
+  });
+});
+
+test('compose permits granted greeting and sender identity while rejecting an ungranted greeting name', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const greetingStep = step();
+    const grantedGreeting = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: greetingStep,
+      rows: [{ ...record, contact_first_name: 'Alex' }],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: { outputs: { headline: 'Hi Alex,', message: 'A brief note.' } },
+        usage: {},
+      }),
+    });
+    assert.equal(grantedGreeting.failed, 0, JSON.stringify(grantedGreeting.errors));
+
+    const ungrantedGreeting = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: greetingStep,
+      rows: [{ ...record, contact_first_name: 'Alex' }],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: { outputs: { headline: 'Hi Jordan,', message: 'A brief note.' } },
+        usage: {},
+      }),
+    });
+    assert.equal(ungrantedGreeting.failed, 1);
+    assert.match(ungrantedGreeting.errors[0].error, /proper name or place "Jordan"/);
+
+    const senderStep = {
+      ...step(),
+      inputs: {
+        ...step().inputs,
+        sender_name: { value: 'Jordan', required: true },
+        sender_company: { value: 'Evergreen', required: true },
+      },
+    };
+    const senderSignoff = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: senderStep,
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: { outputs: { headline: 'Hello Ada', message: 'Thanks,\nJordan from Evergreen' } },
+        usage: {},
+      }),
+    });
+    assert.equal(senderSignoff.failed, 0, JSON.stringify(senderSignoff.errors));
+  });
+});
+
 test('compose repairs known em-dash mojibake and preserves non-ASCII through persistence', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const result = await runComposeStep({

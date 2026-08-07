@@ -98,6 +98,11 @@ const normalizedSpecific = (value: string) => value
   .replace(/\s+/g, ' ')
   .trim();
 
+const isSentenceInitialCapitalizedWord = ({ source, index }: { source: string; index: number }) => {
+  const prefix = source.slice(0, index);
+  return /(?:^|[.!?\r\n])(?:[\p{Z}\t"“”'‘’()[\]{}]*|[\p{Z}\t"“”'‘’()[\]{}]*(?:[-*•]|\d+[.)])[\p{Z}\t]*)$/u.test(prefix);
+};
+
 const uniqueSpecifics = (tokens: SpecificToken[]) => {
   const seen = new Set<string>();
   return tokens.filter((token) => {
@@ -108,7 +113,10 @@ const uniqueSpecifics = (tokens: SpecificToken[]) => {
   });
 };
 
-const specificTokens = (text: string): SpecificToken[] => {
+const specificTokens = ({ text, discountSentenceInitialCapitalizedWords = true }: {
+  text: string;
+  discountSentenceInitialCapitalizedWords?: boolean;
+}): SpecificToken[] => {
   const source = String(text || '');
   const urls = Array.from(source.matchAll(/\b(?:https?:\/\/|www\.)[^\s<>()]+/giu))
     .map((match) => match[0].replace(/[.,!?;:]+$/u, ''));
@@ -119,6 +127,10 @@ const specificTokens = (text: string): SpecificToken[] => {
   const numbers = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:[$€£¥]\s*)?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:%|people|employees|staff|users|locations|offices|vans))?(?![\p{L}\p{N}])/giu))
     .map((match) => match[0]);
   const names = Array.from(source.matchAll(/\p{Lu}[\p{L}\p{M}'’-]*/gu))
+    .filter((match) => (
+      !discountSentenceInitialCapitalizedWords
+      || !isSentenceInitialCapitalizedWord({ source, index: match.index })
+    ))
     .map((match) => match[0])
     .filter((word) => !ordinaryCapitalizedWords.has(normalizedSpecific(word)));
   const serviceLines = Array.from(source.matchAll(/\b(?:you|your\s+(?:company|business|team|firm|organization|organisation))\s+(?:offer|offers|provide|provides|sell|sells|speciali[sz]e\s+in|speciali[sz]es\s+in)\s+([\p{L}\p{M}'’& -]{2,80}?)(?:[.!?\n]|$)/giu))
@@ -145,9 +157,12 @@ const inventedSpecifics = ({ step, outputs, inputs }: {
   inputs: Record<string, string>;
 }) => {
   const grantedText = [...Object.values(inputs), trustedComposeText(step)].join('\n');
-  const allowed = new Set(specificTokens(grantedText).map((token) => normalizedSpecific(token.value)));
+  const allowed = new Set(specificTokens({
+    text: grantedText,
+    discountSentenceInitialCapitalizedWords: false,
+  }).map((token) => normalizedSpecific(token.value)));
   const normalizedGrantedText = normalizedSpecific(grantedText);
-  const outputTokens = specificTokens(Object.values(outputs).join('\n'));
+  const outputTokens = specificTokens({ text: Object.values(outputs).join('\n') });
   return outputTokens.filter((token) => (
     !allowed.has(normalizedSpecific(token.value))
     && !(token.kind === 'service line' && normalizedGrantedText.includes(normalizedSpecific(token.value)))
