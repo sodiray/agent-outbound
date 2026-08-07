@@ -583,6 +583,30 @@ const executeSequenceActionBatch = async (
           errored: false,
         }] as const;
       }
+      // A skip is not a failure. The dataflow treats any errored step as
+      // poisoning the whole record (`recordState.errored.size === 0` gates
+      // every remaining step), so classifying a deliberate skip as an error
+      // stops steps that have nothing to do with it.
+      //
+      // That produced a deadlock: the send step was gated because content was
+      // not ready (`sequence_outbound_gated: non_outbound_action_enrichment_repair`),
+      // the resulting "error" then blocked `diagnostic_content_pack` — the step
+      // that produces the content — so the gate could never clear itself.
+      // Forbidden work and provider failures still set errored explicitly at
+      // their own return sites.
+      // Scoped deliberately to the sequence gate. A provider that cannot run
+      // (no Unipile credentials, a failed send) is a genuine error and still
+      // classifies as one; only "the sequence says not now" is routine.
+      if (status === 'skipped' && /sequence_outbound_gated/i.test(reason)) {
+        return [
+          recordId,
+          {
+            passed: false,
+            reason,
+            errored: false,
+          },
+        ] as const;
+      }
       return [
         recordId,
         {
