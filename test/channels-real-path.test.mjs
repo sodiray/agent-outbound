@@ -867,7 +867,7 @@ test('phone: human_phone parks as awaiting_manual; visit/field_visit/send_sms re
 // LinkedIn: not forbidden; readiness gate on production path
 // ---------------------------------------------------------------------------
 
-test('linkedin: not forbidden; production path skips without Unipile; readiness contract', async () => {
+test('linkedin: not forbidden; production path fails clearly without configured credentials', async () => {
   assert.equal(isForbiddenChannelKind('linkedin_connect'), false);
   assert.equal(isForbiddenTaskType('linkedin_connect'), false);
   assert.equal(isLinkedinConnectKind('linkedin_connect'), true);
@@ -939,8 +939,9 @@ test('linkedin: not forbidden; production path skips without Unipile; readiness 
       channelHint: 'linkedin',
       intent: 'send',
     });
-    assert.equal(out.status, 'skipped');
+    assert.equal(out.status, 'failed');
     assert.match(String(out.reason), /unipile/i);
+    assert.match(String(out.reason), /UNIPILE_API_KEY.*UNIPILE_DSN/);
     assert.doesNotMatch(String(out.reason), /forbidden/i);
 
     // Pipeline batch also routes linkedin_connect (not forbidden short-circuit)

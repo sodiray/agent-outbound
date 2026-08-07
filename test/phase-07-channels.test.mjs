@@ -593,7 +593,7 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
   assert.equal(fixture.reason, 'unipile_fixture_success');
   assert.match(String(fixture.provider_id), /^unipile_fixture_/);
 
-  // Production executeChannelStep path without Unipile env
+  // Production executeChannelStep path without pipeline credentials
   const prevKey = process.env.UNIPILE_API_KEY;
   const prevDsn = process.env.UNIPILE_DSN;
   const prevFix = process.env.AO_UNIPILE_FIXTURE;
@@ -622,7 +622,7 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
       channelHint: 'linkedin',
       intent: 'send',
     });
-    assert.equal(out.status, 'skipped');
+    assert.equal(out.status, 'failed');
     assert.match(String(out.reason), /unipile/i);
     assert.doesNotMatch(String(out.reason), /forbidden/i);
 

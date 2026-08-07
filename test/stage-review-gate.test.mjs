@@ -642,7 +642,7 @@ test('executeChannelStep: linkedin after authorizeStageReview proceeds past gate
   const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
 
   // dryRun never hits the review gate; use non-dryRun so authorize is exercised.
-  // Without Unipile credentials the path is skipped for readiness — still past review.
+  // Without pipeline credentials the path fails closed after the review gate opens.
   const prevFixture = process.env.AO_UNIPILE_FIXTURE;
   delete process.env.AO_UNIPILE_FIXTURE;
   try {
@@ -655,9 +655,9 @@ test('executeChannelStep: linkedin after authorizeStageReview proceeds past gate
       !/asset changed/i.test(String(out.reason || '')),
       `material invalidation on matching version: ${JSON.stringify(out)}`,
     );
-    // Unconfigured Unipile is the expected stop after the review gate opens.
-    assert.equal(out.status, 'skipped');
-    assert.match(String(out.reason), /unipile_not_configured|unipile_/i);
+    // Missing pipeline credentials are the expected stop after the review gate opens.
+    assert.equal(out.status, 'failed');
+    assert.match(String(out.reason), /unipile.*UNIPILE_API_KEY.*UNIPILE_DSN/i);
 
     // Sequence must remain active (authorize path), not re-paused for review.
     const after = db.prepare('SELECT account_sequence_state FROM records WHERE _row_id = ?').get(rowId);

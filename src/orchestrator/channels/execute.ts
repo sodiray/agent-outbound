@@ -25,6 +25,7 @@ import { computeNextScheduledAction, resolveWorkingDayConfig, toIsoDate, toZoned
 import { recordCostEvent } from '../lib/costs.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { readConfig } from '../lib/config.js';
+import { resolveChannelProviderCredentials } from '../lib/channel-credentials.js';
 import { countMailboxSendsToday, resolveSendMailbox, smtpCredentialEnv } from '../lib/mailboxes.js';
 import {
   commitLiveInteraction,
@@ -1252,10 +1253,38 @@ export const executeChannelStep = async ({
       if (liClaim.ok === false) return liClaim.result as any;
 
       const { executeUnipileLinkedinConnect } = await import('./unipile.js');
+      const channelConfig = projectConfig?.channels?.linkedin;
+      const provider = String(
+        channelConfig && typeof channelConfig === 'object' && !Array.isArray(channelConfig)
+          ? channelConfig.provider || 'unipile'
+          : 'unipile',
+      ).trim().toLowerCase();
+      const fixtureMode = isSinkOrFixtureMode('linkedin');
+      const providerCredentials = fixtureMode
+        ? null
+        : resolveChannelProviderCredentials({
+          listDir: String(listDir),
+          config: projectConfig || {},
+          channel: 'linkedin',
+          provider,
+          requiredKeys: ['UNIPILE_API_KEY', 'UNIPILE_DSN'],
+        });
+      if (providerCredentials && !providerCredentials.ready) {
+        releaseProviderInteraction({ mode: liClaim.mode });
+        return {
+          status: 'failed',
+          reason: providerCredentials.reason,
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
       const linkedinResult = await executeUnipileLinkedinConnect({
         record: sendRecord,
         step,
         dryRun,
+        env: fixtureMode
+          ? { AO_UNIPILE_FIXTURE: '1' }
+          : providerCredentials?.credentials,
       });
       if (linkedinResult.status !== 'sent') {
         releaseProviderInteraction({ mode: liClaim.mode });

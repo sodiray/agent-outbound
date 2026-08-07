@@ -26,7 +26,7 @@ const nonBlank = (value: unknown) => String(value ?? '').trim();
  * Ready when API credentials are present, or when AO_UNIPILE_FIXTURE=1 (harness only).
  */
 export function evaluateUnipileReadiness(
-  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = {},
 ): UnipileReadiness {
   const fixtureMode = nonBlank(env.AO_UNIPILE_FIXTURE) === '1'
     || nonBlank(env.AO_UNIPILE_FIXTURE).toLowerCase() === 'true';
@@ -67,7 +67,7 @@ export type UnipileLinkedinConnectInput = {
   record?: Record<string, unknown>;
   step?: { id?: string; description?: string; config?: Record<string, unknown> };
   dryRun?: boolean;
-  /** Inject env for tests; defaults to process.env */
+  /** Provider credentials supplied by the pipeline channel configuration. */
   env?: NodeJS.ProcessEnv | Record<string, string | undefined>;
   /** Optional fetch inject for tests */
   fetchImpl?: typeof fetch;
@@ -164,7 +164,7 @@ export async function unipileLiveInvite(input: {
 export async function executeUnipileLinkedinConnect(
   input: UnipileLinkedinConnectInput = {},
 ): Promise<UnipileLinkedinConnectResult> {
-  const readiness = evaluateUnipileReadiness(input.env || process.env);
+  const readiness = evaluateUnipileReadiness(input.env || {});
   if (!readiness.ready) {
     return {
       status: 'skipped',
@@ -182,7 +182,7 @@ export async function executeUnipileLinkedinConnect(
     };
   }
 
-  const env = input.env || process.env;
+  const env = input.env || {};
   // Fixture/contract adapter: when AO_UNIPILE_FIXTURE=1, return deterministic
   // provider success without live HTTP (validation / harness only).
   const fixtureMode = String(env.AO_UNIPILE_FIXTURE || '').trim() === '1'

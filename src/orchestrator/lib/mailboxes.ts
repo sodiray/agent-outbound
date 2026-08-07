@@ -1,8 +1,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import yaml from 'js-yaml';
+import {
+  resolveCredentials,
+  type Credentials,
+} from './credentials.js';
 
-export type MailboxCredentials = Record<string, string>;
+export type MailboxCredentials = Credentials;
+
+export { parseEnvFile } from './credentials.js';
 
 export type Mailbox = {
   id: string;
@@ -40,23 +46,6 @@ const isObject = (value: unknown): value is Record<string, unknown> => (
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 );
 const isSink = () => process.env.AO_SMTP_SINK === '1';
-
-export const parseEnvFile = (text: string): MailboxCredentials => {
-  const output: MailboxCredentials = {};
-  for (const sourceLine of String(text || '').split(/\r?\n/)) {
-    const line = sourceLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const withoutExport = line.startsWith('export ') ? line.slice(7).trim() : line;
-    const equals = withoutExport.indexOf('=');
-    if (equals <= 0) continue;
-    const key = withoutExport.slice(0, equals).trim();
-    const raw = withoutExport.slice(equals + 1).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
-    const quoted = raw.match(/^(['"])([\s\S]*)\1$/);
-    output[key] = quoted ? quoted[2].replace(/\\n/g, '\n').replace(/\\r/g, '\r') : raw.replace(/\s+#.*$/, '').trim();
-  }
-  return output;
-};
 
 const normalizeMailbox = (raw: unknown): Mailbox => {
   const value = isObject(raw) ? raw : {};
@@ -132,24 +121,11 @@ export const loadMailboxesCatalog = ({
 };
 
 export const resolveMailboxCredentials = (mailbox: Mailbox, yamlDir: string) => {
-  const credentials = mailbox.credentials;
-  if (typeof credentials === 'string') {
-    const path = isAbsolute(credentials) ? credentials : join(yamlDir, credentials);
-    if (!existsSync(path)) throw new Error(`Credentials file not found for mailbox "${mailbox.id}": ${path}`);
-    return { credentials: parseEnvFile(readFileSync(path, 'utf8')), source: 'path' as const, path };
-  }
-  const pathValue = nonBlank(credentials.path);
-  const overrides = Object.fromEntries(Object.entries(credentials)
-    .filter(([key]) => key !== 'path')
-    .map(([key, value]) => [key, String(value ?? '')]));
-  if (!pathValue) return { credentials: overrides, source: 'inline' as const, path: '' };
-  const path = isAbsolute(pathValue) ? pathValue : join(yamlDir, pathValue);
-  if (!existsSync(path)) throw new Error(`Credentials file not found for mailbox "${mailbox.id}": ${path}`);
-  return {
-    credentials: { ...parseEnvFile(readFileSync(path, 'utf8')), ...overrides },
-    source: 'merged' as const,
-    path,
-  };
+  return resolveCredentials({
+    credentials: mailbox.credentials,
+    yamlDir,
+    subject: `mailbox "${mailbox.id}"`,
+  });
 };
 
 export const smtpCredentialEnv = (credentials: MailboxCredentials) => ({
