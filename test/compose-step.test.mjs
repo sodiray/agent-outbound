@@ -70,7 +70,7 @@ const liveStep = () => ({
   inputs: {
     person: { from: 'contact_first_name', required: true },
     account: { from: 'business_name', required: true },
-    friction: { value: 'Manual staff coordination for inquiries and payments.', required: true },
+    friction: { value: 'The website lacks online booking, payment, and live chat, so tenant and owner inquiries need manual handling.', required: true },
   },
   outputs: {
     email_subject: { type: 'string', description: 'Subject.' },
@@ -80,16 +80,13 @@ const liveStep = () => ({
 
 const liveObject = {
   outputs: {
-    email_subject: 'Liberty Asset Group',
-    email_body: 'Hi Alex,\n\nEvery inquiry and payment at your firm requires manual staff coordination.\n\nI can give you a quick read on where your time is being spent.\n\nWorth a conversation?\n\nRay\nMission',
+    email_subject: 'Liberty Asset Group manual inquiries',
+    email_body: 'Hi Alex,\n\nYour website lacks online booking, payment, and live chat—every tenant and owner inquiry needs manual handling.\n\nWe can show where your team\'s time is going.\n\nWorth a conversation?\n\nRay\nMission',
   },
-  used_inputs: ['person', 'account', 'friction'],
+  used_inputs: ['account', 'friction'],
   grounding: [
-    { output: 'email_body', text: 'Hi Alex,', inputs: ['person'] },
-    { output: 'email_subject', text: 'Liberty Asset Group', inputs: ['account'] },
-    { output: 'email_body', text: 'Every inquiry and payment at your firm requires manual staff coordination.', inputs: ['friction', 'account'] },
-    { output: 'email_body', text: 'I can give you a quick read on where your time is being spent.', inputs: ['friction'] },
-    { output: 'email_body', text: 'Worth a conversation?', inputs: ['friction'] },
+    { output: 'email_subject', text: 'Liberty Asset Group manual inquiries', inputs: ['account', 'friction'] },
+    { output: 'email_body', text: 'Your website lacks online booking, payment, and live chat—every tenant and owner inquiry needs manual handling.', inputs: ['friction'] },
   ],
 };
 
@@ -159,7 +156,7 @@ test('compose writes arbitrary declared outputs and persists an auditable asset'
   });
 });
 
-test('compose accepts the live response when only non-assertive boilerplate is uncited', async () => {
+test('compose accepts the exact live response when its offer is ordinary prose', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const liveRecord = { ...record, contact_first_name: 'Alex', business_name: 'Liberty Asset Group' };
     const result = await runComposeStep({
@@ -173,13 +170,13 @@ test('compose accepts the live response when only non-assertive boilerplate is u
     });
     assert.equal(result.failed, 0, JSON.stringify(result.errors));
     assert.deepEqual(result.declared_output_writes[liveRecord._row_id], {
-      email_subject: { provided: true, value: 'Liberty Asset Group' },
+      email_subject: { provided: true, value: 'Liberty Asset Group manual inquiries' },
       email_body: { provided: true, value: liveObject.outputs.email_body },
     });
   });
 });
 
-test('compose permits uncited structural language that makes no factual assertion', async () => {
+test('compose permits ordinary prose without audit metadata', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const result = await runComposeStep({
       db,
@@ -192,10 +189,8 @@ test('compose permits uncited structural language that makes no factual assertio
         object: {
           outputs: {
             email_subject: 'Acme',
-            email_body: 'Hello Ada,\n\nWorth a conversation?\n\nRay\nMission',
+            email_body: 'Hello Ada,\n\nWe can show where your team\'s time is going.\n\nWorth a conversation?\n\nRay\nMission',
           },
-          used_inputs: ['account'],
-          grounding: [{ output: 'email_subject', text: 'Acme', inputs: ['account'] }],
         },
         usage: {},
       }),
@@ -204,14 +199,14 @@ test('compose permits uncited structural language that makes no factual assertio
   });
 });
 
-test('compose rejects uncited factual claims and reports grounding rather than schema failure', async () => {
+test('compose rejects invented specifics with an accurate per-record reason', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const claims = [
-      'Acme',
-      'Boise',
-      'Acme has 80 employees.',
-      'Acme is based in Boise.',
-      'Acme offers commercial lending.',
+      { text: 'Acme is based in Boise.', reason: /proper name or place "Boise"/ },
+      { text: 'Acme employs 14 people.', reason: /number "14 people"/ },
+      { text: 'Your company offers commercial lending.', reason: /service line "commercial lending"/ },
+      { text: 'reach alex@madeup.test.', reason: /email address "alex@madeup\.test"/ },
+      { text: 'visit https://madeup.test/portal.', reason: /URL or domain "https:\/\/madeup\.test\/portal"/ },
     ];
     for (const claim of claims) {
       const result = await runComposeStep({
@@ -225,18 +220,51 @@ test('compose rejects uncited factual claims and reports grounding rather than s
           object: {
             outputs: {
               email_subject: 'Acme',
-              email_body: `Hello Ada,\n\n${claim}\n\nRay\nMission`,
+              email_body: `Hello Ada,\n\n${claim.text}\n\nRay\nMission`,
             },
-            used_inputs: ['account'],
-            grounding: [{ output: 'email_subject', text: 'Acme', inputs: ['account'] }],
           },
           usage: {},
         }),
       });
-      assert.equal(result.failed, 1, claim);
-      assert.match(result.errors[0].error, /grounding error/i);
+      assert.equal(result.failed, 1, claim.text);
+      assert.match(result.errors[0].error, /invented specifics/i);
+      assert.match(result.errors[0].error, claim.reason);
       assert.doesNotMatch(result.errors[0].error, /schema/i);
     }
+  });
+});
+
+test('compose repairs known em-dash mojibake and preserves non-ASCII through persistence', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: {
+          outputs: {
+            headline: 'Hello Ada â€” café',
+            message: 'Acme — résumé',
+          },
+        },
+        usage: {},
+      }),
+    });
+    assert.equal(result.failed, 0, JSON.stringify(result.errors));
+    assert.deepEqual(result.declared_output_writes[record._row_id], {
+      headline: { provided: true, value: 'Hello Ada — café' },
+      message: { provided: true, value: 'Acme — résumé' },
+    });
+    const persisted = db.prepare('SELECT headline, message FROM records WHERE _row_id = ?').get(record._row_id);
+    assert.deepEqual(persisted, { headline: 'Hello Ada — café', message: 'Acme — résumé' });
+    const [asset] = getAssetsForRow({ db, rowId: record._row_id });
+    assert.deepEqual(JSON.parse(asset.outputs_json).outputs, {
+      headline: 'Hello Ada — café',
+      message: 'Acme — résumé',
+    });
   });
 });
 
@@ -287,7 +315,7 @@ test('compose never receives or accepts ungranted facts, and missing required in
   });
 });
 
-test('compose rejects over-budget, partial, hole-bearing, and ungrounded outputs without persisting an asset', async () => {
+test('compose rejects over-budget, partial, and hole-bearing outputs without persisting an asset', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const invalid = [
       {
@@ -309,10 +337,6 @@ test('compose rejects over-budget, partial, hole-bearing, and ungrounded outputs
       {
         ...validObject,
         outputs: { headline: 'Hello Ada' },
-        grounding: [{ output: 'headline', text: 'Hello Ada', inputs: ['person'] }],
-      },
-      {
-        ...validObject,
         grounding: [{ output: 'headline', text: 'Hello Ada', inputs: ['person'] }],
       },
     ];
