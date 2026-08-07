@@ -784,7 +784,12 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         policy_version: NEXT_ACTION_POLICY_VERSION,
       };
       work_state = 'enrichment_repair';
-    } else if (!next_action || String(next_action.action_type || '').includes('reprocess') || !next_action.action_id) {
+    } else if (!next_action || String(next_action.action_type || '').includes('reprocess') || !next_action.action_id
+      || holdsStaleRepairAction()) {
+      // The stale-repair escape is repeated here deliberately. This branch is
+      // the ONLY producer of `prepare_outbound`, and it was nested inside a
+      // second copy of the same "only if there is no usable action" condition —
+      // so entering the outer block was not enough to leave a repair action.
       next_action = {
         action_id: `na_route_${rowId}`,
         action_type: 'prepare_outbound',

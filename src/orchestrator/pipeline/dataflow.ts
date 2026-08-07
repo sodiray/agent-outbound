@@ -393,6 +393,21 @@ export const runDataflowCore = async ({
       return candidate;
     });
     if (!selected) {
+      if (process.env.AO_DATAFLOW_DEBUG === '1') {
+        const rid = getRecordRowId(recordState.record);
+        const why = steps.map((candidate) => {
+          const reasons: string[] = [];
+          if (recordState.status.dropped) reasons.push('record_dropped');
+          if (recordState.errored.size > 0) reasons.push(`record_errored:${[...recordState.errored].join('|')}`);
+          if (!candidate.executable) reasons.push('not_executable');
+          if (recordState.resolved.has(candidate.id)) reasons.push('already_resolved');
+          if (recordState.pending.has(candidate.id)) reasons.push('pending');
+          const unmet = candidate.deps.filter((dep) => !recordState.resolved.has(dep));
+          if (unmet.length) reasons.push(`deps_unresolved:${unmet.join('|')}`);
+          return `${candidate.id}=${reasons.length ? reasons.join(',') : 'ELIGIBLE?'}`;
+        });
+        process.stderr.write(`[dataflow-debug] ${rid}\n  ${why.join('\n  ')}\n`);
+      }
       state.completedOrder = [...state.completedOrder, getRecordRowId(recordState.record)];
       return;
     }
