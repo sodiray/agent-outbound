@@ -15,6 +15,7 @@ import {
 import {
   assignTreatmentAndMail,
   countStrongTimingSignals,
+  type TreatmentBandLadders,
   type TreatmentTier,
 } from './treatment.js';
 import {
@@ -100,6 +101,8 @@ export type PolicyApplyInput = {
   costLedger?: CostLedger;
   /** Minimum assessable criterion-weight share required to trust a fit score. */
   minFitCoverage?: number;
+  /** Configured fit and evidence-confidence ladders for treatment assignment. */
+  treatmentBands?: TreatmentBandLadders;
 };
 
 export type PolicyApplyResult = {
@@ -551,6 +554,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       cohortCapacityOk: cohortCapacityOk === true,
     },
     cumulativeEnrichmentCostUsd: enrichmentUsd,
+    treatmentBands: input.treatmentBands,
   });
 
   const taxonomyResolutionFailed = taxonomy.reasons.includes('taxonomy_not_loaded')

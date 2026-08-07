@@ -1293,6 +1293,7 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       costLedger: costHydrate.ledger,
       enrichmentSpendUsd: costHydrate.enrichment_usd,
       minFitCoverage: config?.score?.min_coverage,
+      treatmentBands: config?.score?.treatment_bands,
     });
     summary.tiers[result.treatment_tier] = (summary.tiers[result.treatment_tier] || 0) + 1;
     if (result.integrity_errors.length) summary.integrity_errors += 1;

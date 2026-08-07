@@ -3,6 +3,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { normalizeConfig } from '../dist/schemas/config.js';
 import {
   assignTreatmentAndMail,
   assignTreatmentTier,
@@ -105,6 +106,58 @@ test('treatment matrix assigns A/B/C/D/hold per design', () => {
   assert.equal(assignTreatmentTier({ fitScore: 40, fitEvidenceConfidence: 90 }).tier, 'D');
   assert.equal(assignTreatmentTier({ fitScore: 85, fitEvidenceConfidence: 30 }).tier, 'enrichment_hold');
   assert.equal(assignTreatmentTier({ fitScore: null, fitEvidenceConfidence: 90 }).tier, 'enrichment_hold');
+});
+
+test('treatment bands default exactly to the existing matrix labels and cuts', () => {
+  const config = normalizeConfig({ score: {} }).config;
+  assert.deepEqual(config.score.treatment_bands, {
+    fit: [0, 50, 65, 80, 100],
+    fit_evidence_confidence: [0, 40, 60, 80, 100],
+  });
+
+  const cases = [
+    { score: 49.9, label: 'below50', tier: 'D' },
+    { score: 50, label: '50-64', tier: 'C' },
+    { score: 64.9, label: '50-64', tier: 'C' },
+    { score: 65, label: '65-79', tier: 'B' },
+    { score: 79.9, label: '65-79', tier: 'B' },
+    { score: 80, label: '80-100', tier: 'A' },
+  ];
+  for (const item of cases) {
+    const result = assignTreatmentTier({
+      fitScore: item.score,
+      fitEvidenceConfidence: 90,
+      treatmentBands: config.score.treatment_bands,
+    });
+    assert.equal(result.tier, item.tier);
+    assert.ok(result.reasons.includes(`fit_band=${item.label}`));
+  }
+});
+
+test('configured treatment bands use their configured fit cut and reject malformed ladders', () => {
+  const tv = normalizeConfig({
+    score: { treatment_bands: { fit: [0, 45, 65, 80, 100] } },
+  });
+  assert.deepEqual(tv.errors, []);
+
+  const defaults = assignTreatmentTier({ fitScore: 47, fitEvidenceConfidence: 90 });
+  const configured = assignTreatmentTier({
+    fitScore: 47,
+    fitEvidenceConfidence: 90,
+    treatmentBands: tv.config.score.treatment_bands,
+  });
+  assert.equal(defaults.tier, 'D');
+  assert.equal(configured.tier, 'C');
+  assert.ok(configured.reasons.includes('fit_band=45-64'));
+
+  const malformed = [
+    [0, 65, 50, 80, 100],
+    [-1, 50, 65, 80, 100],
+    [0, 50, 50, 80, 100],
+  ];
+  for (const fit of malformed) {
+    assert.ok(normalizeConfig({ score: { treatment_bands: { fit } } }).errors.length > 0);
+  }
 });
 
 test('mail treatment is independent; golden ticket is tier-A overlay', () => {

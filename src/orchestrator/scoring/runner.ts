@@ -1006,6 +1006,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           costLedger: costHydrate.ledger,
           enrichmentSpendUsd: costHydrate.enrichment_usd,
           minFitCoverage: minimumCoverage,
+          treatmentBands: scoreConfig?.treatment_bands,
         });
         const updated = {
           ...prePolicy,

@@ -30,6 +30,7 @@ import {
   preservePriorNonBlankFields,
 } from '../policy/evidence.js';
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
+import type { TreatmentBandLadders } from '../policy/treatment.js';
 
 const zeroUsage = () => ({
   input_tokens: 0,
@@ -684,6 +685,7 @@ export const executeEnrichmentAction = async ({
   record,
   aiConfig,
   context,
+  treatmentBands,
   outputSchema,
   toolCatalog,
 }: {
@@ -696,6 +698,7 @@ export const executeEnrichmentAction = async ({
   record: Record<string, unknown>;
   aiConfig: Record<string, unknown>;
   context: Record<string, unknown>;
+  treatmentBands?: TreatmentBandLadders;
   outputSchema: z.ZodTypeAny;
   toolCatalog?: ToolCatalog;
 }) => {
@@ -816,6 +819,7 @@ export const executeEnrichmentAction = async ({
       costLedger: costHydrate?.ledger,
       enrichmentSpendUsd: costHydrate?.enrichment_usd,
       minFitCoverage: Number(context?.min_fit_coverage),
+      treatmentBands,
     });
     // Map declared outputs from patch when present
     const outputs: Record<string, unknown> = { ...result.patch };
@@ -1005,6 +1009,7 @@ export const executeEnrichmentStepOnRecords = async ({
           min_fit_coverage: config?.score?.min_coverage,
           linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
         },
+        treatmentBands: config?.score?.treatment_bands,
         outputSchema: outputZod,
         toolCatalog,
       });
@@ -1460,6 +1465,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 min_fit_coverage: config?.score?.min_coverage,
                 linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
               },
+              treatmentBands: config?.score?.treatment_bands,
               outputSchema: outputZod,
               toolCatalog,
             });

@@ -3,10 +3,16 @@
  * Implements the provisional matrix in treatment-thresholds-and-physical-mail-programs.md.
  */
 
+import { DEFAULT_SCORE_TREATMENT_BANDS } from '../../schemas/config.js';
+
 export const CALCULATION_RULE_VERSION = 'tv-treatment-v1';
 
 export type TreatmentTier = 'A' | 'B' | 'C' | 'D' | 'enrichment_hold';
 export type MailTreatment = 'none' | 'standard_postcard' | 'golden_ticket';
+export type TreatmentBandLadders = {
+  fit?: readonly number[];
+  fit_evidence_confidence?: readonly number[];
+};
 
 export type TreatmentInput = {
   fitScore: number | null;
@@ -44,6 +50,7 @@ export type TreatmentInput = {
   goldenTicketGates?: GoldenTicketGates;
   cumulativeEnrichmentCostUsd?: number;
   goldenTicketBudgetCeilingUsd?: number;
+  treatmentBands?: TreatmentBandLadders;
 };
 
 export type GoldenTicketGates = {
@@ -96,21 +103,25 @@ export type TreatmentResult = {
   calculation_rule_version: string;
 };
 
-function band(score: number | null): 'unscored' | 'below50' | '50-64' | '65-79' | '80-100' {
-  if (score == null || Number.isNaN(score)) return 'unscored';
-  if (score < 50) return 'below50';
-  if (score < 65) return '50-64';
-  if (score < 80) return '65-79';
-  return '80-100';
-}
+type ScoredBand = { index: number; label: string };
 
-function confBand(score: number | null): 'unscored' | 'below40' | '40-59' | '60-79' | '80-100' {
+const formatBoundary = (value: number) => String(value);
+
+const labelForBand = (boundaries: readonly number[], index: number) => {
+  const lower = boundaries[index];
+  const upper = boundaries[index + 1];
+  if (index === 0) return `below${formatBoundary(upper)}`;
+  if (index === boundaries.length - 2) return `${formatBoundary(lower)}-100`;
+  if (Number.isInteger(lower) && Number.isInteger(upper)) return `${formatBoundary(lower)}-${formatBoundary(upper - 1)}`;
+  return `${formatBoundary(lower)}-<${formatBoundary(upper)}`;
+};
+
+const band = (score: number | null, boundaries: readonly number[]): 'unscored' | ScoredBand => {
   if (score == null || Number.isNaN(score)) return 'unscored';
-  if (score < 40) return 'below40';
-  if (score < 60) return '40-59';
-  if (score < 80) return '60-79';
-  return '80-100';
-}
+  const index = boundaries.slice(1).findIndex((boundary) => score < boundary);
+  const resolvedIndex = index < 0 ? boundaries.length - 2 : index;
+  return { index: resolvedIndex, label: labelForBand(boundaries, resolvedIndex) };
+};
 
 /**
  * Assign treatment_tier from fit × fit_evidence_confidence matrix.
@@ -118,30 +129,37 @@ function confBand(score: number | null): 'unscored' | 'below40' | '40-59' | '60-
 export function assignTreatmentTier(input: {
   fitScore: number | null;
   fitEvidenceConfidence: number | null;
+  treatmentBands?: TreatmentBandLadders;
 }): { tier: TreatmentTier; reasons: string[] } {
-  const fit = band(input.fitScore);
-  const conf = confBand(input.fitEvidenceConfidence);
-  const reasons: string[] = [`fit_band=${fit}`, `fit_evidence_band=${conf}`];
+  const fitBoundaries = input.treatmentBands?.fit || DEFAULT_SCORE_TREATMENT_BANDS.fit;
+  const confidenceBoundaries = input.treatmentBands?.fit_evidence_confidence
+    || DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence;
+  const fit = band(input.fitScore, fitBoundaries);
+  const conf = band(input.fitEvidenceConfidence, confidenceBoundaries);
+  const reasons: string[] = [
+    `fit_band=${fit === 'unscored' ? fit : fit.label}`,
+    `fit_evidence_band=${conf === 'unscored' ? conf : conf.label}`,
+  ];
 
   if (fit === 'unscored') {
     return { tier: 'enrichment_hold', reasons: [...reasons, 'unscored_fit'] };
   }
-  if (fit === 'below50') {
+  if (fit.index === 0) {
     return { tier: 'D', reasons: [...reasons, 'weak_fit'] };
   }
-  if (fit === '80-100') {
-    if (conf === '80-100') return { tier: 'A', reasons: [...reasons, 'strong_fit_strong_evidence'] };
-    if (conf === '60-79') return { tier: 'B', reasons: [...reasons, 'strong_fit_usable_evidence'] };
-    if (conf === '40-59') return { tier: 'B', reasons: [...reasons, 'high_fit_thin_evidence_postcard_exception_path'] };
+  if (fit.index === 3) {
+    if (conf !== 'unscored' && conf.index === 3) return { tier: 'A', reasons: [...reasons, 'strong_fit_strong_evidence'] };
+    if (conf !== 'unscored' && conf.index === 2) return { tier: 'B', reasons: [...reasons, 'strong_fit_usable_evidence'] };
+    if (conf !== 'unscored' && conf.index === 1) return { tier: 'B', reasons: [...reasons, 'high_fit_thin_evidence_postcard_exception_path'] };
     return { tier: 'enrichment_hold', reasons: [...reasons, 'strong_fit_insufficient_evidence'] };
   }
-  if (fit === '65-79') {
-    if (conf === '60-79' || conf === '80-100') return { tier: 'B', reasons: [...reasons, 'good_fit_usable_evidence'] };
-    if (conf === '40-59') return { tier: 'C', reasons: [...reasons, 'good_fit_low_evidence'] };
+  if (fit.index === 2) {
+    if (conf !== 'unscored' && (conf.index === 2 || conf.index === 3)) return { tier: 'B', reasons: [...reasons, 'good_fit_usable_evidence'] };
+    if (conf !== 'unscored' && conf.index === 1) return { tier: 'C', reasons: [...reasons, 'good_fit_low_evidence'] };
     return { tier: 'enrichment_hold', reasons: [...reasons, 'good_fit_insufficient_evidence'] };
   }
-  // 50-64
-  if (conf === '60-79' || conf === '80-100') return { tier: 'C', reasons: [...reasons, 'plausible_fit_usable_evidence'] };
+  // Second fit band.
+  if (conf !== 'unscored' && (conf.index === 2 || conf.index === 3)) return { tier: 'C', reasons: [...reasons, 'plausible_fit_usable_evidence'] };
   return { tier: 'D', reasons: [...reasons, 'plausible_fit_weak_evidence'] };
 }
 
@@ -359,6 +377,7 @@ export function assignTreatmentAndMail(input: TreatmentInput): TreatmentResult {
   const { tier, reasons } = assignTreatmentTier({
     fitScore: input.fitScore,
     fitEvidenceConfidence: input.fitEvidenceConfidence,
+    treatmentBands: input.treatmentBands,
   });
 
   const postcard = evaluateStandardPostcard({

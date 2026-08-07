@@ -160,6 +160,8 @@ test('phase-05 fit: TV outbound.yaml score criteria match FIT_COMPONENT_WEIGHTS 
   const raw = readFileSync(TV_OUTBOUND, 'utf8');
   const doc = yaml.load(raw);
   const criteria = Array.isArray(doc?.score?.criteria) ? doc.score.criteria : [];
+  assert.deepEqual(doc?.score?.treatment_bands?.fit, [0, 45, 65, 80, 100]);
+  assert.equal(doc?.score?.treatment_bands?.fit_evidence_confidence, undefined);
   assert.ok(criteria.length >= 6, 'TV score must declare fit criteria');
   assert.equal(doc?.policy?.enforce_readiness, true);
   assert.equal(doc?.policy?.fit_rule_version, 'tv-fit-v1');

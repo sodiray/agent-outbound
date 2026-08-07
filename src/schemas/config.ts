@@ -9,6 +9,10 @@ import { validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 
 export const DEFAULT_SCORE_MIN_COVERAGE = 0.5;
+export const DEFAULT_SCORE_TREATMENT_BANDS = {
+  fit: [0, 50, 65, 80, 100],
+  fit_evidence_confidence: [0, 40, 60, 80, 100],
+} as const;
 
 export const ProviderModelSchema = z.string().trim().superRefine((value, ctx) => {
   const raw = String(value || '').trim();
@@ -592,6 +596,42 @@ export const ScoringCriterionSchema = z.object({
   config: StepConfigSchema.default({}),
 }).partial().default({});
 
+const ScoreTreatmentBandLadderSchema = z.array(z.coerce.number().min(0).max(100)).length(5)
+  .superRefine((boundaries, ctx) => {
+    if (boundaries[0] !== 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Treatment band ladders must start at 0.',
+        path: [0],
+      });
+    }
+    if (boundaries[boundaries.length - 1] !== 100) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Treatment band ladders must end at 100.',
+        path: [boundaries.length - 1],
+      });
+    }
+    boundaries.slice(1).forEach((boundary, index) => {
+      if (boundary > boundaries[index]) return;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Treatment band ladder boundaries must be strictly ascending.',
+        path: [index + 1],
+      });
+    });
+  });
+
+const ScoreTreatmentBandsSchema = z.object({
+  fit: ScoreTreatmentBandLadderSchema.default(() => [...DEFAULT_SCORE_TREATMENT_BANDS.fit]),
+  fit_evidence_confidence: ScoreTreatmentBandLadderSchema.default(
+    () => [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
+  ),
+}).partial().default({
+  fit: [...DEFAULT_SCORE_TREATMENT_BANDS.fit],
+  fit_evidence_confidence: [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
+});
+
 // A single lead score (0-100). One weighted criteria list, one LLM pass.
 // Legacy fit/trigger/priority configs are normalized into this shape at load time.
 const ScoreSchema = z.object({
@@ -610,6 +650,9 @@ const ScoreSchema = z.object({
   minimum: z.coerce.number().min(0).max(100).default(0),
   // Minimum assessable criterion-weight share required to trust a fit score.
   min_coverage: z.coerce.number().min(0).max(1).default(DEFAULT_SCORE_MIN_COVERAGE),
+  // Inclusive lower boundaries for the four treatment matrix bands. The final
+  // 100 boundary closes the ladder so every score is in exactly one band.
+  treatment_bands: ScoreTreatmentBandsSchema,
 }).partial().default({});
 
 const SuppressionSchema = z.object({
@@ -969,6 +1012,7 @@ const coerceLegacyScore = (raw) => {
     ],
     minimum: Number(score.priority?.minimum ?? score.minimum ?? 0),
     ...(score.min_coverage !== undefined ? { min_coverage: score.min_coverage } : {}),
+    ...(score.treatment_bands !== undefined ? { treatment_bands: score.treatment_bands } : {}),
   };
   return { ...(raw as any), score: single };
 };
@@ -1074,6 +1118,11 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
         ...(parsed.data?.score || {}),
         samples: parsed.data?.score?.samples ?? 1,
         min_coverage: parsed.data?.score?.min_coverage ?? DEFAULT_SCORE_MIN_COVERAGE,
+        treatment_bands: {
+          fit: parsed.data?.score?.treatment_bands?.fit ?? [...DEFAULT_SCORE_TREATMENT_BANDS.fit],
+          fit_evidence_confidence: parsed.data?.score?.treatment_bands?.fit_evidence_confidence
+            ?? [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
+        },
       },
       ai: {
         ...(parsed.data?.ai || {}),
