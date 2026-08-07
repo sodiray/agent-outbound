@@ -99,3 +99,29 @@ export const inboundResolveCommand = ({
     db.close();
   }
 };
+
+/**
+ * Force an IMAP inbound poll now.
+ *
+ * Ingestion otherwise only runs inside the `serve` polling scheduler, so
+ * "has anyone replied?" — the question an operator asks most after a send —
+ * was unanswerable without a daemon running. Same reads as the scheduled
+ * poll: read-only mailbox access, no flags set, idempotent on re-run.
+ */
+export const inboundPollCommand = async ({ list }: { list: string }) => {
+  const listDir = resolveListDir(list);
+  const db = openListDb({ listDir, readonly: false });
+  const { runImapInboundPoll } = await import('../orchestrator/runtime/polling.js');
+  const { readConfig } = await import('../orchestrator/lib/config.js');
+  const config = readConfig(listDir)?.config;
+  try {
+    const result = await runImapInboundPoll({ listDir, db, config });
+    return { status: 'polled', result };
+  } finally {
+    try {
+      db.close();
+    } catch {
+      // ignore
+    }
+  }
+};

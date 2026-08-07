@@ -122,6 +122,7 @@ import {
   mailboxesShowCommand,
   mailboxesTestCommand,
   inboundListCommand,
+  inboundPollCommand,
   inboundResolveCommand,
   liveInteractionBudgetCommand,
   modelsAddCommand,
@@ -240,6 +241,7 @@ const printHelp = () => {
   process.stdout.write(`  mailboxes show <list> --id ID\n`);
   process.stdout.write(`  mailboxes test <list> --id ID --to EMAIL\n`);
   process.stdout.write(`  inbound list <list> [--status matched|unmatched|ambiguous] [--classification reply|bounce|auto_reply]\n`);
+  process.stdout.write(`  inbound poll <list>                                                        # force an IMAP inbound check now\n`);
   process.stdout.write(`  inbound resolve <list> --message IMAP_MESSAGE_ID --record RECORD_ID\n`);
   process.stdout.write(`  budget live <list> [--limit N]\n`);
   process.stdout.write(`  list create <list> [--description TEXT]\n`);
@@ -846,6 +848,10 @@ const run = async () => {
       const classification = consumeFlag(argv, '--classification', '');
       const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
       print(inboundListCommand({ list, status, classification, limit }));
+      return;
+    }
+    if (sub === 'poll') {
+      print(await inboundPollCommand({ list }));
       return;
     }
     if (sub === 'resolve') {

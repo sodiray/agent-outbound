@@ -81,7 +81,7 @@ export {
 export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand } from './leads.js';
 export { attioDomainsCommand } from './attio-domains.js';
 export { mailboxesListCommand, mailboxesShowCommand, mailboxesTestCommand } from './mailboxes.js';
-export { inboundListCommand, inboundResolveCommand } from './inbound.js';
+export { inboundListCommand, inboundPollCommand, inboundResolveCommand } from './inbound.js';
 export { liveInteractionBudgetCommand } from './live-interaction-budget.js';
 export { briefCommand, briefShowCommand } from './briefs.js';
 export { sourceTerritoryCommand } from './source-territory.js';
