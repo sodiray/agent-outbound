@@ -611,6 +611,20 @@ const SourceBudgetSchema = z.object({
   max_results: z.coerce.number().int().min(0).optional(),
 }).partial().default({});
 
+const NearDuplicateSignalSchema = z.enum([
+  'name_and_address',
+  'name_and_domain',
+  'shared_phone',
+  'shared_domain',
+  'person_at_shared_address_or_domain',
+]);
+
+const NearDuplicateSchema = z.object({
+  enabled: z.boolean().default(false),
+  signals: z.array(NearDuplicateSignalSchema).default([]),
+  name_similarity_threshold: z.coerce.number().min(0).max(1).default(1),
+}).default({});
+
 const FieldCheckConditionSchema = z.object({
   field: z.string(),
   operator: z.enum(['is_not_empty', 'is_empty', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'matches', 'not_matches', 'in', 'not_in']),
@@ -1632,6 +1646,7 @@ export const ConfigSchema = z.object({
     strategies: z.array(StrategySchema).default([]),
     exclude: z.array(SourceExcludeRuleSchema).default([]),
     dedup_key: z.string().default('place_id'),
+    near_duplicate: NearDuplicateSchema,
     budget: SourceBudgetSchema.default({}),
   }).partial().default({}),
   pipeline: z.array(PipelineStepSchema).default([]),

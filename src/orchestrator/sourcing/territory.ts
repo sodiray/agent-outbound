@@ -266,6 +266,7 @@ export const sourceTerritory = async ({ listDir, territoryId, opts = {} }: { lis
   const identityFields = getIdentityFields(config);
   const excludeRules = normalizeExcludeRules(config?.source?.exclude);
   const dedupKey = normalizeDedupKey(config?.source?.dedup_key || 'place_id');
+  const nearDuplicate = config?.source?.near_duplicate || {};
   const state = {
     calls: 0,
     retries: 0,
@@ -377,6 +378,7 @@ export const sourceTerritory = async ({ listDir, territoryId, opts = {} }: { lis
       listDir,
       aiConfig: config?.ai || {},
       excludeRules,
+      nearDuplicate,
     });
     const territoryAssignment = assignTerritories({ listDir, config, db, rowIds: processed.insertedIds });
     const summary = {

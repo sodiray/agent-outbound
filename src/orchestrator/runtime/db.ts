@@ -65,6 +65,7 @@ const SCHEMA_SQL = `
     sourced_at TEXT DEFAULT '',
     duplicate_of TEXT DEFAULT '',
     duplicate_status TEXT DEFAULT '',
+    duplicate_reason TEXT DEFAULT '',
     source_filter_result TEXT DEFAULT '',
     source_filter_failures TEXT DEFAULT '',
     disqualified_at TEXT DEFAULT '',
@@ -1037,6 +1038,7 @@ const ensureRecordCompatibility = (db) => {
   try { db.exec("ALTER TABLE records ADD COLUMN disqualified_at TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN disqualified_gate TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN disqualify_reason TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN duplicate_reason TEXT DEFAULT ''"); } catch {}
   // Soft-drop / review queue: a committed record a filter would now drop is flagged
   // for review instead of being disqualified, so we never destroy in-flight outreach.
   try { db.exec("ALTER TABLE records ADD COLUMN needs_review INTEGER DEFAULT 0"); } catch {}
@@ -1772,7 +1774,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       'trigger_score_peak',
       'fit_updated_at', 'trigger_updated_at',
       'fit_score_updated_at', 'trigger_score_updated_at', 'source', 'source_query', 'sourced_at',
-      'duplicate_of', 'duplicate_status', 'source_filter_result', 'source_filter_failures',
+      'duplicate_of', 'duplicate_status', 'duplicate_reason', 'source_filter_result', 'source_filter_failures',
       'disqualified_at', 'disqualified_gate', 'disqualify_reason',
       'google_place_id', 'parent_row_id', 'latitude', 'longitude', 'workflow_signals',
       'vertical', 'sub_vertical', 'size_tier', 'is_franchise', 'persona',
@@ -1832,6 +1834,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       sourced_at: row.sourced_at || '',
       duplicate_of: row.duplicate_of || '',
       duplicate_status: row.duplicate_status || '',
+      duplicate_reason: row.duplicate_reason || '',
       source_filter_result: row.source_filter_result || '',
       source_filter_failures: row.source_filter_failures || '',
       disqualified_at: row.disqualified_at || '',
@@ -1862,7 +1865,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     'email_thread_id', 'contact_name', 'contact_email', 'contact_title', 'email_verification_status',
     'email_verification_confidence', 'email_verified_at', 'trigger_score_peak', 'fit_updated_at',
     'trigger_updated_at', 'fit_score_updated_at', 'trigger_score_updated_at', 'source', 'source_query',
-    'sourced_at', 'duplicate_of', 'duplicate_status', 'source_filter_result', 'source_filter_failures',
+    'sourced_at', 'duplicate_of', 'duplicate_status', 'duplicate_reason', 'source_filter_result', 'source_filter_failures',
     'disqualified_at', 'disqualified_gate', 'disqualify_reason', 'google_place_id', 'parent_row_id',
     'latitude', 'longitude', 'workflow_signals', 'vertical', 'sub_vertical', 'size_tier', 'is_franchise',
     'persona', 'outcome_at', 'outcome_value', 'launched_at', 'sequence_step_attempts', 'mail_last_piece_id',
@@ -1895,7 +1898,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       trigger_score_peak,
       fit_updated_at, trigger_updated_at,
       fit_score_updated_at, trigger_score_updated_at,
-      source, source_query, sourced_at, duplicate_of, duplicate_status, source_filter_result, source_filter_failures,
+      source, source_query, sourced_at, duplicate_of, duplicate_status, duplicate_reason, source_filter_result, source_filter_failures,
       disqualified_at, disqualified_gate, disqualify_reason,
       google_place_id, parent_row_id, latitude, longitude,
       workflow_signals, vertical, sub_vertical, size_tier, is_franchise, persona,
@@ -1919,7 +1922,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       @trigger_score_peak,
       @fit_updated_at, @trigger_updated_at,
       @fit_score_updated_at, @trigger_score_updated_at,
-      @source, @source_query, @sourced_at, @duplicate_of, @duplicate_status, @source_filter_result, @source_filter_failures,
+      @source, @source_query, @sourced_at, @duplicate_of, @duplicate_status, @duplicate_reason, @source_filter_result, @source_filter_failures,
       @disqualified_at, @disqualified_gate, @disqualify_reason,
       @google_place_id, @parent_row_id, @latitude, @longitude,
       @workflow_signals, @vertical, @sub_vertical, @size_tier, @is_franchise, @persona,
@@ -1987,6 +1990,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     sourced_at: row.sourced_at || '',
     duplicate_of: row.duplicate_of || '',
     duplicate_status: row.duplicate_status || '',
+    duplicate_reason: row.duplicate_reason || '',
     source_filter_result: row.source_filter_result || '',
     source_filter_failures: row.source_filter_failures || '',
     disqualified_at: row.disqualified_at || '',
@@ -2259,7 +2263,7 @@ export const FIELD_OVERRIDE_PROTECTED = new Set([
   'disqualified_at', 'disqualified_gate', 'disqualify_reason',
   'needs_review', 'review_reason', 'review_flagged_at',
   'suppressed', 'suppressed_reason', 'suppressed_at',
-  'duplicate_of', 'duplicate_status',
+  'duplicate_of', 'duplicate_status', 'duplicate_reason',
 ]);
 
 export const insertFieldOverride = ({ db, recordId, field, value, reason = '', createdBy = '' }) => {

@@ -26,6 +26,7 @@ import { beginRun, tickProgress, endRun, heartbeat } from '../runtime/progress.j
 import { recordCostEvent } from '../lib/costs.js';
 import { getMcpClient } from '../runtime/mcp.js';
 import { aiDedupLink, buildIdentityHash, buildIdentityString, getIdentityFields, upsertRecordEmbedding } from './dedup.js';
+import { findNearDuplicateMatch, type NearDuplicateConfig } from './near-duplicate.js';
 import { embed } from '../runtime/embeddings.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
@@ -59,6 +60,19 @@ const isQuotaError = (error: any) => {
 const mergeExcludedByRule = (summary: any, excludedByRule: Record<string, number>) => {
   for (const [rule, count] of Object.entries(excludedByRule || {})) {
     summary.excluded_by_rule[rule] = (summary.excluded_by_rule[rule] || 0) + count;
+  }
+};
+
+const objectValue = (value: unknown): Record<string, unknown> => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
   }
 };
 
@@ -688,6 +702,7 @@ export const processAndInsertRows = async ({
   listDir,
   aiConfig,
   excludeRules = [],
+  nearDuplicate = {},
   limit = 0,
 }: {
   db: any;
@@ -697,6 +712,7 @@ export const processAndInsertRows = async ({
   listDir: string;
   aiConfig: any;
   excludeRules?: SourceExcludeRule[];
+  nearDuplicate?: NearDuplicateConfig;
   limit?: number;
 }) => {
   // Pre-insert exclusion runs before everything — excluded rows never become
@@ -714,6 +730,23 @@ export const processAndInsertRows = async ({
   const dynamicColumns = new Map<string, { name: string; type: string }>();
   const existingColumns = new Set(
     db.prepare('PRAGMA table_info(records)').all().map((column: any) => String(column.name || '')),
+  );
+  const persistedNearDuplicateCandidates = db.prepare('SELECT * FROM records').all() as Record<string, unknown>[];
+  const nearDuplicateCandidates = [
+    ...persistedNearDuplicateCandidates,
+    ...rowsToProcess.map((row) => rowToRecordShape({
+      listName,
+      row: {
+        ...row,
+        _row_id: getRecordRowId(row),
+        id: getRecordRowId(row),
+        sequence_status: 'idle',
+        sequence_step: 0,
+      },
+    }) as Record<string, unknown>),
+  ];
+  const persistedNearDuplicateIds = new Set(
+    persistedNearDuplicateCandidates.map((candidate) => getRecordRowId(candidate)),
   );
   for (const row of rowsToProcess || []) {
     for (const key of Object.keys(row || {})) {
@@ -768,6 +801,36 @@ export const processAndInsertRows = async ({
         upsertRecord({ db, row: persisted });
         if (!existing) insertedIds.push(getRecordRowId(shape));
         emitActivity({ event: 'row_complete', phase: 'sourcing', row: persisted.business_name || persisted.id });
+        return;
+      }
+
+      const nearMatch = findNearDuplicateMatch({
+        row: shape as Record<string, unknown>,
+        candidates: nearDuplicateCandidates,
+        config: nearDuplicate,
+      });
+      const nearMatchIsCanonical = nearMatch && (
+        persistedNearDuplicateIds.has(getRecordRowId(nearMatch.candidate))
+        || getRecordRowId(nearMatch.candidate).localeCompare(getRecordRowId(shape)) < 0
+      );
+      if (nearMatch && nearMatchIsCanonical) {
+        const nearDuplicateDetail = {
+          matched_row_id: getRecordRowId(nearMatch.candidate),
+          signals: nearMatch.signals,
+          name_similarity: Number(nearMatch.name_similarity.toFixed(2)),
+          detected_at: new Date().toISOString(),
+        };
+        shape.duplicate_of = nearDuplicateDetail.matched_row_id;
+        shape.duplicate_status = 'needs_review';
+        shape.duplicate_reason = nearMatch.reason;
+        shape.extra_json = {
+          ...objectValue(shape.extra_json),
+          near_duplicate: nearDuplicateDetail,
+        };
+        upsertRecord({ db, row: shape });
+        insertedIds.push(getRecordRowId(shape));
+        deduped += 1;
+        emitActivity({ event: 'row_complete', phase: 'sourcing', row: shape.business_name || shape.id });
         return;
       }
 
@@ -865,6 +928,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
   const strategies = Array.isArray(config?.source?.strategies) ? config.source.strategies : [];
   const excludeRules = normalizeExcludeRules(config?.source?.exclude);
   const dedupKey = normalizeDedupKey(config?.source?.dedup_key || 'place_id');
+  const nearDuplicate = config?.source?.near_duplicate || {};
   const maxCalls = config?.source?.budget?.max_calls === undefined
     ? null
     : Math.max(0, Number(config.source.budget.max_calls || 0));
@@ -1195,6 +1259,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
             listDir,
             aiConfig: config?.ai || {},
             excludeRules,
+            nearDuplicate,
             limit: remaining,
           });
           summary.inserted_ids.push(...processed.insertedIds);
@@ -1270,6 +1335,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         listDir,
         aiConfig: config?.ai || {},
         excludeRules,
+        nearDuplicate,
         limit: legacyLimit,
       });
       summary.inserted_ids.push(...processed.insertedIds);
@@ -1332,6 +1398,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
   const listName = config?.list?.name || 'list';
   const searches = Array.isArray(config?.source?.searches) ? config.source.searches : [];
   const excludeRules = normalizeExcludeRules(config?.source?.exclude);
+  const nearDuplicate = config?.source?.near_duplicate || {};
   const db = openListDb({ listDir, readonly: false });
   const mcp = await getMcpClient();
   const toolCatalog = readToolCatalog(listDir);
@@ -1414,6 +1481,7 @@ export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
           listDir,
           aiConfig: config?.ai || {},
           excludeRules,
+          nearDuplicate,
           limit: remaining,
         });
 

@@ -96,6 +96,7 @@ export const rowToRecordShape = ({ listName, row }) => {
     parent_row_id: String(row.parent_row_id || ''),
     duplicate_of: String(row.duplicate_of || ''),
     duplicate_status: String(row.duplicate_status || ''),
+    duplicate_reason: String(row.duplicate_reason || ''),
     latitude: Number(row.latitude || row.lat || 0),
     longitude: Number(row.longitude || row.lng || 0),
     phone: String(row.phone || ''),

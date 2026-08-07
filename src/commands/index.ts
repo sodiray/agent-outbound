@@ -1689,7 +1689,7 @@ export const duplicatesListCommand = ({ list, status = 'needs_review', limit = 1
   const db = openListDb({ listDir, readonly: true });
   try {
     const rows = db.prepare(`
-      SELECT _row_id, business_name, duplicate_of, duplicate_status, updated_at
+      SELECT _row_id, business_name, duplicate_of, duplicate_status, duplicate_reason, updated_at
       FROM records
       WHERE duplicate_status = ?
       ORDER BY updated_at DESC
@@ -1753,6 +1753,7 @@ export const duplicatesBreakCommand = ({ list, rowId = '' }) => {
         ...row,
         duplicate_of: '',
         duplicate_status: '',
+        duplicate_reason: '',
       },
     });
     return { status: 'unlinked', row_id: getRecordRowId(row) };
