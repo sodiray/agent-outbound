@@ -194,7 +194,7 @@ export const criticalPathGenerateIds = (
  *   `account_intelligence` → `treatment_assignment`): always on the normal path.
  *   Never requires AO_PIPELINE_FIXTURE.
  * - **Honest opt-in** (`run_in_pipeline: true` on the step or step.config):
- *   e.g. TV `diagnostic_content_pack` — runs on production dataflow without
+ *   e.g. a configured generated asset — runs on production dataflow without
  *   AO_RUN_GENERATE, still subject to its `when:` gate (A/B/C only).
  * - **AO_RUN_GENERATE=1**: include every generate (expensive asset packs too).
  * - **AO_PIPELINE_FIXTURE=1**: full generate graph with deterministic fixtures.

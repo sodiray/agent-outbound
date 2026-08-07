@@ -18,7 +18,7 @@ import { attachProviderToolUsage, providerToolUsageFromError } from '../../runti
 import { isBudgetExceededError } from '../../runtime/contract.js';
 import { readConfig } from '../../lib/config.js';
 import {
-  buildDiagnosticContentModelContext,
+  buildBusinessEvidenceModelContext,
   buildModelContext,
   withModelContextTelemetry,
 } from '../../lib/model-context.js';
@@ -36,6 +36,28 @@ const buildExecuteStepResultSchema = (outputSchema?: z.ZodTypeAny) => {
     defer: nullableBoolean(false),
     reason: nullableString(),
     pagination: recordWithDefault().nullable().optional(),
+  });
+};
+
+export const modelContextForStep = ({
+  record,
+  stepConfig,
+  identityFields,
+  budget,
+}: {
+  record: unknown;
+  stepConfig: Record<string, unknown>;
+  identityFields?: unknown;
+  budget?: unknown;
+}) => {
+  if (stepConfig.context_projection === 'business_evidence') {
+    return buildBusinessEvidenceModelContext({ record, budget });
+  }
+  return buildModelContext({
+    record,
+    inputs: stepConfig.inputs || [],
+    identityFields,
+    budget,
   });
 };
 
@@ -297,14 +319,12 @@ export const executeStepAction = async ({
 
   const promptFileBody = readPromptFileIfAny({ listDir, promptFile: stepConfig?.prompt_file });
   const { config } = readConfig(listDir);
-  const modelContext = stepId === 'diagnostic_content_pack'
-    ? buildDiagnosticContentModelContext({ record, budget: config?.model_context })
-    : buildModelContext({
-      record,
-      inputs: stepConfig?.inputs || [],
-      identityFields: config?.source?.identity || [],
-      budget: config?.model_context,
-    });
+  const modelContext = modelContextForStep({
+    record,
+    stepConfig,
+    identityFields: config?.source?.identity || [],
+    budget: config?.model_context,
+  });
   const systemPrompt = renderPromptTemplate({
     template: promptFileBody || promptTemplate,
     vars: {

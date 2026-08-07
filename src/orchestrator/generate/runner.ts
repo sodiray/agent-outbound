@@ -23,8 +23,8 @@ import { emitActivity } from '../runtime/activity.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
 import {
-  buildDiagnosticContentModelContext,
-  diagnosticContentHasBusinessEvidence,
+  buildBusinessEvidenceModelContext,
+  businessEvidenceIsAvailable,
 } from '../lib/model-context.js';
 import {
   buildOutputZodSchema,
@@ -259,10 +259,10 @@ const dependencyValuesFor = ({ stepConfig, record }: {
   for (const dep of dependencyFieldsFor(stepConfig)) {
     depValues[String(dep)] = dependencyValueForRecord({ dep, record, extra });
   }
-  if (String(stepConfig.id || '') !== 'diagnostic_content_pack') return depValues;
+  if (stepConfig.context_projection !== 'business_evidence') return depValues;
   return {
     ...depValues,
-    diagnostic_business_evidence: buildDiagnosticContentModelContext({ record }).data,
+    business_evidence_context: buildBusinessEvidenceModelContext({ record }).data,
   };
 };
 
@@ -362,7 +362,7 @@ export const runGenerateStep = async ({
       return;
     }
 
-    if (id === 'diagnostic_content_pack' && !diagnosticContentHasBusinessEvidence(currentRecord)) {
+    if (stepConfig.requires_evidence === true && !businessEvidenceIsAvailable(currentRecord)) {
       const reason = 'needs_discovery: no_business_evidence';
       const emptyOutputs = emptyOutputsFor(outputZod);
       ensureRecordColumns({
@@ -421,7 +421,7 @@ export const runGenerateStep = async ({
         toolCatalog,
       }) as Record<string, unknown>;
 
-      // Expensive generate (e.g. diagnostic_content_pack): skip provider when over ceiling.
+      // Expensive generate steps skip the provider when over ceiling.
       if (isEnrichmentCeilingSkip(executionResult)) {
         const detail = String(executionResult.skip_detail || 'enrichment_ceiling');
         const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId)

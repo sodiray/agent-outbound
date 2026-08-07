@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
+import { DEFAULT_SCORE_MIN_COVERAGE } from '../../schemas/config.js';
 import { ensureRecordColumns, inPlayWhere, insertPipelineEvent, insertScoreEvent, openListDb, overridesByRecordMap, upsertRecord } from '../runtime/db.js';
 import { writeFilterFailure } from '../pipeline/shared.js';
 import { readConfig } from '../lib/config.js';
@@ -16,7 +17,6 @@ import {
   applyOutboundPolicy,
   calculateFitScore,
   fitComponentsFromBreakdown,
-  FIT_ASSESSABLE_WEIGHT_MINIMUM,
   FIT_COMPONENT_WEIGHTS,
   loadCampaignContactsFromDb,
   hydrateRecordCostLedger,
@@ -191,7 +191,7 @@ const rewardOnlyPointsGraded = (criterion, grade) => (
   Math.max(0, Math.round(100 * Math.max(0, numericOr(criterion.weight, 0)) * (grade / 10)))
 );
 
-export const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget, samples = 1, generateObject = generateObjectWithTools }) => {
+export const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget, minCoverage = DEFAULT_SCORE_MIN_COVERAGE, samples = 1, generateObject = generateObjectWithTools }) => {
   const recordId = getRecordRowId(record);
   const normalizedCriteria = normalizeCriteria(criteria);
   if (normalizedCriteria.length <= 0) {
@@ -351,7 +351,7 @@ export const scoreAxisCriteriaGraded = async ({ db, listDir, record, axis, descr
     const grade = Number(item?.grade || 0);
     return sum + ((baseWeights[index] / (assessableWeight || 1)) * (grade / 10));
   }, 0);
-  const score = assessableWeight < FIT_ASSESSABLE_WEIGHT_MINIMUM
+  const score = assessableWeight < minCoverage
     ? null
     : Math.max(0, Math.min(100, Math.round(100 * gatedBase)));
   const unassessable = breakdown
@@ -638,9 +638,9 @@ const scoreAxisSingle = async ({ db, listDir, record, axis, description, model, 
   }
 };
 
-const scoreAxisCriteria = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, grading = 'ternary', inputs, identityFields, contextBudget, samples = 1 }) => {
+const scoreAxisCriteria = async ({ db, listDir, record, axis, description, criteria, model, aiConfig, grading = 'ternary', inputs, identityFields, contextBudget, minCoverage = DEFAULT_SCORE_MIN_COVERAGE, samples = 1 }) => {
   if (String(grading || 'ternary') === 'graded') {
-    return scoreAxisCriteriaGraded({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget, samples });
+    return scoreAxisCriteriaGraded({ db, listDir, record, axis, description, criteria, model, aiConfig, inputs, identityFields, contextBudget, minCoverage, samples });
   }
   const recordId = getRecordRowId(record);
   const normalizedCriteria = normalizeCriteria(criteria);
@@ -802,6 +802,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
   const scoreGrading = String(scoreConfig?.grading || 'ternary');
   const scoreSamples = scoreGrading === 'graded' ? Number(scoreConfig?.samples || 1) : 1;
   const minimumScore = numericOr(scoreConfig?.minimum, 0);
+  const minimumCoverage = numericOr(scoreConfig?.min_coverage, DEFAULT_SCORE_MIN_COVERAGE);
 
   const db = openListDb({ listDir, readonly: false });
   const overridesByRecord = overridesByRecordMap({ db });
@@ -923,6 +924,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
               inputs: scoreConfig?.inputs || [],
               identityFields: config?.source?.identity || [],
               contextBudget: config?.model_context,
+              minCoverage: minimumCoverage,
             }).then((value) => ({ ...value, error: '' })).catch((error) => ({
               score: null,
               reasoning: '',
@@ -961,7 +963,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
         const fitCoverage = numericOr(scoreMetadata.fit_coverage, null);
         const coverageGuarded = usesFitComponents
           && fitCoverage !== null
-          && fitCoverage < FIT_ASSESSABLE_WEIGHT_MINIMUM;
+          && fitCoverage < minimumCoverage;
         const fitCalculation = usesFitComponents && !coverageGuarded
           ? calculateFitScore(fitComponentsFromBreakdown(breakdown))
           : null;
@@ -1003,6 +1005,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           listDir,
           costLedger: costHydrate.ledger,
           enrichmentSpendUsd: costHydrate.enrichment_usd,
+          minFitCoverage: minimumCoverage,
         });
         const updated = {
           ...prePolicy,

@@ -1248,6 +1248,7 @@ export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 
  */
 export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun = false }) => {
   const listDir = resolveListDir(list);
+  const { config } = readConfig(listDir);
   const whereSql = String(where || '').trim();
   const whereCheck = validateWhereSql(whereSql);
   if (!whereCheck.ok) throw new Error(whereCheck.error || 'Invalid --where SQL fragment.');
@@ -1285,6 +1286,7 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       campaignId: `camp_${record._row_id}`,
       costLedger: costHydrate.ledger,
       enrichmentSpendUsd: costHydrate.enrichment_usd,
+      minFitCoverage: config?.score?.min_coverage,
     });
     summary.tiers[result.treatment_tier] = (summary.tiers[result.treatment_tier] || 0) + 1;
     if (result.integrity_errors.length) summary.integrity_errors += 1;

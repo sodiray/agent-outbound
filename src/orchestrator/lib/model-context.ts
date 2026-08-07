@@ -59,7 +59,7 @@ const DEFAULT_IDENTITY_FIELDS = [
   'longitude',
 ] as const;
 
-const DIAGNOSTIC_CONTENT_FIELDS = [
+const BUSINESS_EVIDENCE_CONTEXT_FIELDS = [
   'business_name',
   'name',
   'address',
@@ -89,9 +89,9 @@ const DIAGNOSTIC_CONTENT_FIELDS = [
   'linkedin_company_url',
 ] as const;
 
-const DIAGNOSTIC_INTERNAL_PREDICATE = /(?:^|_)(?:fit|score|confidence|tier|readiness|blocker|next_action|work_state|sequence|taxonomy|scrape|failure|error|status)(?:_|$)/;
+const INTERNAL_EVALUATION_PREDICATE = /(?:^|_)(?:fit|score|confidence|tier|readiness|blocker|next_action|work_state|sequence|taxonomy|scrape|failure|error|status)(?:_|$)/;
 
-const DIAGNOSTIC_EVIDENCE_FIELDS = new Set([
+const BUSINESS_EVIDENCE_FIELDS = new Set([
   'site_text',
   'services',
   'service_offerings',
@@ -139,15 +139,15 @@ const observationsFrom = (value: unknown): Array<Record<string, unknown>> => {
   });
 };
 
-const diagnosticObservationsFrom = (value: unknown): Array<Record<string, unknown>> => (
+const businessEvidenceObservationsFrom = (value: unknown): Array<Record<string, unknown>> => (
   observationsFrom(value).filter((observation) => {
     const predicate = String(observation.predicate || '').trim().toLowerCase();
-    return predicate !== '' && !DIAGNOSTIC_INTERNAL_PREDICATE.test(predicate);
+    return predicate !== '' && !INTERNAL_EVALUATION_PREDICATE.test(predicate);
   })
 );
 
-const hasDiagnosticScalarEvidence = (source: Record<string, unknown>) => (
-  [...DIAGNOSTIC_EVIDENCE_FIELDS].some((field) => String(source[field] || '').trim() !== '')
+const hasBusinessEvidenceScalar = (source: Record<string, unknown>) => (
+  [...BUSINESS_EVIDENCE_FIELDS].some((field) => String(source[field] || '').trim() !== '')
 );
 
 const contributorChars = (field: string, value: unknown): ModelContextContributor => ({
@@ -220,12 +220,12 @@ export const buildModelContext = ({
   return buildModelContextPayload({ data: withObservations, budget });
 };
 
-export const diagnosticContentHasBusinessEvidence = (record: unknown): boolean => {
+export const businessEvidenceIsAvailable = (record: unknown): boolean => {
   const source = isRecord(record) ? record : {};
-  return hasDiagnosticScalarEvidence(source) || diagnosticObservationsFrom(source.observations_json).length > 0;
+  return hasBusinessEvidenceScalar(source) || businessEvidenceObservationsFrom(source.observations_json).length > 0;
 };
 
-export const buildDiagnosticContentModelContext = ({
+export const buildBusinessEvidenceModelContext = ({
   record,
   budget,
 }: {
@@ -233,11 +233,11 @@ export const buildDiagnosticContentModelContext = ({
   budget?: unknown;
 }): ModelContext => {
   const source = isRecord(record) ? record : {};
-  const data = DIAGNOSTIC_CONTENT_FIELDS.reduce<Record<string, unknown>>((context, field) => {
+  const data = BUSINESS_EVIDENCE_CONTEXT_FIELDS.reduce<Record<string, unknown>>((context, field) => {
     if (source[field] === undefined) return context;
     return { ...context, [field]: source[field] };
   }, {});
-  const observations = diagnosticObservationsFrom(source.observations_json);
+  const observations = businessEvidenceObservationsFrom(source.observations_json);
   const withObservations = observations.length > 0
     ? { ...data, observations_json: observations }
     : data;

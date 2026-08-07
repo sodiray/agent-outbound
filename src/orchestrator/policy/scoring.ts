@@ -5,7 +5,6 @@
 
 export const FIT_RULE_VERSION = 'tv-fit-v1';
 export const PRIORITY_RULE_VERSION = 'tv-priority-v1';
-export const FIT_ASSESSABLE_WEIGHT_MINIMUM = 0.5;
 
 /** Fit components — commercial value only (no walk-in, HIPAA, contact availability). */
 export const FIT_COMPONENT_WEIGHTS = {

@@ -38,10 +38,62 @@ const modelResult = (object) => ({
   usage: { input_tokens: 10, output_tokens: 4, usd_cost: 0.001 },
 });
 
-test('score.samples defaults to one and rejects non-positive or fractional values', () => {
+test('score samples and minimum coverage use validated defaults', () => {
   assert.equal(normalizeConfig({ score: {} }).config.score.samples, 1);
+  assert.equal(normalizeConfig({ score: {} }).config.score.min_coverage, 0.5);
+  assert.equal(normalizeConfig({ score: { min_coverage: 0.3 } }).config.score.min_coverage, 0.3);
+  assert.equal(normalizeConfig({ score: { min_coverage: -0.1 } }).errors.length, 1);
+  assert.equal(normalizeConfig({ score: { min_coverage: 1.1 } }).errors.length, 1);
   assert.equal(normalizeConfig({ score: { samples: 0 } }).errors.length, 1);
   assert.equal(normalizeConfig({ score: { samples: 1.5 } }).errors.length, 1);
+});
+
+test('graded scoring honors the configured minimum coverage', async () => {
+  const { db, listDir, record } = createContext();
+  const config = normalizeConfig({ score: { min_coverage: 0.3 } }).config;
+  const criteriaWithPartialCoverage = [
+    { id: 'operational_coordination_burden', description: 'Coordination burden', weight: 0.4 },
+    { id: 'repetition_and_volume', description: 'Repetition and volume', weight: 0.6 },
+  ];
+  const response = {
+    criteria: [
+      {
+        id: 'operational_coordination_burden',
+        assessable: true,
+        grade: 10,
+        reasoning: 'The cited services show substantial scheduling coordination.',
+        evidence_ids: ['obs_8'],
+      },
+      {
+        id: 'repetition_and_volume',
+        assessable: false,
+        reasoning: 'The cited profile does not disclose repeat work or job volume.',
+        evidence_ids: ['obs_3'],
+      },
+    ],
+    summary_reasoning: 'Enough evidence under this pipeline policy.',
+  };
+  const generateObject = async () => modelResult(response);
+
+  try {
+    const result = await scoreAxisCriteriaGraded({
+      db,
+      listDir,
+      record,
+      axis: 'score',
+      description: 'Evaluate commercial fit.',
+      criteria: criteriaWithPartialCoverage,
+      aiConfig: {},
+      minCoverage: config.score.min_coverage,
+      generateObject,
+    });
+
+    assert.equal(result.fit_coverage, 0.4);
+    assert.equal(result.score, 100);
+    assert.equal(result.score_status, 'fresh');
+  } finally {
+    db.close();
+  }
 });
 
 test('graded scoring uses the lower median, matching rationale/evidence, concurrent samples, and one cost event per sample', async () => {

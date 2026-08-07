@@ -7,6 +7,8 @@ import {
 import { validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib/pipeline-graph.js';
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 
+export const DEFAULT_SCORE_MIN_COVERAGE = 0.5;
+
 export const ProviderModelSchema = z.string().trim().superRefine((value, ctx) => {
   const raw = String(value || '').trim();
   if (!raw) return;
@@ -49,6 +51,8 @@ export const IdempotencySchema = z.object({
   scope: z.enum(['list', 'global']).default('list'),
 }).partial().default({});
 
+const ModelContextProjectionSchema = z.enum(['business_evidence']);
+
 const EnrichmentOutputDefSchema = z.object({
   type: z.enum(['string', 'number', 'integer', 'boolean']),
   description: z.string(),
@@ -89,6 +93,10 @@ export const StepConfigSchema = z.object({
   // The only non-identity record scalars visible to a model for this step.
   // New database columns stay invisible until listed here.
   inputs: z.array(z.string()).default([]),
+  // Optional named projection for model steps that need a curated record view.
+  context_projection: ModelContextProjectionSchema.optional(),
+  // Refuse model generation when the required evidence class is absent.
+  requires_evidence: z.boolean().optional(),
   depends_on: z.array(z.string()).default([]),
   prompt_file: z.string().default(''),
   prompt_args: z.record(z.any()).default({}),
@@ -413,9 +421,11 @@ const PipelineGenerateStepSchema = z.object({
   when: PipelineEnrichmentStepSchema.shape.when,
   prompt_file: PipelineEnrichmentStepSchema.shape.prompt_file,
   prompt_args: PipelineEnrichmentStepSchema.shape.prompt_args,
+  context_projection: ModelContextProjectionSchema.optional(),
+  requires_evidence: z.boolean().optional(),
   // Keep this generate on the normal production dataflow without AO_PIPELINE_FIXTURE
   // or AO_RUN_GENERATE. Critical-path generates (depended on by non-generate steps)
-  // are always included; use this for diagnostic packs that must run for A/B/C
+  // are always included; use this for generated assets that must run for selected tiers
   // without being a hard dependency of treatment_assignment.
   run_in_pipeline: z.boolean().optional(),
 });
@@ -586,6 +596,8 @@ const ScoreSchema = z.object({
   // Leads scoring below this threshold are dropped at scoring time
   // (gate "score_minimum"). 0 / unset disables the floor.
   minimum: z.coerce.number().min(0).max(100).default(0),
+  // Minimum assessable criterion-weight share required to trust a fit score.
+  min_coverage: z.coerce.number().min(0).max(1).default(DEFAULT_SCORE_MIN_COVERAGE),
 }).partial().default({});
 
 const SuppressionSchema = z.object({
@@ -930,6 +942,7 @@ const coerceLegacyScore = (raw) => {
       ...(Array.isArray(trigger.criteria) ? trigger.criteria : []),
     ],
     minimum: Number(score.priority?.minimum ?? score.minimum ?? 0),
+    ...(score.min_coverage !== undefined ? { min_coverage: score.min_coverage } : {}),
   };
   return { ...(raw as any), score: single };
 };
@@ -1028,6 +1041,7 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
       score: {
         ...(parsed.data?.score || {}),
         samples: parsed.data?.score?.samples ?? 1,
+        min_coverage: parsed.data?.score?.min_coverage ?? DEFAULT_SCORE_MIN_COVERAGE,
       },
       ai: {
         ...(parsed.data?.ai || {}),

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   ModelContextBudgetError,
-  buildDiagnosticContentModelContext,
+  buildBusinessEvidenceModelContext,
   buildModelContext,
   withModelContextTelemetry,
 } from '../dist/orchestrator/lib/model-context.js';
@@ -29,8 +29,8 @@ test('model context is default-deny for undeclared record columns', () => {
   assert.equal(context.serialized.includes('cost_ledger_json'), false);
 });
 
-test('diagnostic content context excludes internal scoring and pipeline fields', () => {
-  const context = buildDiagnosticContentModelContext({
+test('business-evidence context excludes internal scoring and pipeline fields', () => {
+  const context = buildBusinessEvidenceModelContext({
     record: {
       business_name: 'Brain Restore Centers',
       address: '123 Main St, Boise, ID',
@@ -75,7 +75,7 @@ test('diagnostic content context excludes internal scoring and pipeline fields',
     'work_state',
     'site scrape failed',
   ];
-  for (const field of denied) assert.equal(context.serialized.includes(field), false, `${field} must not reach diagnostic content`);
+  for (const field of denied) assert.equal(context.serialized.includes(field), false, `${field} must not reach business-evidence context`);
   assert.match(context.serialized, /Neurological rehabilitation/);
   assert.match(context.serialized, /Concussion support/);
 });

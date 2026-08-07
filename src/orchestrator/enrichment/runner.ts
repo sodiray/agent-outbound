@@ -816,6 +816,7 @@ export const executeEnrichmentAction = async ({
       listDir,
       costLedger: costHydrate?.ledger,
       enrichmentSpendUsd: costHydrate?.enrichment_usd,
+      minFitCoverage: Number(context?.min_fit_coverage),
     });
     // Map declared outputs from patch when present
     const outputs: Record<string, unknown> = { ...result.patch };
@@ -1002,6 +1003,7 @@ export const executeEnrichmentStepOnRecords = async ({
           phase: 'pipeline',
           step: id,
           source_identity: Array.isArray(config?.source?.identity) ? config.source.identity : [],
+          min_fit_coverage: config?.score?.min_coverage,
           linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
         },
         outputSchema: outputZod,
@@ -1456,6 +1458,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 phase: 'enrichment',
                 step: id,
                 source_identity: Array.isArray(config?.source?.identity) ? config.source.identity : [],
+                min_fit_coverage: config?.score?.min_coverage,
                 linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
               },
               outputSchema: outputZod,

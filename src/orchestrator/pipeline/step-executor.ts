@@ -602,7 +602,7 @@ const executeSequenceActionBatch = async (
       //
       // That produced a deadlock: the send step was gated because content was
       // not ready (`sequence_outbound_gated: non_outbound_action_enrichment_repair`),
-      // the resulting "error" then blocked `diagnostic_content_pack` — the step
+      // the resulting error then blocked a dependent generate step — the step
       // that produces the content — so the gate could never clear itself.
       // Forbidden work and provider failures still set errored explicitly at
       // their own return sites.
@@ -866,7 +866,7 @@ const executeStepBatchUnchecked = async (
 
   // Production generate on the normal path (no AO_PIPELINE_FIXTURE required):
   // - critical-path generates (e.g. account_intelligence → treatment_assignment)
-  // - honest opt-in via run_in_pipeline (e.g. TV diagnostic_content_pack for A/B/C)
+  // - honest opt-in via run_in_pipeline for non-critical generated assets
   // Fixture branch above is only for $0 deterministic tests.
   if (kind === 'generate') {
     return executeGenerateBatch(ctx, step, stepId, rows);

@@ -6,7 +6,6 @@
 import {
   calculateFitScore,
   calculatePriority,
-  FIT_ASSESSABLE_WEIGHT_MINIMUM,
   assignCandidateTier,
   FIT_COMPONENT_WEIGHTS,
   type FitComponentId,
@@ -73,6 +72,7 @@ import {
   resolveBuyerAffiliationFromRecord,
   type EnrichmentRepairPlan,
 } from './enrichment-repair.js';
+import { DEFAULT_SCORE_MIN_COVERAGE } from '../../schemas/config.js';
 
 export type PolicyApplyInput = {
   record: Record<string, unknown>;
@@ -94,6 +94,8 @@ export type PolicyApplyInput = {
   enrichmentSpendUsd?: number;
   /** Optional fully rebuilt ledger from cost_events (preferred over stale JSON). */
   costLedger?: CostLedger;
+  /** Minimum assessable criterion-weight share required to trust a fit score. */
+  minFitCoverage?: number;
 };
 
 export type PolicyApplyResult = {
@@ -404,6 +406,9 @@ export function buildEvidenceResolutionEnvelope(input: {
  */
 export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult {
   const record = input.record || {};
+  const minFitCoverage = Number.isFinite(Number(input.minFitCoverage))
+    ? Number(input.minFitCoverage)
+    : DEFAULT_SCORE_MIN_COVERAGE;
   const rowId = String(record._row_id || record.id || 'unknown');
   // Prefer fit_breakdown commercial components; never invent zeros from legacy ticket_size score_breakdown alone.
   const selected = selectFitBreakdownSource(record);
@@ -419,7 +424,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     ? Math.min(derivedFitCoverage, recordedFitCoverage)
     : derivedFitCoverage ?? recordedFitCoverage;
   const insufficientFitCoverage = fitCoverage != null
-    && fitCoverage < FIT_ASSESSABLE_WEIGHT_MINIMUM;
+    && fitCoverage < minFitCoverage;
   const missing_inputs = fitCalc?.missing_inputs || [];
   const source_observation_refs = (() => {
     const refs: string[] = [];
@@ -605,7 +610,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     }
   }
   if (insufficientFitCoverage) {
-    const coverageReason = `fit_assessable_weight_below_${FIT_ASSESSABLE_WEIGHT_MINIMUM}`;
+    const coverageReason = `fit_assessable_weight_below_${minFitCoverage}`;
     treatment = {
       ...treatment,
       treatment_tier: 'enrichment_hold',
