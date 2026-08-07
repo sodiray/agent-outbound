@@ -162,28 +162,67 @@ const getOpenRouterReasoningEffortFromOptions = (providerOptions?: Record<string
   return isOpenRouterReasoningEffort(effort) ? effort : getOpenRouterReasoningEffort();
 };
 
+const strictOpenRouterResponseFormat = (body: Record<string, unknown>) => {
+  const responseFormat = body.response_format;
+  if (!responseFormat || typeof responseFormat !== 'object' || Array.isArray(responseFormat)) return {};
+  const jsonSchema = (responseFormat as { json_schema?: unknown }).json_schema;
+  if (!jsonSchema || typeof jsonSchema !== 'object' || Array.isArray(jsonSchema)) return {};
+  return {
+    response_format: {
+      ...responseFormat,
+      json_schema: { ...jsonSchema, strict: true },
+    },
+  };
+};
+
 const withOpenRouterReasoning = (
   fetchFn: typeof globalThis.fetch,
   effort: OpenRouterReasoningEffort,
 ): typeof globalThis.fetch => async (input, init) => {
-  if (typeof init?.body !== 'string') return fetchFn(input, init);
-  try {
-    const body = JSON.parse(init.body) as unknown;
-    if (!body || typeof body !== 'object' || Array.isArray(body)) return fetchFn(input, init);
-    const existingReasoning = (body as { reasoning?: unknown }).reasoning;
-    const reasoning = existingReasoning && typeof existingReasoning === 'object' && !Array.isArray(existingReasoning)
-      ? existingReasoning
-      : {};
-    return fetchFn(input, {
-      ...init,
-      body: JSON.stringify({
-        ...body,
-        reasoning: { ...reasoning, effort },
-      }),
-    });
-  } catch {
-    return fetchFn(input, init);
-  }
+  const request = (() => {
+    if (typeof init?.body !== 'string') return init;
+    try {
+      const body = JSON.parse(init.body) as unknown;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return init;
+      const existingReasoning = (body as { reasoning?: unknown }).reasoning;
+      const reasoning = existingReasoning && typeof existingReasoning === 'object' && !Array.isArray(existingReasoning)
+        ? existingReasoning
+        : {};
+      return {
+        ...init,
+        body: JSON.stringify({
+          ...body,
+          ...strictOpenRouterResponseFormat(body as Record<string, unknown>),
+          reasoning: { ...reasoning, effort },
+        }),
+      };
+    } catch {
+      return init;
+    }
+  })();
+  const response = await fetchFn(input, request);
+  if (!process.env.AO_DEBUG_LLM) return response;
+  const responseBody = await response.clone().text().catch((error: unknown) => (
+    `Unable to read response body: ${error instanceof Error ? error.message : String(error)}`
+  ));
+  const requestBody = typeof request?.body === 'string'
+    ? (() => {
+      try {
+        return JSON.parse(request.body) as unknown;
+      } catch {
+        return request.body;
+      }
+    })()
+    : request?.body || null;
+  console.error('[AO_DEBUG_LLM] openrouter exchange', JSON.stringify({
+    url: input instanceof Request ? input.url : String(input),
+    request: requestBody,
+    response: {
+      status: response.status,
+      body: responseBody,
+    },
+  }, null, 2));
+  return response;
 };
 
 const getOpenRouterProviderOptions = () => ({

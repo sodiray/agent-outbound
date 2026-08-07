@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { generateText, Output } from 'ai';
+import { z } from 'zod';
 
 import { AgentOutboundError } from '../dist/orchestrator/runtime/contract.js';
 import {
@@ -39,7 +41,7 @@ test('OpenRouter missing credentials name both supported credential paths', () =
   );
 });
 
-test('OpenRouter sends high reasoning by default without temperature', async () => {
+test('OpenRouter sends strict structured output with the provider model id and high reasoning', async () => {
   const originalApiKey = process.env.OPENROUTER_API_KEY;
   const originalReasoningEffort = process.env.AO_OPENROUTER_REASONING_EFFORT;
   const originalFetch = globalThis.fetch;
@@ -47,18 +49,33 @@ test('OpenRouter sends high reasoning by default without temperature', async () 
   process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
   delete process.env.AO_OPENROUTER_REASONING_EFFORT;
   globalThis.fetch = async (_input, init) => {
-    bodies.push(JSON.parse(String(init?.body || '{}')));
+    const body = JSON.parse(String(init?.body || '{}'));
+    bodies.push(body);
+    const structured = body.response_format?.json_schema;
     return new Response(JSON.stringify({
       id: 'test-response',
       created: 0,
       model: 'z-ai/glm-5.2',
-      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      choices: [{
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: structured ? JSON.stringify({
+            outputs: { email_subject: 'Subject', email_body: 'Body' },
+            used_inputs: ['account'],
+            grounding: [
+              { output: 'email_subject', text: 'Subject', inputs: ['account'] },
+              { output: 'email_body', text: 'Body', inputs: ['account'] },
+            ],
+          }) : 'ok',
+        },
+        finish_reason: 'stop',
+      }],
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
     }), { headers: { 'content-type': 'application/json' } });
   };
 
   try {
-    const { generateText } = await import('ai');
     const resolved = await resolveRuntimeModel({
       model: 'openrouter/z-ai/glm-5.2',
       enforceSupported: false,
@@ -72,6 +89,46 @@ test('OpenRouter sends high reasoning by default without temperature', async () 
     assert.equal(bodies.length, 1);
     assert.deepEqual(bodies[0].reasoning, { effort: 'high' });
     assert.equal('temperature' in bodies[0], false);
+
+    const schema = z.object({
+      outputs: z.object({
+        email_subject: z.string().min(1),
+        email_body: z.string().min(1),
+      }).strict(),
+      used_inputs: z.array(z.string().min(1)).min(1),
+      grounding: z.array(z.object({
+        output: z.string().min(1),
+        text: z.string().min(1),
+        inputs: z.array(z.string().min(1)).min(1),
+      }).strict()).min(1),
+    }).strict();
+    const structured = await generateText({
+      model: resolved.built,
+      prompt: 'Return the requested compose result.',
+      output: Output.object({ schema }),
+      providerOptions: resolved.providerOptions,
+    });
+    assert.deepEqual(structured.output, {
+      outputs: { email_subject: 'Subject', email_body: 'Body' },
+      used_inputs: ['account'],
+      grounding: [
+        { output: 'email_subject', text: 'Subject', inputs: ['account'] },
+        { output: 'email_body', text: 'Body', inputs: ['account'] },
+      ],
+    });
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[1].model, 'z-ai/glm-5.2');
+    assert.equal(bodies[1].response_format.json_schema.strict, true);
+    assert.deepEqual(bodies[1].response_format.json_schema.schema.required, [
+      'outputs',
+      'used_inputs',
+      'grounding',
+    ]);
+    assert.deepEqual(bodies[1].response_format.json_schema.schema.properties.outputs.required, [
+      'email_subject',
+      'email_body',
+    ]);
+    assert.equal(bodies[1].response_format.json_schema.schema.properties.outputs.additionalProperties, false);
 
     process.env.AO_OPENROUTER_REASONING_EFFORT = 'medium';
     assert.deepEqual(resolved.provider.getProviderOptions?.('z-ai/glm-5.2'), {

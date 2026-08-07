@@ -304,15 +304,6 @@ const extractAssistantText = (result: any): string => {
   return candidates.map((candidate) => String(candidate || '').trim()).find(Boolean) || '';
 };
 
-const providerOptionsRequestReasoning = (value: any): boolean => {
-  if (!value || typeof value !== 'object') return false;
-  return Object.entries(value).some(([key, child]) => (
-    key.toLowerCase().includes('thinking')
-    || key.toLowerCase().includes('reasoning')
-    || providerOptionsRequestReasoning(child)
-  ));
-};
-
 const describeZodType = (schema: any): string => {
   const typeName = String(schema?._def?.typeName || '');
   if (typeName === 'ZodBoolean') return 'boolean';
@@ -414,10 +405,7 @@ export const generateObjectWithTools = async ({
   // OpenRouter reasoning models reject temperature; grading determinism comes
   // from median-of-N sampling (score.samples), not temperature.
   const sampling = deterministicRole && resolved.providerId !== 'openrouter' ? { temperature: 0 } : {};
-  const preferPlainTextObject = !hasTools && (
-    resolved.providerId === 'deepinfra'
-    || providerOptionsRequestReasoning(providerOptions)
-  );
+  const preferPlainTextObject = !hasTools && resolved.providerId === 'deepinfra';
   const providerToolUsage: { current: ProviderToolUsage | null } = { current: null };
 
   let result: any;
