@@ -189,8 +189,7 @@ function emailState(record: Record<string, unknown>): ChannelReachability {
       reason: verificationStatus === 'invalid' ? 'invalid_verification' : `verification_${verificationStatus}`,
     };
   }
-  const validatedFlag = Boolean(record.email_validated)
-    || verificationAccepted
+  const validatedFlag = verificationAccepted
     // Legacy verifier results may predate the status field. This accepts only
     // the dedicated verification confidence, never discovery confidence.
     || (!verificationStatus && (verificationConfidence ?? 0) >= 70);
@@ -232,9 +231,8 @@ function phoneState(record: Record<string, unknown>): ChannelReachability {
   }
   const phone = String(record.phone || record.contact_phone || '').trim();
   if (!phone) return { channel: 'phone', state: 'missing', confidence: 0, ready: false };
-  const conf = readConfidence(record.phone_confidence, record.confidence_phone);
-  const validatedFlag = Boolean(record.phone_validated);
-  if (conf == null && !validatedFlag) {
+  const conf = readConfidence(record.phone_confidence);
+  if (conf == null) {
     return {
       channel: 'phone',
       state: 'unvalidated',
@@ -243,9 +241,8 @@ function phoneState(record: Record<string, unknown>): ChannelReachability {
       reason: 'confidence_missing',
     };
   }
-  // Never invent confidence=80 when only a validation flag is present.
-  const confVal = conf ?? 0;
-  const validated = validatedFlag || confVal >= 70;
+  const confVal = conf;
+  const validated = confVal >= 70;
   return {
     channel: 'phone',
     state: validated ? 'named_validated' : 'unvalidated',
@@ -261,7 +258,7 @@ function linkedinState(record: Record<string, unknown>): ChannelReachability {
   if (record.linkedin_connected) {
     return { channel: 'linkedin', state: 'connected', confidence: 90, ready: true };
   }
-  const conf = readConfidence(record.linkedin_confidence, record.confidence_linkedin);
+  const conf = readConfidence(record.linkedin_confidence);
   // Raw LinkedIn URL alone is never ready without a confidence field.
   if (conf == null) {
     return {
@@ -281,7 +278,7 @@ function linkedinState(record: Record<string, unknown>): ChannelReachability {
 function mailState(record: Record<string, unknown>): ChannelReachability {
   const address = String(record.mailing_address || record.address || '').trim();
   if (!address) return { channel: 'mail', state: 'missing', confidence: 0, ready: false };
-  const conf = readConfidence(record.mail_confidence, record.address_confidence);
+  const conf = readConfidence(record.mail_confidence);
   const addressReadyFlag = Boolean(
     record.mail_address_ready === true
     || record.mail_address_ready === 1

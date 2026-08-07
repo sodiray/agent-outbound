@@ -95,8 +95,8 @@ test('residual timing + reachability', () => {
   assert.equal(t.calculation_rule_version, 'tv-timing-v1');
   const r = evaluateReachability({
     contact_email: 'a@b.com',
-    email_validated: true,
-    email_confidence: 90,
+    email_verification_status: 'verified',
+    email_verification_confidence: 90,
   });
   const email = r.channels.find((c) => c.channel === 'email');
   assert.equal(email.state, 'named_validated');

@@ -1251,8 +1251,8 @@ test('phase-05 timing: signal registry decays; apply writes timing_json (not sca
 test('phase-05 reachability: named channel states; apply writes reachability_json', () => {
   const vector = evaluateReachability({
     contact_email: 'owner@example.test',
-    email_validated: true,
-    email_confidence: 90,
+    email_verification_status: 'verified',
+    email_verification_confidence: 90,
     phone: '+12085551212',
     phone_confidence: 40,
     linkedin_url: 'https://linkedin.com/in/example',
@@ -1281,8 +1281,8 @@ test('phase-05 reachability: named channel states; apply writes reachability_jso
       fit_evidence_confidence: 70,
       identity_confidence: 90,
       contact_email: 'owner@example.test',
-      email_confidence: 90,
-      email_validated: true,
+      email_verification_status: 'verified',
+      email_verification_confidence: 90,
       score_breakdown: JSON.stringify(fullBreakdown()),
     },
     recomputeFitFromBreakdown: true,

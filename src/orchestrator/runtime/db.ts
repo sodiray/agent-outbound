@@ -75,6 +75,9 @@ const SCHEMA_SQL = `
     phone_source_kind TEXT DEFAULT '',
     contact_linkedin_url TEXT DEFAULT '',
     linkedin_confidence REAL DEFAULT NULL,
+    buyer_confidence REAL DEFAULT NULL,
+    mail_confidence REAL DEFAULT NULL,
+    mail_address_ready INTEGER DEFAULT 0,
     email_primary TEXT DEFAULT '',
     contact_name_primary TEXT DEFAULT '',
     contact_title_primary TEXT DEFAULT '',
@@ -981,6 +984,9 @@ const ensureRecordCompatibility = (db) => {
   try { db.exec("ALTER TABLE records ADD COLUMN phone_source_kind TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN contact_linkedin_url TEXT DEFAULT ''"); } catch {}
   try { db.exec('ALTER TABLE records ADD COLUMN linkedin_confidence REAL DEFAULT NULL'); } catch {}
+  try { db.exec('ALTER TABLE records ADD COLUMN buyer_confidence REAL DEFAULT NULL'); } catch {}
+  try { db.exec('ALTER TABLE records ADD COLUMN mail_confidence REAL DEFAULT NULL'); } catch {}
+  try { db.exec('ALTER TABLE records ADD COLUMN mail_address_ready INTEGER DEFAULT 0'); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN place_id TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN primary_type TEXT DEFAULT ''"); } catch {}
   try { db.exec('ALTER TABLE records ADD COLUMN user_rating_count INTEGER DEFAULT 0'); } catch {}

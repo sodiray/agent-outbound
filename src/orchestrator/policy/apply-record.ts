@@ -40,6 +40,9 @@ import { assertWorkAllowed } from './forbidden-channels.js';
 import {
   buildIdentityResolution,
   buildObservationStore,
+  deriveBuyerConfidence,
+  deriveMailAddressReady,
+  deriveMailConfidence,
   derivePhoneConfidence,
   detectContradictions,
   resolveFieldPreferringEvidence,
@@ -470,12 +473,12 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   // Never invent confidence defaults (70/40/50) — missing fails closed as 0.
   const identityConfidence = buildIdentityResolution(record).identity_confidence ?? 0;
-  const buyerConfidence = num(record.buyer_confidence, null) ?? 0;
+  const buyerConfidence = deriveBuyerConfidence(record);
   const classificationConfidence = num(record.classification_confidence, null) ?? 0;
   const timingCalc = calculateTimingScore(record);
   const timingScore = timingCalc.timing_score;
   const strongTimingSignalCount = countStrongTimingSignals(timingCalc.signals);
-  const storedPhoneConfidence = num(record.phone_confidence, num(record.confidence_phone, null));
+  const storedPhoneConfidence = num(record.phone_confidence, null);
   const phoneConfidence = storedPhoneConfidence ?? derivePhoneConfidence(record);
   const reachability = evaluateReachability({ ...record, phone_confidence: phoneConfidence });
   const reachFlags = reachabilityToChannelFlags(reachability);
@@ -493,17 +496,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     enrichment_usd: enrichmentUsd,
     golden_ticket: Boolean(record.golden_ticket_eligible),
   });
-  const mailAddressReady = Boolean(
-    record.mail_address_ready === true
-    || record.mail_address_ready === 1
-    || String(record.address_rdi || '').toLowerCase() === 'commercial'
-    || reachFlags.mail?.ready,
-  );
-  // Mail confidence: observed field or reachability only — never invent from identity.
-  const mailConfidence =
-    reachFlags.mail?.confidence
-    ?? num(record.mail_confidence, num(record.address_confidence, null))
-    ?? 0;
+  const mailAddressReady = deriveMailAddressReady(record);
+  const mailConfidence = deriveMailConfidence(record);
 
   // Taxonomy validation when classification labels present — reject unsupported at write time.
   const listDir =
@@ -814,7 +808,12 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       // enrichment_hold → autonomous targeted repair (not generic foundational only).
       // Foundational → candidate_tier → targeted order lives in planEnrichmentRepair.
       const prelimPlan = planEnrichmentRepair({
-        record,
+        record: {
+          ...record,
+          buyer_confidence: buyerConfidence,
+          mail_confidence: mailConfidence,
+          mail_address_ready: mailAddressReady ? 1 : 0,
+        },
         hold_reasons: [...treatment.reasons, ...buyerHoldReasons],
         treatment_tier: treatment.treatment_tier,
         candidate_tier: candidate.candidate_tier,
@@ -987,7 +986,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     timing_confidence: timingScore,
     email_confidence:
       reachFlags.email?.confidence
-      ?? num(record.email_verification_confidence, num(record.email_confidence, 0))
+      ?? num(record.email_verification_confidence, 0)
       ?? 0,
     phone_confidence: reachFlags.phone?.confidence ?? phoneConfidence,
     linkedin_confidence: reachFlags.linkedin?.confidence ?? num(record.linkedin_confidence, 0) ?? 0,
@@ -1069,7 +1068,12 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   let enrichment_repair_plan: EnrichmentRepairPlan | null = null;
   if (readinessForcesRepair || enrichment_hold_reasons.length > 0 && treatment.treatment_tier === 'enrichment_hold') {
     enrichment_repair_plan = planEnrichmentRepair({
-      record,
+      record: {
+        ...record,
+        buyer_confidence: buyerConfidence,
+        mail_confidence: mailConfidence,
+        mail_address_ready: mailAddressReady ? 1 : 0,
+      },
       hold_reasons: enrichment_hold_reasons,
       treatment_tier: treatment.treatment_tier,
       candidate_tier: candidate.candidate_tier,
@@ -1220,6 +1224,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     buying_center_role: buyerAffiliation.role ?? '',
     timing_json: JSON.stringify(timingCalc),
     timing_score: timingScore,
+    buyer_confidence: buyerConfidence,
+    mail_confidence: mailConfidence,
+    mail_address_ready: mailAddressReady ? 1 : 0,
     phone_confidence: phoneConfidence,
     reachability_json: JSON.stringify(reachability),
     cost_ledger_json: JSON.stringify({
@@ -1359,7 +1366,7 @@ export function readinessInputFromRecord(input: {
   const rowId = String(record._row_id || record.id || 'unknown');
   // Never invent confidence defaults — missing → 0 (fail closed on gates).
   const identityConfidence = num(record.identity_confidence, null) ?? 0;
-  const buyerConfidence = num(record.buyer_confidence, null) ?? 0;
+  const buyerConfidence = deriveBuyerConfidence(record);
   const classificationConfidence = num(record.classification_confidence, null) ?? 0;
   const timingCalc = calculateTimingScore(record);
   const timingScore = timingCalc.timing_score;
@@ -1424,10 +1431,7 @@ export function readinessInputFromRecord(input: {
   const mailTreatment = String(record.mail_treatment || 'none');
   const proposedChannel = proposedChannelForStep(input);
 
-  const mailConfidence =
-    reachFlags.mail?.confidence
-    ?? num(record.mail_confidence, num(record.address_confidence, null))
-    ?? 0;
+  const mailConfidence = deriveMailConfidence(record);
 
   const confidenceProfile: EvidenceConfidenceProfile = {
     identity_confidence: identityConfidence,
@@ -1437,7 +1441,7 @@ export function readinessInputFromRecord(input: {
     timing_confidence: timingScore,
     email_confidence:
       reachFlags.email?.confidence
-      ?? num(record.email_verification_confidence, num(record.email_confidence, 0))
+      ?? num(record.email_verification_confidence, 0)
       ?? 0,
     phone_confidence: reachFlags.phone?.confidence ?? num(record.phone_confidence, 0) ?? 0,
     linkedin_confidence:

@@ -152,6 +152,22 @@ const PHONE_CONFIDENCE_WEIGHTS = {
   structured_source: 35,
 } as const;
 
+const BUYER_CONFIDENCE_WEIGHTS = {
+  named: 25,
+  named_literal_support: 25,
+  decision_authority: 20,
+  role_literal_support: 10,
+  affiliation: 10,
+  affiliation_literal_support: 10,
+} as const;
+
+const MAIL_CONFIDENCE_WEIGHTS = {
+  address_present: 15,
+  address_complete: 25,
+  commercial_delivery_indicator: 30,
+  validation_evidence: 30,
+} as const;
+
 const hasLiteralSupport = (resolution: FieldResolution | undefined): boolean => (
   Boolean(
     resolution
@@ -223,6 +239,129 @@ export function derivePhoneConfidence(record: Record<string, unknown>): number {
     + PHONE_CONFIDENCE_WEIGHTS.well_formed
     + (structuredSource ? PHONE_CONFIDENCE_WEIGHTS.structured_source : 0);
   return Math.max(0, Math.min(100, evidenceScore));
+}
+
+const resolvedBuyerStatus = (value: unknown): boolean => (
+  ['confirmed', 'likely', 'resolved'].includes(text(value).toLowerCase())
+);
+
+const confirmedAffiliation = (value: unknown): boolean => (
+  ['confirmed', 'likely'].includes(text(value).toLowerCase())
+);
+
+const affirmative = (value: unknown): boolean => (
+  ['1', 'true', 'yes', 'confirmed', 'verified'].includes(text(value).toLowerCase())
+);
+
+const fieldValue = (record: Record<string, unknown>, fields: string[]): string => {
+  for (const field of fields) {
+    const value = text(record[field]);
+    if (value) return value;
+  }
+  return '';
+};
+
+const durableLiteralSupport = (input: {
+  observations: Observation[];
+  fields: string[];
+  value: string;
+}): boolean => {
+  const expected = input.value.toLowerCase();
+  if (!expected) return false;
+  return input.observations.some((observation) => (
+    input.fields.includes(observation.predicate)
+    && observation.provisional !== true
+    && observation.support_status === 'literal_support'
+    && Boolean(text(observation.source_id))
+    && text(observation.value).toLowerCase() === expected
+  ));
+};
+
+const roleIndicatesDecisionAuthority = (role: string): boolean => (
+  /\b(owner|founder|principal|partner|chief|president|vice[ -]?president|vp|director|head|general manager|managing|executive)\b/iu.test(role)
+);
+
+/**
+ * Deterministic buyer confidence from named-person evidence already persisted on
+ * a record. A name without a resolved status cannot earn confidence; durable
+ * provider-backed literal support and unresolved contradictions are required to
+ * distinguish a researched decision-maker from an unverified contact string.
+ */
+export function deriveBuyerConfidence(record: Record<string, unknown>): number {
+  const nameFields = ['observed_buyer_name', 'buyer_name', 'primary_buyer_name', 'named_buyer_name'];
+  const statusFields = ['named_buyer_status', 'buyer_named_status', 'primary_buyer_status'];
+  const roleFields = ['buying_center_role', 'buyer_role', 'named_buyer_role', 'contact_title_primary', 'contact_title'];
+  const affiliationFields = ['buyer_affiliation_status', 'current_affiliation_status', 'affiliation_status'];
+  const buyerName = fieldValue(record, nameFields);
+  const buyerStatus = fieldValue(record, statusFields);
+  if (!buyerName || !resolvedBuyerStatus(buyerStatus)) return 0;
+
+  const observations = parseStoredObservations(record.observations_json);
+  const buyerRole = fieldValue(record, roleFields);
+  const affiliation = fieldValue(record, affiliationFields);
+  const authorityConfirmed = affirmative(record.local_buying_authority);
+  const decisionAuthority = authorityConfirmed || roleIndicatesDecisionAuthority(buyerRole);
+  const score =
+    BUYER_CONFIDENCE_WEIGHTS.named
+    + (durableLiteralSupport({ observations, fields: nameFields, value: buyerName })
+      ? BUYER_CONFIDENCE_WEIGHTS.named_literal_support
+      : 0)
+    + (decisionAuthority ? BUYER_CONFIDENCE_WEIGHTS.decision_authority : 0)
+    + (buyerRole && durableLiteralSupport({ observations, fields: roleFields, value: buyerRole })
+      ? BUYER_CONFIDENCE_WEIGHTS.role_literal_support
+      : 0)
+    + (confirmedAffiliation(affiliation) ? BUYER_CONFIDENCE_WEIGHTS.affiliation : 0)
+    + (confirmedAffiliation(affiliation)
+      && durableLiteralSupport({ observations, fields: affiliationFields, value: affiliation })
+      ? BUYER_CONFIDENCE_WEIGHTS.affiliation_literal_support
+      : 0);
+  const openContradictions = detectContradictions({ record, observations })
+    .filter((contradiction) => contradiction.status === 'open').length;
+  const penalty = Math.min(60, openContradictions * 30);
+  return Math.max(0, Math.min(100, score - penalty));
+}
+
+const completeAddress = (record: Record<string, unknown>, address: string): boolean => {
+  if (!address) return false;
+  if (affirmative(record.address_normalized) || affirmative(record.address_normalised)) return true;
+  if (text(record.formatted_address)) return true;
+  return Boolean(
+    /\d/u.test(address)
+    && text(record.city)
+    && text(record.state)
+    && (text(record.postal_code) || text(record.zip)),
+  );
+};
+
+const validatedAddress = (record: Record<string, unknown>): boolean => {
+  const status = fieldValue(record, ['address_validation_status', 'address_verification_status']);
+  return affirmative(record.address_validated)
+    || affirmative(record.address_verified)
+    || affirmative(record.address_cass_validated)
+    || ['valid', 'verified', 'deliverable'].includes(status.toLowerCase());
+};
+
+/**
+ * Derive a record-level mail confidence without using it to authorize mail
+ * reachability. RDI is one independently observed delivery signal; a high score
+ * additionally requires a complete normalized address and validation evidence.
+ */
+export function deriveMailConfidence(record: Record<string, unknown>): number {
+  const address = fieldValue(record, ['mailing_address', 'address']);
+  if (!address) return 0;
+  const commercial = text(record.address_rdi).toLowerCase() === 'commercial';
+  const score =
+    MAIL_CONFIDENCE_WEIGHTS.address_present
+    + (completeAddress(record, address) ? MAIL_CONFIDENCE_WEIGHTS.address_complete : 0)
+    + (commercial ? MAIL_CONFIDENCE_WEIGHTS.commercial_delivery_indicator : 0)
+    + (validatedAddress(record) ? MAIL_CONFIDENCE_WEIGHTS.validation_evidence : 0);
+  return Math.max(0, Math.min(100, score));
+}
+
+/** The persisted mail-ready field mirrors the existing commercial-RDI readiness evidence. */
+export function deriveMailAddressReady(record: Record<string, unknown>): boolean {
+  return Boolean(fieldValue(record, ['mailing_address', 'address']))
+    && text(record.address_rdi).toLowerCase() === 'commercial';
 }
 
 export type ObservationStore = {
