@@ -23,6 +23,10 @@ import { emitActivity } from '../runtime/activity.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
 import {
+  buildDiagnosticContentModelContext,
+  diagnosticContentHasBusinessEvidence,
+} from '../lib/model-context.js';
+import {
   buildOutputZodSchema,
   dependencyFieldsForStep,
   dependencyValueForRecord,
@@ -255,7 +259,11 @@ const dependencyValuesFor = ({ stepConfig, record }: {
   for (const dep of dependencyFieldsFor(stepConfig)) {
     depValues[String(dep)] = dependencyValueForRecord({ dep, record, extra });
   }
-  return depValues;
+  if (String(stepConfig.id || '') !== 'diagnostic_content_pack') return depValues;
+  return {
+    ...depValues,
+    diagnostic_business_evidence: buildDiagnosticContentModelContext({ record }).data,
+  };
 };
 
 const persistAsset = ({
@@ -351,6 +359,37 @@ export const runGenerateStep = async ({
 
     if (isLockedAsset(existing)) {
       summary.skipped_locked += 1;
+      return;
+    }
+
+    if (id === 'diagnostic_content_pack' && !diagnosticContentHasBusinessEvidence(currentRecord)) {
+      const reason = 'needs_discovery: no_business_evidence';
+      const emptyOutputs = emptyOutputsFor(outputZod);
+      ensureRecordColumns({
+        db,
+        columns: [...Object.keys(emptyOutputs), { name: 'score_status', type: 'TEXT' }],
+      });
+      upsertRecord({
+        db,
+        row: { ...currentRecord, ...emptyOutputs, score_status: 'needs_discovery' },
+      });
+      persistAsset({
+        db,
+        existing,
+        recordId,
+        stepId: id,
+        label: String(stepConfig.label || ''),
+        result: '',
+        outputsJson: stringifyJson(emptyOutputs),
+        isReference: false,
+        status: 'empty',
+        reason,
+      });
+      summary.processed += 1;
+      if (existing) summary.updated += 1;
+      if (!existing) summary.inserted += 1;
+      summary.record_ids.push(recordId);
+      emit({ logger, event: { event: 'row_complete', phase: 'generate', step: id, row: rowLabel, outcome: 'empty', reason } });
       return;
     }
 

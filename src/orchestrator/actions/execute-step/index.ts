@@ -17,7 +17,11 @@ import { formatErrorMessage } from '../../lib/error-format.js';
 import { attachProviderToolUsage, providerToolUsageFromError } from '../../runtime/providers/usage.js';
 import { isBudgetExceededError } from '../../runtime/contract.js';
 import { readConfig } from '../../lib/config.js';
-import { buildModelContext, withModelContextTelemetry } from '../../lib/model-context.js';
+import {
+  buildDiagnosticContentModelContext,
+  buildModelContext,
+  withModelContextTelemetry,
+} from '../../lib/model-context.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
@@ -293,12 +297,14 @@ export const executeStepAction = async ({
 
   const promptFileBody = readPromptFileIfAny({ listDir, promptFile: stepConfig?.prompt_file });
   const { config } = readConfig(listDir);
-  const modelContext = buildModelContext({
-    record,
-    inputs: stepConfig?.inputs || [],
-    identityFields: config?.source?.identity || [],
-    budget: config?.model_context,
-  });
+  const modelContext = stepId === 'diagnostic_content_pack'
+    ? buildDiagnosticContentModelContext({ record, budget: config?.model_context })
+    : buildModelContext({
+      record,
+      inputs: stepConfig?.inputs || [],
+      identityFields: config?.source?.identity || [],
+      budget: config?.model_context,
+    });
   const systemPrompt = renderPromptTemplate({
     template: promptFileBody || promptTemplate,
     vars: {

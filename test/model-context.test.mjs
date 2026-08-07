@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   ModelContextBudgetError,
+  buildDiagnosticContentModelContext,
   buildModelContext,
   withModelContextTelemetry,
 } from '../dist/orchestrator/lib/model-context.js';
@@ -26,6 +27,57 @@ test('model context is default-deny for undeclared record columns', () => {
   assert.equal(context.serialized.includes('next_year_enrichment_blob'), false);
   assert.equal(context.serialized.includes('transition_audit_json'), false);
   assert.equal(context.serialized.includes('cost_ledger_json'), false);
+});
+
+test('diagnostic content context excludes internal scoring and pipeline fields', () => {
+  const context = buildDiagnosticContentModelContext({
+    record: {
+      business_name: 'Brain Restore Centers',
+      address: '123 Main St, Boise, ID',
+      vertical: 'healthcare_clinical',
+      services: 'Brain injury rehabilitation',
+      site_text: 'Neurological rehabilitation and concussion support.',
+      contact_name: 'Jordan Owner',
+      contact_email: 'jordan@example.test',
+      fit_score: 88,
+      fit_evidence_confidence: 92,
+      identity_confidence: 90,
+      treatment_tier: 'A',
+      candidate_tier: 'A',
+      score_status: 'fresh',
+      fit_coverage: 1,
+      readiness: true,
+      readiness_json: '{"ready":true}',
+      taxonomy_validation_json: '{"fallback_applied":true}',
+      next_action_json: '{"action_type":"send_email"}',
+      work_state: 'active',
+      observations_json: JSON.stringify({
+        observations: [
+          { predicate: 'services', value: 'Concussion support', evidence_id: 'obs_services', support_status: 'literal_support' },
+          { predicate: 'fit_score', value: 88, evidence_id: 'obs_fit', support_status: 'inferred' },
+          { predicate: 'tool_failure', value: 'site scrape failed', evidence_id: 'obs_failure', support_status: 'tool_failure' },
+        ],
+      }),
+    },
+  });
+
+  const denied = [
+    'fit_score',
+    'fit_evidence_confidence',
+    'identity_confidence',
+    'treatment_tier',
+    'candidate_tier',
+    'score_status',
+    'fit_coverage',
+    'readiness',
+    'taxonomy_validation_json',
+    'next_action_json',
+    'work_state',
+    'site scrape failed',
+  ];
+  for (const field of denied) assert.equal(context.serialized.includes(field), false, `${field} must not reach diagnostic content`);
+  assert.match(context.serialized, /Neurological rehabilitation/);
+  assert.match(context.serialized, /Concussion support/);
 });
 
 test('model context preserves compact observations and evidence ids', () => {

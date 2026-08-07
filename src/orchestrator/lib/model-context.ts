@@ -59,6 +59,46 @@ const DEFAULT_IDENTITY_FIELDS = [
   'longitude',
 ] as const;
 
+const DIAGNOSTIC_CONTENT_FIELDS = [
+  'business_name',
+  'name',
+  'address',
+  'city',
+  'state',
+  'zip',
+  'postal_code',
+  'country',
+  'website',
+  'domain',
+  'vertical',
+  'sub_vertical',
+  'services',
+  'service_offerings',
+  'business_description',
+  'description',
+  'site_text',
+  'phone',
+  'email_primary',
+  'contact_name',
+  'contact_title',
+  'contact_email',
+  'contact_name_primary',
+  'contact_title_primary',
+  'linkedin_name',
+  'linkedin_headline',
+  'linkedin_company_url',
+] as const;
+
+const DIAGNOSTIC_INTERNAL_PREDICATE = /(?:^|_)(?:fit|score|confidence|tier|readiness|blocker|next_action|work_state|sequence|taxonomy|scrape|failure|error|status)(?:_|$)/;
+
+const DIAGNOSTIC_EVIDENCE_FIELDS = new Set([
+  'site_text',
+  'services',
+  'service_offerings',
+  'business_description',
+  'description',
+]);
+
 export const DEFAULT_MODEL_CONTEXT_BUDGET: ModelContextBudget = {
   max_chars: 100_000,
   max_tokens: 25_000,
@@ -98,6 +138,17 @@ const observationsFrom = (value: unknown): Array<Record<string, unknown>> => {
     }];
   });
 };
+
+const diagnosticObservationsFrom = (value: unknown): Array<Record<string, unknown>> => (
+  observationsFrom(value).filter((observation) => {
+    const predicate = String(observation.predicate || '').trim().toLowerCase();
+    return predicate !== '' && !DIAGNOSTIC_INTERNAL_PREDICATE.test(predicate);
+  })
+);
+
+const hasDiagnosticScalarEvidence = (source: Record<string, unknown>) => (
+  [...DIAGNOSTIC_EVIDENCE_FIELDS].some((field) => String(source[field] || '').trim() !== '')
+);
 
 const contributorChars = (field: string, value: unknown): ModelContextContributor => ({
   field,
@@ -163,6 +214,30 @@ export const buildModelContext = ({
     return { ...context, [field]: source[field] };
   }, {});
   const observations = observationsFrom(source.observations_json);
+  const withObservations = observations.length > 0
+    ? { ...data, observations_json: observations }
+    : data;
+  return buildModelContextPayload({ data: withObservations, budget });
+};
+
+export const diagnosticContentHasBusinessEvidence = (record: unknown): boolean => {
+  const source = isRecord(record) ? record : {};
+  return hasDiagnosticScalarEvidence(source) || diagnosticObservationsFrom(source.observations_json).length > 0;
+};
+
+export const buildDiagnosticContentModelContext = ({
+  record,
+  budget,
+}: {
+  record: unknown;
+  budget?: unknown;
+}): ModelContext => {
+  const source = isRecord(record) ? record : {};
+  const data = DIAGNOSTIC_CONTENT_FIELDS.reduce<Record<string, unknown>>((context, field) => {
+    if (source[field] === undefined) return context;
+    return { ...context, [field]: source[field] };
+  }, {});
+  const observations = diagnosticObservationsFrom(source.observations_json);
   const withObservations = observations.length > 0
     ? { ...data, observations_json: observations }
     : data;
