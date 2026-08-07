@@ -6,8 +6,8 @@ import test from 'node:test';
 
 import {
   persistSupportedDecisionMakerCandidates,
-  verifyHunterEmail,
 } from '../dist/orchestrator/enrichment/actions/decision-makers.js';
+import { verifyHunterEmail } from '../dist/orchestrator/runtime/providers/decision-makers/hunter.js';
 import { openListDb } from '../dist/orchestrator/runtime/db.js';
 import { denormalizedFieldsFromContact } from '../dist/orchestrator/policy/load-contacts.js';
 import { evaluateReachability } from '../dist/orchestrator/policy/timing-reachability.js';

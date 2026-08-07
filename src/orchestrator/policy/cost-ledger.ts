@@ -123,7 +123,7 @@ export function costEntryKindFromStep(stepId: string): CostEntry['kind'] {
     return 'execution';
   }
   if (s.includes('mail') || s.includes('postcard') || s.includes('lob')) return 'mail';
-  if (s.includes('tool') || s.includes('hunter') || s.includes('apollo') || s.includes('composio')) {
+  if (s.includes('tool')) {
     return 'tool';
   }
   if (
@@ -288,6 +288,7 @@ export function recordHasEnrichmentTier(record?: Record<string, unknown> | null)
 export function isExpensiveEnrichProviderAction(stepConfig?: Record<string, unknown> | null): boolean {
   const action = String(stepConfig?.action || '').trim().toLowerCase();
   if (action === 'policy_apply' || action === 'linkedin_company_resolution') return false;
+  if (action === 'decision_makers' && String(stepConfig?.mode || '').trim().toLowerCase() === 'discovery') return false;
   // tool_call / decision_makers / default model-generate path
   return true;
 }

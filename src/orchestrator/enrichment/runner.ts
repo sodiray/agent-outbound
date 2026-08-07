@@ -20,6 +20,7 @@ import { nullableBoolean, nullableNumber, nullableString } from '../actions/sche
 import { formatErrorMessage } from '../lib/error-format.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
 import { providerToolUsageFromError } from '../runtime/providers/usage.js';
+import { decisionMakerProviderNeedsMcp } from '../runtime/providers/decision-makers/index.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
 import { executeToolCallAction, isRecordScopedProviderToolError } from './actions/tool-call.js';
 import { executeLinkedinCompanyResolutionAction } from './actions/linkedin-company-resolution.js';
@@ -445,7 +446,8 @@ export const enrichStepUsesEmptyOnError = (stepConfig: unknown) => {
 
 export const enrichmentActionNeedsMcp = (stepConfig: unknown) => {
   const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
-  return String(config.action || '').trim().toLowerCase() === 'decision_makers';
+  if (String(config.action || '').trim().toLowerCase() !== 'decision_makers') return false;
+  return decisionMakerProviderNeedsMcp({ provider: String(config.provider || '') });
 };
 
 export const enrichmentStepConfig = (step: unknown): Record<string, unknown> => {
@@ -613,12 +615,12 @@ const applyOutputsWithEvidence = ({
  * record.
  *
  * Skipping that check bound a company inbox to a real named person. `site_profile`
- * returned `customercare@rightnowheatcool.com` — which genuinely appears on that
- * site, in its accessibility notice, so the model answered its prompt correctly.
+ * returned a shared inbox — which genuinely appears on that site, in its
+ * accessibility notice, so the model answered its prompt correctly.
  * `upsertRecord` refused the value, as designed. But this function read it from
  * the in-memory row, and `upsertContact` matches on name+title only, so it landed
- * on the Hunter-sourced "Tyeson Anderson / Marketing Director" row and replaced
- * his address. The projection then republished it to `records.contact_email`,
+ * on the provider-sourced contact row and replaced his address. The projection
+ * then republished it to `records.contact_email`,
  * laundering it past the very lock that had rejected it — and the account was one
  * approval away from emailing a real person at an address that was never his.
  *
@@ -792,8 +794,9 @@ export const executeEnrichmentAction = async ({
     if (fixtureMode) {
       const outputs: Record<string, unknown> = {
         decision_makers_json: record.decision_makers_json
-          || JSON.stringify([{ name: 'Owner', title: 'Owner', email: record.email_primary || record.contact_email || '' }]),
-        contact_name: record.contact_name || 'Owner',
+          || '',
+        decision_maker_exists: false,
+        contact_name: record.contact_name || '',
         contact_email: record.contact_email || record.email_primary || '',
       };
       return {

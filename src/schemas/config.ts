@@ -758,6 +758,10 @@ const PipelineEnrichmentStepSchema = z.object({
   // edits (description, concurrency, etc.) never re-run already-enriched records.
   cache_key: z.string().default(''),
   action: z.string().default(''),
+  provider: z.string().default(''),
+  mode: z.string().default(''),
+  output_fields: z.record(z.string()).default({}),
+  candidate_field: z.string().default(''),
   tool: ToolSpecSchema.optional(),
   // tool_call provider waterfall (primary tool first, then each entry in order).
   waterfall: z.array(ToolSpecSchema).optional(),
@@ -785,6 +789,10 @@ const PipelineEnrichmentStepSchema = z.object({
   cache: true,
   cache_key: true,
   action: true,
+  provider: true,
+  mode: true,
+  output_fields: true,
+  candidate_field: true,
   tool: true,
   waterfall: true,
   fallback_tools: true,
