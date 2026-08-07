@@ -112,8 +112,15 @@ const guardDeclaredOutputWrites = (
     const row = persisted && typeof persisted === 'object' && !Array.isArray(persisted)
       ? persisted as Record<string, unknown>
       : {};
+    // Fail only when the step wrote NONE of its declared outputs — the
+    // "reported success while doing nothing" case this guard exists for.
+    // A blank individual output is usually the correct answer: a business with
+    // no franchise legitimately has no franchise_brand, and failing the step for
+    // that blocks the pipeline on a true negative. Requiring every declared
+    // output to be non-blank turns optional fields into hard requirements.
     const missing = declaredOutputsUnwritten({ outputNames, record: row });
-    guarded.set(recordId, missing.length > 0
+    const wroteNothing = missing.length === outputNames.length;
+    guarded.set(recordId, wroteNothing
       ? {
         passed: false,
         errored: true,
