@@ -904,7 +904,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         // Genuine in-flight states (active, waiting, paused_inbound,
         // paused_review, completed) are preserved — they describe live work or
         // a real interruption, not a stale hold.
-        sequence_state: ['not_started', 'recycle_wait', 'recycle_monitor'].includes(String(sequence_state))
+        sequence_state: ['not_started', 'recycle_wait', 'recycle_monitor', 'paused_repair'].includes(String(sequence_state))
           ? 'active'
           : sequence_state,
         work_state: 'content_generation',
@@ -1261,7 +1261,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     // catches it regardless of which branch produced the action.
     account_sequence_state: (() => {
       const resolved = String(next_action?.sequence_state || bundle.sequence_state || '');
-      const holding = ['recycle_wait', 'recycle_monitor'].includes(resolved);
+      const holding = ['recycle_wait', 'recycle_monitor', 'paused_repair'].includes(resolved);
       const outboundAction = ['prepare_outbound', 'send_email', 'send_linkedin', 'send_mail', 'phone_attempt']
         .includes(String(next_action?.action_type || ''));
       return holding && outboundAction ? 'active' : resolved;
