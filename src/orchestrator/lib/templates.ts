@@ -62,6 +62,7 @@ const AUTO_RECORD_FIELDS = [
   'business_name',
   'name',
   'contact_name',
+  'contact_first_name',
   'contact_email',
   'contact_title',
   'contact_name_primary',

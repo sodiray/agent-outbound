@@ -28,7 +28,7 @@ import {
   assertActionTarget,
   parseAccountCampaignFromRecord,
 } from '../dist/orchestrator/policy/contact-campaign.js';
-import { openListDb, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
+import { openListDb, ensureRecordColumns, projectContactOntoRecord } from '../dist/orchestrator/runtime/db.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../dist/orchestrator/policy/lifecycle.js';
 
@@ -146,10 +146,15 @@ policy:
   // Critical: send path must target active email, not seniority primary denorm.
   assert.equal(hydrated.record.contact_email, 'active@example-hydrate.test');
   assert.equal(hydrated.record.contact_name, 'Active Ops');
+  assert.equal(hydrated.record.contact_first_name, 'Active');
   assert.equal(hydrated.record.contact_linkedin_url, 'https://linkedin.com/in/active-ops');
   assert.equal(hydrated.projected.contact_email, 'active@example-hydrate.test');
   // Input record not mutated.
   assert.equal(record.contact_email, 'seniority@example-hydrate.test');
+
+  projectContactOntoRecord({ db, recordId: rowId, contactId: 'c_active' });
+  const persisted = db.prepare('SELECT contact_name, contact_first_name FROM records WHERE _row_id = ?').get(rowId);
+  assert.deepEqual(persisted, { contact_name: 'Active Ops', contact_first_name: 'Active' });
 
   db.close();
 });
@@ -174,7 +179,7 @@ test('denormalizedFieldsFromContact: email is authoritative (blank clears stale)
   assert.deepEqual(denormalizedFieldsFromContact(null), {});
   assert.deepEqual(
     denormalizedFieldsFromContact({ email: 'a@b.test', name: '  ', phone: '' }),
-    { contact_email: 'a@b.test' },
+    { contact_email: 'a@b.test', contact_first_name: '' },
   );
   // Blank email must project '' so hydrate cannot leave seniority-primary denorm.
   assert.deepEqual(
@@ -183,9 +188,24 @@ test('denormalizedFieldsFromContact: email is authoritative (blank clears stale)
       contact_name: 'Ops',
       contact_name_primary: 'Ops',
       owner_name: 'Ops',
+      contact_first_name: 'Ops',
       contact_email: '',
     },
   );
+});
+
+test('denormalizedFieldsFromContact: derives safe first names from contact identity', () => {
+  assert.equal(denormalizedFieldsFromContact({ name: 'Alex Costa' }).contact_first_name, 'Alex');
+  assert.equal(denormalizedFieldsFromContact({ name: 'Dr. Shawn Stadlbauer, DC' }).contact_first_name, 'Shawn');
+  assert.equal(denormalizedFieldsFromContact({ name: 'Ms. Alex Costa Jr., PhD' }).contact_first_name, 'Alex');
+  assert.equal(denormalizedFieldsFromContact({ name: 'Cher' }).contact_first_name, 'Cher');
+});
+
+test('denormalizedFieldsFromContact: leaves ambiguous or absent names blank', () => {
+  assert.equal(denormalizedFieldsFromContact({ name: 'Acme Plumbing LLC' }).contact_first_name, '');
+  assert.equal(denormalizedFieldsFromContact({ name: 'Sales Team' }).contact_first_name, '');
+  assert.equal(denormalizedFieldsFromContact({ name: 'Costa, Alex' }).contact_first_name, '');
+  assert.equal(denormalizedFieldsFromContact({ email: 'contact@example.test' }).contact_first_name, '');
 });
 
 // --- Pure: assertActionTarget held contact ---------------------------------

@@ -14,6 +14,7 @@ import {
   getPipelineLogPath,
   getSourcingLogPath,
 } from './paths.js';
+import { deriveContactFirstName } from '../policy/contact-name.js';
 
 const require = createRequire(import.meta.url);
 
@@ -83,6 +84,7 @@ const SCHEMA_SQL = `
     contact_name_primary TEXT DEFAULT '',
     contact_title_primary TEXT DEFAULT '',
     contact_name TEXT DEFAULT '',
+    contact_first_name TEXT DEFAULT '',
     contact_email TEXT DEFAULT '',
     contact_title TEXT DEFAULT '',
     email_verification_status TEXT DEFAULT '',
@@ -981,6 +983,7 @@ const canaryScopedRecordIds = (db: any): string[] | null => {
 };
 
 const ensureRecordCompatibility = (db) => {
+  try { db.exec("ALTER TABLE records ADD COLUMN contact_first_name TEXT DEFAULT ''"); } catch {}
   try { db.exec('ALTER TABLE records ADD COLUMN phone_confidence REAL DEFAULT NULL'); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN phone_source_kind TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN contact_linkedin_url TEXT DEFAULT ''"); } catch {}
@@ -1725,6 +1728,7 @@ const isDynamicRecordValue = (value) => (
 
 const PRIMARY_CONTACT_PROJECTION_FIELDS = new Set([
   'contact_name',
+  'contact_first_name',
   'contact_title',
   'contact_email',
   'contact_name_primary',
@@ -1752,7 +1756,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
   if (!rowId) throw new Error('Record id/_row_id is required.');
   enforceCanaryRecordMutation(db, rowId);
   const current = db.prepare(`
-    SELECT id, _row_id, contact_name, contact_title, contact_email,
+    SELECT id, _row_id, contact_name, contact_first_name, contact_title, contact_email,
       contact_name_primary, contact_title_primary, pipeline_name
     FROM records
     WHERE _row_id = ? OR id = ?
@@ -1769,7 +1773,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       'fit_reasoning', 'trigger_reasoning',
       'priority_rank', 'sequence_name', 'pipeline_name', 'routed_by', 'sequence_status', 'sequence_step', 'next_action_date',
       'last_outreach_at', 'email_last_message_id', 'email_last_from', 'assigned_mailbox_id', 'email_last_thread_id', 'email_last_draft_id',
-      'email_thread_id', 'contact_name', 'contact_email', 'contact_title',
+      'email_thread_id', 'contact_name', 'contact_first_name', 'contact_email', 'contact_title',
       'email_verification_status', 'email_verification_confidence', 'email_verified_at',
       'trigger_score_peak',
       'fit_updated_at', 'trigger_updated_at',
@@ -1811,6 +1815,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       contact_name_primary: current.contact_name_primary || '',
       contact_title_primary: current.contact_title_primary || '',
       contact_name: current.contact_name || '',
+      contact_first_name: current.contact_first_name || '',
       contact_email: current.contact_email || '',
       contact_title: current.contact_title || '',
       email_verification_status: row.email_verification_status || '',
@@ -1862,7 +1867,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     'sequence_name', 'pipeline_name', 'routed_by', 'sequence_status', 'sequence_step', 'next_action_date', 'last_outreach_at',
     'email_last_message_id', 'email_last_from', 'assigned_mailbox_id', 'email_last_thread_id', 'email_last_draft_id', 'email_last_reply_at',
     'email_reply_classification', 'reply_classification_latest', 'disposition_latest', 'disposition_follow_up_at',
-    'email_thread_id', 'contact_name', 'contact_email', 'contact_title', 'email_verification_status',
+    'email_thread_id', 'contact_name', 'contact_first_name', 'contact_email', 'contact_title', 'email_verification_status',
     'email_verification_confidence', 'email_verified_at', 'trigger_score_peak', 'fit_updated_at',
     'trigger_updated_at', 'fit_score_updated_at', 'trigger_score_updated_at', 'source', 'source_query',
     'sourced_at', 'duplicate_of', 'duplicate_status', 'duplicate_reason', 'source_filter_result', 'source_filter_failures',
@@ -1893,7 +1898,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       sequence_name, pipeline_name, routed_by, sequence_status, sequence_step, next_action_date, last_outreach_at, email_last_message_id, email_last_from, assigned_mailbox_id,
       email_last_thread_id, email_last_draft_id, email_last_reply_at, email_reply_classification,
       reply_classification_latest, disposition_latest, disposition_follow_up_at,
-      email_thread_id, contact_name, contact_email, contact_title,
+      email_thread_id, contact_name, contact_first_name, contact_email, contact_title,
       email_verification_status, email_verification_confidence, email_verified_at,
       trigger_score_peak,
       fit_updated_at, trigger_updated_at,
@@ -1917,7 +1922,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       @sequence_name, @pipeline_name, @routed_by, @sequence_status, @sequence_step, @next_action_date, @last_outreach_at, @email_last_message_id, @email_last_from, @assigned_mailbox_id,
       @email_last_thread_id, @email_last_draft_id, @email_last_reply_at, @email_reply_classification,
       @reply_classification_latest, @disposition_latest, @disposition_follow_up_at,
-      @email_thread_id, @contact_name, @contact_email, @contact_title,
+      @email_thread_id, @contact_name, @contact_first_name, @contact_email, @contact_title,
       @email_verification_status, @email_verification_confidence, @email_verified_at,
       @trigger_score_peak,
       @fit_updated_at, @trigger_updated_at,
@@ -1975,6 +1980,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     disposition_follow_up_at: row.disposition_follow_up_at || '',
     email_thread_id: row.email_thread_id || row.email_last_thread_id || '',
     contact_name: '',
+    contact_first_name: '',
     contact_email: '',
     contact_title: '',
     email_verification_status: row.email_verification_status || '',
@@ -2688,6 +2694,7 @@ const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
   const name = String(primaryContact?.full_name || primaryContact?.name || '');
   const projection = {
     contact_name: name,
+    contact_first_name: deriveContactFirstName(name),
     contact_title: String(primaryContact?.title || ''),
     contact_email: String(primaryContact?.email || ''),
     contact_name_primary: name,
@@ -2776,6 +2783,7 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
     const name = String(contact?.full_name || contact?.name || '');
     const projection: Record<string, string> = {
       contact_name: name,
+      contact_first_name: deriveContactFirstName(name),
       contact_title: String(contact?.title || ''),
       contact_email: String(contact?.email || ''),
       contact_name_primary: name,

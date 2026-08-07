@@ -12,6 +12,7 @@ import {
   type CampaignContact,
   type ContactDisposition,
 } from './contact-campaign.js';
+import { deriveContactFirstName } from './contact-name.js';
 
 export type ContactRow = {
   contact_id?: string;
@@ -217,6 +218,7 @@ export function denormalizedFieldsFromContact(
     out.contact_name_primary = name;
     out.owner_name = name;
   }
+  out.contact_first_name = deriveContactFirstName(name);
   if (title) {
     out.contact_title = title;
     out.contact_title_primary = title;
