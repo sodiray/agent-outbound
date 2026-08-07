@@ -880,7 +880,19 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         action_type: 'prepare_outbound',
         account_id: rowId,
         lifecycle_stage,
-        sequence_state: sequence_state === 'not_started' ? 'active' : sequence_state,
+        // Holding sequence states encode the same outgrown premise as the
+        // holding actions above and must clear with them. Preserving anything
+        // that was not `not_started` kept `recycle_wait` on a record that had
+        // improved from Tier D to Tier C: its action correctly recomputed to
+        // prepare_outbound while the sequence state still gated every send with
+        // `sequence_outbound_gated: sequence_state_recycle_wait`.
+        //
+        // Genuine in-flight states (active, waiting, paused_inbound,
+        // paused_review, completed) are preserved — they describe live work or
+        // a real interruption, not a stale hold.
+        sequence_state: ['not_started', 'recycle_wait', 'recycle_monitor'].includes(String(sequence_state))
+          ? 'active'
+          : sequence_state,
         work_state: 'content_generation',
         reason: `treatment_${treatment.treatment_tier}_ready_for_campaign`,
         on_success: 'execute_or_review',
@@ -1227,7 +1239,19 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     priority_json: JSON.stringify(priority),
     lifecycle_stage,
     work_state,
-    account_sequence_state: next_action?.sequence_state || bundle.sequence_state,
+    // A holding sequence state must not outlive the tier that justified it.
+    // The action guard above only runs when the action itself is recomputed, so
+    // a record whose action had already been corrected to `prepare_outbound`
+    // kept `recycle_wait` forever and every send was refused with
+    // `sequence_outbound_gated: sequence_state_recycle_wait`. Normalising here
+    // catches it regardless of which branch produced the action.
+    account_sequence_state: (() => {
+      const resolved = String(next_action?.sequence_state || bundle.sequence_state || '');
+      const holding = ['recycle_wait', 'recycle_monitor'].includes(resolved);
+      const outboundAction = ['prepare_outbound', 'send_email', 'send_linkedin', 'send_mail', 'phone_attempt']
+        .includes(String(next_action?.action_type || ''));
+      return holding && outboundAction ? 'active' : resolved;
+    })(),
     next_action_json: JSON.stringify(next_action),
     ...campaignExhaustionPatch,
     eligibility_outcome: eligibility.outcome,
