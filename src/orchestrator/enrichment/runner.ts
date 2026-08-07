@@ -598,6 +598,24 @@ export const dependencyValueForRecord = ({ dep, record, extra }) => {
   return (extra as any)?.[key];
 };
 
+export const dependencyFieldsForStep = (stepConfig: Record<string, unknown>) => {
+  const dependsOn = Array.isArray(stepConfig.depends_on) ? stepConfig.depends_on : [];
+  const inputs = Array.isArray(stepConfig.inputs) ? stepConfig.inputs : [];
+  return [...new Set([...dependsOn, ...inputs].map((value) => String(value).trim()).filter(Boolean))];
+};
+
+export const dependencyValuesForRecord = ({ stepConfig, record }: {
+  stepConfig: Record<string, unknown>;
+  record: Record<string, unknown>;
+}) => {
+  const extra = parseExtra(record.extra_json);
+  const depValues: Record<string, unknown> = {};
+  for (const dep of dependencyFieldsForStep(stepConfig)) {
+    depValues[dep] = dependencyValueForRecord({ dep, record, extra });
+  }
+  return depValues;
+};
+
 const resolveStepId = (step: any, index: number) => {
   const id = String(step?.id || step?.config?.id || '').trim();
   if (id) return id;
@@ -607,7 +625,7 @@ const resolveStepId = (step: any, index: number) => {
 // Non-writing count of what a pipeline enrich step WOULD do on the given rows:
 // how many would actually re-run vs be skipped (fresh cache or `when` mismatch).
 // Mirrors the per-record staleness logic in executeEnrichmentStepOnRecords so the
-// dry-run impact preview is accurate. (Pipeline enrich uses empty depValues.)
+// dry-run impact preview is accurate.
 export const countEnrichWorkForStep = ({ db, listDir = '', step, stepId = '', rows = [], force = false }: { db: any; listDir?: string; step: any; stepId?: string; rows?: any[]; force?: boolean }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
@@ -623,7 +641,7 @@ export const countEnrichWorkForStep = ({ db, listDir = '', step, stepId = '', ro
     if (!whenOutcome.passed) { result.skip_when += 1; continue; }
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
     if (
-      isEnrichFresh({ cached, stepConfig, depValues: {}, force })
+      isEnrichFresh({ cached, stepConfig, depValues: dependencyValuesForRecord({ stepConfig, record }), force })
       && declaredOutputsHaveAnyValue({ record, expectedOutputs })
     ) { result.skip_fresh += 1; continue; }
     result.would_enrich += 1;
@@ -910,13 +928,16 @@ export const executeEnrichmentStepOnRecords = async ({
 
   await mapWithConcurrency<any, void>((rows || []) as any[], async (record) => {
     const recordId = getRecordRowId(record);
-    const rowLabel = String(record?.business_name || recordId);
-    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
+    const currentRecord = dependencyFieldsForStep(stepConfig).length > 0
+      ? db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record
+      : record;
+    const rowLabel = String(currentRecord?.business_name || recordId);
+    const whenOutcome = shouldRunForRecord({ record: currentRecord, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) {
       upsertRecord({
         db,
         row: {
-          ...record,
+          ...currentRecord,
           [statusColumn]: 'skipped',
         },
       });
@@ -926,22 +947,23 @@ export const executeEnrichmentStepOnRecords = async ({
       return;
     }
 
-    const depHash = enrichDepHash(stepConfig, {});
+    const depValues = dependencyValuesForRecord({ stepConfig, record: currentRecord });
+    const depHash = enrichDepHash(stepConfig, depValues);
     const cached = readStaleness({ db, recordId, stepId: id });
 
     const expectedOutputs = Object.keys(declaredOutputs).length > 0
       ? declaredOutputs
       : legacyColumns;
     if (
-      isEnrichFresh({ cached, stepConfig, depValues: {}, force })
-      && declaredOutputsHaveAnyValue({ record, expectedOutputs })
+      isEnrichFresh({ cached, stepConfig, depValues, force })
+      && declaredOutputsHaveAnyValue({ record: currentRecord, expectedOutputs })
     ) {
       summary.skipped_fresh += 1;
       return;
     }
 
     const runAttempt = async (attempt: number) => {
-      const inputRecord = mergedRecordForEnrichment({ db, record });
+      const inputRecord = mergedRecordForEnrichment({ db, record: currentRecord });
       const result = await executeEnrichmentAction({
         db,
         mcp,
@@ -963,7 +985,7 @@ export const executeEnrichmentStepOnRecords = async ({
 
       if (isEnrichmentCeilingSkip(result)) {
         const detail = String(result.skip_detail || 'enrichment_ceiling');
-        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || currentRecord;
         const patch = enrichmentCeilingSkipPatch({
           record: currentRow,
           stepId: id,
@@ -1005,7 +1027,7 @@ export const executeEnrichmentStepOnRecords = async ({
         ensureRecordColumns({ db, columns: Object.keys(outputs) });
       }
 
-      const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+      const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || currentRecord;
       // Empty success: still do not clobber prior good site_text; record evidence only when material.
       const isEmptyOutcome = outcome === 'empty';
       const failedEmpty = isEmptyOutcome && Object.keys(outputs || {}).every((k) => isBlank(outputs?.[k]));
@@ -1064,7 +1086,7 @@ export const executeEnrichmentStepOnRecords = async ({
       const detail = formatErrorMessage(error);
       if (enrichStepUsesEmptyOnError(stepConfig)) {
         const outputs = emptyOutputsFor(outputZod);
-        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || currentRecord;
         const patch = applyOutputsWithEvidence({
           db,
           step: { ...step, config: stepConfig, __list_dir: listDir },
@@ -1379,12 +1401,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             return;
           }
 
-          const dependsOn = Array.isArray(stepConfig.depends_on) ? stepConfig.depends_on : [];
-          const depValues: Record<string, any> = {};
-          const extra = parseExtra(record.extra_json);
-          for (const dep of dependsOn) {
-            depValues[dep] = dependencyValueForRecord({ dep, record, extra });
-          }
+          const depValues = dependencyValuesForRecord({ stepConfig, record });
           const depHash = enrichDepHash(stepConfig, depValues);
           const cached = readStaleness({ db, recordId, stepId: id });
 

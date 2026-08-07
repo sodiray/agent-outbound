@@ -23,7 +23,9 @@ import { recordCostEvent } from '../lib/costs.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
 import {
   buildOutputZodSchema,
+  dependencyFieldsForStep,
   dependencyValueForRecord,
+  dependencyValuesForRecord,
   emptyOutputsFor,
   enrichDepHash,
   enrichmentActionNeedsMcp,
@@ -221,14 +223,34 @@ const emit = ({ logger, event }: { logger?: Logger; event: Record<string, unknow
   emitActivity(event);
 };
 
+const claimPacketDependencyFields = ['vertical', 'diagnostic_family'];
+
+const dependencyFieldsFor = (stepConfig: Record<string, unknown>) => {
+  const outputs = getDeclaredOutputs(stepConfig);
+  const claimPacketFields = Object.prototype.hasOwnProperty.call(outputs, 'permitted_claim_packet_json')
+    ? claimPacketDependencyFields
+    : [];
+  return [...new Set([...dependencyFieldsForStep(stepConfig), ...claimPacketFields])];
+};
+
+const currentRecordForDependencies = ({ db, record, stepConfig }: {
+  db: DbLike;
+  record: GenerateRecord;
+  stepConfig: Record<string, unknown>;
+}) => {
+  if (dependencyFieldsFor(stepConfig).length === 0) return record;
+  const recordId = getRecordRowId(record);
+  const current = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId);
+  return (current as GenerateRecord) || record;
+};
+
 const dependencyValuesFor = ({ stepConfig, record }: {
   stepConfig: Record<string, unknown>;
   record: GenerateRecord;
 }) => {
-  const dependsOn = Array.isArray(stepConfig.depends_on) ? stepConfig.depends_on : [];
+  const depValues = dependencyValuesForRecord({ stepConfig, record });
   const extra = parseExtra(record.extra_json);
-  const depValues: Record<string, unknown> = {};
-  for (const dep of dependsOn) {
+  for (const dep of dependencyFieldsFor(stepConfig)) {
     depValues[String(dep)] = dependencyValueForRecord({ dep, record, extra });
   }
   return depValues;
@@ -312,10 +334,11 @@ export const runGenerateStep = async ({
 
   await mapWithConcurrency<GenerateRecord, void>(rows || [], async (record) => {
     const recordId = getRecordRowId(record);
-    const rowLabel = String(record.business_name || recordId);
+    const currentRecord = currentRecordForDependencies({ db, record, stepConfig });
+    const rowLabel = String(currentRecord.business_name || recordId);
     const existing = findAsset({ db, rowId: recordId, stepId: id });
 
-    const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
+    const whenOutcome = shouldRunForRecord({ record: currentRecord, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) {
       summary.skipped_when += 1;
       summary.record_ids.push(recordId);
@@ -328,7 +351,7 @@ export const runGenerateStep = async ({
       return;
     }
 
-    const depValues = dependencyValuesFor({ stepConfig, record });
+    const depValues = dependencyValuesFor({ stepConfig, record: currentRecord });
     const depHash = enrichDepHash(stepConfig, depValues);
     const cached = readStaleness({ db, recordId, stepId: id });
     if (existing && isEnrichFresh({ cached, stepConfig, depValues, force })) {
@@ -337,7 +360,7 @@ export const runGenerateStep = async ({
     }
 
     try {
-      const inputRecord = mergedRecordForEnrichment({ db, record });
+      const inputRecord = mergedRecordForEnrichment({ db, record: currentRecord });
       const executionResult = await executeEnrichmentAction({
         db,
         mcp,
@@ -554,6 +577,52 @@ export const runGenerateStep = async ({
             packet = typeof packetRaw === 'string' ? JSON.parse(String(packetRaw)) : packetRaw;
           }
           parsedOutputs.claim_packet_assemble_error = String((assembleErr as Error)?.message || assembleErr);
+        }
+
+        const withholdReason = String(packet?.withhold_reason || '').trim();
+        const isClaimPacketStep = Object.prototype.hasOwnProperty.call(expectedOutputs, 'permitted_claim_packet_json');
+        if (isClaimPacketStep && withholdReason) {
+          ensureRecordColumns({
+            db,
+            columns: [
+              'claim_audit_passed',
+              'claim_audit_json',
+              'permitted_claim_packet_json',
+              'economic_scenarios_json',
+              'claim_packet_assemble_error',
+            ],
+          });
+          upsertRecord({
+            db,
+            row: {
+              ...inputRecord,
+              ...parsedOutputs,
+              permitted_claim_packet_json: JSON.stringify(packet),
+              claim_audit_passed: 0,
+              claim_audit_json: JSON.stringify({
+                passed: false,
+                authorized: [],
+                unauthorized: [{ text: '', reason: withholdReason }],
+              }),
+            },
+          });
+          persistAsset({
+            db,
+            existing: saved,
+            recordId,
+            stepId: id,
+            label: String(stepConfig.label || ''),
+            result: referenceAsset.result,
+            outputsJson,
+            isReference,
+            status: 'needs_repair',
+            reason: `withheld_claim_packet:${withholdReason}`,
+          });
+          summary.failed += 1;
+          summary.errors.push({ record_id: recordId, error: `withheld_claim_packet:${withholdReason}` });
+          summary.record_ids.push(recordId);
+          emit({ logger, event: { event: 'error', phase: 'generate', step: id, row: rowLabel, detail: `withheld_claim_packet:${withholdReason}` } });
+          return;
         }
 
         if (packet && Array.isArray(packet.permitted_claims) && assetText) {
