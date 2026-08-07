@@ -1281,6 +1281,12 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
     const costHydrate = hydrateRecordCostLedger({ db, recordId: rowId, record });
     const result = applyOutboundPolicy({
       record: { ...record, ...costHydrate.patch },
+      // Without listDir the vertical taxonomy cannot resolve, and taxonomy
+      // resolution is fail-closed — every classified record is forced to
+      // enrichment_hold with `taxonomy_not_loaded`. An absolute path baked into
+      // the engine used to hide this; removing it exposed that this call site
+      // never passed the list directory at all.
+      listDir,
       recomputeFitFromBreakdown: true,
       contacts: campaignContacts.length ? campaignContacts : undefined,
       campaignId: `camp_${record._row_id}`,
