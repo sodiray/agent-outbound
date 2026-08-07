@@ -40,6 +40,7 @@ import { assertWorkAllowed } from './forbidden-channels.js';
 import {
   buildIdentityResolution,
   buildObservationStore,
+  derivePhoneConfidence,
   detectContradictions,
   resolveFieldPreferringEvidence,
 } from './evidence.js';
@@ -474,7 +475,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const timingCalc = calculateTimingScore(record);
   const timingScore = timingCalc.timing_score;
   const strongTimingSignalCount = countStrongTimingSignals(timingCalc.signals);
-  const reachability = evaluateReachability(record);
+  const storedPhoneConfidence = num(record.phone_confidence, num(record.confidence_phone, null));
+  const phoneConfidence = storedPhoneConfidence ?? derivePhoneConfidence(record);
+  const reachability = evaluateReachability({ ...record, phone_confidence: phoneConfidence });
   const reachFlags = reachabilityToChannelFlags(reachability);
   // Prefer production cost_events rebuild (input.costLedger / override) over stale JSON.
   const costLedger = input.costLedger
@@ -986,7 +989,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       reachFlags.email?.confidence
       ?? num(record.email_verification_confidence, num(record.email_confidence, 0))
       ?? 0,
-    phone_confidence: reachFlags.phone?.confidence ?? num(record.phone_confidence, 0) ?? 0,
+    phone_confidence: reachFlags.phone?.confidence ?? phoneConfidence,
     linkedin_confidence: reachFlags.linkedin?.confidence ?? num(record.linkedin_confidence, 0) ?? 0,
     mail_confidence: mailConfidence,
   };
@@ -1217,6 +1220,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     buying_center_role: buyerAffiliation.role ?? '',
     timing_json: JSON.stringify(timingCalc),
     timing_score: timingScore,
+    phone_confidence: phoneConfidence,
     reachability_json: JSON.stringify(reachability),
     cost_ledger_json: JSON.stringify({
       ...costLedger,

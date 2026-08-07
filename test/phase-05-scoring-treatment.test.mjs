@@ -55,6 +55,7 @@ import {
   TIMING_RULE_VERSION,
   REACHABILITY_RULE_VERSION,
 } from '../dist/orchestrator/policy/timing-reachability.js';
+import { derivePhoneConfidence } from '../dist/orchestrator/policy/evidence.js';
 import {
   parseCostLedger,
   appendCostEntry,
@@ -1292,6 +1293,68 @@ test('phase-05 reachability: named channel states; apply writes reachability_jso
   const email = reach.channels.find((c) => c.channel === 'email');
   assert.equal(email.state, 'named_validated');
   assert.equal(email.ready, true);
+});
+
+test('phone reachability: structured, well-formed source evidence persists a usable channel', () => {
+  const sourced = {
+    phone: '+12085551212',
+    phone_source_kind: 'structured',
+  };
+  const phoneConfidence = derivePhoneConfidence(sourced);
+  assert.equal(phoneConfidence, 85);
+
+  const policy = applyOutboundPolicy({
+    record: { _row_id: 'phone_source_1', ...sourced },
+  });
+  assert.equal(policy.patch.phone_confidence, phoneConfidence);
+
+  const reachability = evaluateReachability({ ...sourced, phone_confidence: phoneConfidence });
+  const phone = reachability.channels.find((channel) => channel.channel === 'phone');
+  assert.equal(phone?.state, 'named_validated');
+  assert.equal(phone?.ready, true);
+
+  const readiness = evaluateOutboundReadiness({
+    eligible: true,
+    suppressed: false,
+    identityConfidence: 90,
+    materialContradiction: false,
+    treatmentTier: 'B',
+    channels: { phone: { ready: phone?.ready === true, confidence: phone?.confidence } },
+    contentReady: true,
+    withinBudget: true,
+    collision: false,
+    hasNextAction: true,
+  });
+  assert.ok(readiness.permitted_channels.includes('phone'));
+});
+
+test('phone reachability: absent, malformed, and structurally suppressed phones remain excluded', () => {
+  const records = [
+    {},
+    { phone: 'not a phone', phone_source_kind: 'structured' },
+    { phone: '+12085551212', phone_source_kind: 'structured', dne_phone: true },
+  ];
+
+  for (const record of records) {
+    const phoneConfidence = derivePhoneConfidence(record);
+    const reachability = evaluateReachability({ ...record, phone_confidence: phoneConfidence });
+    const phone = reachability.channels.find((channel) => channel.channel === 'phone');
+    assert.equal(phone?.ready, false);
+
+    const readiness = evaluateOutboundReadiness({
+      eligible: true,
+      suppressed: false,
+      identityConfidence: 90,
+      materialContradiction: false,
+      treatmentTier: 'B',
+      channels: { phone: { ready: phone?.ready === true, confidence: phone?.confidence } },
+      contentReady: true,
+      withinBudget: true,
+      collision: false,
+      hasNextAction: true,
+    });
+    assert.ok(!readiness.permitted_channels.includes('phone'));
+  }
 });
 
 test('phase-05 cost-ledger: ceilings feed readiness; overspend does not authorize send', () => {

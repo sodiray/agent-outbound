@@ -146,6 +146,12 @@ const IDENTITY_CONFIDENCE_WEIGHTS = {
   place_id: 20,
 } as const;
 
+const PHONE_CONFIDENCE_WEIGHTS = {
+  present: 15,
+  well_formed: 35,
+  structured_source: 35,
+} as const;
+
 const hasLiteralSupport = (resolution: FieldResolution | undefined): boolean => (
   Boolean(
     resolution
@@ -184,6 +190,39 @@ export function deriveIdentityConfidence(resolution: Omit<IdentityResolution, 'i
   ), 0);
   const penalty = Math.min(40, unresolvedCount * 10 + contradictionCount * 25);
   return Math.max(0, Math.min(100, supportedScore - penalty));
+}
+
+const truthyFlag = (value: unknown): boolean => {
+  if (value === true || value === 1) return true;
+  if (value === false || value === 0 || value == null || value === '') return false;
+  return ['1', 'true', 'yes'].includes(String(value).trim().toLowerCase());
+};
+
+const phoneIsWellFormed = (value: unknown): boolean => {
+  const phone = text(value);
+  if (!phone || !/^\+?[\d().\-\s]+$/u.test(phone)) return false;
+  const digits = phone.replace(/\D/gu, '');
+  return digits.length >= 7 && digits.length <= 15;
+};
+
+/**
+ * Deterministic, fail-closed phone confidence from persisted channel evidence.
+ * A canonical phone needs both a well-formed value and structured-field provenance;
+ * free text alone cannot satisfy the reachability threshold.
+ */
+export function derivePhoneConfidence(record: Record<string, unknown>): number {
+  const phone = text(record.phone) || text(record.contact_phone);
+  if (!phone) return 0;
+  if (truthyFlag(record.dne_phone) || truthyFlag(record.phone_suppressed)) return 0;
+
+  const present = PHONE_CONFIDENCE_WEIGHTS.present;
+  if (!phoneIsWellFormed(phone)) return present;
+
+  const structuredSource = text(record.phone_source_kind).toLowerCase() === 'structured';
+  const evidenceScore = present
+    + PHONE_CONFIDENCE_WEIGHTS.well_formed
+    + (structuredSource ? PHONE_CONFIDENCE_WEIGHTS.structured_source : 0);
+  return Math.max(0, Math.min(100, evidenceScore));
 }
 
 export type ObservationStore = {

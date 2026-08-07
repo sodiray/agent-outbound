@@ -71,6 +71,10 @@ const SCHEMA_SQL = `
     disqualified_gate TEXT DEFAULT '',
     disqualify_reason TEXT DEFAULT '',
     phone TEXT DEFAULT '',
+    phone_confidence REAL DEFAULT NULL,
+    phone_source_kind TEXT DEFAULT '',
+    contact_linkedin_url TEXT DEFAULT '',
+    linkedin_confidence REAL DEFAULT NULL,
     email_primary TEXT DEFAULT '',
     contact_name_primary TEXT DEFAULT '',
     contact_title_primary TEXT DEFAULT '',
@@ -973,6 +977,10 @@ const canaryScopedRecordIds = (db: any): string[] | null => {
 };
 
 const ensureRecordCompatibility = (db) => {
+  try { db.exec('ALTER TABLE records ADD COLUMN phone_confidence REAL DEFAULT NULL'); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN phone_source_kind TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE records ADD COLUMN contact_linkedin_url TEXT DEFAULT ''"); } catch {}
+  try { db.exec('ALTER TABLE records ADD COLUMN linkedin_confidence REAL DEFAULT NULL'); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN place_id TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE records ADD COLUMN primary_type TEXT DEFAULT ''"); } catch {}
   try { db.exec('ALTER TABLE records ADD COLUMN user_rating_count INTEGER DEFAULT 0'); } catch {}
@@ -2678,6 +2686,10 @@ const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
     email_verification_status: String(primaryContact?.email_verification_status || ''),
     email_verification_confidence: String(primaryContact?.email_verification_confidence || 0),
     email_verified_at: String(primaryContact?.email_verified_at || ''),
+    contact_linkedin_url: String(primaryContact?.linkedin_url || ''),
+    linkedin_confidence: primaryContact?.linkedin_url
+      ? Math.max(0, Math.min(100, Number(primaryContact?.confidence || 0)))
+      : 0,
   };
   const writableProjection = Object.entries(projection)
     .filter(([column]) => recordColumns.has(column));
@@ -2739,7 +2751,7 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
     // Ensure optional outreach fields exist before projecting.
     for (const col of [
       'contact_phone', 'contact_linkedin_url', 'active_contact_id',
-      'email_verification_status', 'email_verification_confidence', 'email_verified_at',
+      'email_verification_status', 'email_verification_confidence', 'email_verified_at', 'linkedin_confidence',
     ]) {
       if (!recordColumns.has(col) && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(col)) {
         try {
@@ -2761,6 +2773,9 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
       owner_name: name,
       contact_phone: String(contact?.phone || ''),
       contact_linkedin_url: String(contact?.linkedin_url || ''),
+      linkedin_confidence: contact?.linkedin_url
+        ? String(Math.max(0, Math.min(100, Number(contact?.confidence || 0))))
+        : '0',
       active_contact_id: String(contact?.contact_id || contact?.id || normalizedContactId),
       email_verification_status: String(contact?.email_verification_status || ''),
       email_verification_confidence: String(contact?.email_verification_confidence || 0),

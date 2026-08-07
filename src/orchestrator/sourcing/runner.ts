@@ -33,6 +33,7 @@ import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { loadTools, toolSpecNeedsMcp } from '../runtime/tools.js';
 import { matchExcludeRule, normalizeExcludeRules, type SourceExcludeRule } from '../lib/source-exclude.js';
 import { assignTerritories } from '../territories/assign.js';
+import { derivePhoneConfidence } from '../policy/evidence.js';
 import {
   GEO_SUBDIVISION_RADIUS_FACTOR,
   subdivisionChildCenters,
@@ -152,12 +153,37 @@ const toSearchRows = async ({
   };
 };
 
+const markStructuredPhoneSource = ({
+  row,
+  mapped,
+  outputMap,
+}: {
+  row: Record<string, unknown>;
+  mapped: Record<string, unknown>;
+  outputMap: Record<string, string>;
+}) => {
+  const mappedPhone = Object.entries(outputMap || {}).some(([first, second]) => (
+    (String(first).trim() === 'phone' && valueAtPath(row, String(second)) !== undefined)
+    || (String(second).trim() === 'phone' && row?.[first] !== undefined)
+  ));
+  const canonicalPhone = Object.prototype.hasOwnProperty.call(row || {}, 'phone')
+    && row?.phone !== undefined;
+  const alternateStructuredPhone = row?.nationalPhoneNumber !== undefined;
+  if (
+    String(mapped.phone || '').trim()
+    && (mappedPhone || canonicalPhone || alternateStructuredPhone)
+  ) {
+    return { ...mapped, phone_source_kind: 'structured' };
+  }
+  return mapped;
+};
+
 const mapSearchRow = ({ row, outputMap }) => {
   const mapped = { ...row };
   for (const [sourceKey, targetKey] of Object.entries(outputMap || {})) {
     mapped[String(targetKey)] = row[sourceKey];
   }
-  return mapped;
+  return markStructuredPhoneSource({ row, mapped, outputMap });
 };
 
 const readJsonFromListDir = (listDir: string, path: string) => {
@@ -370,7 +396,7 @@ export const mapStrategyRow = ({ row, outputMap }: { row: any; outputMap: Record
   if (mapped.lng === undefined && row?.location?.longitude !== undefined) mapped.lng = row.location.longitude;
   if (mapped.latitude === undefined && mapped.lat !== undefined) mapped.latitude = mapped.lat;
   if (mapped.longitude === undefined && mapped.lng !== undefined) mapped.longitude = mapped.lng;
-  return mapped;
+  return markStructuredPhoneSource({ row, mapped, outputMap });
 };
 
 const linkedinUrnFrom = (value: unknown) => {
@@ -390,7 +416,7 @@ export const mapLinkedinProfileRow = ({
 }: {
   row: Record<string, unknown>;
   params: Record<string, unknown>;
-}) => {
+}): Record<string, unknown> => {
   const rawLocation = row.location;
   const location = rawLocation && typeof rawLocation === 'object' && !Array.isArray(rawLocation)
     ? String((rawLocation as Record<string, unknown>).linkedinText || '').trim()
@@ -709,7 +735,7 @@ export const processAndInsertRows = async ({
     const id = getRecordRowId(row);
 
     try {
-      const shape = rowToRecordShape({
+      const baseShape = rowToRecordShape({
         listName,
         row: {
           ...row,
@@ -719,6 +745,10 @@ export const processAndInsertRows = async ({
           sequence_step: 0,
         },
       });
+      const shape = {
+        ...baseShape,
+        phone_confidence: derivePhoneConfidence(baseShape),
+      };
 
       if (String(row?.source || '').trim() === LINKEDIN_PROFILE_SEARCH_SOURCE) {
         const existing = db.prepare('SELECT * FROM records WHERE _row_id = ? LIMIT 1').get(getRecordRowId(shape));

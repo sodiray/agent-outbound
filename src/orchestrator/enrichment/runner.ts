@@ -771,7 +771,6 @@ export const executeEnrichmentAction = async ({
       const outputs: Record<string, unknown> = {
         company_resolution: record.company_resolution || 'resolved',
         linkedin_company_url: record.linkedin_company_url || 'https://www.linkedin.com/company/fixture',
-        linkedin_confidence: record.linkedin_confidence ?? 90,
       };
       return {
         outputs,
