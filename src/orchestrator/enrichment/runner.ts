@@ -43,6 +43,7 @@ import type {
   PhoneConfidenceConfigInput,
   PostcardConfigInput,
   ReachabilityConfigInput,
+  ContactPolicyConfigInput,
 } from '../../schemas/config.js';
 
 const zeroUsage = () => ({
@@ -730,6 +731,7 @@ export const executeEnrichmentAction = async ({
   postcard,
   enrichmentRepair,
   enrichmentBudget,
+  contactPolicy,
   outputSchema,
   toolCatalog,
 }: {
@@ -754,6 +756,7 @@ export const executeEnrichmentAction = async ({
   postcard?: PostcardConfigInput;
   enrichmentRepair?: EnrichmentRepairConfigInput;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
+  contactPolicy?: ContactPolicyConfigInput;
   outputSchema: z.ZodTypeAny;
   toolCatalog?: ToolCatalog;
 }) => {
@@ -886,6 +889,7 @@ export const executeEnrichmentAction = async ({
       postcard,
       enrichmentRepair,
       enrichmentBudget,
+      contactPolicy,
     });
     // Map declared outputs from patch when present
     const outputs: Record<string, unknown> = { ...result.patch };
@@ -1091,6 +1095,7 @@ export const executeEnrichmentStepOnRecords = async ({
         postcard: config?.score?.postcard,
         enrichmentRepair: config?.score?.enrichment_repair,
         enrichmentBudget: config?.score?.enrichment_budget,
+        contactPolicy: config?.contact_policy,
         outputSchema: outputZod,
         toolCatalog,
       });
@@ -1560,6 +1565,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               postcard: config?.score?.postcard,
               enrichmentRepair: config?.score?.enrichment_repair,
               enrichmentBudget: config?.score?.enrichment_budget,
+              contactPolicy: config?.contact_policy,
               outputSchema: outputZod,
               toolCatalog,
             });

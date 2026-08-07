@@ -2,6 +2,12 @@
  * One-account campaign with ordered contacts and at most one active contact.
  */
 
+import {
+  DEFAULT_CONTACT_POLICY,
+  resolveContactPolicy,
+  type ContactPolicyConfigInput,
+} from '../../schemas/config.js';
+
 export type ContactDisposition =
   | 'active_target'
   | 'eligible_target'
@@ -35,23 +41,14 @@ export type AccountCampaign = {
 
 export const CONTACT_CAMPAIGN_RULE_VERSION = 'tv-contact-campaign-v1';
 
-/** Tier-specific per-contact automated-action allowances (provisional). */
-/** Doc-aligned per-contact automated-action allowances (business-day process). */
+/** Backward-compatible exports; pipeline defaults now live in contact_policy. */
 export const PER_CONTACT_ALLOWANCES: Record<string, number> = {
-  A: 3,
-  B: 2,
-  C: 1,
-  D: 0,
-  enrichment_hold: 0,
+  ...DEFAULT_CONTACT_POLICY.per_contact_allowances,
 };
 
-/** Calendar-day storage of campaign max age (process module enforces business days). */
+/** Calendar-day storage mirrors the configured business-day enforcement values. */
 export const CAMPAIGN_MAX_AGE_DAYS: Record<string, number> = {
-  A: 40,
-  B: 30,
-  C: 20,
-  D: 0,
-  enrichment_hold: 14,
+  ...DEFAULT_CONTACT_POLICY.campaign.max_age_business_days,
 };
 
 /**
@@ -63,7 +60,9 @@ export function buildContactPlan(input: {
   contacts: CampaignContact[];
   treatment_tier: string;
   mail_treatment?: AccountCampaign['mail_treatment'];
+  contactPolicy?: ContactPolicyConfigInput;
 }): AccountCampaign {
+  const contactPolicy = resolveContactPolicy(input.contactPolicy);
   const eligible = input.contacts
     .filter((c) => c.outbound_disposition === 'eligible_target' || c.outbound_disposition === 'active_target')
     .filter((c) => !c.suppression_state || c.suppression_state === 'none')
@@ -91,8 +90,10 @@ export function buildContactPlan(input: {
     excluded_contact_ids: excluded,
     mail_allocated: false,
     mail_treatment: input.mail_treatment || 'none',
-    per_contact_action_allowance: PER_CONTACT_ALLOWANCES[input.treatment_tier] ?? 0,
-    campaign_max_age_days: CAMPAIGN_MAX_AGE_DAYS[input.treatment_tier] ?? 30,
+    per_contact_action_allowance: contactPolicy.per_contact_allowances[input.treatment_tier] ?? 0,
+    campaign_max_age_days:
+      contactPolicy.campaign.max_age_business_days[input.treatment_tier]
+      ?? contactPolicy.campaign.max_age_business_days_unknown_tier,
     // First build stamps campaign start so age enforcement has a real origin.
     started_at: new Date().toISOString(),
     selection_rule_version: CONTACT_CAMPAIGN_RULE_VERSION,

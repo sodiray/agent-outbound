@@ -1018,6 +1018,7 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           postcard: scoreConfig?.postcard,
           enrichmentRepair: scoreConfig?.enrichment_repair,
           enrichmentBudget: scoreConfig?.enrichment_budget,
+          contactPolicy: config?.contact_policy,
         });
         const updated = {
           ...prePolicy,

@@ -87,6 +87,151 @@ export const DEFAULT_SCORE_ENRICHMENT_BUDGET = {
   },
 } as const;
 
+export const DEFAULT_CONTACT_POLICY = {
+  per_contact_allowances: {
+    A: 3,
+    B: 2,
+    C: 1,
+    D: 0,
+    enrichment_hold: 0,
+  },
+  campaign: {
+    max_age_business_days: {
+      A: 40,
+      B: 30,
+      C: 20,
+      D: 0,
+      enrichment_hold: 14,
+    },
+    max_age_business_days_unknown_tier: 30,
+    quiet_period_business_days: 3,
+    annual_campaign_limit: 2,
+    recycle_wait_days: {
+      A: 90,
+      B: 60,
+      C: 45,
+      D: 30,
+      enrichment_hold: 14,
+    },
+    recycle_wait_days_unknown_tier: 60,
+  },
+  phone: {
+    attempt_window: {
+      start_hour: 9,
+      end_hour: 17,
+      weekdays_only: true,
+    },
+    max_attempts: {
+      default: 3,
+      A: 4,
+      B: 3,
+      C: 0,
+      D: 0,
+      enrichment_hold: 0,
+    },
+    callback_delay_hours: 24,
+  },
+  linkedin: {
+    invite_cooldown_hours: 24,
+  },
+  fallback_wait_days: 2,
+} as const;
+
+type ContactPolicyTier = 'A' | 'B' | 'C' | 'D' | 'enrichment_hold';
+
+export type ContactPolicyConfig = {
+  per_contact_allowances: Record<ContactPolicyTier, number>;
+  campaign: {
+    max_age_business_days: Record<ContactPolicyTier, number>;
+    max_age_business_days_unknown_tier: number;
+    quiet_period_business_days: number;
+    annual_campaign_limit: number;
+    recycle_wait_days: Record<ContactPolicyTier, number>;
+    recycle_wait_days_unknown_tier: number;
+  };
+  phone: {
+    attempt_window: {
+      start_hour: number;
+      end_hour: number;
+      weekdays_only: boolean;
+    };
+    max_attempts: Record<'default' | ContactPolicyTier, number>;
+    callback_delay_hours: number;
+  };
+  linkedin: {
+    invite_cooldown_hours: number;
+  };
+  fallback_wait_days: number;
+};
+
+export type ContactPolicyConfigInput = {
+  per_contact_allowances?: Partial<ContactPolicyConfig['per_contact_allowances']>;
+  campaign?: {
+    max_age_business_days?: Partial<ContactPolicyConfig['campaign']['max_age_business_days']>;
+    max_age_business_days_unknown_tier?: number;
+    quiet_period_business_days?: number;
+    annual_campaign_limit?: number;
+    recycle_wait_days?: Partial<ContactPolicyConfig['campaign']['recycle_wait_days']>;
+    recycle_wait_days_unknown_tier?: number;
+  };
+  phone?: {
+    attempt_window?: Partial<ContactPolicyConfig['phone']['attempt_window']>;
+    max_attempts?: Partial<ContactPolicyConfig['phone']['max_attempts']>;
+    callback_delay_hours?: number;
+  };
+  linkedin?: Partial<ContactPolicyConfig['linkedin']>;
+  fallback_wait_days?: number;
+};
+
+export const resolveContactPolicy = (
+  input: ContactPolicyConfigInput | undefined = undefined,
+): ContactPolicyConfig => ({
+  per_contact_allowances: {
+    ...DEFAULT_CONTACT_POLICY.per_contact_allowances,
+    ...(input?.per_contact_allowances || {}),
+  },
+  campaign: {
+    max_age_business_days: {
+      ...DEFAULT_CONTACT_POLICY.campaign.max_age_business_days,
+      ...(input?.campaign?.max_age_business_days || {}),
+    },
+    max_age_business_days_unknown_tier:
+      input?.campaign?.max_age_business_days_unknown_tier
+      ?? DEFAULT_CONTACT_POLICY.campaign.max_age_business_days_unknown_tier,
+    quiet_period_business_days:
+      input?.campaign?.quiet_period_business_days
+      ?? DEFAULT_CONTACT_POLICY.campaign.quiet_period_business_days,
+    annual_campaign_limit:
+      input?.campaign?.annual_campaign_limit
+      ?? DEFAULT_CONTACT_POLICY.campaign.annual_campaign_limit,
+    recycle_wait_days: {
+      ...DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days,
+      ...(input?.campaign?.recycle_wait_days || {}),
+    },
+    recycle_wait_days_unknown_tier:
+      input?.campaign?.recycle_wait_days_unknown_tier
+      ?? DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days_unknown_tier,
+  },
+  phone: {
+    attempt_window: {
+      ...DEFAULT_CONTACT_POLICY.phone.attempt_window,
+      ...(input?.phone?.attempt_window || {}),
+    },
+    max_attempts: {
+      ...DEFAULT_CONTACT_POLICY.phone.max_attempts,
+      ...(input?.phone?.max_attempts || {}),
+    },
+    callback_delay_hours:
+      input?.phone?.callback_delay_hours
+      ?? DEFAULT_CONTACT_POLICY.phone.callback_delay_hours,
+  },
+  linkedin: {
+    ...DEFAULT_CONTACT_POLICY.linkedin,
+    ...(input?.linkedin || {}),
+  },
+  fallback_wait_days: input?.fallback_wait_days ?? DEFAULT_CONTACT_POLICY.fallback_wait_days,
+});
+
 export type GoldenTicketConfigInput = {
   minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_GOLDEN_TICKET.minimums, number>>;
 };
@@ -862,6 +1007,87 @@ const ScoreTreatmentBandsSchema = z.object({
 
 const ConfidenceMinimumSchema = z.coerce.number().min(0).max(100);
 const NonNegativePolicyValueSchema = z.coerce.number().nonnegative();
+const NonNegativeWholePolicyValueSchema = z.coerce.number().int().nonnegative();
+
+const ContactPolicyTierValuesSchema = <T extends Record<ContactPolicyTier, number>>(defaults: T) => z.object({
+  A: NonNegativeWholePolicyValueSchema.default(defaults.A),
+  B: NonNegativeWholePolicyValueSchema.default(defaults.B),
+  C: NonNegativeWholePolicyValueSchema.default(defaults.C),
+  D: NonNegativeWholePolicyValueSchema.default(defaults.D),
+  enrichment_hold: NonNegativeWholePolicyValueSchema.default(defaults.enrichment_hold),
+}).default(() => ({ ...defaults }));
+
+const ContactPolicyPhoneAttemptWindowSchema = z.object({
+  start_hour: z.coerce.number().int().min(0).max(23)
+    .default(DEFAULT_CONTACT_POLICY.phone.attempt_window.start_hour),
+  end_hour: z.coerce.number().int().min(1).max(24)
+    .default(DEFAULT_CONTACT_POLICY.phone.attempt_window.end_hour),
+  weekdays_only: z.boolean().default(DEFAULT_CONTACT_POLICY.phone.attempt_window.weekdays_only),
+}).superRefine((window, ctx) => {
+  if (window.end_hour > window.start_hour) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'contact_policy.phone.attempt_window.end_hour must be after start_hour.',
+    path: ['end_hour'],
+  });
+}).default(() => ({ ...DEFAULT_CONTACT_POLICY.phone.attempt_window }));
+
+const ContactPolicyPhoneMaxAttemptsSchema = z.object({
+  default: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.default),
+  A: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.A),
+  B: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.B),
+  C: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.C),
+  D: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.D),
+  enrichment_hold: NonNegativeWholePolicyValueSchema.default(
+    DEFAULT_CONTACT_POLICY.phone.max_attempts.enrichment_hold,
+  ),
+}).default(() => ({ ...DEFAULT_CONTACT_POLICY.phone.max_attempts }));
+
+const ContactPolicySchema = z.object({
+  per_contact_allowances: ContactPolicyTierValuesSchema(DEFAULT_CONTACT_POLICY.per_contact_allowances),
+  campaign: z.object({
+    max_age_business_days: ContactPolicyTierValuesSchema(
+      DEFAULT_CONTACT_POLICY.campaign.max_age_business_days,
+    ),
+    max_age_business_days_unknown_tier: NonNegativeWholePolicyValueSchema.default(
+      DEFAULT_CONTACT_POLICY.campaign.max_age_business_days_unknown_tier,
+    ),
+    quiet_period_business_days: NonNegativeWholePolicyValueSchema.default(
+      DEFAULT_CONTACT_POLICY.campaign.quiet_period_business_days,
+    ),
+    annual_campaign_limit: NonNegativeWholePolicyValueSchema.default(
+      DEFAULT_CONTACT_POLICY.campaign.annual_campaign_limit,
+    ),
+    recycle_wait_days: ContactPolicyTierValuesSchema(DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days),
+    recycle_wait_days_unknown_tier: NonNegativeWholePolicyValueSchema.default(
+      DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days_unknown_tier,
+    ),
+  }).default(() => ({
+    max_age_business_days: { ...DEFAULT_CONTACT_POLICY.campaign.max_age_business_days },
+    max_age_business_days_unknown_tier: DEFAULT_CONTACT_POLICY.campaign.max_age_business_days_unknown_tier,
+    quiet_period_business_days: DEFAULT_CONTACT_POLICY.campaign.quiet_period_business_days,
+    annual_campaign_limit: DEFAULT_CONTACT_POLICY.campaign.annual_campaign_limit,
+    recycle_wait_days: { ...DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days },
+    recycle_wait_days_unknown_tier: DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days_unknown_tier,
+  })),
+  phone: z.object({
+    attempt_window: ContactPolicyPhoneAttemptWindowSchema,
+    max_attempts: ContactPolicyPhoneMaxAttemptsSchema,
+    callback_delay_hours: NonNegativePolicyValueSchema.default(
+      DEFAULT_CONTACT_POLICY.phone.callback_delay_hours,
+    ),
+  }).default(() => ({
+    attempt_window: { ...DEFAULT_CONTACT_POLICY.phone.attempt_window },
+    max_attempts: { ...DEFAULT_CONTACT_POLICY.phone.max_attempts },
+    callback_delay_hours: DEFAULT_CONTACT_POLICY.phone.callback_delay_hours,
+  })),
+  linkedin: z.object({
+    invite_cooldown_hours: NonNegativePolicyValueSchema.default(
+      DEFAULT_CONTACT_POLICY.linkedin.invite_cooldown_hours,
+    ),
+  }).default(() => ({ ...DEFAULT_CONTACT_POLICY.linkedin })),
+  fallback_wait_days: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.fallback_wait_days),
+}).default(() => resolveContactPolicy());
 
 const GoldenTicketConfigSchema = z.object({
   minimums: z.object({
@@ -1410,6 +1636,8 @@ export const ConfigSchema = z.object({
   }).partial().default({}),
   pipeline: z.array(PipelineStepSchema).default([]),
   score: ScoreSchema,
+  /** Pipeline-owned limits that determine how often a person is contacted. */
+  contact_policy: ContactPolicySchema,
   sequences: z.record(SequenceSchema).default({ default: { steps: [] } }),
   templates: z.record(TemplateSchema).default({}),
   ai: AiSchema.default({}),
@@ -1440,6 +1668,85 @@ export const ConfigSchema = z.object({
 
 // Fold a legacy fit/trigger/priority score block into the single-score shape so
 // existing configs keep validating and scoring after the collapse to one score.
+const coerceLegacyContactPolicy = (raw: unknown) => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+  const config = raw as Record<string, unknown>;
+  const contactPolicy = config.contact_policy && typeof config.contact_policy === 'object' && !Array.isArray(config.contact_policy)
+    ? config.contact_policy as Record<string, unknown>
+    : {};
+  const channels = config.channels && typeof config.channels === 'object' && !Array.isArray(config.channels)
+    ? config.channels as Record<string, unknown>
+    : {};
+  const legacyPhone = channels.phone && typeof channels.phone === 'object' && !Array.isArray(channels.phone)
+    ? channels.phone as Record<string, unknown>
+    : {};
+  const legacyLinkedin = channels.linkedin && typeof channels.linkedin === 'object' && !Array.isArray(channels.linkedin)
+    ? channels.linkedin as Record<string, unknown>
+    : {};
+  const phone = contactPolicy.phone && typeof contactPolicy.phone === 'object' && !Array.isArray(contactPolicy.phone)
+    ? contactPolicy.phone as Record<string, unknown>
+    : {};
+  const attemptWindow = phone.attempt_window && typeof phone.attempt_window === 'object' && !Array.isArray(phone.attempt_window)
+    ? phone.attempt_window as Record<string, unknown>
+    : {};
+  const linkedin = contactPolicy.linkedin && typeof contactPolicy.linkedin === 'object' && !Array.isArray(contactPolicy.linkedin)
+    ? contactPolicy.linkedin as Record<string, unknown>
+    : {};
+  const legacyMaxAttempts = legacyPhone.max_attempts ?? legacyPhone.maxAttempts;
+  const maxAttempts = phone.max_attempts && typeof phone.max_attempts === 'object' && !Array.isArray(phone.max_attempts)
+    ? phone.max_attempts as Record<string, unknown>
+    : legacyMaxAttempts === undefined
+      ? undefined
+      : {
+        default: legacyMaxAttempts,
+        A: legacyMaxAttempts,
+        B: legacyMaxAttempts,
+        C: legacyMaxAttempts,
+        D: legacyMaxAttempts,
+        enrichment_hold: legacyMaxAttempts,
+      };
+
+  return {
+    ...config,
+    contact_policy: {
+      ...contactPolicy,
+      phone: {
+        ...phone,
+        attempt_window: {
+          ...attemptWindow,
+          ...(attemptWindow.start_hour === undefined && attemptWindow.startHour === undefined
+            && (legacyPhone.start_hour !== undefined || legacyPhone.startHour !== undefined)
+            ? { start_hour: legacyPhone.start_hour ?? legacyPhone.startHour }
+            : {}),
+          ...(attemptWindow.end_hour === undefined && attemptWindow.endHour === undefined
+            && (legacyPhone.end_hour !== undefined || legacyPhone.endHour !== undefined)
+            ? { end_hour: legacyPhone.end_hour ?? legacyPhone.endHour }
+            : {}),
+          ...(attemptWindow.weekdays_only === undefined && attemptWindow.weekdaysOnly === undefined
+            && (legacyPhone.weekdays_only !== undefined || legacyPhone.weekdaysOnly !== undefined)
+            ? { weekdays_only: legacyPhone.weekdays_only ?? legacyPhone.weekdaysOnly }
+            : {}),
+        },
+        ...(maxAttempts ? { max_attempts: maxAttempts } : {}),
+        ...(phone.callback_delay_hours === undefined && phone.callbackDelayHours === undefined
+          && (legacyPhone.callback_delay_hours !== undefined || legacyPhone.callbackDelayHours !== undefined)
+          ? { callback_delay_hours: legacyPhone.callback_delay_hours ?? legacyPhone.callbackDelayHours }
+          : {}),
+      },
+      linkedin: {
+        ...linkedin,
+        ...(linkedin.invite_cooldown_hours === undefined && linkedin.inviteCooldownHours === undefined
+          && (legacyLinkedin.connect_cooldown_hours !== undefined || legacyLinkedin.cooldown_hours !== undefined)
+          ? {
+            invite_cooldown_hours:
+              legacyLinkedin.connect_cooldown_hours ?? legacyLinkedin.cooldown_hours,
+          }
+          : {}),
+      },
+    },
+  };
+};
+
 const coerceLegacyScore = (raw) => {
   if (!raw || typeof raw !== 'object') return raw;
   const score = (raw as any).score;
@@ -1518,7 +1825,7 @@ const isSimpleRing = (ring: any[]) => {
 };
 
 export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
-  const parsed = ConfigSchema.safeParse(coerceLegacyScore(value || {}));
+  const parsed = ConfigSchema.safeParse(coerceLegacyScore(coerceLegacyContactPolicy(value || {})));
   if (!parsed.success) {
     return {
       error: parsed.error.message,

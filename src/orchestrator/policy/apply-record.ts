@@ -31,8 +31,6 @@ import {
   buildContactPlan,
   mergeContactPlan,
   parseAccountCampaignFromRecord,
-  PER_CONTACT_ALLOWANCES,
-  CAMPAIGN_MAX_AGE_DAYS,
   type CampaignContact,
   type AccountCampaign,
 } from './contact-campaign.js';
@@ -80,6 +78,7 @@ import {
 } from './enrichment-repair.js';
 import {
   DEFAULT_SCORE_MIN_COVERAGE,
+  resolveContactPolicy,
   type ActionConfidenceConfigInput,
   type BuyerConfidenceConfigInput,
   type CandidateTierConfigInput,
@@ -91,6 +90,7 @@ import {
   type PostcardConfigInput,
   type PhoneConfidenceConfigInput,
   type ReachabilityConfigInput,
+  type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
 
 export type PolicyApplyInput = {
@@ -132,6 +132,8 @@ export type PolicyApplyInput = {
   postcard?: PostcardConfigInput;
   enrichmentRepair?: EnrichmentRepairConfigInput;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
+  /** Configured cadence limits that govern prospect contact frequency. */
+  contactPolicy?: ContactPolicyConfigInput;
 };
 
 export type PolicyApplyResult = {
@@ -442,6 +444,7 @@ export function buildEvidenceResolutionEnvelope(input: {
  */
 export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult {
   const record = input.record || {};
+  const contactPolicy = resolveContactPolicy(input.contactPolicy);
   const minFitCoverage = Number.isFinite(Number(input.minFitCoverage))
     ? Number(input.minFitCoverage)
     : DEFAULT_SCORE_MIN_COVERAGE;
@@ -967,6 +970,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       contacts: input.contacts,
       treatment_tier: treatment.treatment_tier,
       mail_treatment: treatment.mail_treatment as AccountCampaign['mail_treatment'],
+      contactPolicy,
     });
     // Preserve rotation + mail-once across re-score / re-policy_apply.
     const existing = parseAccountCampaignFromRecord(record);
@@ -984,9 +988,11 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         ...existing,
         mail_treatment: (treatment.mail_treatment as AccountCampaign['mail_treatment']) || existing.mail_treatment,
         per_contact_action_allowance:
-          PER_CONTACT_ALLOWANCES[treatment.treatment_tier] ?? existing.per_contact_action_allowance,
+          contactPolicy.per_contact_allowances[treatment.treatment_tier]
+          ?? existing.per_contact_action_allowance,
         campaign_max_age_days:
-          CAMPAIGN_MAX_AGE_DAYS[treatment.treatment_tier] ?? existing.campaign_max_age_days,
+          contactPolicy.campaign.max_age_business_days[treatment.treatment_tier]
+          ?? contactPolicy.campaign.max_age_business_days_unknown_tier,
       };
     }
   }
@@ -1003,6 +1009,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       automated_actions_used: num(record.automated_actions_used, 0) ?? 0,
       last_rotation_at: record.last_contact_rotation_at != null ? String(record.last_contact_rotation_at) : null,
       campaigns_in_last_12_months: num(record.campaigns_in_last_12_months, 0) ?? 0,
+      contactPolicy,
     });
     campaignProcessBlockers = proc.blockers;
 
@@ -1011,6 +1018,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       treatment_tier: treatment.treatment_tier,
       automated_actions_used: num(record.automated_actions_used, 0) ?? 0,
       channel_needs_repair: Boolean(record.needs_repair || record.channel_needs_repair),
+      contactPolicy,
     });
     if (exhaustion.exhausted || exhaustion.next_action_type === 'channel_repair') {
       const due = exhaustion.recycle_wait_days > 0
@@ -1038,6 +1046,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         campaigns_in_last_12_months: num(record.campaigns_in_last_12_months, 0) ?? 0,
         suppressed: Boolean(record.suppressed),
         still_eligible: eligibility.outcome === 'eligible' || eligibility.outcome === 'active',
+        contactPolicy,
       });
       Object.assign(campaignExhaustionPatch, {
         campaign_exhausted: exhaustion.exhausted ? 1 : 0,
@@ -1651,15 +1660,15 @@ export function guardChannelExecution(input: {
   }
 
   const policy = input.config?.policy;
-  if (!policy) return { allowed: true };
-
-  const forbidden = new Set(
-    (Array.isArray(policy.forbidden_channels) ? policy.forbidden_channels : []).map((x: string) => String(x).toLowerCase()),
-  );
-  const kind = String(input.stepKind || '').toLowerCase();
-  const task = String(input.taskType || '').toLowerCase();
-  if (forbidden.has(kind) || forbidden.has(task) || forbidden.has(String(input.channel || '').toLowerCase())) {
-    return { allowed: false, reason: `project policy forbids ${kind || task || input.channel}` };
+  if (policy) {
+    const forbidden = new Set(
+      (Array.isArray(policy.forbidden_channels) ? policy.forbidden_channels : []).map((x: string) => String(x).toLowerCase()),
+    );
+    const kind = String(input.stepKind || '').toLowerCase();
+    const task = String(input.taskType || '').toLowerCase();
+    if (forbidden.has(kind) || forbidden.has(task) || forbidden.has(String(input.channel || '').toLowerCase())) {
+      return { allowed: false, reason: `project policy forbids ${kind || task || input.channel}` };
+    }
   }
 
   // Campaign process (age / allowance / quiet / annual) always gates automated external sends —
@@ -1680,6 +1689,7 @@ export function guardChannelExecution(input: {
             ? String(input.record.last_contact_rotation_at)
             : null,
         campaigns_in_last_12_months: num(input.record.campaigns_in_last_12_months, 0) ?? 0,
+        contactPolicy: input.config?.contact_policy,
       });
       if (!proc.allowed) {
         return {
@@ -1690,6 +1700,8 @@ export function guardChannelExecution(input: {
       }
     }
   }
+
+  if (!policy) return { allowed: true };
 
   // Soft / off: never hard-block on readiness alone.
   if (policy.enforce_readiness !== true) return { allowed: true };

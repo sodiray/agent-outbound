@@ -1305,6 +1305,7 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       postcard: config?.score?.postcard,
       enrichmentRepair: config?.score?.enrichment_repair,
       enrichmentBudget: config?.score?.enrichment_budget,
+      contactPolicy: config?.contact_policy,
     });
     summary.tiers[result.treatment_tier] = (summary.tiers[result.treatment_tier] || 0) + 1;
     if (result.integrity_errors.length) summary.integrity_errors += 1;

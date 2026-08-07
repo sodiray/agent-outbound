@@ -15,6 +15,12 @@
  * Stage review for connect remains owned by stage-review-gate / execute.ts.
  */
 
+import {
+  DEFAULT_CONTACT_POLICY,
+  resolveContactPolicy,
+  type ContactPolicyConfigInput,
+} from '../../schemas/config.js';
+
 export const LINKEDIN_LIFECYCLE_STATES = [
   'none',
   'invite_sent',
@@ -25,7 +31,7 @@ export const LINKEDIN_LIFECYCLE_STATES = [
 
 export type LinkedinLifecycleState = (typeof LINKEDIN_LIFECYCLE_STATES)[number];
 
-export const LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT = 24;
+export const LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT = DEFAULT_CONTACT_POLICY.linkedin.invite_cooldown_hours;
 
 const text = (value: unknown) => String(value ?? '').trim();
 
@@ -63,6 +69,7 @@ export function evaluateLinkedinConnectGate(
   record: Record<string, unknown> | null | undefined,
   opts: {
     cooldownHours?: number;
+    contactPolicy?: ContactPolicyConfigInput;
     nowMs?: number;
     /** When true, skip cooldown check (dry-run / admin). */
     ignoreCooldown?: boolean;
@@ -70,9 +77,10 @@ export function evaluateLinkedinConnectGate(
 ): LinkedinConnectGate {
   const state = parseLinkedinLifecycleState(record);
   const nowMs = opts.nowMs ?? Date.now();
-  const hours = Number.isFinite(Number(opts.cooldownHours)) && Number(opts.cooldownHours) > 0
+  const configuredCooldown = resolveContactPolicy(opts.contactPolicy).linkedin.invite_cooldown_hours;
+  const hours = Number.isFinite(Number(opts.cooldownHours)) && Number(opts.cooldownHours) >= 0
     ? Number(opts.cooldownHours)
-    : LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT;
+    : configuredCooldown;
 
   if (state === 'declined') {
     return {

@@ -55,7 +55,6 @@ import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import {
   applyLinkedinInviteSent,
   evaluateLinkedinConnectGate,
-  LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT,
 } from '../policy/linkedin-lifecycle.js';
 
 const linkedinBodyForReview = ({
@@ -1104,15 +1103,9 @@ export const executeChannelStep = async ({
     if (stepKind === 'linkedin_connect') {
       // Lifecycle + cooldown + provider-ack gate (single place).
       if (!dryRun) {
-        const hoursRaw = Number(
-          projectConfig?.channels?.linkedin?.connect_cooldown_hours
-          ?? projectConfig?.channels?.linkedin?.cooldown_hours
-          ?? LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT,
-        );
-        const cooldownHours = Number.isFinite(hoursRaw) && hoursRaw > 0
-          ? hoursRaw
-          : LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT;
-        const liGate = evaluateLinkedinConnectGate(sendRecord, { cooldownHours });
+        const liGate = evaluateLinkedinConnectGate(sendRecord, {
+          contactPolicy: projectConfig?.contact_policy,
+        });
         if (!liGate.allowed) {
           const priorProvider = String(
             sendRecord.linkedin_last_provider_id || sendRecord.linkedin_last_connect_provider_id || '',
@@ -1357,6 +1350,7 @@ export const executeChannelStep = async ({
               reason: `linkedin_connect ${sequenceStepId} ${linkedinResult.reason}`,
               evidence_ids: [liProviderId, sequenceStepId].filter(Boolean),
             },
+            contactPolicy: projectConfig?.contact_policy,
           });
           Object.assign(updatedRecord, advanced.patch);
           ensureRecordColumns({
@@ -2301,6 +2295,7 @@ export const executeChannelStep = async ({
             reason: `channel ${eventChannel} step ${sequenceStepId} executed successfully`,
             evidence_ids: [providerMessageId, sequenceStepId].filter(Boolean),
           },
+          contactPolicy: projectConfig?.contact_policy,
         });
         Object.assign(updatedRecord, advanced.patch);
         ensureRecordColumns({ db, columns: Object.keys(advanced.patch) });

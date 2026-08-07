@@ -12,29 +12,34 @@
 
 import { NEXT_ACTION_POLICY_VERSION } from './lifecycle.js';
 import { DEFAULT_TIME_ZONE, getWeekdayInTimezone, toZonedIsoDate } from '../lib/working-days.js';
+import {
+  DEFAULT_CONTACT_POLICY,
+  resolveContactPolicy,
+  type ContactPolicyConfigInput,
+} from '../../schemas/config.js';
 
 export const PHONE_ATTEMPT_POLICY_VERSION = 'phone-attempt-v1';
 
 /** Inclusive local start hour, exclusive end hour (09:00 ≤ t < 17:00). */
-export const DEFAULT_ATTEMPT_WINDOW_START_HOUR = 9;
-export const DEFAULT_ATTEMPT_WINDOW_END_HOUR = 17;
+export const DEFAULT_ATTEMPT_WINDOW_START_HOUR = DEFAULT_CONTACT_POLICY.phone.attempt_window.start_hour;
+export const DEFAULT_ATTEMPT_WINDOW_END_HOUR = DEFAULT_CONTACT_POLICY.phone.attempt_window.end_hour;
 
 /** Fallback ceiling when tier is unknown. */
-export const DEFAULT_MAX_PHONE_ATTEMPTS = 3;
+export const DEFAULT_MAX_PHONE_ATTEMPTS = DEFAULT_CONTACT_POLICY.phone.max_attempts.default;
 
 /** Default delay for disposition=callback when no explicit callback_at. */
-export const DEFAULT_CALLBACK_DELAY_HOURS = 24;
+export const DEFAULT_CALLBACK_DELAY_HOURS = DEFAULT_CONTACT_POLICY.phone.callback_delay_hours;
 
 /**
  * Treatment ceilings (hard calibration params — ceilings, not quotas).
  * Tier C/D: no proactive cold attempts.
  */
 export const TIER_MAX_PHONE_ATTEMPTS: Record<string, number> = {
-  A: 4,
-  B: 3,
-  C: 0,
-  D: 0,
-  enrichment_hold: 0,
+  A: DEFAULT_CONTACT_POLICY.phone.max_attempts.A,
+  B: DEFAULT_CONTACT_POLICY.phone.max_attempts.B,
+  C: DEFAULT_CONTACT_POLICY.phone.max_attempts.C,
+  D: DEFAULT_CONTACT_POLICY.phone.max_attempts.D,
+  enrichment_hold: DEFAULT_CONTACT_POLICY.phone.max_attempts.enrichment_hold,
 };
 
 export type PhoneCallDisposition =
@@ -95,6 +100,9 @@ export type PhoneAttemptPolicyConfig = {
   endHour?: number;
   /** Override per-tier / default ceiling. */
   maxAttempts?: number;
+  /** Pipeline-configured default and per-tier ceilings. */
+  maxAttemptsByTier?: Partial<Record<string, number>>;
+  defaultMaxAttempts?: number;
   /** Hours until callback when disposition=callback and no explicit time. */
   callbackDelayHours?: number;
   /** Restrict attempt window to Mon–Fri in timeZone (default true). */
@@ -106,11 +114,7 @@ const optionalNumber = (value: unknown): number | undefined => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
-const optionalBoolean = (value: unknown): boolean | undefined => (
-  typeof value === 'boolean' ? value : undefined
-);
-
-/** Resolve phone policy values from the pipeline's operations and phone-channel config. */
+/** Resolve phone policy values from the pipeline's contact policy and timezone config. */
 export const resolvePhoneAttemptPolicyConfig = (config: unknown): PhoneAttemptPolicyConfig => {
   const pipeline = config && typeof config === 'object'
     ? config as Record<string, unknown>
@@ -124,15 +128,19 @@ export const resolvePhoneAttemptPolicyConfig = (config: unknown): PhoneAttemptPo
   const phone = channels.phone && typeof channels.phone === 'object'
     ? channels.phone as Record<string, unknown>
     : {};
+  const contactPolicy = resolveContactPolicy(
+    pipeline.contact_policy as ContactPolicyConfigInput | undefined,
+  );
   const timeZone = String(phone.timezone || operations.timezone || DEFAULT_TIME_ZONE).trim();
 
   return {
     timeZone,
-    startHour: optionalNumber(phone.start_hour ?? phone.startHour),
-    endHour: optionalNumber(phone.end_hour ?? phone.endHour),
-    maxAttempts: optionalNumber(phone.max_attempts ?? phone.maxAttempts),
-    callbackDelayHours: optionalNumber(phone.callback_delay_hours ?? phone.callbackDelayHours),
-    weekdaysOnly: optionalBoolean(phone.weekdays_only ?? phone.weekdaysOnly),
+    startHour: contactPolicy.phone.attempt_window.start_hour,
+    endHour: contactPolicy.phone.attempt_window.end_hour,
+    maxAttemptsByTier: contactPolicy.phone.max_attempts,
+    defaultMaxAttempts: contactPolicy.phone.max_attempts.default,
+    callbackDelayHours: contactPolicy.phone.callback_delay_hours,
+    weekdaysOnly: contactPolicy.phone.attempt_window.weekdays_only,
   };
 };
 
@@ -166,15 +174,21 @@ export function getZonedHour(
 export function maxPhoneAttemptsForTier(
   treatmentTier: string | null | undefined,
   override?: number,
+  config: PhoneAttemptPolicyConfig = {},
 ): number {
   if (Number.isFinite(Number(override)) && Number(override) >= 0) {
     return Math.floor(Number(override));
   }
   const tier = text(treatmentTier) || 'B';
+  const configured = optionalNumber(config.maxAttemptsByTier?.[tier]);
+  if (configured !== undefined && configured >= 0) return Math.floor(configured);
   if (tier in TIER_MAX_PHONE_ATTEMPTS) {
     return TIER_MAX_PHONE_ATTEMPTS[tier];
   }
-  return DEFAULT_MAX_PHONE_ATTEMPTS;
+  const defaultMaxAttempts = optionalNumber(config.defaultMaxAttempts);
+  return defaultMaxAttempts !== undefined && defaultMaxAttempts >= 0
+    ? Math.floor(defaultMaxAttempts)
+    : DEFAULT_MAX_PHONE_ATTEMPTS;
 }
 
 export function readCallAttemptCount(
@@ -232,6 +246,7 @@ export function isPhoneAttemptCeilingReached(
   const max = maxPhoneAttemptsForTier(
     text(record?.treatment_tier),
     config.maxAttempts,
+    config,
   );
   if (max <= 0) return true;
   return readCallAttemptCount(record) >= max;
@@ -293,7 +308,7 @@ export function scheduleCallbackAt(
       : Date.parse(String(from));
   const ms = Number.isFinite(base) ? base : Date.now();
   const hours = Number.isFinite(Number(config.callbackDelayHours))
-    && Number(config.callbackDelayHours) > 0
+    && Number(config.callbackDelayHours) >= 0
     ? Number(config.callbackDelayHours)
     : DEFAULT_CALLBACK_DELAY_HOURS;
   return new Date(ms + hours * 60 * 60 * 1000).toISOString();

@@ -14,6 +14,11 @@ import {
   createTransitionAudit,
   type TransitionAuditRecord,
 } from './transition-audit.js';
+import {
+  DEFAULT_CONTACT_POLICY,
+  resolveContactPolicy,
+  type ContactPolicyConfigInput,
+} from '../../schemas/config.js';
 
 export const LIFECYCLE_STAGES = [
   'cold',
@@ -333,7 +338,7 @@ const isOutboundChannel = (channel: string, stepKind: string): boolean => {
 };
 
 /** Default wait when no next_action_date / progression date is available on the record. */
-export const DEFAULT_WAIT_SUCCESSOR_DAYS = 2;
+export const DEFAULT_WAIT_SUCCESSOR_DAYS = DEFAULT_CONTACT_POLICY.fallback_wait_days;
 
 /**
  * Resolve due_at for a wait (or waiting_time_or_event) next_action successor.
@@ -343,13 +348,15 @@ export const DEFAULT_WAIT_SUCCESSOR_DAYS = 2;
 export function resolveWaitDueAt(
   record: Record<string, unknown> | null | undefined,
   now: Date = new Date(),
-  defaultWaitDays: number = DEFAULT_WAIT_SUCCESSOR_DAYS,
+  defaultWaitDays?: number,
+  contactPolicy?: ContactPolicyConfigInput,
 ): string {
   const fromRecord = String(record?.next_action_date || '').trim();
   if (fromRecord) return fromRecord;
 
   const d = new Date(now.getTime());
-  d.setUTCDate(d.getUTCDate() + defaultWaitDays);
+  const waitDays = defaultWaitDays ?? resolveContactPolicy(contactPolicy).fallback_wait_days;
+  d.setUTCDate(d.getUTCDate() + waitDays);
   return d.toISOString().slice(0, 10);
 }
 
@@ -508,8 +515,10 @@ export type AdvanceAfterSuccessfulActionInput = {
    * Also triggered when next_action.action_type === 'contact_rotation',
    * record.force_contact_rotate, sequence complete with held contacts,
    * or next_action.on_success includes "rotate".
-   */
+  */
   rotate?: boolean;
+  /** Pipeline-owned person-contact cadence controls. */
+  contactPolicy?: ContactPolicyConfigInput;
 };
 
 export type AdvanceAfterSuccessfulActionResult = {
@@ -632,7 +641,7 @@ export function advanceAfterSuccessfulAction(
   } else {
     // Prefer progression next_action_date (executeChannelStep sets it before advance);
     // else now+2d so shouldExecuteSequenceOutbound gates on due_at first-class.
-    const due_at = resolveWaitDueAt(record);
+    const due_at = resolveWaitDueAt(record, new Date(), undefined, input.contactPolicy);
     successor = buildWaitSuccessor({
       accountId,
       contactId: active_contact_id,
