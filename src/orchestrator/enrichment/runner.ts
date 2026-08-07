@@ -567,13 +567,38 @@ const applyOutputsWithEvidence = ({
   return { ...patch, ...evidencePatch };
 };
 
+/**
+ * Create a primary contact from record-level fields, for pipelines that have no
+ * `decision_makers` step.
+ *
+ * It must never overwrite the email of a contact that already exists. Those rows
+ * come from `decision_makers`, where every address is checked against the raw
+ * provider payload before it is stored. The values reaching this function do not
+ * carry that guarantee: they are whatever a general enrichment step put on the
+ * record.
+ *
+ * Skipping that check bound a company inbox to a real named person. `site_profile`
+ * returned `customercare@rightnowheatcool.com` — which genuinely appears on that
+ * site, in its accessibility notice, so the model answered its prompt correctly.
+ * `upsertRecord` refused the value, as designed. But this function read it from
+ * the in-memory row, and `upsertContact` matches on name+title only, so it landed
+ * on the Hunter-sourced "Tyeson Anderson / Marketing Director" row and replaced
+ * his address. The projection then republished it to `records.contact_email`,
+ * laundering it past the very lock that had rejected it — and the account was one
+ * approval away from emailing a real person at an address that was never his.
+ *
+ * Nobody fabricated anything. A site-wide inbox was bound to a named human.
+ */
 const upsertPrimaryContactIfPresent = ({ db, record }: { db: any; record: any }) => {
   const contactEmail = String(record?.contact_email || record?.email_primary || '').trim().toLowerCase();
   if (!contactEmail) return;
+  const recordId = getRecordRowId(record);
+  const existing = db.prepare('SELECT COUNT(*) AS n FROM contacts WHERE row_id = ?').get(recordId);
+  if (Number(existing?.n || 0) > 0) return;
   upsertContact({
     db,
     contact: {
-      record_id: getRecordRowId(record),
+      record_id: recordId,
       full_name: String(record?.contact_name || record?.contact_name_primary || ''),
       title: String(record?.contact_title || record?.contact_title_primary || ''),
       email: contactEmail,
