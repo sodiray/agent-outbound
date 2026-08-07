@@ -80,9 +80,16 @@ const responseDetail = (value: unknown): string => {
     .find(Boolean) || '';
 };
 
+const redactSecretValues = (value: string): string => value
+  .replace(
+    /((?:x-)?api[-_ ]?key|authorization|token|secret|password)\s*([:=])\s*[^,\s;]+/gi,
+    '$1$2[redacted]',
+  )
+  .replace(/\bbearer\s+[A-Za-z0-9._~-]{8,}/gi, 'bearer [redacted]');
+
 const unipileFailureDetail = (payload: unknown, statusText: string): string =>
-  responseDetail(payload).replace(/\s+/g, ' ').slice(0, 200)
-  || nonBlank(statusText).slice(0, 200)
+  redactSecretValues(responseDetail(payload)).replace(/\s+/g, ' ').slice(0, 200)
+  || redactSecretValues(nonBlank(statusText)).slice(0, 200)
   || 'error';
 
 const readUnipileJson = async (response: Response): Promise<unknown> => {
