@@ -31,10 +31,7 @@ import {
   assertActionTarget,
   applyContactRotation,
 } from '../dist/orchestrator/policy/contact-campaign.js';
-import {
-  auditClaims,
-  calculateEconomicScenario,
-} from '../dist/orchestrator/policy/claim-audit.js';
+import { calculateEconomicScenario } from '../dist/orchestrator/policy/economics.js';
 import {
   evaluateOutboundReadiness,
   classifyEligibility,
@@ -299,43 +296,6 @@ test('applyContactRotation production helper returns plan fields shape', () => {
   assert.equal(out.active_contact_id, 'c2');
   assert.ok(out.account_contact_plan_json);
   assert.equal(JSON.parse(out.account_contact_plan_json).active_contact_id, 'c2');
-});
-
-test('claim audit rejects unsupported and prohibited claims', () => {
-  const packet = {
-    account_id: 'a1',
-    policy_version: 'v1',
-    permitted_claims: [
-      {
-        claim_id: 'obs1',
-        claim_class: 'observation',
-        text: 'public reviews mention slow quote follow-up',
-        evidence_ids: ['e1'],
-      },
-      {
-        claim_id: 'hyp1',
-        claim_class: 'hypothesis',
-        text: 'missed-call follow-up may be leaking jobs',
-        hypothesis_id: 'h1',
-      },
-    ],
-  };
-  const bad = auditClaims({
-    packet,
-    extracted: [{ text: 'we increased your revenue by 40%' }],
-    assetText: "I'll stop by your office next Tuesday",
-  });
-  assert.equal(bad.passed, false);
-  assert.ok(bad.unauthorized.length >= 1);
-
-  const good = auditClaims({
-    packet,
-    extracted: [
-      { text: 'public reviews mention slow quote follow-up' },
-      { text: 'missed-call follow-up may be leaking jobs' },
-    ],
-  });
-  assert.equal(good.passed, true);
 });
 
 test('economic scenarios require inputs and never invent precision', () => {

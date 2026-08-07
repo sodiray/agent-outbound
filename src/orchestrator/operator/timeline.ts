@@ -297,7 +297,6 @@ export function getDecisionView(input: { db: any; recordId: string }) {
     evidence_resolution: parse(row.evidence_resolution_json),
     observations: parse(row.observations_json),
     contradictions: parse(row.contradictions_json),
-    claim_audit: parse(row.claim_audit_json),
     timing: parse(row.timing_json),
     reachability: parse(row.reachability_json),
     cost_ledger: parse(row.cost_ledger_json),
@@ -306,7 +305,6 @@ export function getDecisionView(input: { db: any; recordId: string }) {
     withheld: {
       golden_ticket_eligible: row.golden_ticket_eligible,
       mail_treatment: row.mail_treatment,
-      claim_audit_passed: row.claim_audit_passed,
     },
   };
 }
@@ -347,12 +345,12 @@ function readinessBlockers(raw: unknown): string[] {
 }
 
 /**
- * Export transition_audit / stage_review / claim_audit / decision surfaces as JSON.
+ * Export transition_audit / stage_review / decision surfaces as JSON.
  * Scope: one record, or the whole list (capped by limit).
  * Canary operators use this instead of grepping SQLite.
  *
  * Decision-replay fields (fit_score, treatment_tier, readiness blockers,
- * claim_audit_passed, stage_review, cost_ledger summary) let operators reconstruct
+ * stage_review and cost_ledger summary let operators reconstruct
  * the last treatment/priority/readiness decision without a second query.
  */
 export function exportAuditLog(input: {
@@ -367,12 +365,10 @@ export function exportAuditLog(input: {
     business_name: string;
     transition_audit: unknown;
     stage_review: unknown;
-    claim_audit: unknown;
     fit_score?: number | null;
     treatment_tier?: string;
     priority_lane?: string;
     priority_rank?: number | null;
-    claim_audit_passed?: boolean | null;
     readiness_blockers?: string[];
     cost_ledger_summary?: {
       total_usd: number;
@@ -404,7 +400,6 @@ export function exportAuditLog(input: {
         SELECT * FROM records
         WHERE COALESCE(transition_audit_json, '') != ''
            OR COALESCE(stage_review_json, '') != ''
-           OR COALESCE(claim_audit_json, '') != ''
         ORDER BY COALESCE(updated_at, _updated_at, created_at) DESC
         LIMIT ?
       `).all(limit) as Array<Record<string, unknown>>;
@@ -432,28 +427,9 @@ export function exportAuditLog(input: {
     }
   }
 
-  const truthyFlag = (v: unknown): boolean | null => {
-    if (v == null || v === '') return null;
-    if (typeof v === 'boolean') return v;
-    if (typeof v === 'number') return v !== 0;
-    const s = String(v).trim().toLowerCase();
-    if (s === 'true' || s === 'yes' || s === '1' || s === '1.0') return true;
-    if (s === 'false' || s === 'no' || s === '0' || s === '0.0') return false;
-    return null;
-  };
-
   const records = rows.map((row) => {
     const recordId = String(row._row_id || row.id || '');
     const readiness = parseJson(row.readiness_json);
-    const claimAudit = parseJson(row.claim_audit_json) as Record<string, unknown> | null;
-    // Prefer column claim_audit_passed; fall back to claim_audit_json.passed when present.
-    // Normalize to boolean so TEXT "1" / INTEGER 1 / JSON true all replay cleanly.
-    let claim_audit_passed: boolean | null = truthyFlag(row.claim_audit_passed);
-    if (claim_audit_passed == null && claimAudit && typeof claimAudit === 'object') {
-      claim_audit_passed = truthyFlag(
-        claimAudit.passed != null ? claimAudit.passed : claimAudit.claim_audit_passed,
-      );
-    }
     const fitRaw = row.fit_score;
     const fit_score = fitRaw == null || fitRaw === ''
       ? null
@@ -468,12 +444,10 @@ export function exportAuditLog(input: {
       business_name: String(row.business_name || ''),
       transition_audit: parseJson(row.transition_audit_json),
       stage_review: parseJson(row.stage_review_json),
-      claim_audit: claimAudit,
       fit_score,
       treatment_tier: row.treatment_tier != null ? String(row.treatment_tier) : undefined,
       priority_lane: row.priority_lane != null ? String(row.priority_lane) : undefined,
       priority_rank,
-      claim_audit_passed,
       readiness_blockers: readinessBlockers(row.readiness_json),
       cost_ledger_summary: costLedgerSummary(row.cost_ledger_json),
       account_sequence_state: row.account_sequence_state != null

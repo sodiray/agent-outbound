@@ -63,7 +63,7 @@ const PRODUCTION_IMPORTERS = [
   },
   {
     path: 'src/orchestrator/generate/runner.ts',
-    mustInclude: ['auditClaims'],
+    mustInclude: ['calculateEconomicScenario'],
   },
   {
     path: 'src/commands/index.ts',

@@ -29,7 +29,6 @@ import {
   parseStageReviewJson,
   invalidateStageReviewIfAssetChanged,
 } from '../dist/orchestrator/policy/transition-audit.js';
-import { contentBindingFromRecord } from '../dist/orchestrator/policy/claim-binding.js';
 import { openListDb, ensureRecordColumns, insertDraft, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../dist/orchestrator/policy/lifecycle.js';
@@ -45,7 +44,6 @@ const materialAssetVersion = ({
   assetId,
   policyVersion,
 } = {}) => {
-  const binding = contentBindingFromRecord(record || {});
   return resolveStageAssetVersion({
     accountId: String(record?._row_id || record?.id || record?.account_id || ''),
     activeContactId: String(record?.active_contact_id || record?.contact_id || '') || null,
@@ -54,11 +52,10 @@ const materialAssetVersion = ({
       ?? String(record?.contact_email || record?.email || record?.linkedin_url || ''),
     stepId: stageId,
     stageId,
-    claimPacketHash: binding.claim_packet_hash || null,
     assetId: assetId ?? null,
     draftId: draftId ?? null,
     policyVersion: policyVersion ?? null,
-    bodyText: bodyText ?? null,
+    bodyText: bodyText ?? record?.linkedin_message ?? null,
     subjectText: subjectText ?? null,
   });
 };
@@ -237,14 +234,14 @@ test('resolveStageAssetVersion: material fields change fingerprint; sparse fallb
     activeContactId: 'c1',
     recipient: 'a@example.com',
     stepId: 'email_1',
-    claimPacketHash: 'packet_aaa',
+    bodyText: 'Approved body A',
   };
   const vA = resolveStageAssetVersion(base);
-  const vB = resolveStageAssetVersion({ ...base, claimPacketHash: 'packet_bbb' });
+  const vB = resolveStageAssetVersion({ ...base, bodyText: 'Approved body B' });
   const vContact = resolveStageAssetVersion({ ...base, activeContactId: 'c2' });
   const vRecipient = resolveStageAssetVersion({ ...base, recipient: 'b@example.com' });
   assert.match(vA, /^srv1:[a-f0-9]{64}$/);
-  assert.notEqual(vA, vB, 'content/claim change must invalidate');
+  assert.notEqual(vA, vB, 'content change must invalidate');
   assert.notEqual(vA, vContact, 'contact change must invalidate');
   assert.notEqual(vA, vRecipient, 'recipient change must invalidate');
   // Same inputs → same version
@@ -270,11 +267,11 @@ test('invalidateStageReviewIfAssetChanged: authorized A + current B → invalida
     lifecycle_stage: 'contacted',
   };
   const versionA = materialAssetVersion({
-    record: { ...recordBase, permitted_claim_packet_json: JSON.stringify({ permitted_claims: [{ claim_id: 'cA' }] }) },
+    record: { ...recordBase, linkedin_message: 'Message A' },
     stageId: 'linkedin_1',
   });
   const versionB = materialAssetVersion({
-    record: { ...recordBase, permitted_claim_packet_json: JSON.stringify({ permitted_claims: [{ claim_id: 'cB' }] }) },
+    record: { ...recordBase, linkedin_message: 'Message B' },
     stageId: 'linkedin_1',
   });
   assert.notEqual(versionA, versionB);
@@ -306,7 +303,7 @@ test('invalidateStageReviewIfAssetChanged: authorized A + current B → invalida
   const record = {
     ...recordBase,
     stage_review_json: authorized.patch.stage_review_json,
-    permitted_claim_packet_json: JSON.stringify({ permitted_claims: [{ claim_id: 'cB' }] }),
+    linkedin_message: 'Message B',
   };
   const result = invalidateStageReviewIfAssetChanged({
     record,
@@ -682,8 +679,8 @@ test('executeChannelStep: linkedin after authorizeStageReview proceeds past gate
 
 test('executeChannelStep: authorized version A + content change → B blocks send and re-pauses', async () => {
   const accountId = 'acct_li_material_change';
-  const claimA = JSON.stringify({ permitted_claims: [{ claim_id: 'claim_A' }] });
-  const claimB = JSON.stringify({ permitted_claims: [{ claim_id: 'claim_B' }] });
+  const messageA = 'Approved LinkedIn message A';
+  const messageB = 'Updated LinkedIn message B';
 
   const { listDir, db, rowId } = seedList({
     rowId: accountId,
@@ -694,10 +691,10 @@ test('executeChannelStep: authorized version A + content change → B blocks sen
   });
   // Stamp content version A onto the record before authorize.
   const seeded = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
-  ensureRecordColumns({ db, columns: ['permitted_claim_packet_json'] });
+  ensureRecordColumns({ db, columns: ['linkedin_message'] });
   upsertRecord({
     db,
-    row: { ...seeded, permitted_claim_packet_json: claimA },
+    row: { ...seeded, linkedin_message: messageA },
   });
   const withA = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
   const versionA = materialAssetVersion({
@@ -748,18 +745,18 @@ test('executeChannelStep: authorized version A + content change → B blocks sen
       next_action_json: authorized.patch.next_action_json
         || JSON.stringify(nextAction(accountId, { action_type: 'linkedin_connect' })),
       stage_review_json: authorized.patch.stage_review_json,
-      permitted_claim_packet_json: claimA,
+      linkedin_message: messageA,
     },
   });
 
-  // Material change: claim packet becomes B → current asset_version drifts.
+  // Material change: outbound copy becomes B → current asset_version drifts.
   const beforeSend = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
   upsertRecord({
     db,
-    row: { ...beforeSend, permitted_claim_packet_json: claimB },
+    row: { ...beforeSend, linkedin_message: messageB },
   });
   const versionB = materialAssetVersion({
-    record: { ...beforeSend, permitted_claim_packet_json: claimB },
+    record: { ...beforeSend, linkedin_message: messageB },
     stageId: 'linkedin_1',
     policyVersion: 'tv-pipeline-v1',
   });

@@ -14,25 +14,13 @@ import {
   parseStageReviewJson,
 } from '../orchestrator/policy/transition-audit.js';
 import { resolveStageAssetVersion } from '../orchestrator/policy/stage-review-gate.js';
-import {
-  draftAssetText,
-  claimAuditAssetHash,
-  contentBindingFromRecord,
-} from '../orchestrator/policy/claim-binding.js';
-import {
-  auditClaims,
-  extractCommercialClaimFragments,
-  collectAdmissibleEvidenceIds,
-  evidenceIdResolves,
-  CLAIM_AUDIT_VERSION,
-} from '../orchestrator/policy/claim-audit.js';
 import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { resolveSendMailbox } from '../orchestrator/lib/mailboxes.js';
 
 /**
  * Compose the same material asset_version send uses:
- * account + contact + recipient + subject/body + claim packet + draft id + step.
+ * account + contact + recipient + subject/body + draft id + step.
  */
 export const composeOutboundReviewVersion = (input: {
   record: Record<string, unknown>;
@@ -44,7 +32,6 @@ export const composeOutboundReviewVersion = (input: {
 }): string => {
   const record = input.record || {};
   const draft = input.draft || {};
-  const binding = contentBindingFromRecord(record);
   const subject = String(draft.subject || '');
   const body = String(draft.body || '');
   const stepId = String(draft.step_id || input.stageId || '').trim();
@@ -71,194 +58,13 @@ export const composeOutboundReviewVersion = (input: {
     draftId: String(draft.draft_id || ''),
     bodyText: body,
     subjectText: subject,
-    claimPacketHash: binding.claim_packet_hash || null,
     policyVersion: input.policyVersion
       ?? String((record as any).policy_version || ''),
   });
 };
 
 /**
- * Actually audit the final draft copy against the permitted claim packet.
- * Returns { passed, audit, assetHash }. Never inherits an old pass without re-audit.
- */
-export const auditFinalDraftCopy = (input: {
-  record: Record<string, unknown>;
-  draft: Record<string, unknown>;
-}): {
-  passed: boolean;
-  audit: Record<string, unknown>;
-  assetHash: string;
-  assetText: string;
-} => {
-  const subject = String(input.draft.subject || '');
-  const body = String(input.draft.body || '');
-  const assetText = draftAssetText({ subject, body });
-  const assetHash = assetText ? claimAuditAssetHash(assetText) : '';
-  if (!assetText) {
-    return {
-      passed: false,
-      audit: {
-        passed: false,
-        authorized: [],
-        unauthorized: [{ text: '', reason: 'empty_draft_body' }],
-        policy_version: CLAIM_AUDIT_VERSION,
-      },
-      assetHash: '',
-      assetText: '',
-    };
-  }
-
-  let packet: any = null;
-  try {
-    const raw = input.record.permitted_claim_packet_json;
-    packet = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw;
-  } catch {
-    packet = null;
-  }
-  if (!packet || !Array.isArray(packet.permitted_claims)) {
-    return {
-      passed: false,
-      audit: {
-        passed: false,
-        authorized: [],
-        unauthorized: [{ text: assetText.slice(0, 120), reason: 'missing_claim_packet' }],
-        policy_version: CLAIM_AUDIT_VERSION,
-      },
-      assetHash,
-      assetText,
-    };
-  }
-
-  const extracted = extractCommercialClaimFragments(assetText);
-  const audit = auditClaims({
-    packet,
-    extracted,
-    assetText,
-  });
-
-  // Account-bound packet: missing or cross-account account_id fails closed.
-  const pktAcct = String(packet.account_id || '').trim();
-  const recAcct = String(input.record._row_id || input.record.id || '').trim();
-  if (!pktAcct) {
-    return {
-      passed: false,
-      audit: {
-        ...audit,
-        passed: false,
-        unauthorized: [
-          ...(audit.unauthorized || []),
-          { text: '', reason: 'claim_packet_missing_account_id' },
-        ],
-      } as any,
-      assetHash,
-      assetText,
-    };
-  }
-  if (recAcct && pktAcct !== recAcct) {
-    return {
-      passed: false,
-      audit: {
-        ...audit,
-        passed: false,
-        unauthorized: [
-          ...(audit.unauthorized || []),
-          { text: pktAcct, reason: 'claim_packet_cross_account' },
-        ],
-      } as any,
-      assetHash,
-      assetText,
-    };
-  }
-
-  // Every factual claim used in the draft must cite admissible evidence that
-  // resolves independently (observations/registries) — not claim self-declaration.
-  if (Array.isArray(audit.authorized) && audit.authorized.length > 0) {
-    const knownIds = collectAdmissibleEvidenceIds(input.record);
-    const extraUnauthorized: Array<{ text: string; reason: string }> = [];
-    for (const used of audit.authorized) {
-      const pktClaim = (packet.permitted_claims || []).find(
-        (p: any) => String(p.claim_id || '') === String(used.claim_id || ''),
-      );
-      let eids: string[] = Array.isArray(used.evidence_ids)
-        ? used.evidence_ids.map(String).filter(Boolean)
-        : [];
-      if (eids.length === 0 && pktClaim && Array.isArray(pktClaim.evidence_ids)) {
-        eids = pktClaim.evidence_ids.map(String).filter(Boolean);
-      }
-      const claimClass = String(pktClaim?.claim_class || 'observation');
-      if (eids.length === 0) {
-        extraUnauthorized.push({
-          text: String(used.text || used.claim_id || ''),
-          reason: 'factual_claim_missing_evidence_ids',
-        });
-        continue;
-      }
-      const missing = eids.filter((id) => !evidenceIdResolves(id, knownIds));
-      if (missing.length > 0) {
-        extraUnauthorized.push({
-          text: String(used.text || used.claim_id || ''),
-          reason: `evidence_ids_unresolved:${missing.join(',')}`,
-        });
-      }
-      if (claimClass === 'mission_proof' && !pktClaim?.proof_id) {
-        extraUnauthorized.push({
-          text: String(used.text || used.claim_id || ''),
-          reason: 'proof_claim_missing_proof_id',
-        });
-      }
-    }
-    if (extraUnauthorized.length > 0) {
-      return {
-        passed: false,
-        audit: {
-          ...audit,
-          passed: false,
-          unauthorized: [...(audit.unauthorized || []), ...extraUnauthorized],
-        } as any,
-        assetHash,
-        assetText,
-      };
-    }
-  }
-
-  // Model preliminary snapshot must not self-authorize.
-  const prelim = String(input.record.preliminary_snapshot || '').trim().toLowerCase();
-  if (
-    audit.passed
-    && prelim.length > 40
-    && assetText.toLowerCase().includes(prelim.slice(0, 80))
-  ) {
-    const usedHaveEvidence = (audit.authorized || []).some(
-      (a: any) => Array.isArray(a.evidence_ids) && a.evidence_ids.length > 0,
-    );
-    if (!usedHaveEvidence) {
-      return {
-        passed: false,
-        audit: {
-          ...audit,
-          passed: false,
-          unauthorized: [
-            ...(audit.unauthorized || []),
-            { text: assetText.slice(0, 120), reason: 'preliminary_snapshot_self_authorization' },
-          ],
-        } as any,
-        assetHash,
-        assetText,
-      };
-    }
-  }
-
-  return {
-    passed: Boolean(audit.passed),
-    audit: audit as unknown as Record<string, unknown>,
-    assetHash,
-    assetText,
-  };
-};
-
-/**
  * Build the record patch for draft approval WITHOUT writing.
- * Caller must apply audit + stage-review + draft ready inside one DB transaction.
  *
  * Version binding: expected_asset_version is the review's original bound version.
  * Current material state is boundVersion. Silent replace of expected→current is
@@ -267,11 +73,9 @@ export const auditFinalDraftCopy = (input: {
 const planDraftApproval = ({
   record,
   draft,
-  auditResult,
 }: {
   record: Record<string, unknown>;
   draft: Record<string, unknown>;
-  auditResult: ReturnType<typeof auditFinalDraftCopy>;
 }): {
   authorized: boolean;
   reason: string;
@@ -289,32 +93,12 @@ const planDraftApproval = ({
     stageId: stepId || existing?.stage_id,
   });
 
-  const auditPatch: Record<string, unknown> = {
-    claim_audit_passed: auditResult.passed ? 1 : 0,
-    claim_audit_json: JSON.stringify(auditResult.audit),
-    claim_audit_asset_hash: auditResult.assetHash || '',
-  };
-
-  if (!auditResult.passed) {
-    return {
-      authorized: false,
-      reason: 'claim_audit_failed',
-      asset_version: boundVersion,
-      // On audit fail, still stamp the failure so send gates see the truth —
-      // but do NOT authorize/resume. Applied only when caller chooses to persist
-      // failure state (same transaction as leaving draft pending).
-      recordPatch: auditPatch,
-      markReady: false,
-    };
-  }
-
   if (!existing || (existing.status !== 'pending' && existing.status !== 'edited')) {
-    // No pending stage review — claim audit alone can ready the draft when policy allows.
     return {
       authorized: true,
-      reason: 'claim_audit_only',
+      reason: 'ready_without_stage_review',
       asset_version: boundVersion,
-      recordPatch: auditPatch,
+      recordPatch: {},
       markReady: true,
     };
   }
@@ -328,7 +112,7 @@ const planDraftApproval = ({
       authorized: false,
       reason: 'stage_mismatch',
       asset_version: boundVersion,
-      recordPatch: auditPatch,
+      recordPatch: {},
       markReady: false,
     };
   }
@@ -347,7 +131,7 @@ const planDraftApproval = ({
     existing,
     lifecycle_stage: String(record.lifecycle_stage || 'contacted'),
     actor: 'drafts_approve',
-    notes: `Authorized via draft approval ${String(draft.draft_id || '')} after claim audit`,
+    notes: `Authorized via draft approval ${String(draft.draft_id || '')}`,
   });
   if (!authorized || typeof authorized !== 'object' || !('allowed' in authorized) || !authorized.allowed) {
     const deniedReason = (authorized && typeof authorized === 'object' && 'reason' in authorized)
@@ -365,7 +149,6 @@ const planDraftApproval = ({
       reason: deniedReason === 'asset_version_mismatch' ? 'asset_version_mismatch' : 'stage_review_denied',
       asset_version: boundVersion,
       recordPatch: {
-        ...auditPatch,
         ...denyPatch,
         ...(denyAudit
           ? { transition_audit_json: appendTransitionAudit(record.transition_audit_json, denyAudit) }
@@ -382,7 +165,6 @@ const planDraftApproval = ({
     asset_version: boundVersion,
     recordPatch: {
       ...patch,
-      ...auditPatch,
       transition_audit_json: appendTransitionAudit(record.transition_audit_json, authorized.audit),
     },
     markReady: true,
@@ -564,28 +346,21 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
         continue;
       }
 
-      // 1) Audit final draft copy (pure; no writes).
-      const auditResult = auditFinalDraftCopy({ record, draft: existing });
-      // 2) Plan authorize + patches (pure; no writes).
+      // Plan authorize + patches (pure; no writes).
       const plan = planDraftApproval({
         record,
         draft: existing,
-        auditResult,
       });
 
       // Hard failures that must not mark ready (including stage_mismatch).
       if (!plan.markReady) {
-        // Persist failure stamp (audit fail / stage mismatch / version drift)
-        // without marking draft ready — still atomic per draft.
+        // Persist a review failure or version-drift patch without marking ready.
         try {
           const failTx = db.transaction(() => {
             ensureRecordColumns({
               db,
               columns: [
                 ...Object.keys(plan.recordPatch),
-                'claim_audit_passed',
-                'claim_audit_json',
-                'claim_audit_asset_hash',
                 'transition_audit_json',
                 'stage_review_json',
                 'account_sequence_state',
@@ -609,9 +384,6 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
             db,
             columns: [
               ...Object.keys(plan.recordPatch),
-              'claim_audit_passed',
-              'claim_audit_json',
-              'claim_audit_asset_hash',
               'transition_audit_json',
               'stage_review_json',
               'account_sequence_state',
@@ -632,8 +404,6 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
             from: resolvedFrom,
             mailbox_id: resolvedMailboxId,
             asset_version: plan.asset_version || '',
-            claim_audit_asset_hash: auditResult.assetHash || '',
-            claim_audit_passed: true,
             approved_at: new Date().toISOString(),
           };
           upsertRecord({
@@ -650,12 +420,7 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
             draftId: id,
             patch: {
               status: 'ready',
-              claim_audit_passed: 1,
-              claim_audit_version: CLAIM_AUDIT_VERSION,
               content_binding: {
-                claim_audit_passed: 1,
-                claim_audit_version: CLAIM_AUDIT_VERSION,
-                claim_audit_asset_hash: auditResult.assetHash || '',
                 provider_envelope: envelope,
               },
             },
@@ -727,17 +492,7 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
       });
     }
     patch.status = 'pending_approval';
-    // Content edit invalidates prior claim-audit pass and content binding on the draft.
-    patch.claim_audit_passed = 0;
-    patch.claim_audit_version = '';
-    patch.claim_packet_hash = '';
-    patch.preliminary_snapshot_hash = '';
-    patch.content_binding = {
-      claim_audit_passed: 0,
-      claim_packet_hash: '',
-      claim_audit_version: '',
-      preliminary_snapshot_hash: '',
-    };
+    patch.content_binding = {};
 
     const existingDraft = db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1')
       .get(String(draftId || '').trim()) as Record<string, unknown> | undefined;
@@ -751,7 +506,7 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
     const rowId = String(existingDraft.row_id || '').trim();
     assertRecordAccessForMutation({ listDir, recordId: rowId });
 
-    // Atomic: draft content edit + invalidate stage authorization + clear claim audit on record.
+    // Atomic: draft content edit + invalidate stage authorization.
     const editTx = db.transaction(() => {
       const next = updateDraft({ db, draftId: String(draftId || '').trim(), patch });
       if (!next) throw new Error('update_failed');
@@ -762,11 +517,7 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
           | undefined;
         if (record) {
           const existingReview = parseStageReviewJson(record.stage_review_json);
-          let stagePatch: Record<string, unknown> = {
-            claim_audit_passed: 0,
-            claim_audit_json: '',
-            claim_audit_asset_hash: '',
-          };
+          let stagePatch: Record<string, unknown> = {};
           if (existingReview && (existingReview.status === 'authorized'
             || existingReview.status === 'pending'
             || existingReview.status === 'edited')) {
@@ -798,9 +549,6 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
             db,
             columns: [
               ...Object.keys(stagePatch),
-              'claim_audit_passed',
-              'claim_audit_json',
-              'claim_audit_asset_hash',
               'stage_review_json',
               'transition_audit_json',
             ],
@@ -815,7 +563,6 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
       status: 'edited',
       draft_id: next.draft_id,
       authorization_invalidated: true,
-      claim_audit_cleared: true,
     };
   } finally {
     db.close();

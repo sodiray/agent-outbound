@@ -10,6 +10,7 @@ import {
   SUBPIPELINE_STEP_INDEX_FIELD,
 } from '../lib/subpipelines.js';
 import { isReviewRequired } from '../policy/stage-review-gate.js';
+import { calculateEconomicScenario } from '../policy/economics.js';
 import { executePipelineSequenceAction } from './sequence-step-runtime.js';
 
 export type StepExecutionOutcome = {
@@ -50,6 +51,15 @@ const textValue = (value: unknown, fallback = '') => {
   if (!text) return fallback;
   return text;
 };
+
+const CLAIM_ENGINE_OUTPUT_FIELDS = new Set([
+  'claim_audit_passed',
+  'claim_audit_json',
+  'claim_audit_asset_hash',
+  'permitted_claim_packet_json',
+  'claim_packet_assemble_error',
+  'catalog_evidence_json',
+]);
 
 const outcomeFor = (value: { passed?: unknown; reason?: unknown; errored?: unknown }): StepExecutionOutcome => ({
   passed: Boolean(value.passed),
@@ -594,21 +604,13 @@ export const executeStepBatch = async (
   if (kind === 'review') return executeReviewBatch(ctx, step, stepId, rows);
 
   // Deterministic fixture path for generate / geo / profile-search under AO_PIPELINE_FIXTURE.
-  // Generate fixtures must persist declared outputs (and claim audit for content packs) so the
-  // full unmodified TV graph can be exercised without model spend.
+  // Generate fixtures persist declared outputs so the full graph can be exercised without model spend.
   if (
     String(process.env.AO_PIPELINE_FIXTURE || '').trim() === '1'
     && ['generate', 'geo_tiles', 'linkedin_profile_search'].includes(kind)
   ) {
     if (kind === 'generate') {
       const { ensureRecordColumns } = await import('../runtime/db.js');
-      const {
-        assembleClaimEvidenceCatalog,
-        assemblePermittedClaimPacket,
-        auditClaims,
-        calculateEconomicScenario,
-        claimAuditAssetHash,
-      } = await import('../policy/index.js');
       const declared = (step.outputs && typeof step.outputs === 'object')
         ? step.outputs as Record<string, unknown>
         : {};
@@ -640,6 +642,7 @@ export const executeStepBatch = async (
             return value;
           };
           for (const key of Object.keys(declared)) {
+            if (CLAIM_ENGINE_OUTPUT_FIELDS.has(key)) continue;
             const existing = row[key];
             if (existing !== undefined && existing !== null && String(existing).trim() !== '') {
               outputs[key] = coerceFixture(key, existing);
@@ -725,12 +728,6 @@ export const executeStepBatch = async (
                   }),
                 ]);
                 break;
-              case 'proof_match_ids':
-                outputs[key] = JSON.stringify([]);
-                break;
-              case 'permitted_claim_packet_json':
-                // Filled below via assembler (prevents self-approval of free text).
-                break;
               default:
                 outputs[key] = declaredType(key) === 'boolean'
                   ? false
@@ -741,57 +738,9 @@ export const executeStepBatch = async (
             outputs[key] = coerceFixture(key, outputs[key]);
           }
 
-          // Claim packet + audit for diagnostic content packs (production path under fixture inputs).
-          if (
-            Object.prototype.hasOwnProperty.call(declared, 'permitted_claim_packet_json')
-            || Object.prototype.hasOwnProperty.call(declared, 'preliminary_snapshot')
-            || String(stepId).includes('diagnostic')
-          ) {
-            const snapshot = String(
-              outputs.preliminary_snapshot
-              || row.preliminary_snapshot
-              || `Fixture preliminary operational snapshot for ${name}.`,
-            );
-            outputs.preliminary_snapshot = snapshot;
-            const packet = assemblePermittedClaimPacket({
-              account_id: recordId,
-              family_id: String(row.diagnostic_family || row.vertical || outputs.vertical || ''),
-              vertical: String(row.vertical || outputs.vertical || ''),
-              economic_inputs: {
-                weekly_admin_hours: 10,
-                hourly_loaded_cost: 45,
-              },
-              preliminary_snapshot: snapshot,
-              listDir: ctx.listDir,
-            });
-            outputs.permitted_claim_packet_json = JSON.stringify(packet);
-            outputs.catalog_evidence_json = JSON.stringify(
-              assembleClaimEvidenceCatalog({
-                family_id: String(row.diagnostic_family || row.vertical || outputs.vertical || ''),
-                vertical: String(row.vertical || outputs.vertical || ''),
-                economic_inputs: {
-                  weekly_admin_hours: 10,
-                  hourly_loaded_cost: 45,
-                },
-                listDir: ctx.listDir,
-              }),
-            );
-            const extracted = snapshot
-              .split(/[.!?\n]+/)
-              .map((t) => t.trim())
-              .filter((t) => t.length >= 3)
-              .map((text) => ({ text }));
-            const audit = auditClaims({ packet, extracted, assetText: snapshot });
-            outputs.claim_audit_passed = audit.passed ? 1 : 0;
-            outputs.claim_audit_json = JSON.stringify(audit);
-            // RES-CONTENT: persist hash of exact assetText audited.
-            const assetHash = claimAuditAssetHash(snapshot);
-            if (assetHash) outputs.claim_audit_asset_hash = assetHash;
-          }
-
           ensureRecordColumns({
             db: ctx.db as any,
-            columns: [...Object.keys(outputs), 'claim_audit_passed', 'claim_audit_json', 'claim_audit_asset_hash'],
+            columns: Object.keys(outputs),
           });
           upsertRecord({
             db: ctx.db as any,

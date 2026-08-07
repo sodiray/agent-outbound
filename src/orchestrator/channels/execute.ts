@@ -49,11 +49,6 @@ import {
   pauseForStageReview,
   invalidateStageReviewIfAssetChanged,
   appendTransitionAudit,
-  contentBindingFromRecord,
-  buildAssetClaimBinding,
-  claimAuditBlocksExternalSend,
-  claimAuditBlocksEmailSend,
-  linkedinCommercialBody,
 } from '../policy/index.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import {
@@ -61,6 +56,23 @@ import {
   evaluateLinkedinConnectGate,
   LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT,
 } from '../policy/linkedin-lifecycle.js';
+
+const linkedinBodyForReview = ({
+  record,
+  step,
+}: {
+  record: Record<string, unknown>;
+  step?: { config?: Record<string, unknown> } | null;
+}) => String(
+  step?.config?.invite_message
+  || step?.config?.message
+  || step?.config?.connection_note
+  || step?.config?.body
+  || record.linkedin_invite_message
+  || record.linkedin_message
+  || record.linkedin_message_body
+  || '',
+).trim();
 
 /**
  * Material asset_version for the outbound about to execute.
@@ -88,7 +100,6 @@ const currentStageAssetVersion = ({
   subjectText?: string | null;
   activeContactId?: string | null;
 }): string => {
-  const binding = contentBindingFromRecord(record);
   const accountId = String(record._row_id || record.id || record.account_id || '');
   const contact = String(
     activeContactId
@@ -112,7 +123,6 @@ const currentStageAssetVersion = ({
     recipient: to || null,
     stepId: stageId,
     stageId,
-    claimPacketHash: binding.claim_packet_hash || null,
     assetId: assetForStep?.asset_id ? String(assetForStep.asset_id) : null,
     draftId: draftId ?? null,
     policyVersion: policyVersion ?? null,
@@ -555,8 +565,7 @@ export const executeChannelStep = async ({
       || '',
     ).trim().toLowerCase();
     const idemContentVer = String(
-      sendRecord.claim_audit_asset_hash
-      || sendRecord.email_last_body
+      sendRecord.email_last_body
       || '',
     ).trim().slice(0, 64);
     idemKey = buildIdempotencyKey({
@@ -1070,7 +1079,7 @@ export const executeChannelStep = async ({
       // Recompute material asset_version from the asset about to execute; authorized
       // reviews bound to a different fingerprint are invalidated and re-paused (fail closed).
       if (!dryRun) {
-        const liBody = linkedinCommercialBody({ record: sendRecord, step });
+        const liBody = linkedinBodyForReview({ record: sendRecord, step });
         const linkedinAssetVersion = currentStageAssetVersion({
           record: sendRecord,
           stageId: sequenceStepId,
@@ -1144,28 +1153,6 @@ export const executeChannelStep = async ({
           provider_id: '',
           auto_skipped_steps: [],
         };
-      }
-
-      // Commercial invite/message body requires claim audit pass; bare connect is OK.
-      const liCommercialBody = linkedinCommercialBody({ record: sendRecord, step });
-      if (!dryRun && intent === 'send') {
-        const liClaimBlock = claimAuditBlocksExternalSend({
-          config: projectConfig,
-          record: sendRecord,
-          channel: 'linkedin',
-          stepKind: 'linkedin_connect',
-          taskType,
-          commercialBody: liCommercialBody,
-        });
-        if (liClaimBlock.blocked) {
-          return {
-            status: 'skipped',
-            reason: liClaimBlock.reason || 'claim_audit_failed',
-            provider_id: '',
-            auto_skipped_steps: [],
-            readiness_blockers: ['claim_audit_failed'],
-          };
-        }
       }
 
       const liClaim = reserveProviderInteraction({ providerChannel: 'linkedin' });
@@ -1259,14 +1246,6 @@ export const executeChannelStep = async ({
         (sendRecord as any).__idempotency_completed = true;
       }
 
-      const liContentBinding = contentBindingFromRecord(sendRecord);
-      const liAssetBinding = buildAssetClaimBinding({
-        record: sendRecord,
-        assetId: assetForStep?.asset_id,
-        channel: 'linkedin',
-        stepId: sequenceStepId,
-        at: now,
-      });
       if (!dryRun) {
         insertChannelEvent({
           db,
@@ -1288,14 +1267,6 @@ export const executeChannelStep = async ({
               reason: linkedinResult.reason,
               readiness: linkedinResult.readiness,
               linkedin_lifecycle_state: 'invite_sent',
-              content_binding: liContentBinding,
-              claim_packet_hash: liContentBinding.claim_packet_hash,
-              claim_audit_version: liContentBinding.claim_audit_version,
-              preliminary_snapshot_hash: liContentBinding.preliminary_snapshot_hash,
-              claim_audit_passed: liContentBinding.claim_audit_passed,
-              asset_claim_binding: liAssetBinding,
-              asset_claim_binding_json: JSON.stringify(liAssetBinding),
-              commercial_body_present: Boolean(liCommercialBody),
               ...(activeContactId ? { contact_id: activeContactId } : {}),
             },
             occurred_at: now,
@@ -1312,7 +1283,6 @@ export const executeChannelStep = async ({
         ...lifecyclePatch.patch,
         last_outreach_at: now,
         sequence_step_attempts: Number(sendRecord.sequence_step_attempts || 0) + 1,
-        asset_claim_binding_json: JSON.stringify(liAssetBinding),
       };
       if (!dryRun) {
         try {
@@ -1337,7 +1307,6 @@ export const executeChannelStep = async ({
               'linkedin_lifecycle_state',
               'linkedin_relationship_state',
               'linkedin_invite_sent_at',
-              'asset_claim_binding_json',
             ],
           });
         } catch (policyError) {
@@ -1351,11 +1320,9 @@ export const executeChannelStep = async ({
               'linkedin_lifecycle_state',
               'linkedin_relationship_state',
               'linkedin_invite_sent_at',
-              'asset_claim_binding_json',
             ],
           });
         }
-        ensureRecordColumns({ db, columns: ['asset_claim_binding_json'] });
         upsertRecord({ db, row: updatedRecord });
         // Project after upsert: upsertRecord locks primary contact_* against pipeline clobber.
         applyActiveContactProjection({
@@ -1419,37 +1386,6 @@ export const executeChannelStep = async ({
           reason: 'Draft approval required before send.',
           provider_id: '',
           auto_skipped_steps: [],
-        };
-      }
-
-      // Claim audit fail blocks send even when draft is ready (under enforce_readiness / review).
-      // Pass exact drafted subject+body so claim_audit_asset_hash matches generation/approve bind.
-      const { draftAssetText } = await import('../policy/claim-binding.js');
-      const emailBodyForAudit = approvedDraft
-        ? draftAssetText({
-          subject: approvedDraft.subject != null ? String(approvedDraft.subject) : '',
-          body: approvedDraft.body != null ? String(approvedDraft.body) : '',
-        })
-        : draftAssetText({
-          subject: String(sendRecord.email_last_subject || ''),
-          body: String(sendRecord.email_last_body || sendRecord.email_body || ''),
-        });
-      const claimBlock = claimAuditBlocksEmailSend({
-        config: projectConfig,
-        record: sendRecord,
-        stepKind: stepKind || 'send_email',
-        taskType,
-        commercialBody: emailBodyForAudit || null,
-      });
-      if (claimBlock.blocked) {
-        return {
-          status: 'skipped',
-          reason: claimBlock.reason || 'claim_audit_failed',
-          provider_id: '',
-          auto_skipped_steps: [],
-          readiness_blockers: claimBlock.reason?.includes('claim_audit_asset_hash')
-            ? ['claim_audit_asset_hash_mismatch']
-            : ['claim_audit_failed'],
         };
       }
 
@@ -1793,7 +1729,6 @@ export const executeChannelStep = async ({
                 draftId: String(approvedDraft.draft_id),
                 patch: {
                   status: 'pending_approval',
-                  claim_audit_passed: 0,
                   content_binding: {
                     ...prevBind,
                     provider_envelope: null,
@@ -2042,21 +1977,6 @@ export const executeChannelStep = async ({
       || ''
     ).trim();
 
-    // Content-version binding from diagnostic record (packet / audit / snapshot).
-    // Computed before channel event so send/draft payloads stamp the same hashes.
-    // asset_claim_binding_json is the audit-export shape (which claims rode with this send).
-    const contentBinding = contentBindingFromRecord(sendRecord);
-    const assetClaimBinding = buildAssetClaimBinding({
-      record: sendRecord,
-      assetId: assetForStep?.asset_id
-        || (intent === 'draft'
-          ? String(stepArtifacts.draft_id || stepOutputs.draft_id || '')
-          : ''),
-      channel: eventChannel,
-      stepId: sequenceStepId,
-      at: now,
-    });
-
     if (!dryRun) {
       insertChannelEvent({
         db,
@@ -2084,13 +2004,6 @@ export const executeChannelStep = async ({
             outputs: stepResult.outputs,
             artifacts: stepResult.artifacts,
             reason: stepResult.reason || '',
-            content_binding: contentBinding,
-            claim_packet_hash: contentBinding.claim_packet_hash,
-            claim_audit_version: contentBinding.claim_audit_version,
-            preliminary_snapshot_hash: contentBinding.preliminary_snapshot_hash,
-            claim_audit_passed: contentBinding.claim_audit_passed,
-            asset_claim_binding: assetClaimBinding,
-            asset_claim_binding_json: JSON.stringify(assetClaimBinding),
             ...(activeContactId ? { contact_id: activeContactId } : {}),
             ...(sendMailbox ? {
               mailbox_id: sendMailbox.id,
@@ -2142,17 +2055,11 @@ export const executeChannelStep = async ({
               subject: draftSubject,
               body: draftBody,
               reason: String(stepResult.reason || (usesAssetId && !assetForStep ? `Asset not found for step ${usesAssetId}` : '')),
-              claim_packet_hash: contentBinding.claim_packet_hash,
-              claim_audit_version: contentBinding.claim_audit_version,
-              preliminary_snapshot_hash: contentBinding.preliminary_snapshot_hash,
-              claim_audit_passed: contentBinding.claim_audit_passed,
-              content_binding: contentBinding,
+              content_binding: {},
               artifacts: {
                 summary: stepResult.summary || '',
                 outputs: stepOutputs,
                 artifacts: stepArtifacts,
-                content_binding: contentBinding,
-                asset_claim_binding: assetClaimBinding,
                 ...(assetOverride ? assetOverride.artifacts : missingAssetArtifacts),
               },
             },
@@ -2188,7 +2095,7 @@ export const executeChannelStep = async ({
           (sendRecord as any).email_last_from =
             draftFrom || sendRecord.email_last_from;
           // Same composition as drafts.composeOutboundReviewVersion / send path:
-          // account, contact, recipient, subject/body, claim packet, draft id, step.
+          // account, contact, recipient, subject/body, draft id, step.
           const { composeOutboundReviewVersion } = await import('../../commands/drafts.js');
           const assetVersion = composeOutboundReviewVersion({
             record: sendRecord,
@@ -2302,10 +2209,7 @@ export const executeChannelStep = async ({
       sequence_step_attempts: shouldAdvanceSequence
         ? Number(sendRecord.sequence_step_attempts || 0) + 1
         : Number(sendRecord.sequence_step_attempts || 0),
-      // Persist which claims rode with the latest executed asset (audit export).
-      asset_claim_binding_json: JSON.stringify(assetClaimBinding),
     };
-    ensureRecordColumns({ db, columns: ['asset_claim_binding_json'] });
 
     if (intent === 'draft' && !updatedRecord.email_last_draft_id && providerMessageId) {
       updatedRecord.email_last_draft_id = providerMessageId;

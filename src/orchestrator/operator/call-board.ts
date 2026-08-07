@@ -23,7 +23,6 @@
 import { rankCallCapacity } from '../policy/campaign-process.js';
 import { parseNextActionFromRecord } from '../policy/lifecycle.js';
 import { SEQUENCE_STATES_BLOCK_OUTBOUND } from '../policy/sequence-outbound.js';
-import { buildAssetClaimBinding } from '../policy/claim-binding.js';
 import {
   applyPhoneDisposition,
   assertPhoneCallDisposition,
@@ -820,15 +819,6 @@ export function disposeCallBoardEntry(input: {
     throw new Error(`Cannot dispose: lease held by ${holder} until ${until}`);
   }
 
-  // Bind executed call disposition to the permitted claim packet / audit version
-  // so audit export can show which claims rode with which call touch.
-  const assetClaimBinding = buildAssetClaimBinding({
-    record: row,
-    channel: 'call',
-    stepId: String(row.next_action_step_id || row.sequence_step_id || 'call'),
-    at: now,
-  });
-
   const applied = applyPhoneDisposition({
     record: row,
     disposition,
@@ -864,15 +854,11 @@ export function disposeCallBoardEntry(input: {
       'work_state',
       'disposition_latest',
       'disposition_follow_up_at',
-      'asset_claim_binding_json',
     ],
   });
   upsertRecord({
     db: input.db,
-    row: {
-      ...applied.patch,
-      asset_claim_binding_json: JSON.stringify(assetClaimBinding),
-    },
+    row: applied.patch,
   });
 
   // Structural wrong_number: also stamp the contacts-table row so eligibility
@@ -933,11 +919,6 @@ export function disposeCallBoardEntry(input: {
           phone_invalidated: applied.phone_invalidated,
           callback_at: text(applied.patch.call_callback_at) || null,
           next_action: applied.next_action,
-          asset_claim_binding: assetClaimBinding,
-          asset_claim_binding_json: JSON.stringify(assetClaimBinding),
-          claim_packet_hash: assetClaimBinding.claim_packet_hash,
-          claim_audit_version: assetClaimBinding.claim_audit_version,
-          claim_audit_passed: assetClaimBinding.claim_audit_passed,
           policy_version: applied.policy_version,
         },
         occurred_at: now,

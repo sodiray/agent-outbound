@@ -438,10 +438,6 @@ const SCHEMA_SQL = `
     body TEXT DEFAULT '',
     reason TEXT DEFAULT '',
     artifacts_json TEXT DEFAULT '{}',
-    claim_packet_hash TEXT DEFAULT '',
-    claim_audit_version TEXT DEFAULT '',
-    preliminary_snapshot_hash TEXT DEFAULT '',
-    claim_audit_passed INTEGER DEFAULT 0,
     content_binding_json TEXT DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -1060,17 +1056,12 @@ const ensurePipelineEventCompatibility = (db) => {
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_pipeline_events_contact ON pipeline_events(record_id, contact_id, step_id)'); } catch {}
 };
 
-/** Content-version binding columns on drafts (diagnostic claim packet / snapshot hashes). */
 const ensureDraftCompatibility = (db) => {
-  try { db.exec("ALTER TABLE drafts ADD COLUMN claim_packet_hash TEXT DEFAULT ''"); } catch {}
-  try { db.exec("ALTER TABLE drafts ADD COLUMN claim_audit_version TEXT DEFAULT ''"); } catch {}
-  try { db.exec("ALTER TABLE drafts ADD COLUMN preliminary_snapshot_hash TEXT DEFAULT ''"); } catch {}
-  try { db.exec('ALTER TABLE drafts ADD COLUMN claim_audit_passed INTEGER DEFAULT 0'); } catch {}
   try { db.exec("ALTER TABLE drafts ADD COLUMN content_binding_json TEXT DEFAULT '{}'"); } catch {}
 };
 
 /**
- * Ensure drafts table has content-binding columns (export for execute path).
+ * Ensure drafts table has its generic content-binding column.
  */
 export const ensureDraftColumns = ({ db }) => {
   ensureDraftCompatibility(db);
@@ -2942,15 +2933,11 @@ export const insertDraft = ({ db, draft }) => {
   db.prepare(`
     INSERT INTO drafts (
       draft_id, row_id, sequence_name, step_number, step_id, channel, status,
-      subject, body, reason, artifacts_json,
-      claim_packet_hash, claim_audit_version, preliminary_snapshot_hash,
-      claim_audit_passed, content_binding_json,
+      subject, body, reason, artifacts_json, content_binding_json,
       created_at, updated_at
     ) VALUES (
       @draft_id, @row_id, @sequence_name, @step_number, @step_id, @channel, @status,
-      @subject, @body, @reason, @artifacts_json,
-      @claim_packet_hash, @claim_audit_version, @preliminary_snapshot_hash,
-      @claim_audit_passed, @content_binding_json,
+      @subject, @body, @reason, @artifacts_json, @content_binding_json,
       @created_at, @updated_at
     )
   `).run({
@@ -2965,26 +2952,7 @@ export const insertDraft = ({ db, draft }) => {
     body: String(draft?.body || ''),
     reason: String(draft?.reason || ''),
     artifacts_json: safeJson(draft?.artifacts || {}),
-    claim_packet_hash: String(draft?.claim_packet_hash || contentBinding.claim_packet_hash || ''),
-    claim_audit_version: String(draft?.claim_audit_version || contentBinding.claim_audit_version || ''),
-    preliminary_snapshot_hash: String(
-      draft?.preliminary_snapshot_hash || contentBinding.preliminary_snapshot_hash || '',
-    ),
-    claim_audit_passed: Number(
-      draft?.claim_audit_passed
-      ?? contentBinding.claim_audit_passed
-      ?? 0,
-    ) ? 1 : 0,
-    content_binding_json: safeJson(
-      Object.keys(contentBinding).length
-        ? contentBinding
-        : {
-          claim_packet_hash: draft?.claim_packet_hash || '',
-          claim_audit_version: draft?.claim_audit_version || '',
-          preliminary_snapshot_hash: draft?.preliminary_snapshot_hash || '',
-          claim_audit_passed: draft?.claim_audit_passed ?? 0,
-        },
-    ),
+    content_binding_json: safeJson(contentBinding),
     created_at: String(draft?.created_at || now),
     updated_at: String(draft?.updated_at || now),
   });
@@ -3018,10 +2986,6 @@ export const updateDraft = ({ db, draftId, patch }) => {
         body = @body,
         reason = @reason,
         artifacts_json = @artifacts_json,
-        claim_packet_hash = @claim_packet_hash,
-        claim_audit_version = @claim_audit_version,
-        preliminary_snapshot_hash = @preliminary_snapshot_hash,
-        claim_audit_passed = @claim_audit_passed,
         content_binding_json = @content_binding_json,
         updated_at = @updated_at
     WHERE draft_id = @draft_id
@@ -3032,10 +2996,6 @@ export const updateDraft = ({ db, draftId, patch }) => {
     body: String(merged.body || ''),
     reason: String(merged.reason || ''),
     artifacts_json: String(merged.artifacts_json || '{}'),
-    claim_packet_hash: String(merged.claim_packet_hash || ''),
-    claim_audit_version: String(merged.claim_audit_version || ''),
-    preliminary_snapshot_hash: String(merged.preliminary_snapshot_hash || ''),
-    claim_audit_passed: Number(merged.claim_audit_passed || 0) ? 1 : 0,
     content_binding_json: String(merged.content_binding_json || '{}'),
     updated_at: String(merged.updated_at),
   });

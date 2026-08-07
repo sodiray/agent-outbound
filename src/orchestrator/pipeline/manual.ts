@@ -40,11 +40,6 @@ import {
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../policy/lifecycle.js';
 import { stableHash } from '../lib/record.js';
-import {
-  buildAssetClaimBinding,
-  claimAuditBlocksExternalSend,
-  contentBindingFromRecord,
-} from '../policy/claim-binding.js';
 
 const text = (value: unknown) => String(value || '').trim();
 
@@ -278,7 +273,6 @@ const assertMailStageReviewAuthorized = ({
     || row.postcard_body
     || row.preliminary_snapshot,
   );
-  const binding = contentBindingFromRecord(row);
   const currentAssetVersion = resolveStageAssetVersion({
     accountId: String(row._row_id || row.id || recordId),
     activeContactId: text(row.active_contact_id) || null,
@@ -286,7 +280,6 @@ const assertMailStageReviewAuthorized = ({
     recipient: text(row.address || row.contact_email || row.email) || null,
     stepId,
     stageId: stepId,
-    claimPacketHash: binding.claim_packet_hash || null,
     bodyText: mailBody || null,
     policyVersion: config?.policy?.version ?? null,
   });
@@ -614,35 +607,6 @@ export const completeManualTask = async ({
     || sid.toLowerCase().includes('golden_ticket')
     || sid.toLowerCase().includes('letter');
 
-  // Claim audit gate BEFORE completion event — refuse without closing the park when
-  // commercial GT/postcard copy is present and claim_audit_passed is not true.
-  if (!skip && isMailStep && recordRow) {
-    // Only real mailpiece copy — never preliminary_snapshot (diagnostic prose is
-    // not the physical-mail asset; using it caused false claim-hash failures).
-    const mailCopyBody = text(
-      recordRow.golden_ticket_copy
-      || recordRow.golden_ticket_body
-      || recordRow.mail_copy
-      || recordRow.mail_body
-      || recordRow.postcard_copy
-      || recordRow.postcard_body,
-    );
-    const mailProduct = resolveMailProductType({ stepId: sid, configured: configuredStep || null });
-    const forceCommercial = mailProduct === 'golden_ticket' || Boolean(mailCopyBody);
-    const mailClaimBlock = claimAuditBlocksExternalSend({
-      config,
-      record: recordRow,
-      channel: 'mail',
-      stepKind: 'manual_task',
-      taskType: mailProduct || 'mail',
-      commercialBody: mailCopyBody || null,
-      forceCommercial: forceCommercial && Boolean(mailCopyBody || recordRow.permitted_claim_packet_json),
-    });
-    if (mailClaimBlock.blocked) {
-      throw new Error(mailClaimBlock.reason || 'claim_audit_failed: mail blocked');
-    }
-  }
-
   // Completion timestamps must be strictly after the park event so
   // listAwaitingManualTasks (done.occurred_at > park.occurred_at) closes the park.
   const parkAt = String(
@@ -705,19 +669,12 @@ export const completeManualTask = async ({
       );
     }
 
-    const assetClaimBinding = buildAssetClaimBinding({
-      record: row,
-      channel: 'mail',
-      stepId: sid,
-      at: now,
-    });
     let patched: Record<string, unknown> = {
       ...row,
       account_contact_plan_json: JSON.stringify(next),
       mail_allocated: 1,
       mail_allocated_at: now,
       mail_provider_status: 'allocated',
-      asset_claim_binding_json: JSON.stringify(assetClaimBinding),
     };
     ensureRecordColumns({
       db,
@@ -733,7 +690,6 @@ export const completeManualTask = async ({
         'mail_last_expected_delivery',
         'mail_last_failed_at',
         'mail_last_failure_reason',
-        'asset_claim_binding_json',
       ],
     });
     mail_allocated = true;
@@ -769,11 +725,6 @@ export const completeManualTask = async ({
           || row.postcard_copy
           || row.postcard_body,
         ),
-        claim_packet_hash: assetClaimBinding.claim_packet_hash,
-        claim_audit_version: assetClaimBinding.claim_audit_version,
-        preliminary_snapshot_hash: assetClaimBinding.preliminary_snapshot_hash,
-        claim_audit_passed: assetClaimBinding.claim_audit_passed,
-        permitted_claim_ids: assetClaimBinding.permitted_claim_ids,
       });
       const submitResult = await submitMailWithIdempotency({
         db,
@@ -797,10 +748,7 @@ export const completeManualTask = async ({
         );
       }
       const submitted = applyMailSubmitted({ record: patched, result: submitResult, at: now });
-      patched = {
-        ...submitted.patch,
-        asset_claim_binding_json: JSON.stringify(assetClaimBinding),
-      };
+      patched = submitted.patch;
       mail_provider_status = submitted.status;
       mail_piece_id = submitResult.piece_id || undefined;
       try {
@@ -819,10 +767,6 @@ export const completeManualTask = async ({
               provider: submitResult.provider,
               treatment: mail_treatment,
               step_id: sid,
-              asset_claim_binding: assetClaimBinding,
-              claim_packet_hash: assetClaimBinding.claim_packet_hash,
-              claim_audit_version: assetClaimBinding.claim_audit_version,
-              claim_audit_passed: assetClaimBinding.claim_audit_passed,
             },
             occurred_at: now,
           },
@@ -844,10 +788,6 @@ export const completeManualTask = async ({
             payload: {
               treatment: mail_treatment,
               step_id: sid,
-              asset_claim_binding: assetClaimBinding,
-              claim_packet_hash: assetClaimBinding.claim_packet_hash,
-              claim_audit_version: assetClaimBinding.claim_audit_version,
-              claim_audit_passed: assetClaimBinding.claim_audit_passed,
             },
             occurred_at: now,
           },

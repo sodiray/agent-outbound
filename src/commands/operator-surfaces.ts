@@ -178,7 +178,7 @@ export const metricsCommand = ({ list }: { list: string }) => {
 };
 
 /**
- * Dump transition_audit / stage_review / claim_audit / decision fields as JSON.
+ * Dump transition_audit / stage_review / decision fields as JSON.
  * One record (`record` / `recordId` / `row`) or whole-list export (capped by limit).
  */
 export const auditExportCommand = ({

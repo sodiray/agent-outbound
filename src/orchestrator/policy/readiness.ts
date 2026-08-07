@@ -23,7 +23,6 @@ export type ReadinessInput = {
     mail?: { ready: boolean; confidence?: number };
   };
   contentReady?: boolean;
-  claimAuditPassed?: boolean;
   withinBudget?: boolean;
   collision?: boolean;
   hasNextAction?: boolean;
@@ -174,13 +173,6 @@ export function evaluateOutboundReadiness(input: ReadinessInput): ReadinessResul
 
   // Fail closed: undefined/null content must not readiness-pass.
   if (input.contentReady !== true) blockers.push('content_not_ready');
-  // Explicit fail always blocks. Content present + missing/null audit also blocks
-  // (null must not readiness-pass — AGGREGATE B2).
-  if (input.claimAuditPassed === false) blockers.push('claim_audit_failed');
-  else if (input.contentReady === true && input.claimAuditPassed !== true) {
-    blockers.push('claim_audit_required');
-  }
-
   if (input.confidenceProfile && input.proposedAction?.channel) {
     const gate = actionConfidenceAllows({
       action: input.proposedAction.channel,

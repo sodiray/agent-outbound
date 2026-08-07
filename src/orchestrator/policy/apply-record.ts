@@ -165,29 +165,6 @@ export function resolveCohortCapacityOk(record: Record<string, unknown>): boolea
   return null;
 }
 
-/**
- * SQLite may return flags as 1, 1.0, "1", "1.0".
- * Missing/unknown → undefined (fail closed when content is present).
- */
-function resolveClaimAuditPassed(raw: unknown, contentReady: boolean): boolean | undefined {
-  if (raw === false || raw === 0 || raw === '0' || raw === 'false') {
-    return false;
-  }
-  if (raw === true || raw === 1 || raw === '1') return true;
-  if (raw != null && raw !== '') {
-    const n = Number(raw);
-    if (Number.isFinite(n)) return n !== 0;
-    const s = String(raw).trim().toLowerCase();
-    if (s === 'true' || s === 'yes') return true;
-    if (s === 'false' || s === 'no') return false;
-  }
-  // Missing audit: no invent pass when content exists (fail closed).
-  // Without content there is nothing to audit — leave undefined so readiness
-  // only requires claim audit when contentReady === true.
-  if (!contentReady) return undefined;
-  return undefined;
-}
-
 type BreakdownItem = {
   id: string;
   grade: number;
@@ -937,9 +914,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     mail_confidence: mailConfidence,
   };
 
-  const contentReady = Boolean(record.permitted_claim_packet_json || record.preliminary_snapshot);
-  // SQLite often returns numeric flags as "1.0" strings — coerce robustly.
-  const claimAuditPassed = resolveClaimAuditPassed(record.claim_audit_passed, contentReady);
+  const contentReady = Boolean(record.preliminary_snapshot);
 
   const collision = detectCollision({
     active_contact_id: campaign?.active_contact_id || String(record.active_contact_id || '') || null,
@@ -980,7 +955,6 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       },
     },
     contentReady,
-    claimAuditPassed,
     withinBudget: costCheck.within_budget,
     collision: collision.collision || Boolean(record.channel_or_contact_collision),
     hasNextAction: Boolean(next_action),
@@ -1285,7 +1259,7 @@ function isHardReadinessExternalSend(input: {
  * Build evaluateOutboundReadiness input from live record fields (same sources as policy apply).
  * Uses timing-reachability + cost-ledger so hard readiness does not invent permission
  * from scores alone or ignore spend ceilings.
- * Fail closed: missing content / next_action / claim_audit never readiness-pass.
+ * Fail closed: missing content or next_action never readiness-pass.
  * Raw contact fields alone never mark a channel ready (validation confidence required).
  */
 export function readinessInputFromRecord(input: {
@@ -1390,9 +1364,8 @@ export function readinessInputFromRecord(input: {
   };
 
   // Explicit booleans — undefined must not readiness-pass (fail closed).
-  const hasContent = Boolean(record.permitted_claim_packet_json || record.preliminary_snapshot);
+  const hasContent = Boolean(record.preliminary_snapshot);
   const hasNext = Boolean(record.next_action_json);
-  const claimAuditPassed = resolveClaimAuditPassed(record.claim_audit_passed, hasContent);
   const namedBuyer = resolveNamedBuyerFromRecord(record);
   const buyerAffiliation = resolveBuyerAffiliationFromRecord(record);
   const mailTreatmentAllows = mailTreatment !== 'none' && mailTreatment !== '';
@@ -1425,7 +1398,6 @@ export function readinessInputFromRecord(input: {
       },
     },
     contentReady: hasContent,
-    claimAuditPassed,
     withinBudget: withinBudgetFlag,
     hasNextAction: hasNext,
     confidenceProfile,

@@ -10,6 +10,7 @@ import {
   upsertRecord,
 } from '../runtime/db.js';
 import { EVIDENCE_RECORD_COLUMNS } from '../policy/evidence.js';
+import { calculateEconomicScenario } from '../policy/economics.js';
 import { readConfig } from '../lib/config.js';
 import { getRecordRowId } from '../lib/record.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
@@ -59,6 +60,15 @@ type DbLike = {
 type GenerateStepInput = Record<string, unknown>;
 type GenerateRecord = Record<string, unknown>;
 type Logger = (event: Record<string, unknown>) => void;
+
+const CLAIM_ENGINE_OUTPUT_FIELDS = new Set([
+  'claim_audit_passed',
+  'claim_audit_json',
+  'claim_audit_asset_hash',
+  'permitted_claim_packet_json',
+  'claim_packet_assemble_error',
+  'catalog_evidence_json',
+]);
 
 const stringifyJson = (value: unknown) => {
   try {
@@ -223,15 +233,7 @@ const emit = ({ logger, event }: { logger?: Logger; event: Record<string, unknow
   emitActivity(event);
 };
 
-const claimPacketDependencyFields = ['vertical', 'diagnostic_family'];
-
-const dependencyFieldsFor = (stepConfig: Record<string, unknown>) => {
-  const outputs = getDeclaredOutputs(stepConfig);
-  const claimPacketFields = Object.prototype.hasOwnProperty.call(outputs, 'permitted_claim_packet_json')
-    ? claimPacketDependencyFields
-    : [];
-  return [...new Set([...dependencyFieldsForStep(stepConfig), ...claimPacketFields])];
-};
+const dependencyFieldsFor = (stepConfig: Record<string, unknown>) => dependencyFieldsForStep(stepConfig);
 
 const currentRecordForDependencies = ({ db, record, stepConfig }: {
   db: DbLike;
@@ -311,7 +313,9 @@ export const runGenerateStep = async ({
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'generate';
   const stepConfig = enrichmentStepConfig(step);
-  const declaredOutputs = getDeclaredOutputs(stepConfig);
+  const declaredOutputs = Object.fromEntries(
+    Object.entries(getDeclaredOutputs(stepConfig)).filter(([key]) => !CLAIM_ENGINE_OUTPUT_FIELDS.has(key)),
+  );
   const outputZod = buildOutputZodSchema(declaredOutputs, {});
   const executionOutputZod = buildOutputZodSchema({}, {});
   const effectiveConcurrency = Number(concurrency || stepConfig.concurrency || 3);
@@ -498,242 +502,31 @@ export const runGenerateStep = async ({
         reason: referenceAsset.reason,
       });
 
-      // Deterministic claim packet assembly + claim audit (not best-effort swallow).
-      {
-        const {
-          auditClaims,
-          assembleClaimEvidenceCatalog,
-          assemblePermittedClaimPacket,
-          calculateEconomicScenario,
-          claimAuditAssetHash,
-          draftAssetText,
-        } = await import('../policy/index.js');
-        const { ensureRecordColumns, upsertRecord } = await import('../runtime/db.js');
-        // Final drafted email (subject+body) is the only asset that may authorize
-        // claim_audit for send. Do NOT hash diagnostic snapshot + raw model result
-        // into the same hash — that makes legitimate drafts fail at send.
-        const draftedEmail = draftAssetText({
-          subject: parsedOutputs.subject as string,
-          body: (parsedOutputs.body || parsedOutputs.email_body || parsedOutputs.email_copy) as string,
-        });
-        // Audit text: prefer drafted email; fall back to diagnostic snapshot alone
-        // (not a composite with model result) when no body yet.
-        const assetText = draftedEmail
-          || String(parsedOutputs.preliminary_snapshot || '').trim()
-          || String(referenceAsset.result || '').trim();
-
-        // Prefer code-assembled packet over model-emitted packet (prevents self-approval).
-        let packet: any = null;
-        try {
-          const economicInputs: Record<string, number> = {};
-          for (const key of [
-            'weekly_admin_hours',
-            'admin_hours_per_week',
-            'hourly_loaded_cost',
-            'hourly_rate',
-            'missed_leads_per_month',
-            'avg_job_value',
-            'close_rate',
-          ]) {
-            const n = Number((inputRecord as any)[key] ?? (parsedOutputs as any)[key]);
-            if (Number.isFinite(n)) economicInputs[key] = n;
-          }
-          const scenarioIds = ['admin_labor_leak', 'missed_lead_revenue'];
-          const econResults = scenarioIds.map((scenario_id) =>
-            calculateEconomicScenario({
-              scenario_id,
-              weekly_admin_hours: economicInputs.weekly_admin_hours ?? economicInputs.admin_hours_per_week,
-              hourly_loaded_cost: economicInputs.hourly_loaded_cost ?? economicInputs.hourly_rate,
-              missed_leads_per_month: economicInputs.missed_leads_per_month,
-              avg_job_value: economicInputs.avg_job_value,
-              close_rate: economicInputs.close_rate,
-            }),
-          );
-          parsedOutputs.economic_scenarios_json = JSON.stringify(econResults);
-
-          packet = assemblePermittedClaimPacket({
-            account_id: String(recordId),
-            family_id: String(inputRecord.diagnostic_family || inputRecord.vertical || ''),
-            vertical: String(inputRecord.vertical || ''),
-            economic_inputs: economicInputs,
-            preliminary_snapshot: String(parsedOutputs.preliminary_snapshot || ''),
-            listDir: String(listDir || ''),
-          });
-          parsedOutputs.permitted_claim_packet_json = JSON.stringify(packet);
-          parsedOutputs.catalog_evidence_json = JSON.stringify(
-            assembleClaimEvidenceCatalog({
-              family_id: String(inputRecord.diagnostic_family || inputRecord.vertical || ''),
-              vertical: String(inputRecord.vertical || ''),
-              economic_inputs: economicInputs,
-              listDir: String(listDir || ''),
-            }),
-          );
-        } catch (assembleErr) {
-          // Fall back to model packet only if assembler fails; still audit.
-          const packetRaw = parsedOutputs.permitted_claim_packet_json
-            || inputRecord.permitted_claim_packet_json
-            || '';
-          if (packetRaw) {
-            packet = typeof packetRaw === 'string' ? JSON.parse(String(packetRaw)) : packetRaw;
-          }
-          parsedOutputs.claim_packet_assemble_error = String((assembleErr as Error)?.message || assembleErr);
-        }
-
-        const withholdReason = String(packet?.withhold_reason || '').trim();
-        const isClaimPacketStep = Object.prototype.hasOwnProperty.call(expectedOutputs, 'permitted_claim_packet_json');
-        if (isClaimPacketStep && withholdReason) {
-          ensureRecordColumns({
-            db,
-            columns: [
-              'claim_audit_passed',
-              'claim_audit_json',
-              'permitted_claim_packet_json',
-              'economic_scenarios_json',
-              'claim_packet_assemble_error',
-            ],
-          });
-          upsertRecord({
-            db,
-            row: {
-              ...inputRecord,
-              ...parsedOutputs,
-              permitted_claim_packet_json: JSON.stringify(packet),
-              claim_audit_passed: 0,
-              claim_audit_json: JSON.stringify({
-                passed: false,
-                authorized: [],
-                unauthorized: [{ text: '', reason: withholdReason }],
-              }),
-            },
-          });
-          persistAsset({
-            db,
-            existing: saved,
-            recordId,
-            stepId: id,
-            label: String(stepConfig.label || ''),
-            result: referenceAsset.result,
-            outputsJson,
-            isReference,
-            status: 'needs_repair',
-            reason: `withheld_claim_packet:${withholdReason}`,
-          });
-          summary.failed += 1;
-          summary.errors.push({ record_id: recordId, error: `withheld_claim_packet:${withholdReason}` });
-          summary.record_ids.push(recordId);
-          emit({ logger, event: { event: 'error', phase: 'generate', step: id, row: rowLabel, detail: `withheld_claim_packet:${withholdReason}` } });
-          return;
-        }
-
-        if (packet && Array.isArray(packet.permitted_claims) && assetText) {
-          // Sentence-ish extract for audit. Empty result with non-empty assetText must fail
-          // (claim-audit v2 no_claims_extracted) — never treat "nothing extracted" as pass.
-          // Audit EVERY substantive sentence (no 12-sentence cap, no dropping short claims
-          // that can still assert commercial falsehoods).
-          const extracted = String(assetText)
-            .split(/[.!?\n]+/)
-            .map((t) => t.trim())
-            .filter((t) => t.length >= 3)
-            .map((text) => ({ text }));
-          let audit: any;
-          try {
-            audit = auditClaims({ packet, extracted, assetText });
-            // Belt-and-suspenders: empty extract of authored content cannot pass even if
-            // auditClaims were ever relaxed.
-            if (extracted.length === 0 && String(assetText).trim()) {
-              audit = {
-                ...audit,
-                passed: false,
-                unauthorized: [
-                  ...(audit.unauthorized || []),
-                  { text: String(assetText).slice(0, 120), reason: 'no_claims_extracted' },
-                ],
-              };
-            }
-            // Withheld / unknown family packet (zero claims) cannot authorize content.
-            if ((packet.permitted_claims || []).length === 0 && String(assetText).trim()) {
-              audit = {
-                ...audit,
-                passed: false,
-                unauthorized: [
-                  ...(audit.unauthorized || []).filter((u: any) => u.reason !== 'withheld_claim_packet'),
-                  {
-                    text: String(assetText).slice(0, 120),
-                    reason: String((packet as any).withhold_reason || 'withheld_claim_packet'),
-                  },
-                ],
-              };
-            }
-          } catch (auditErr) {
-            // Do not swallow: mark failed so readiness cannot pass on missing audit.
-            audit = {
-              passed: false,
-              authorized: [],
-              unauthorized: [{ text: 'audit_error', reason: String((auditErr as Error)?.message || auditErr) }],
-              policy_version: 'error',
-            };
-          }
-          ensureRecordColumns({
-            db,
-            columns: [
-              'claim_audit_passed',
-              'claim_audit_json',
-              'claim_audit_asset_hash',
-              'permitted_claim_packet_json',
-              'economic_scenarios_json',
-              'claim_packet_assemble_error',
-            ],
-          });
-          // Bind hash only when we audited a real drafted email body. Snapshot-only
-          // audits never set claim_audit_passed=1 (send requires draft-bound hash).
-          const assetHash = draftedEmail ? claimAuditAssetHash(draftedEmail) : '';
-          const pass = Boolean(audit.passed && draftedEmail && assetHash);
-          const patch: Record<string, unknown> = {
-            ...inputRecord,
-            ...parsedOutputs,
-            permitted_claim_packet_json: JSON.stringify(packet),
-            claim_audit_json: JSON.stringify(audit),
-            claim_audit_passed: pass ? 1 : 0,
-            ...(assetHash ? { claim_audit_asset_hash: assetHash } : {}),
-          };
-          upsertRecord({ db, row: patch });
-          if (!audit.passed) {
-            persistAsset({
-              db,
-              existing: saved,
-              recordId,
-              stepId: id,
-              label: String(stepConfig.label || ''),
-              result: referenceAsset.result,
-              outputsJson,
-              isReference,
-              status: 'needs_repair',
-              reason: `claim_audit_failed:${(audit.unauthorized || []).map((u: any) => u.reason).join(',')}`,
-            });
-          }
-        } else if (Object.keys(parsedOutputs).length > 0) {
-          ensureRecordColumns({ db, columns: Object.keys(parsedOutputs) });
-          // Content without packet/audit → mark audit required failed if text exists.
-          const patch: Record<string, unknown> = { ...inputRecord, ...parsedOutputs };
-          if (assetText && !packet) {
-            patch.claim_audit_passed = 0;
-            patch.claim_audit_json = JSON.stringify({
-              passed: false,
-              unauthorized: [{ text: '', reason: 'missing_permitted_claim_packet' }],
-            });
-          }
-          // Empty extract path: assetText present but condition skipped → fail closed.
-          if (assetText && packet && !Array.isArray(packet.permitted_claims)) {
-            patch.claim_audit_passed = 0;
-            patch.claim_audit_json = JSON.stringify({
-              passed: false,
-              unauthorized: [{ text: '', reason: 'invalid_permitted_claim_packet' }],
-            });
-            patch.permitted_claim_packet_json = JSON.stringify(packet);
-          }
-          upsertRecord({ db, row: patch });
-        }
+      const economicInputs: Record<string, number> = {};
+      for (const key of [
+        'weekly_admin_hours',
+        'admin_hours_per_week',
+        'hourly_loaded_cost',
+        'hourly_rate',
+        'missed_leads_per_month',
+        'avg_job_value',
+        'close_rate',
+      ]) {
+        const value = Number(inputRecord[key] ?? parsedOutputs[key]);
+        if (Number.isFinite(value)) economicInputs[key] = value;
       }
+      parsedOutputs.economic_scenarios_json = JSON.stringify(
+        ['admin_labor_leak', 'missed_lead_revenue'].map((scenario_id) => calculateEconomicScenario({
+          scenario_id,
+          weekly_admin_hours: economicInputs.weekly_admin_hours ?? economicInputs.admin_hours_per_week,
+          hourly_loaded_cost: economicInputs.hourly_loaded_cost ?? economicInputs.hourly_rate,
+          missed_leads_per_month: economicInputs.missed_leads_per_month,
+          avg_job_value: economicInputs.avg_job_value,
+          close_rate: economicInputs.close_rate,
+        })),
+      );
+      ensureRecordColumns({ db, columns: Object.keys(parsedOutputs) });
+      upsertRecord({ db, row: { ...inputRecord, ...parsedOutputs } });
 
       recordCostEvent({
         db,

@@ -49,15 +49,6 @@ function tableHasColumn(db: any, table: string, column: string): boolean {
   }
 }
 
-function isClaimAuditFailed(raw: unknown): boolean {
-  if (raw == null || raw === '') return false;
-  if (typeof raw === 'boolean') return raw === false;
-  const n = Number(raw);
-  if (Number.isFinite(n)) return n === 0;
-  const s = String(raw).trim().toLowerCase();
-  return s === '0' || s === 'false' || s === 'no' || s === 'failed';
-}
-
 export function runHealthChecks(input: {
   db: any;
   limit?: number;
@@ -72,7 +63,6 @@ export function runHealthChecks(input: {
     visit_path: 0,
     impossible_treatment: 0,
     open_paused_review: 0,
-    claim_audit_failed_with_ready_draft: 0,
     suppressed_active_sequence: 0,
     cost_events_without_ledger: 0,
     false_pipeline_health: 0,
@@ -84,18 +74,7 @@ export function runHealthChecks(input: {
   // ----- Portfolio-level aggregate checks (not limited to sample) -----
 
   const hasAccountSeq = tableHasColumn(input.db, 'records', 'account_sequence_state');
-  const hasClaimAudit = tableHasColumn(input.db, 'records', 'claim_audit_passed');
-  const hasPacket = tableHasColumn(input.db, 'records', 'permitted_claim_packet_json');
-  const hasSnapshot = tableHasColumn(input.db, 'records', 'preliminary_snapshot');
   const hasCostLedger = tableHasColumn(input.db, 'records', 'cost_ledger_json');
-  const hasDrafts = (() => {
-    try {
-      input.db.prepare(`SELECT 1 FROM drafts LIMIT 1`).get();
-      return true;
-    } catch {
-      return false;
-    }
-  })();
 
   // Open paused_review queue (sequence + account_sequence_state when present).
   const pausedWhere = hasAccountSeq
@@ -134,63 +113,6 @@ export function runHealthChecks(input: {
         detail: `${openPausedReview} records in paused_review (${sample.length} listed)`,
       });
     }
-  }
-
-  // claim_audit_failed with ready drafts — content ready but audit failed.
-  if (hasClaimAudit) {
-    const contentParts = [`COALESCE(r.email_last_draft_id,'') != ''`];
-    if (hasPacket) contentParts.push(`COALESCE(r.permitted_claim_packet_json,'') != ''`);
-    if (hasSnapshot) contentParts.push(`COALESCE(r.preliminary_snapshot,'') != ''`);
-    if (hasDrafts) {
-      contentParts.push(`EXISTS (
-        SELECT 1 FROM drafts d
-        WHERE d.row_id = r._row_id
-          AND lower(COALESCE(d.status,'')) IN ('ready','pending_approval','approved')
-      )`);
-    }
-    const claimWhere = `
-      COALESCE(r.disqualified_at,'') = ''
-      AND (
-        r.claim_audit_passed = 0
-        OR lower(CAST(r.claim_audit_passed AS TEXT)) IN ('0','false','failed')
-      )
-      AND (${contentParts.join(' OR ')})
-    `;
-    const selectClaim = [
-      'r._row_id',
-      'r.business_name',
-      'r.claim_audit_passed',
-      'r.email_last_draft_id',
-      hasPacket ? 'r.permitted_claim_packet_json' : `'' AS permitted_claim_packet_json`,
-      hasSnapshot ? 'r.preliminary_snapshot' : `'' AS preliminary_snapshot`,
-    ].join(', ');
-    const claimFailedRows = safeAll(
-      input.db,
-      `SELECT ${selectClaim}
-       FROM records r
-       WHERE ${claimWhere}
-       ORDER BY r.updated_at DESC
-       LIMIT ?`,
-      [Math.min(limit, 100)],
-    );
-    for (const r of claimFailedRows) {
-      if (!isClaimAuditFailed(r.claim_audit_passed)) continue;
-      counts.claim_audit_failed_with_ready_draft += 1;
-      issues.push({
-        code: 'claim_audit_failed_with_ready_draft',
-        severity: 'error',
-        record_id: String(r._row_id || ''),
-        detail: `claim_audit_passed failed but ready draft/content present (${r.business_name || ''}; draft=${r.email_last_draft_id || 'packet'})`,
-      });
-    }
-    const claimFailedTotal = safeCount(
-      input.db,
-      `SELECT COUNT(*) AS n FROM records r WHERE ${claimWhere}`,
-    );
-    counts.claim_audit_failed_with_ready_draft = Math.max(
-      counts.claim_audit_failed_with_ready_draft,
-      claimFailedTotal,
-    );
   }
 
   // Suppressed + active sequence_status inconsistency.

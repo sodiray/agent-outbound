@@ -205,8 +205,6 @@ export function evaluateExternalActionAuthorization(input: {
  * - active_contact_id (falls back to contact_id)
  * - recipient (email / linkedin / mail address)
  * - content: **exact body/subject first** (email, LinkedIn invite, mail copy).
- *   Claim-packet hash is a secondary binder only — never a substitute that lets
- *   copy change without invalidating authorization.
  * - step_id (falls back to stageId)
  *
  * When any material field is present the result is `srv1:<sha256>` of a stable
@@ -232,9 +230,8 @@ export function resolveStageAssetVersion(input: {
   sender?: string | null;
   /** Exact mailbox id — two mailboxes sharing a from-address must not interchange. */
   mailboxId?: string | null;
-  /** Precomputed content fingerprint (body/template preferred over claim packet). */
+  /** Precomputed content fingerprint. */
   contentHash?: string | null;
-  claimPacketHash?: string | null;
   /** Raw copy — preferred content source for email / LI / mail. */
   bodyText?: string | null;
   subjectText?: string | null;
@@ -248,8 +245,6 @@ export function resolveStageAssetVersion(input: {
   const sender = String(input.sender || '').trim().toLowerCase();
   const mailboxId = String(input.mailboxId || '').trim();
 
-  // Prefer the exact outbound body/subject/template over claim-packet alone so
-  // operators cannot authorize packet A and ship copy B.
   const bodyParts = [
     String(input.subjectText || '').trim(),
     String(input.bodyText || '').trim(),
@@ -257,16 +252,11 @@ export function resolveStageAssetVersion(input: {
   ].filter(Boolean);
   const bodyHash = bodyParts.length > 0 ? stableHash(bodyParts.join('\n')) : '';
   const explicitContent = String(input.contentHash || '').trim();
-  const claim = String(input.claimPacketHash || '').trim();
-
   let content = '';
   if (bodyHash) {
-    // Body is authoritative; fold claim hash in as secondary only when present.
-    content = claim ? stableHash(`${bodyHash}|claim:${claim}`) : bodyHash;
+    content = bodyHash;
   } else if (explicitContent) {
-    content = claim ? stableHash(`${explicitContent}|claim:${claim}`) : explicitContent;
-  } else if (claim) {
-    content = claim;
+    content = explicitContent;
   }
   if (!content) {
     const asset = String(input.assetId || '').trim();
