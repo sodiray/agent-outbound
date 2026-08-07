@@ -14,6 +14,39 @@ export const DEFAULT_SCORE_TREATMENT_BANDS = {
   fit_evidence_confidence: [0, 40, 60, 80, 100],
 } as const;
 
+export type IdentityConfidenceConfig = {
+  weights: {
+    business_name: number;
+    address: number;
+    website: number;
+    place_id: number;
+  };
+  penalties: {
+    unresolved_alternative: number;
+    open_contradiction: number;
+    maximum_total: number;
+  };
+};
+
+export type IdentityConfidenceConfigInput = {
+  weights?: Partial<IdentityConfidenceConfig['weights']>;
+  penalties?: Partial<IdentityConfidenceConfig['penalties']>;
+};
+
+export const DEFAULT_SCORE_IDENTITY_CONFIDENCE: IdentityConfidenceConfig = {
+  weights: {
+    business_name: 30,
+    address: 30,
+    website: 20,
+    place_id: 20,
+  },
+  penalties: {
+    unresolved_alternative: 10,
+    open_contradiction: 25,
+    maximum_total: 40,
+  },
+};
+
 export const ProviderModelSchema = z.string().trim().superRefine((value, ctx) => {
   const raw = String(value || '').trim();
   if (!raw) return;
@@ -632,6 +665,37 @@ const ScoreTreatmentBandsSchema = z.object({
   fit_evidence_confidence: [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
 });
 
+const IdentityConfidenceWeightsSchema = z.object({
+  business_name: z.coerce.number().nonnegative().default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.business_name),
+  address: z.coerce.number().nonnegative().default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.address),
+  website: z.coerce.number().nonnegative().default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.website),
+  place_id: z.coerce.number().nonnegative().default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.place_id),
+}).superRefine((weights, ctx) => {
+  const total = Object.values(weights).reduce((sum, weight) => sum + weight, 0);
+  if (Math.abs(total - 100) <= Number.EPSILON) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'score.identity_confidence.weights must sum to exactly 100.',
+  });
+});
+
+const IdentityConfidencePenaltiesSchema = z.object({
+  unresolved_alternative: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties.unresolved_alternative),
+  open_contradiction: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties.open_contradiction),
+  maximum_total: z.coerce.number().nonnegative()
+    .default(DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties.maximum_total),
+});
+
+const IdentityConfidenceConfigSchema = z.object({
+  weights: IdentityConfidenceWeightsSchema.default(() => ({ ...DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights })),
+  penalties: IdentityConfidencePenaltiesSchema.default(() => ({ ...DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties })),
+}).default(() => ({
+  weights: { ...DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights },
+  penalties: { ...DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties },
+}));
+
 // A single lead score (0-100). One weighted criteria list, one LLM pass.
 // Legacy fit/trigger/priority configs are normalized into this shape at load time.
 const ScoreSchema = z.object({
@@ -653,6 +717,8 @@ const ScoreSchema = z.object({
   // Inclusive lower boundaries for the four treatment matrix bands. The final
   // 100 boundary closes the ladder so every score is in exactly one band.
   treatment_bands: ScoreTreatmentBandsSchema,
+  // Literal-support identity points must total 100; penalties deduct from that total.
+  identity_confidence: IdentityConfidenceConfigSchema,
 }).partial().default({});
 
 const SuppressionSchema = z.object({
@@ -1013,6 +1079,7 @@ const coerceLegacyScore = (raw) => {
     minimum: Number(score.priority?.minimum ?? score.minimum ?? 0),
     ...(score.min_coverage !== undefined ? { min_coverage: score.min_coverage } : {}),
     ...(score.treatment_bands !== undefined ? { treatment_bands: score.treatment_bands } : {}),
+    ...(score.identity_confidence !== undefined ? { identity_confidence: score.identity_confidence } : {}),
   };
   return { ...(raw as any), score: single };
 };
@@ -1122,6 +1189,26 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
           fit: parsed.data?.score?.treatment_bands?.fit ?? [...DEFAULT_SCORE_TREATMENT_BANDS.fit],
           fit_evidence_confidence: parsed.data?.score?.treatment_bands?.fit_evidence_confidence
             ?? [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
+        },
+        identity_confidence: {
+          weights: {
+            business_name: parsed.data?.score?.identity_confidence?.weights?.business_name
+              ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.business_name,
+            address: parsed.data?.score?.identity_confidence?.weights?.address
+              ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.address,
+            website: parsed.data?.score?.identity_confidence?.weights?.website
+              ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.website,
+            place_id: parsed.data?.score?.identity_confidence?.weights?.place_id
+              ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights.place_id,
+          },
+          penalties: {
+            unresolved_alternative: parsed.data?.score?.identity_confidence?.penalties?.unresolved_alternative
+              ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties.unresolved_alternative,
+            open_contradiction: parsed.data?.score?.identity_confidence?.penalties?.open_contradiction
+              ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties.open_contradiction,
+            maximum_total: parsed.data?.score?.identity_confidence?.penalties?.maximum_total
+              ?? DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties.maximum_total,
+          },
         },
       },
       ai: {

@@ -31,6 +31,7 @@ import {
 } from '../policy/evidence.js';
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
 import type { TreatmentBandLadders } from '../policy/treatment.js';
+import type { IdentityConfidenceConfigInput } from '../../schemas/config.js';
 
 const zeroUsage = () => ({
   input_tokens: 0,
@@ -706,6 +707,7 @@ export const executeEnrichmentAction = async ({
   aiConfig,
   context,
   treatmentBands,
+  identityConfidence,
   outputSchema,
   toolCatalog,
 }: {
@@ -719,6 +721,7 @@ export const executeEnrichmentAction = async ({
   aiConfig: Record<string, unknown>;
   context: Record<string, unknown>;
   treatmentBands?: TreatmentBandLadders;
+  identityConfidence?: IdentityConfidenceConfigInput;
   outputSchema: z.ZodTypeAny;
   toolCatalog?: ToolCatalog;
 }) => {
@@ -840,6 +843,7 @@ export const executeEnrichmentAction = async ({
       enrichmentSpendUsd: costHydrate?.enrichment_usd,
       minFitCoverage: Number(context?.min_fit_coverage),
       treatmentBands,
+      identityConfidence,
     });
     // Map declared outputs from patch when present
     const outputs: Record<string, unknown> = { ...result.patch };
@@ -1034,6 +1038,7 @@ export const executeEnrichmentStepOnRecords = async ({
           linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
         },
         treatmentBands: config?.score?.treatment_bands,
+        identityConfidence: config?.score?.identity_confidence,
         outputSchema: outputZod,
         toolCatalog,
       });
@@ -1492,6 +1497,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
               },
               treatmentBands: config?.score?.treatment_bands,
+              identityConfidence: config?.score?.identity_confidence,
               outputSchema: outputZod,
               toolCatalog,
             });

@@ -15,6 +15,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import {
+  DEFAULT_SCORE_IDENTITY_CONFIDENCE,
+  type IdentityConfidenceConfig,
+  type IdentityConfidenceConfigInput,
+} from '../../schemas/config.js';
 
 export const EVIDENCE_CONTRACT_VERSION = 'tv-evidence-v1';
 
@@ -139,13 +144,6 @@ export type IdentityResolution = {
   generated_at: string;
 };
 
-const IDENTITY_CONFIDENCE_WEIGHTS = {
-  business_name: 30,
-  address: 30,
-  website: 20,
-  place_id: 20,
-} as const;
-
 const PHONE_CONFIDENCE_WEIGHTS = {
   present: 15,
   well_formed: 35,
@@ -202,24 +200,40 @@ const unresolvedIdentityAlternatives = (resolution: FieldResolution): number => 
  * Deterministic, fail-closed identity confidence from the persisted resolution.
  * Only literal-support-backed core fields earn points; unresolved identity is 0.
  */
-export function deriveIdentityConfidence(resolution: Omit<IdentityResolution, 'identity_confidence'> | IdentityResolution): number {
+export const deriveIdentityConfidence = (
+  resolution: Omit<IdentityResolution, 'identity_confidence'> | IdentityResolution,
+  config?: IdentityConfidenceConfigInput,
+): number => {
   if (text(resolution.company_resolution).toLowerCase() !== 'resolved') return 0;
 
+  const policy: IdentityConfidenceConfig = {
+    weights: {
+      ...DEFAULT_SCORE_IDENTITY_CONFIDENCE.weights,
+      ...(config?.weights || {}),
+    },
+    penalties: {
+      ...DEFAULT_SCORE_IDENTITY_CONFIDENCE.penalties,
+      ...(config?.penalties || {}),
+    },
+  };
   const byField = new Map(resolution.resolutions.map((fieldResolution) => [fieldResolution.field, fieldResolution]));
-  const supportedScore = Object.entries(IDENTITY_CONFIDENCE_WEIGHTS).reduce((total, [field, weight]) => (
+  const supportedScore = Object.entries(policy.weights).reduce((total, [field, weight]) => (
     hasLiteralSupport(byField.get(field)) ? total + weight : total
   ), 0);
   const unresolvedCount = resolution.resolutions.reduce((total, fieldResolution) => (
     total
-    + (fieldResolution.unknowns || []).length
     + unresolvedIdentityAlternatives(fieldResolution)
   ), 0);
   const contradictionCount = resolution.resolutions.reduce((total, fieldResolution) => (
     total + (fieldResolution.contradictions || []).filter((contradiction) => contradiction.status === 'open').length
   ), 0);
-  const penalty = Math.min(40, unresolvedCount * 10 + contradictionCount * 25);
+  const penalty = Math.min(
+    policy.penalties.maximum_total,
+    unresolvedCount * policy.penalties.unresolved_alternative
+      + contradictionCount * policy.penalties.open_contradiction,
+  );
   return Math.max(0, Math.min(100, supportedScore - penalty));
-}
+};
 
 const truthyFlag = (value: unknown): boolean => {
   if (value === true || value === 1) return true;
@@ -1315,7 +1329,10 @@ export function resolveFieldPreferringEvidence(input: {
   };
 }
 
-export function buildIdentityResolution(record: Record<string, unknown>): IdentityResolution {
+export function buildIdentityResolution(
+  record: Record<string, unknown>,
+  identityConfidenceConfig?: IdentityConfidenceConfigInput,
+): IdentityResolution {
   const accountId = text(record._row_id || record.id || 'unknown');
   const placeId = text(record.place_id) || null;
   const companyRes = text(record.company_resolution) || null;
@@ -1376,7 +1393,7 @@ export function buildIdentityResolution(record: Record<string, unknown>): Identi
     resolutions,
     contract_version: EVIDENCE_CONTRACT_VERSION,
     generated_at: new Date().toISOString(),
-  });
+  }, identityConfidenceConfig);
   return {
     account_id: accountId,
     place_id: placeId,
@@ -1400,7 +1417,10 @@ export function buildIdentityResolution(record: Record<string, unknown>): Identi
  */
 export function buildObservationStore(
   record: Record<string, unknown>,
-  opts?: { rebuildObservations?: boolean },
+  opts?: {
+    rebuildObservations?: boolean;
+    identityConfidenceConfig?: IdentityConfidenceConfigInput;
+  },
 ): ObservationStore {
   const accountId = text(record._row_id || record.id || 'unknown');
   const rebuild =
@@ -1436,7 +1456,7 @@ export function buildObservationStore(
     snapshots,
     observations,
     contradictions,
-    identity_resolution: buildIdentityResolution(identityRecord),
+    identity_resolution: buildIdentityResolution(identityRecord, opts?.identityConfidenceConfig),
     contract_version: EVIDENCE_CONTRACT_VERSION,
     generated_at: new Date().toISOString(),
   };

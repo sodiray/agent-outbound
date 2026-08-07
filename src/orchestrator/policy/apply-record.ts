@@ -78,7 +78,10 @@ import {
   resolveBuyerAffiliationFromRecord,
   type EnrichmentRepairPlan,
 } from './enrichment-repair.js';
-import { DEFAULT_SCORE_MIN_COVERAGE } from '../../schemas/config.js';
+import {
+  DEFAULT_SCORE_MIN_COVERAGE,
+  type IdentityConfidenceConfigInput,
+} from '../../schemas/config.js';
 
 export type PolicyApplyInput = {
   record: Record<string, unknown>;
@@ -104,6 +107,8 @@ export type PolicyApplyInput = {
   minFitCoverage?: number;
   /** Configured fit and evidence-confidence ladders for treatment assignment. */
   treatmentBands?: TreatmentBandLadders;
+  /** Configured literal-support identity weights and deductions. */
+  identityConfidence?: IdentityConfidenceConfigInput;
 };
 
 export type PolicyApplyResult = {
@@ -476,7 +481,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   }
 
   // Never invent confidence defaults (70/40/50) — missing fails closed as 0.
-  const identityConfidence = buildIdentityResolution(record).identity_confidence ?? 0;
+  const identityConfidence = buildIdentityResolution(record, input.identityConfidence).identity_confidence ?? 0;
   const buyerConfidence = deriveBuyerConfidence(record);
   const classificationConfidence = num(record.classification_confidence, null) ?? 0;
   const timingCalc = calculateTimingScore(record);
@@ -1031,6 +1036,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       || record.rebuild_observations === true
       || record.rebuild_observations === 1
       || record.rebuild_observations === '1',
+    identityConfidenceConfig: input.identityConfidence,
   });
   const contradictions = detectContradictions({
     record,
