@@ -58,6 +58,7 @@ const nextAction = (accountId, overrides = {}) => ({
 const seedList = ({
   account_sequence_state = 'active',
   next_action_json,
+  readiness_json,
   rowId = 'acct_gate_1',
 } = {}) => {
   const listDir = mkdtempSync(join(tmpdir(), 'ao-exec-seq-gate-'));
@@ -76,6 +77,7 @@ const seedList = ({
       'active_contact_id',
       'treatment_tier',
       'suppressed',
+      'readiness_json',
     ],
   });
   const na =
@@ -86,15 +88,15 @@ const seedList = ({
     INSERT INTO records (
       _row_id, business_name, sequence_name, sequence_status, sequence_step,
       contact_email, lifecycle_stage, account_sequence_state, work_state, next_action_json,
-      active_contact_id, treatment_tier, suppressed,
+      active_contact_id, treatment_tier, suppressed, readiness_json,
       _created_at, _updated_at, created_at, updated_at
     ) VALUES (
       ?, 'Gate HVAC', 'default', 'active', 0,
       'owner@example-gate.test', 'contacted', ?, 'executing_external_action', ?,
-      'c_owner', 'B', 0,
+      'c_owner', 'B', 0, ?,
       ?, ?, ?, ?
     )
-  `).run(rowId, account_sequence_state, na, now, now, now, now);
+  `).run(rowId, account_sequence_state, na, readiness_json || '', now, now, now, now);
   return { listDir, db, rowId };
 };
 
@@ -136,6 +138,16 @@ const countChannelEvents = (db, rowId) =>
 
 const countIdempotency = (db) =>
   Number(db.prepare('SELECT COUNT(*) AS n FROM idempotency').get()?.n || 0);
+
+const countDrafts = (db, rowId) =>
+  Number(db.prepare('SELECT COUNT(*) AS n FROM drafts WHERE row_id = ?').get(rowId)?.n || 0);
+
+const countModelCostEvents = (db, rowId) =>
+  Number(db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM cost_events
+    WHERE record_id = ? AND provider NOT IN ('tool_call', 'smtp')
+  `).get(rowId)?.n || 0);
 
 // --- Blocked sequence states at executeChannelStep ------------------------
 
@@ -214,5 +226,128 @@ test('executeChannelStep: active + prepare_outbound next_action is allowed (dryR
     !/sequence_outbound_gated/.test(String(out.reason || '')),
     String(out.reason),
   );
+  db.close();
+});
+
+test('executeChannelStep: unavailable readiness preserves legacy channel behavior', async () => {
+  const accountId = 'acct_readiness_unavailable';
+  const { listDir, db, rowId } = seedList({
+    rowId: accountId,
+    readiness_json: JSON.stringify({ ready: true }),
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+
+  const out = await runExecute({ listDir, db, record, dryRun: true });
+  assert.equal(out.status, 'sent', JSON.stringify(out));
+  assert.doesNotMatch(String(out.reason || ''), /^channel_not_permitted:/);
+
+  db.close();
+});
+
+test('executeChannelStep: explicitly permitted channel proceeds as before', async () => {
+  const accountId = 'acct_readiness_permitted';
+  const { listDir, db, rowId } = seedList({
+    rowId: accountId,
+    readiness_json: JSON.stringify({ permitted_channels: ['email'] }),
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+
+  const out = await runExecute({ listDir, db, record, dryRun: true });
+  assert.equal(out.status, 'sent', JSON.stringify(out));
+  assert.doesNotMatch(String(out.reason || ''), /^channel_not_permitted:/);
+
+  db.close();
+});
+
+test('executeChannelStep: unpermitted channel skips before model or draft creation', async () => {
+  const accountId = 'acct_readiness_refused';
+  const { listDir, db, rowId } = seedList({
+    rowId: accountId,
+    readiness_json: JSON.stringify({ permitted_channels: ['phone'] }),
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+
+  const out = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Execute Channel Sequence Gate',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step: emailStep,
+    sequence: { steps: [emailStep] },
+    channelHint: 'email',
+    intent: 'draft',
+    dryRun: false,
+  });
+
+  assert.equal(out.status, 'skipped', JSON.stringify(out));
+  assert.equal(out.reason, 'channel_not_permitted:email');
+  assert.equal(countDrafts(db, rowId), 0);
+  assert.equal(countModelCostEvents(db, rowId), 0);
+  assert.equal(countChannelEvents(db, rowId), 0);
+
+  db.close();
+});
+
+test('executeChannelStep: permitted channel proceeds and a skipped channel advances to it', async () => {
+  const accountId = 'acct_readiness_advance';
+  const sequenceSteps = [
+    emailStep,
+    {
+      kind: 'manual_task',
+      id: 'phone_followup',
+      day: 0,
+      config: { task_type: 'human_phone', channel: 'phone' },
+    },
+  ];
+  const { listDir, db, rowId } = seedList({
+    rowId: accountId,
+    readiness_json: JSON.stringify({ permitted_channels: ['phone'] }),
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+
+  const skipped = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Execute Channel Sequence Gate',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step: emailStep,
+    sequence: { steps: sequenceSteps },
+    channelHint: 'email',
+    intent: 'draft',
+    dryRun: false,
+  });
+  assert.equal(skipped.status, 'skipped', JSON.stringify(skipped));
+  assert.equal(skipped.reason, 'channel_not_permitted:email');
+
+  const advancedRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  assert.equal(Number(advancedRecord.sequence_step), 1);
+  assert.equal(String(advancedRecord.sequence_status), 'active');
+
+  const permitted = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Execute Channel Sequence Gate',
+    toolCatalog: null,
+    db,
+    record: advancedRecord,
+    sequenceName: 'default',
+    stepNumber: 2,
+    step: sequenceSteps[1],
+    sequence: { steps: sequenceSteps },
+    channelHint: 'phone',
+    intent: 'send',
+    dryRun: false,
+  });
+  assert.equal(permitted.status, 'skipped', JSON.stringify(permitted));
+  assert.equal(permitted.reason, 'awaiting_manual');
+
   db.close();
 });

@@ -62,6 +62,53 @@ export type ReadinessResult = {
   permitted_channels: string[];
 };
 
+export type ReadinessChannelPermission = {
+  /** A valid persisted channel set is available and authoritative. */
+  computed: boolean;
+  permitted: boolean;
+};
+
+/**
+ * Read the persisted readiness snapshot for a channel action.
+ *
+ * A missing, malformed, or pre-readiness snapshot is intentionally not treated
+ * as an empty permission set: older generic pipelines may not calculate
+ * readiness at all. Once a snapshot explicitly contains permitted_channels,
+ * including an empty array, it is authoritative and therefore fail-closed.
+ */
+export const readinessChannelPermission = ({
+  record,
+  channel,
+}: {
+  record: Record<string, unknown>;
+  channel: string;
+}): ReadinessChannelPermission => {
+  const requested = String(channel || '').trim().toLowerCase();
+  if (!requested) return { computed: false, permitted: true };
+
+  const raw = record.readiness_json;
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return { computed: false, permitted: true };
+  }
+
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { computed: false, permitted: true };
+    }
+    const permittedChannels = (parsed as Record<string, unknown>).permitted_channels;
+    if (!Array.isArray(permittedChannels)) {
+      return { computed: false, permitted: true };
+    }
+    return {
+      computed: true,
+      permitted: permittedChannels.some((value) => String(value || '').trim().toLowerCase() === requested),
+    };
+  } catch {
+    return { computed: false, permitted: true };
+  }
+};
+
 /**
  * Baseline outbound readiness before any active external action.
  */

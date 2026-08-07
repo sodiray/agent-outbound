@@ -49,6 +49,7 @@ import {
   pauseForStageReview,
   invalidateStageReviewIfAssetChanged,
   appendTransitionAudit,
+  readinessChannelPermission,
 } from '../policy/index.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import {
@@ -496,6 +497,66 @@ export const executeChannelStep = async ({
       reason: `sequence_outbound_gated: ${outboundGate.reason}`,
       provider_id: '',
       auto_skipped_steps: [],
+    };
+  }
+
+  const readinessChannel = namedAssertChannel({
+    channelHint,
+    stepKind: earlyStepKind,
+    taskType: earlyTaskType,
+    channel: earlyChannel,
+  });
+  const readinessPermission = readinessChannel
+    ? readinessChannelPermission({ record, channel: readinessChannel })
+    : { computed: false, permitted: true };
+  if (readinessPermission.computed && !readinessPermission.permitted) {
+    const reason = `channel_not_permitted:${readinessChannel}`;
+    const timing = resolveWorkingDayConfig({
+      ...sequence,
+      timezone: sequence?.timezone,
+    });
+    const launchedAt = String(record.launched_at || '').trim()
+      || (Number(stepNumber) === 1 ? now : '');
+    const launchedAtDate = toIsoDate(launchedAt) || toZonedIsoDate(now, timing.timeZone);
+    const progression = computeNextScheduledAction({
+      steps: Array.isArray(sequence?.steps) ? sequence.steps : [],
+      completedStepNumber: Number(stepNumber || 0),
+      launchedAtDate,
+      workingDays: timing.workingDays,
+      policy: timing.policy,
+      timeZone: timing.timeZone,
+    });
+    if (!dryRun) {
+      ensureRecordColumns({
+        db,
+        columns: [
+          'sequence_name',
+          'sequence_step',
+          'sequence_status',
+          'next_action_date',
+          'launched_at',
+          'last_error',
+        ],
+      });
+      upsertRecord({
+        db,
+        row: {
+          ...record,
+          sequence_name: sequenceName,
+          sequence_step: progression.sequenceStep,
+          sequence_status: progression.completed ? 'completed' : 'active',
+          next_action_date: progression.nextActionDate,
+          launched_at: launchedAt,
+          last_error: reason,
+        },
+      });
+    }
+    return {
+      status: 'skipped',
+      reason,
+      provider_id: '',
+      next_step: progression.sequenceStep + 1,
+      auto_skipped_steps: progression.skippedStepNumbers,
     };
   }
 

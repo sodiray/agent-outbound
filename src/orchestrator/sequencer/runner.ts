@@ -1359,6 +1359,8 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
           }
           summary.skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
           summary.drafted += 1;
+        } else if (result.status === 'skipped' && /^channel_not_permitted:/i.test(String(result.reason || ''))) {
+          summary.skipped += 1 + (Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0);
         } else {
           summary.failed += 1;
           summary.errors.push({ record_id: recordId, error: result.reason || result.status });
@@ -1527,6 +1529,8 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
           if (result.status === 'sent') {
             summary.sent += 1;
             summary.skipped += Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0;
+          } else if (result.status === 'skipped' && /^channel_not_permitted:/i.test(String(result.reason || ''))) {
+            summary.skipped += 1 + (Array.isArray(result.auto_skipped_steps) ? result.auto_skipped_steps.length : 0);
           } else {
             summary.failed += 1;
             summary.errors.push({ record_id: getRecordRowId(row), error: result.reason || result.status });

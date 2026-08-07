@@ -605,14 +605,17 @@ const executeSequenceActionBatch = async (
       // that produces the content — so the gate could never clear itself.
       // Forbidden work and provider failures still set errored explicitly at
       // their own return sites.
-      // Scoped deliberately to the sequence gate. A provider that cannot run
-      // (no Unipile credentials, a failed send) is a genuine error and still
-      // classifies as one; only "the sequence says not now" is routine.
-      if (status === 'skipped' && /sequence_outbound_gated/i.test(reason)) {
+      // A readiness refusal is also a completed skip: its channel is not a
+      // viable dependency for this record, so later independent channels must
+      // be able to run. Provider failures remain genuine errors.
+      if (
+        status === 'skipped'
+        && (/sequence_outbound_gated/i.test(reason) || /^channel_not_permitted:/i.test(reason))
+      ) {
         return [
           recordId,
           {
-            passed: false,
+            passed: /^channel_not_permitted:/i.test(reason),
             reason,
             errored: false,
           },
