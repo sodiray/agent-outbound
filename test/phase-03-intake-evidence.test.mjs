@@ -27,6 +27,7 @@ import {
 import {
   buildObservationStore,
   buildSourceSnapshotFromRecord,
+  deriveIdentityConfidence,
   detectContradictions,
   extractObservationsFromRecord,
   buildIdentityResolution,
@@ -552,4 +553,55 @@ test('evidence helpers: snapshot + observations + identity + contradictions pure
   const store = buildObservationStore(record);
   assert.ok(store.snapshots.length >= 1);
   assert.ok(store.contradictions.length >= 1);
+});
+
+test('identity confidence: fully literal-supported identity scores high; unresolved and open contradiction fail closed', () => {
+  const fullyResolved = buildIdentityResolution({
+    _row_id: 'identity_confidence_high',
+    business_name: 'Top Shelf Heating and Cooling',
+    address: '123 Main St, Boise, ID',
+    website: 'https://topshelf.example',
+    place_id: 'ChIJt8Qe',
+    company_resolution: 'resolved',
+    observations_json: JSON.stringify({
+      observations: [{
+        evidence_id: 'obs_website',
+        predicate: 'website',
+        value: 'https://topshelf.example',
+        support_status: 'literal_support',
+        source_id: 'site_1',
+        observed_at: '2026-08-06T00:00:00.000Z',
+        provisional: false,
+      }],
+    }),
+  });
+  assert.equal(fullyResolved.identity_confidence, 100);
+
+  const unresolved = buildIdentityResolution({
+    _row_id: 'identity_confidence_unresolved',
+    business_name: 'Unknown Heating',
+    place_id: 'ChIJunknown',
+    company_resolution: 'unresolved',
+  });
+  assert.equal(unresolved.identity_confidence, 0);
+
+  const contradicted = {
+    ...fullyResolved,
+    resolutions: fullyResolved.resolutions.map((resolution) => (
+      resolution.field === 'business_name'
+        ? {
+          ...resolution,
+          contradictions: [{
+            contradiction_id: 'name_conflict',
+            field: 'business_name',
+            values: ['Top Shelf Heating and Cooling', 'Top Shelf Plumbing'],
+            evidence_ids: ['obs_website'],
+            status: 'open',
+            noted_at: '2026-08-06T00:00:00.000Z',
+          }],
+        }
+        : resolution
+    )),
+  };
+  assert.equal(deriveIdentityConfidence(contradicted), 75);
 });

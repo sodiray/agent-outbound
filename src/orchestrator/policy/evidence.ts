@@ -139,6 +139,53 @@ export type IdentityResolution = {
   generated_at: string;
 };
 
+const IDENTITY_CONFIDENCE_WEIGHTS = {
+  business_name: 30,
+  address: 30,
+  website: 20,
+  place_id: 20,
+} as const;
+
+const hasLiteralSupport = (resolution: FieldResolution | undefined): boolean => (
+  Boolean(
+    resolution
+    && resolution.value !== null
+    && resolution.value !== undefined
+    && text(resolution.value)
+    && resolution.evidence_ids.length > 0,
+  )
+);
+
+const unresolvedIdentityAlternatives = (resolution: FieldResolution): number => (
+  resolution.alternatives.filter((alternative) => {
+    const reason = text(alternative.reason);
+    return !reason.startsWith('lower_precedence_than:');
+  }).length
+);
+
+/**
+ * Deterministic, fail-closed identity confidence from the persisted resolution.
+ * Only literal-support-backed core fields earn points; unresolved identity is 0.
+ */
+export function deriveIdentityConfidence(resolution: Omit<IdentityResolution, 'identity_confidence'> | IdentityResolution): number {
+  if (text(resolution.company_resolution).toLowerCase() !== 'resolved') return 0;
+
+  const byField = new Map(resolution.resolutions.map((fieldResolution) => [fieldResolution.field, fieldResolution]));
+  const supportedScore = Object.entries(IDENTITY_CONFIDENCE_WEIGHTS).reduce((total, [field, weight]) => (
+    hasLiteralSupport(byField.get(field)) ? total + weight : total
+  ), 0);
+  const unresolvedCount = resolution.resolutions.reduce((total, fieldResolution) => (
+    total
+    + (fieldResolution.unknowns || []).length
+    + unresolvedIdentityAlternatives(fieldResolution)
+  ), 0);
+  const contradictionCount = resolution.resolutions.reduce((total, fieldResolution) => (
+    total + (fieldResolution.contradictions || []).filter((contradiction) => contradiction.status === 'open').length
+  ), 0);
+  const penalty = Math.min(40, unresolvedCount * 10 + contradictionCount * 25);
+  return Math.max(0, Math.min(100, supportedScore - penalty));
+}
+
 export type ObservationStore = {
   account_id: string;
   snapshots: SourceSnapshot[];
@@ -1063,6 +1110,7 @@ export function buildIdentityResolution(record: Record<string, unknown>): Identi
   const storedObs = parseStoredObservations(record.observations_json);
   const nameFromObs = resolveFieldPreferringEvidence({ field: 'business_name', record, observations: storedObs });
   const addrFromObs = resolveFieldPreferringEvidence({ field: 'address', record, observations: storedObs });
+  const websiteFromObs = resolveFieldPreferringEvidence({ field: 'website', record, observations: storedObs });
   const nameRes = resolveFieldWithPrecedence({
     field: 'business_name',
     candidates: [
@@ -1077,8 +1125,8 @@ export function buildIdentityResolution(record: Record<string, unknown>): Identi
       { value: text(record.name), source: 'record_name', authority: 50 },
     ],
   });
-  const locRes = resolveFieldWithPrecedence({
-    field: 'location',
+  const addrRes = resolveFieldWithPrecedence({
+    field: 'address',
     candidates: [
       { value: text(record.address), source: 'places_address', evidence_ids: placeId ? [`place:${placeId}`] : [], authority: 100 },
       {
@@ -1090,12 +1138,39 @@ export function buildIdentityResolution(record: Record<string, unknown>): Identi
       { value: text(record.formatted_address), source: 'places_formatted', authority: 90 },
     ],
   });
+  const websiteRes = resolveFieldWithPrecedence({
+    field: 'website',
+    candidates: [
+      {
+        value: websiteFromObs.value,
+        source: websiteFromObs.source === 'stored_observation' ? 'observation_literal' : 'observation',
+        evidence_ids: websiteFromObs.evidence_ids,
+        authority: websiteFromObs.source.startsWith('stored') ? 95 : 55,
+      },
+      { value: text(record.website) || text(record.website_url), source: 'record_website', authority: 50 },
+    ],
+  });
+  const placeRes = resolveFieldWithPrecedence({
+    field: 'place_id',
+    candidates: [
+      { value: placeId, source: 'places_id', evidence_ids: placeId ? [`place:${placeId}`] : [], authority: 100 },
+    ],
+  });
+  const resolutions = [nameRes, addrRes, websiteRes, placeRes];
+  const identityConfidence = deriveIdentityConfidence({
+    account_id: accountId,
+    place_id: placeId,
+    company_resolution: companyRes,
+    resolutions,
+    contract_version: EVIDENCE_CONTRACT_VERSION,
+    generated_at: new Date().toISOString(),
+  });
   return {
     account_id: accountId,
     place_id: placeId,
     company_resolution: companyRes,
-    identity_confidence: numOrNull(record.identity_confidence),
-    resolutions: [nameRes, locRes],
+    identity_confidence: identityConfidence,
+    resolutions,
     contract_version: EVIDENCE_CONTRACT_VERSION,
     generated_at: new Date().toISOString(),
   };
@@ -1345,6 +1420,7 @@ export function buildEnrichEvidencePatch(input: {
   };
   if (store.identity_resolution) {
     patch.identity_resolution_json = JSON.stringify(store.identity_resolution);
+    patch.identity_confidence = store.identity_resolution.identity_confidence;
   }
   // Always persist contradictions_json (may be empty) so prior open conflicts are not silently dropped.
   patch.contradictions_json = JSON.stringify(store.contradictions || []);

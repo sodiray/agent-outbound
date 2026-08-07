@@ -43,6 +43,7 @@ type PipelineStepLike = Record<string, unknown> & {
 type QueryableDb = {
   prepare: (sql: string) => {
     all: (...params: string[]) => Array<Record<string, unknown>>;
+    get: (...params: string[]) => unknown;
   };
 };
 
@@ -66,6 +67,62 @@ const outcomeFor = (value: { passed?: unknown; reason?: unknown; errored?: unkno
   reason: String(value.reason || ''),
   errored: Boolean(value.errored),
 });
+
+const declaredOutputNames = (step: PipelineStepLike): string[] => {
+  const config = step.config && typeof step.config === 'object' && !Array.isArray(step.config)
+    ? step.config as Record<string, unknown>
+    : {};
+  const outputs = config.outputs && typeof config.outputs === 'object' && !Array.isArray(config.outputs)
+    ? config.outputs as Record<string, unknown>
+    : step.outputs && typeof step.outputs === 'object' && !Array.isArray(step.outputs)
+      ? step.outputs as Record<string, unknown>
+      : {};
+  return Object.keys(outputs);
+};
+
+const isPersistedOutputValue = (value: unknown): boolean => {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim() !== '';
+  return true;
+};
+
+export const declaredOutputsUnwritten = ({
+  outputNames,
+  record,
+}: {
+  outputNames: string[];
+  record: Record<string, unknown>;
+}): string[] => outputNames.filter((name) => !isPersistedOutputValue(record[name]));
+
+const guardDeclaredOutputWrites = (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  outcomes: Map<string, StepExecutionOutcome>,
+): Map<string, StepExecutionOutcome> => {
+  const outputNames = declaredOutputNames(step);
+  if (outputNames.length === 0) return outcomes;
+  const db = ctx.db as QueryableDb;
+  const guarded = new Map<string, StepExecutionOutcome>();
+  for (const [recordId, outcome] of outcomes) {
+    if (!outcome.passed || outcome.errored) {
+      guarded.set(recordId, outcome);
+      continue;
+    }
+    const persisted = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId);
+    const row = persisted && typeof persisted === 'object' && !Array.isArray(persisted)
+      ? persisted as Record<string, unknown>
+      : {};
+    const missing = declaredOutputsUnwritten({ outputNames, record: row });
+    guarded.set(recordId, missing.length > 0
+      ? {
+        passed: false,
+        errored: true,
+        reason: `declared_outputs_unwritten:${missing.join(',')}`,
+      }
+      : outcome);
+  }
+  return guarded;
+};
 
 const executeFieldCheckBatch = async (
   ctx: StepExecutionContext,
@@ -541,7 +598,7 @@ const executeSequenceActionBatch = async (
   return new Map<string, StepExecutionOutcome>(entries);
 };
 
-export const executeStepBatch = async (
+const executeStepBatchUnchecked = async (
   ctx: StepExecutionContext,
   step: PipelineStepLike,
   stepId: string,
@@ -782,3 +839,12 @@ export const executeStepBatch = async (
 
   throw new Error(`unsupported_pipeline_step_kind:${kind || 'unknown'}`);
 };
+
+export const executeStepBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+): Promise<Map<string, StepExecutionOutcome>> => (
+  guardDeclaredOutputWrites(ctx, step, await executeStepBatchUnchecked(ctx, step, stepId, rows))
+);

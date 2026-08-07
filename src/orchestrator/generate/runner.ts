@@ -317,7 +317,6 @@ export const runGenerateStep = async ({
     Object.entries(getDeclaredOutputs(stepConfig)).filter(([key]) => !CLAIM_ENGINE_OUTPUT_FIELDS.has(key)),
   );
   const outputZod = buildOutputZodSchema(declaredOutputs, {});
-  const executionOutputZod = buildOutputZodSchema({}, {});
   const effectiveConcurrency = Number(concurrency || stepConfig.concurrency || 3);
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
   const toolDriven = hasToolFlavor(stepConfig);
@@ -379,7 +378,7 @@ export const runGenerateStep = async ({
           step: id,
           linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
         },
-        outputSchema: executionOutputZod,
+        outputSchema: outputZod,
         toolCatalog,
       }) as Record<string, unknown>;
 

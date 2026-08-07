@@ -38,6 +38,7 @@ import {
 import { classifyEligibility, evaluateOutboundReadiness } from './readiness.js';
 import { assertWorkAllowed } from './forbidden-channels.js';
 import {
+  buildIdentityResolution,
   buildObservationStore,
   detectContradictions,
   resolveFieldPreferringEvidence,
@@ -451,7 +452,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   }
 
   // Never invent confidence defaults (70/40/50) — missing fails closed as 0.
-  const identityConfidence = num(record.identity_confidence, null) ?? 0;
+  const identityConfidence = buildIdentityResolution(record).identity_confidence ?? 0;
   const buyerConfidence = num(record.buyer_confidence, null) ?? 0;
   const classificationConfidence = num(record.classification_confidence, null) ?? 0;
   const timingCalc = calculateTimingScore(record);
@@ -1095,6 +1096,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
             : 'enrichment_hold';
 
   const patch: Record<string, unknown> = {
+    identity_confidence: observationStore.identity_resolution?.identity_confidence ?? 0,
     fit_score: fitScore ?? record.fit_score ?? '',
     fit_evidence_confidence: fitEvidence ?? '',
     candidate_tier: candidate.candidate_tier,

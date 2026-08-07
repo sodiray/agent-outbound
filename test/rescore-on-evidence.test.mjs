@@ -23,6 +23,7 @@ import {
   openListDb,
   ensureRecordColumns,
 } from '../dist/orchestrator/runtime/db.js';
+import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
 
 test('evidencePatchIsMaterialRetrieval: retrieval yes, tool_failure no', () => {
   const ok = buildEnrichEvidencePatch({
@@ -47,6 +48,37 @@ test('evidencePatchIsMaterialRetrieval: retrieval yes, tool_failure no', () => {
     failed: true,
   });
   assert.equal(evidencePatchIsMaterialRetrieval(fail), false);
+});
+
+test('declared but unwritten pipeline output fails instead of passing silently', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-output-guard-'));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  try {
+    db.prepare(`
+      INSERT INTO records (
+        _row_id, business_name, sequence_name, sequence_status,
+        _created_at, _updated_at, created_at, updated_at
+      ) VALUES ('acct_output_guard', 'Peak HVAC', 'default', 'idle', ?, ?, ?, ?)
+    `).run(now, now, now, now);
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('acct_output_guard');
+    const outcomes = await executeStepBatch(
+      { db, listDir, config: {}, aiConfig: {}, mcp: null, toolCatalog: null },
+      {
+        id: 'declared_output_wait',
+        kind: 'wait',
+        outputs: { preliminary_snapshot: { type: 'string' } },
+      },
+      'declared_output_wait',
+      [record],
+    );
+    const outcome = outcomes.get('acct_output_guard');
+    assert.equal(outcome?.passed, false);
+    assert.equal(outcome?.errored, true);
+    assert.equal(outcome?.reason, 'declared_outputs_unwritten:preliminary_snapshot');
+  } finally {
+    db.close();
+  }
 });
 
 test('markScoringStale deletes score:* staleness rows and scoringStaleRecordPatch sets status', () => {
