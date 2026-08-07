@@ -21,7 +21,7 @@ import { formatErrorMessage } from '../lib/error-format.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
 import { providerToolUsageFromError } from '../runtime/providers/usage.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
-import { executeToolCallAction } from './actions/tool-call.js';
+import { executeToolCallAction, isRecordScopedProviderToolError } from './actions/tool-call.js';
 import { executeLinkedinCompanyResolutionAction } from './actions/linkedin-company-resolution.js';
 import {
   buildEnrichEvidencePatch,
@@ -1022,6 +1022,7 @@ export const executeEnrichmentStepOnRecords = async ({
     skipped_ceiling: 0,
     failed: 0,
     errors: [] as Array<{ record_id: string; error: string }>,
+    handled_errors: [] as string[],
     record_ids: [] as string[],
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
     non_execution_reasons: {} as Record<string, string>,
@@ -1203,7 +1204,10 @@ export const executeEnrichmentStepOnRecords = async ({
       });
       if (isBudgetExceededError(error)) throw error;
       const detail = formatErrorMessage(error);
-      if (enrichStepUsesEmptyOnError(stepConfig)) {
+      if (
+        enrichStepUsesEmptyOnError(stepConfig)
+        && isRecordScopedProviderToolError(error)
+      ) {
         const outputs = emptyOutputsFor(outputZod);
         const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || currentRecord;
         const patch = applyOutputsWithEvidence({
@@ -1227,6 +1231,7 @@ export const executeEnrichmentStepOnRecords = async ({
         clearStaleness({ db, recordId, stepId: id });
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: detail });
+        summary.handled_errors.push(recordId);
         summary.record_ids.push(recordId);
         emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail });
         return;
@@ -1660,7 +1665,10 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             });
             if (isBudgetExceededError(error)) throw error;
             const detail = formatErrorMessage(error);
-            if (enrichStepUsesEmptyOnError(stepConfig)) {
+            if (
+              enrichStepUsesEmptyOnError(stepConfig)
+              && isRecordScopedProviderToolError(error)
+            ) {
               const outputs = emptyOutputsFor(outputZod);
               const patch = applyOutputsWithEvidence({
                 db,

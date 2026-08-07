@@ -116,6 +116,52 @@ export const isRetryableToolError = (error: unknown): boolean => {
   );
 };
 
+type RecordScopedToolFailure = Error & {
+  tool_failure_scope?: unknown;
+};
+
+const errorMessage = (error: unknown) => (
+  error instanceof Error ? error.message : String(error || '')
+);
+
+const hasUrlArgument = (args: Record<string, unknown>): boolean => (
+  Object.values(args).some((value) => /^https?:\/\//i.test(String(value || '').trim()))
+);
+
+const isRecordScopedProviderOutcome = ({
+  error,
+  args,
+}: {
+  error: unknown;
+  args: Record<string, unknown>;
+}): boolean => {
+  if (isBudgetExceededError(error)) return false;
+  const detail = errorMessage(error).toLowerCase();
+  if (
+    /\b(401|403|unauthorized|forbidden|auth(?:entication|orization)?|api[ _-]?key|credential|invalid[_\s-]?argument|misconfigur|no tool resolved|not connected|tool_not_connected|unsupported)\b/.test(detail)
+  ) {
+    return false;
+  }
+  if (/\b(?:http\s*)?(404|408|410)\b/.test(detail)) return true;
+  if (!hasUrlArgument(args)) return false;
+  return /\b(timeout|timed out|etimedout|econnreset|econnrefused|enotfound|socket hang up)\b/.test(detail);
+};
+
+const recordScopedToolFailure = (error: unknown): RecordScopedToolFailure => {
+  const tagged = error instanceof Error ? error : new Error(errorMessage(error));
+  Object.assign(tagged, { tool_failure_scope: 'record' });
+  return tagged;
+};
+
+/** A tool failure tagged as a record-local provider outcome may honor on_error: empty. */
+export const isRecordScopedProviderToolError = (error: unknown): boolean => (
+  Boolean(
+    error
+    && typeof error === 'object'
+    && (error as RecordScopedToolFailure).tool_failure_scope === 'record',
+  )
+);
+
 const mapOutputsFromResult = (
   result: unknown,
   outputMap: Record<string, string>,
@@ -262,6 +308,9 @@ export const executeToolCallAction = async ({
     stepId,
     chain,
     tryTool,
+  }).catch((error: unknown) => {
+    if (!isRecordScopedProviderOutcome({ error, args })) throw error;
+    throw recordScopedToolFailure(error);
   });
 
   return {

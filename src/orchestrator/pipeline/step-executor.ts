@@ -257,6 +257,11 @@ const executeEnrichBatch = async (
     String(error.record_id || '').trim(),
     String(error.error || ''),
   ]));
+  const handledErrors = new Set(
+    Array.isArray(result.handled_errors)
+      ? result.handled_errors.map((recordId) => String(recordId || '').trim()).filter(Boolean)
+      : [],
+  );
   const outcomes = new Map<string, StepExecutionOutcome>();
   const declaredOutputWrites = result.declared_output_writes && typeof result.declared_output_writes === 'object'
     ? result.declared_output_writes as Record<string, Record<string, { provided: boolean; value: unknown }>>
@@ -268,7 +273,7 @@ const executeEnrichBatch = async (
     const recordId = getRecordRowId(row);
     const failure = failures.get(recordId);
     outcomes.set(recordId, failure
-      ? { passed: false, reason: failure, errored: true }
+      ? { passed: false, reason: failure, errored: !handledErrors.has(recordId) }
       : {
         passed: true,
         reason: nonExecutionReasons[recordId] || '',
