@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readConfig } from '../lib/config.js';
 import { validatePipelineGraph } from '../lib/pipeline-graph.js';
 import { avgStepCostUsd } from '../lib/costs.js';
-import { getRecordRowId } from '../lib/record.js';
+import { getRecordRowId, nowIso } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { prepareFieldCheckValueFiles } from '../lib/field-check-values.js';
 import { countEnrichWorkForStep, enrichmentStepNeedsMcp, readStaleness, writeStaleness } from '../enrichment/runner.js';
@@ -457,8 +457,11 @@ type TimeReadinessDb = {
   };
 };
 
+// Falls back to nowIso() rather than `new Date()` so the AO_NOW test override
+// is honoured here too — one clock for the whole run. An explicit
+// caller-supplied clock still wins, so tests injecting their own are unaffected.
 const clockIso = (clock?: PipelineClock) => {
-  const value = typeof clock === 'function' ? clock() : (clock || new Date());
+  const value = typeof clock === 'function' ? clock() : (clock || nowIso());
   const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid pipeline clock value "${String(value)}".`);
   return parsed.toISOString();

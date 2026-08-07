@@ -1,6 +1,28 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-export const nowIso = () => new Date().toISOString();
+/**
+ * Test-only clock override, honoured by every caller of `nowIso` — including
+ * `todayIsoDate`, which is what the sequencer compares sequence due dates
+ * against.
+ *
+ * Sequence waits are day-granular: `parseWaitDays` rounds every unit up to
+ * whole days, so `after: "1h"` silently becomes a full day. Validating a
+ * multi-day cadence therefore had only two options — wait days of wall-clock,
+ * or shorten the waits and validate a configuration we would never ship.
+ *
+ * Moving the clock exercises the real production cadence, unchanged, in
+ * seconds and repeatably, and no prospect receives anything they otherwise
+ * would not.
+ *
+ * Never set this in production.
+ */
+export const nowIso = () => {
+  const override = String(process.env.AO_NOW || '').trim();
+  if (!override) return new Date().toISOString();
+  const parsed = new Date(override);
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid AO_NOW clock override "${override}".`);
+  return parsed.toISOString();
+};
 export const todayIsoDate = () => nowIso().slice(0, 10);
 
 export const stableHash = (value) => {
