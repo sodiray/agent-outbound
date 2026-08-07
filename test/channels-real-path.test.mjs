@@ -406,7 +406,7 @@ test('email: ready draft sends via sink; second send is idempotent skip', async 
 });
 
 test('email: compose outputs mapped by args_map become the pending draft content', async () => {
-  const { listDir } = createList();
+  const { listDir, sinkDir } = createList();
   const db = openListDb({ listDir, readonly: false });
   ensureRecordColumns({ db, columns: ['email_subject', 'email_body'] });
   db.prepare(`
@@ -454,15 +454,35 @@ test('email: compose outputs mapped by args_map become the pending draft content
 
   assert.equal(out.status, 'drafted', JSON.stringify(out));
   const draft = db.prepare(`
-    SELECT status, subject, body
+    SELECT draft_id, status, subject, body
     FROM drafts
     WHERE row_id = ? AND step_id = ?
   `).get('fixture_channel_1', 'email_compose_map');
-  assert.deepEqual(draft, {
-    status: 'pending_approval',
-    subject: 'Composed subject',
-    body: 'Composed body from the prior compose step.',
+  assert.equal(draft.status, 'pending_approval');
+  assert.equal(draft.subject, 'Composed subject');
+  assert.equal(draft.body, 'Composed body from the prior compose step.');
+  db.prepare('UPDATE drafts SET status = ? WHERE draft_id = ?').run('ready', draft.draft_id);
+  const sendRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+  const sent = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Channel Real Path',
+    toolCatalog: null,
+    db,
+    record: sendRecord,
+    sequenceName: 'draft-content',
+    stepNumber: 2,
+    step,
+    sequence: { steps: [] },
+    channelHint: 'email',
+    intent: 'send',
   });
+  assert.equal(sent.status, 'sent', JSON.stringify(sent));
+  const sinkFiles = readdirSync(sinkDir).filter((file) => file.endsWith('.json'));
+  assert.equal(sinkFiles.length, 1);
+  const delivered = JSON.parse(readFileSync(join(sinkDir, sinkFiles[0]), 'utf8'));
+  assert.equal(delivered.subject, draft.subject);
+  assert.equal(delivered.body, draft.body);
   db.close();
 });
 
