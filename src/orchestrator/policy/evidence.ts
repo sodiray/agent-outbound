@@ -161,6 +161,19 @@ const BUYER_CONFIDENCE_WEIGHTS = {
   affiliation_literal_support: 10,
 } as const;
 
+const LEGACY_BUYER_NAME_FIELDS = ['observed_buyer_name', 'buyer_name', 'primary_buyer_name', 'named_buyer_name'];
+const LEGACY_BUYER_STATUS_FIELDS = ['named_buyer_status', 'buyer_named_status', 'primary_buyer_status'];
+const CANONICAL_CONTACT_NAME_FIELDS = ['decision_maker_name', 'contact_name', 'contact_name_primary'];
+const BUYER_ROLE_FIELDS = [
+  'decision_maker_title',
+  'contact_title',
+  'contact_title_primary',
+  'buying_center_role',
+  'buyer_role',
+  'named_buyer_role',
+];
+const BUYER_AFFILIATION_FIELDS = ['buyer_affiliation_status', 'current_affiliation_status', 'affiliation_status'];
+
 const MAIL_CONFIDENCE_WEIGHTS = {
   address_present: 15,
   address_complete: 25,
@@ -253,6 +266,15 @@ const affirmative = (value: unknown): boolean => (
   ['1', 'true', 'yes', 'confirmed', 'verified'].includes(text(value).toLowerCase())
 );
 
+const verifiedEmailStatus = (value: unknown): boolean => (
+  ['valid', 'verified', 'deliverable'].includes(text(value).toLowerCase())
+);
+
+const positiveNumber = (value: unknown): boolean => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0;
+};
+
 const fieldValue = (record: Record<string, unknown>, fields: string[]): string => {
   for (const field of fields) {
     const value = text(record[field]);
@@ -283,22 +305,34 @@ const roleIndicatesDecisionAuthority = (role: string): boolean => (
 
 /**
  * Deterministic buyer confidence from named-person evidence already persisted on
- * a record. A name without a resolved status cannot earn confidence; durable
- * provider-backed literal support and unresolved contradictions are required to
- * distinguish a researched decision-maker from an unverified contact string.
+ * a record. A name needs either an explicit resolved status or a primary-contact
+ * projection with durable provider-backed literal support plus independent
+ * resolution evidence. Unresolved contradictions distinguish a researched
+ * decision-maker from an unverified contact string.
  */
 export function deriveBuyerConfidence(record: Record<string, unknown>): number {
-  const nameFields = ['observed_buyer_name', 'buyer_name', 'primary_buyer_name', 'named_buyer_name'];
-  const statusFields = ['named_buyer_status', 'buyer_named_status', 'primary_buyer_status'];
-  const roleFields = ['buying_center_role', 'buyer_role', 'named_buyer_role', 'contact_title_primary', 'contact_title'];
-  const affiliationFields = ['buyer_affiliation_status', 'current_affiliation_status', 'affiliation_status'];
-  const buyerName = fieldValue(record, nameFields);
-  const buyerStatus = fieldValue(record, statusFields);
-  if (!buyerName || !resolvedBuyerStatus(buyerStatus)) return 0;
-
   const observations = parseStoredObservations(record.observations_json);
-  const buyerRole = fieldValue(record, roleFields);
-  const affiliation = fieldValue(record, affiliationFields);
+  const legacyBuyerName = fieldValue(record, LEGACY_BUYER_NAME_FIELDS);
+  const legacyResolved = Boolean(legacyBuyerName)
+    && resolvedBuyerStatus(fieldValue(record, LEGACY_BUYER_STATUS_FIELDS));
+  const canonicalBuyerName = fieldValue(record, CANONICAL_CONTACT_NAME_FIELDS);
+  const canonicalNameSupported = durableLiteralSupport({
+    observations,
+    fields: CANONICAL_CONTACT_NAME_FIELDS,
+    value: canonicalBuyerName,
+  });
+  const canonicalResolved = Boolean(canonicalBuyerName)
+    && canonicalNameSupported
+    && (
+      positiveNumber(record.decision_maker_confidence)
+      || verifiedEmailStatus(record.email_verification_status)
+    );
+  const buyerName = legacyResolved ? legacyBuyerName : canonicalResolved ? canonicalBuyerName : '';
+  const nameFields = legacyResolved ? LEGACY_BUYER_NAME_FIELDS : CANONICAL_CONTACT_NAME_FIELDS;
+  if (!buyerName) return 0;
+
+  const buyerRole = fieldValue(record, BUYER_ROLE_FIELDS);
+  const affiliation = fieldValue(record, BUYER_AFFILIATION_FIELDS);
   const authorityConfirmed = affirmative(record.local_buying_authority);
   const decisionAuthority = authorityConfirmed || roleIndicatesDecisionAuthority(buyerRole);
   const score =
@@ -307,12 +341,12 @@ export function deriveBuyerConfidence(record: Record<string, unknown>): number {
       ? BUYER_CONFIDENCE_WEIGHTS.named_literal_support
       : 0)
     + (decisionAuthority ? BUYER_CONFIDENCE_WEIGHTS.decision_authority : 0)
-    + (buyerRole && durableLiteralSupport({ observations, fields: roleFields, value: buyerRole })
+    + (buyerRole && durableLiteralSupport({ observations, fields: BUYER_ROLE_FIELDS, value: buyerRole })
       ? BUYER_CONFIDENCE_WEIGHTS.role_literal_support
       : 0)
     + (confirmedAffiliation(affiliation) ? BUYER_CONFIDENCE_WEIGHTS.affiliation : 0)
     + (confirmedAffiliation(affiliation)
-      && durableLiteralSupport({ observations, fields: affiliationFields, value: affiliation })
+      && durableLiteralSupport({ observations, fields: BUYER_AFFILIATION_FIELDS, value: affiliation })
       ? BUYER_CONFIDENCE_WEIGHTS.affiliation_literal_support
       : 0);
   const openContradictions = detectContradictions({ record, observations })

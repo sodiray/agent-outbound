@@ -69,6 +69,54 @@ test('buyer confidence requires a resolved named decision-maker with provider su
   assert.equal(deriveBuyerConfidence({ named_buyer_status: 'confirmed' }), 0);
 });
 
+test('buyer confidence recognizes a resolved, titled, provider-verified primary contact', () => {
+  const primaryContact = {
+    decision_maker_name: 'Jordan Lee',
+    decision_maker_title: 'Owner',
+    decision_maker_email: 'jordan@example.test',
+    decision_maker_confidence: 98,
+    email_verification_status: 'valid',
+    observations_json: JSON.stringify({
+      observations: [
+        durableObservation('decision_maker_name', 'Jordan Lee'),
+        durableObservation('decision_maker_title', 'Owner'),
+      ],
+    }),
+  };
+  assert.equal(deriveBuyerConfidence(primaryContact), 80);
+});
+
+test('buyer confidence fails closed without a named resolved person', () => {
+  assert.equal(deriveBuyerConfidence({
+    contacts: [{ title: 'Owner', is_primary: true, email_verification_status: 'valid' }],
+  }), 0);
+  assert.equal(deriveBuyerConfidence({}), 0);
+});
+
+test('buyer confidence penalizes open contradictions', () => {
+  const primaryContact = {
+    decision_maker_name: 'Jordan Lee',
+    decision_maker_title: 'Owner',
+    decision_maker_confidence: 98,
+    email_verification_status: 'valid',
+    observations_json: JSON.stringify({
+      observations: [
+        durableObservation('decision_maker_name', 'Jordan Lee'),
+        durableObservation('decision_maker_title', 'Owner'),
+      ],
+    }),
+    contradictions_json: JSON.stringify([{
+      contradiction_id: 'buyer_affiliation_conflict',
+      field: 'buyer_affiliation',
+      values: ['current', 'former'],
+      evidence_ids: ['provider_decision_maker'],
+      status: 'open',
+      noted_at: '2026-08-01T00:00:00.000Z',
+    }]),
+  };
+  assert.equal(deriveBuyerConfidence(primaryContact), 50);
+});
+
 test('mail confidence combines commercial delivery, complete normalization, and validation evidence', () => {
   const evidenced = fullyEvidencedRecord();
   assert.equal(deriveMailConfidence(evidenced), 100);
