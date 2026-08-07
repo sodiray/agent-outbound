@@ -32,6 +32,11 @@ import {
   writeFilterFailure,
 } from './shared.js';
 import {
+  assignmentDepHash,
+  assignmentStalenessStepId,
+  isAssignmentFresh,
+} from './assignment-staleness.js';
+import {
   assertListAccessForMutation,
   filterRecordsForCanary,
   loadCanaryConfig,
@@ -616,6 +621,20 @@ const initializeResolved = ({
         if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
         return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
       }
+      if (step.kind === 'assign') {
+        const cached = readStaleness({
+          db,
+          recordId,
+          stepId: assignmentStalenessStepId(step.id),
+        });
+        return isAssignmentFresh({
+          cached,
+          step: step.step,
+          record: row,
+          listDir,
+          force,
+        });
+      }
       if (step.kind !== 'filter' && step.kind !== 'exit') return true;
       if (reapply) return false;
       const staleStepId = filterStalenessStepId(step.id);
@@ -954,6 +973,14 @@ export const runPipelineDataflow = async ({
               reason: String(outcome.reason || ''),
               occurred_at: now,
             },
+          });
+          writeStaleness({
+            db,
+            recordId,
+            stepId: assignmentStalenessStepId(step.id),
+            depHash: assignmentDepHash({ step: step.step, record: refreshRecord({ db, record: recordState.record }), listDir }),
+            cacheTtl: '',
+            cacheTtlSeconds: 0,
           });
           summary.processed += 1;
           progressState.done += 1;

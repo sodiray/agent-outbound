@@ -4,9 +4,7 @@ import {
   type NonWorkingDayPolicy,
   type SequenceWorkingDay,
 } from '../lib/working-days.js';
-import { getRecordRowId } from '../lib/record.js';
 import { resolveStepTemplate } from '../lib/templates.js';
-import { upsertRecord } from '../runtime/db.js';
 
 const isBlank = (value: unknown) => (
   value === undefined || value === null || String(value).trim() === ''
@@ -68,21 +66,6 @@ export const computeWaitWakeAt = ({
   };
 };
 
-type PipelineActionDb = {
-  prepare: (sql: string) => {
-    get: (...params: unknown[]) => Record<string, unknown> | undefined;
-  };
-};
-
-const LEGACY_SEQUENCE_STATE_FIELDS = [
-  'sequence_name',
-  'sequence_status',
-  'sequence_step',
-  'sequence_step_attempts',
-  'next_action_date',
-  'launched_at',
-] as const;
-
 export const executePipelineSequenceAction = async ({
   db,
   record,
@@ -96,7 +79,6 @@ export const executePipelineSequenceAction = async ({
   step: Record<string, unknown>;
   [key: string]: unknown;
 }) => {
-  const actionDb = db as PipelineActionDb;
   const template = resolveStepTemplate({ config, step, record });
   const stepConfig = step.config && typeof step.config === 'object'
     ? step.config as Record<string, unknown>
@@ -135,25 +117,10 @@ export const executePipelineSequenceAction = async ({
         },
       }
     : step;
-  const legacySequenceState = Object.fromEntries(
-    LEGACY_SEQUENCE_STATE_FIELDS.map((field) => [field, record[field]]),
-  );
-  const result = await executeChannelStep({
+  return executeChannelStep({
     ...options,
-    db: actionDb,
+    db,
     record,
     step: executableStep,
   });
-  const recordId = getRecordRowId(record);
-  const persisted = actionDb.prepare('SELECT * FROM records WHERE _row_id = ? LIMIT 1').get(recordId);
-  if (persisted) {
-    upsertRecord({
-      db: actionDb,
-      row: {
-        ...persisted,
-        ...legacySequenceState,
-      },
-    });
-  }
-  return result;
 };
