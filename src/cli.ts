@@ -75,6 +75,7 @@ import {
   followupSendCommand,
   recordRevertScoreCommand,
   recordRevertSequenceCommand,
+  recordsReevaluateCommand,
   recordRevertStepCommand,
   snapshotCreateCommand,
   snapshotDeleteCommand,
@@ -262,6 +263,7 @@ const printHelp = () => {
   process.stdout.write(`  export <list> --to FILE --select "col1,col2" [--where SQL] [--format csv|jsonl|parquet]\n`);
   process.stdout.write(`  views save <list> --name NAME --select "col1,col2" [--where SQL]\n`);
   process.stdout.write(`  record show <list> <row_id> [--include enrichment,scores,events,contacts,sequence,drafts,ai-usage]\n`);
+  process.stdout.write(`  records reevaluate <list> [--what provenance,confidences,near_duplicates] [--where SQL] [--dry-run] [--apply] [--declare-phone-source-kind structured]\n`);
   process.stdout.write(`  lead add <list> --name NAME [--near LOCALITY] [--query TEXT] [--run] [--dry-run] [--max N]\n`);
   process.stdout.write(`  lead set <list> <record> --field FIELD --value VALUE [--reason TEXT]        # human-set a field; survives pipeline reruns\n`);
   process.stdout.write(`  lead unset <list> <record> [--field FIELD]                                  # release manually-set field(s) back to the pipeline\n`);
@@ -1198,6 +1200,23 @@ const run = async () => {
       return;
     }
     throw new Error(`Unknown record subcommand: ${sub}`);
+  }
+
+  if (command === 'records') {
+    const sub = String(argv.shift() || '').trim();
+    if (sub !== 'reevaluate') throw new Error(`Unknown records subcommand: ${sub}`);
+    const list = String(argv.shift() || '');
+    const what = consumeFlag(argv, '--what', '');
+    const where = consumeFlag(argv, '--where', '');
+    const limit = toNumber(consumeFlag(argv, '--limit', '0'), 0);
+    const dryRun = hasFlag(argv, '--dry-run');
+    const apply = hasFlag(argv, '--apply');
+    const declaredPhoneSourceKind = consumeFlag(argv, '--declare-phone-source-kind', '');
+    setResponseContext({ command: 'records reevaluate', list });
+    print(recordsReevaluateCommand({
+      list, what, where, limit, dryRun, apply, declaredPhoneSourceKind,
+    }));
+    return;
   }
 
   if (command === 'lead') {

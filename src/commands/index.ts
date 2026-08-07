@@ -80,6 +80,7 @@ export {
 } from './mcp.js';
 export { leadAddCommand, leadOverridesCommand, leadSetCommand, leadUnsetCommand } from './leads.js';
 export { attioDomainsCommand } from './attio-domains.js';
+export { recordsReevaluateCommand } from './reevaluate.js';
 export { mailboxesListCommand, mailboxesShowCommand, mailboxesTestCommand } from './mailboxes.js';
 export { inboundListCommand, inboundPollCommand, inboundResolveCommand } from './inbound.js';
 export { liveInteractionBudgetCommand } from './live-interaction-budget.js';

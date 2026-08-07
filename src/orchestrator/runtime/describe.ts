@@ -658,6 +658,7 @@ const BASIC_COMMANDS: Array<{
   { name: 'source-territory', description: 'Source records within one configured territory.', mutating: true },
   { name: 'remove', description: 'Remove selected records from a project.', mutating: true },
   { name: 'pipeline', description: 'Run the configured pipeline dataflow.', mutating: true },
+  { name: 'records reevaluate', description: 'Dry-run current derivation and duplicate rules against existing records; use --apply to write the reported changes.', mutating: true },
   { name: 'score', description: 'Score selected project records.', mutating: true },
   { name: 'generate', description: 'Run a configured generation step.', mutating: true },
   { name: 'run', description: 'Run the configured outbound workflow.', mutating: true },
