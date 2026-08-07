@@ -376,6 +376,7 @@ test('call board: getCallBoard does not dump pure A/B phone-only records', () =>
     db,
     capacity: 25,
     nowMs: Date.parse('2026-08-05T16:00:00.000Z'),
+    phonePolicy: { timeZone: 'America/Boise' },
   });
   const ids = board.entries.map((e) => e.record_id);
   assert.ok(ids.includes('real_call'), `expected real_call on board: ${ids.join(',')}`);

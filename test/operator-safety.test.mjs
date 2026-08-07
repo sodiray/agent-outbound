@@ -47,6 +47,7 @@ const {
 
 /** Wednesday 2026-08-05 16:00 UTC = 10:00 America/Boise (MDT) — inside attempt window. */
 const BOISE_BUSINESS_MS = Date.parse('2026-08-05T16:00:00.000Z');
+const BOISE_PHONE_POLICY = { timeZone: 'America/Boise' };
 
 const projectYaml = () => `
 list:
@@ -189,6 +190,7 @@ test('claimCallBoardEntry: refuses email next_action with no open phone park', (
       recordId: 'email_only',
       claimedBy: 'op1',
       nowMs: BOISE_BUSINESS_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     /non-phone digital|send_email|no open phone park/i,
   );
@@ -219,6 +221,7 @@ test('claimCallBoardEntry: refuses linkedin next_action with no open phone park'
       recordId: 'li_only',
       claimedBy: 'op1',
       nowMs: BOISE_BUSINESS_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     /non-phone digital|linkedin|no open phone park/i,
   );
@@ -248,6 +251,7 @@ test('claimCallBoardEntry: allows phone next_action (no park required)', () => {
     recordId: 'phone_ok',
     claimedBy: 'op1',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   assert.equal(claimed.ok, true);
   assert.equal(claimed.claimed_by, 'op1');
@@ -294,6 +298,7 @@ test('disposeCallBoardEntry: rejects arbitrary disposition strings', () => {
     recordId: 'disp_1',
     claimedBy: 'op1',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
 
   assert.throws(

@@ -3,7 +3,7 @@
  * and capacity_unserved outcomes.
  *
  * Design source: human-phone-call-channel-and-attempt-windows.md
- * - Attempt window: local business hours (Boise default 09:00–17:00 America/Boise, weekdays)
+ * - Attempt window: local business hours (09:00–17:00, weekdays)
  * - Max attempts per contact/account (Tier A=4, B=3, default 3; C/D=0)
  * - callback disposition → schedule callback_at (overrides ordinary cadence)
  * - wrong_number → suppress phone on contact (dne_phone), not full account DNC
@@ -11,12 +11,9 @@
  */
 
 import { NEXT_ACTION_POLICY_VERSION } from './lifecycle.js';
-import { getWeekdayInTimezone, toZonedIsoDate } from '../lib/working-days.js';
+import { DEFAULT_TIME_ZONE, getWeekdayInTimezone, toZonedIsoDate } from '../lib/working-days.js';
 
-export const PHONE_ATTEMPT_POLICY_VERSION = 'tv-phone-attempt-v1';
-
-/** Default IANA zone for Treasure Valley (MST/MDT). */
-export const DEFAULT_PHONE_TIMEZONE = 'America/Boise';
+export const PHONE_ATTEMPT_POLICY_VERSION = 'phone-attempt-v1';
 
 /** Inclusive local start hour, exclusive end hour (09:00 ≤ t < 17:00). */
 export const DEFAULT_ATTEMPT_WINDOW_START_HOUR = 9;
@@ -104,6 +101,41 @@ export type PhoneAttemptPolicyConfig = {
   weekdaysOnly?: boolean;
 };
 
+const optionalNumber = (value: unknown): number | undefined => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const optionalBoolean = (value: unknown): boolean | undefined => (
+  typeof value === 'boolean' ? value : undefined
+);
+
+/** Resolve phone policy values from the pipeline's operations and phone-channel config. */
+export const resolvePhoneAttemptPolicyConfig = (config: unknown): PhoneAttemptPolicyConfig => {
+  const pipeline = config && typeof config === 'object'
+    ? config as Record<string, unknown>
+    : {};
+  const operations = pipeline.operations && typeof pipeline.operations === 'object'
+    ? pipeline.operations as Record<string, unknown>
+    : {};
+  const channels = pipeline.channels && typeof pipeline.channels === 'object'
+    ? pipeline.channels as Record<string, unknown>
+    : {};
+  const phone = channels.phone && typeof channels.phone === 'object'
+    ? channels.phone as Record<string, unknown>
+    : {};
+  const timeZone = String(phone.timezone || operations.timezone || DEFAULT_TIME_ZONE).trim();
+
+  return {
+    timeZone,
+    startHour: optionalNumber(phone.start_hour ?? phone.startHour),
+    endHour: optionalNumber(phone.end_hour ?? phone.endHour),
+    maxAttempts: optionalNumber(phone.max_attempts ?? phone.maxAttempts),
+    callbackDelayHours: optionalNumber(phone.callback_delay_hours ?? phone.callbackDelayHours),
+    weekdaysOnly: optionalBoolean(phone.weekdays_only ?? phone.weekdaysOnly),
+  };
+};
+
 const text = (value: unknown) => String(value ?? '').trim();
 
 const truthyFlag = (value: unknown): boolean => {
@@ -116,7 +148,7 @@ const truthyFlag = (value: unknown): boolean => {
 /** Local wall-clock hour (0–23) in an IANA timezone. */
 export function getZonedHour(
   now: Date | string | number = Date.now(),
-  timeZone: string = DEFAULT_PHONE_TIMEZONE,
+  timeZone: string = DEFAULT_TIME_ZONE,
 ): number {
   const d = now instanceof Date ? now : new Date(now);
   if (Number.isNaN(d.getTime())) return -1;
@@ -153,13 +185,13 @@ export function readCallAttemptCount(
 
 /**
  * True when local wall clock is inside the attempt window.
- * Default: Mon–Fri 09:00–17:00 America/Boise.
+ * Default: Mon–Fri 09:00–17:00 UTC when no pipeline policy is supplied.
  */
 export function isWithinPhoneAttemptWindow(
   now: Date | string | number = Date.now(),
   config: PhoneAttemptPolicyConfig = {},
 ): boolean {
-  const timeZone = config.timeZone || DEFAULT_PHONE_TIMEZONE;
+  const timeZone = config.timeZone || DEFAULT_TIME_ZONE;
   const startHour = Number.isFinite(Number(config.startHour))
     ? Number(config.startHour)
     : DEFAULT_ATTEMPT_WINDOW_START_HOUR;
@@ -627,7 +659,7 @@ export function applyPhoneDisposition(input: {
     patch.next_action_json = JSON.stringify(next_action);
     if (disposition === 'callback' && call_callback_at) {
       // Surface due date for sequencer / board.
-      patch.next_action_date = toZonedIsoDate(call_callback_at, config.timeZone || DEFAULT_PHONE_TIMEZONE)
+      patch.next_action_date = toZonedIsoDate(call_callback_at, config.timeZone || DEFAULT_TIME_ZONE)
         || call_callback_at.slice(0, 10);
     }
     if (capacity_unserved) {

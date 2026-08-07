@@ -21,7 +21,7 @@ import {
 } from '../runtime/db.js';
 import { getRecordRowId } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
-import { computeNextScheduledAction, resolveWorkingDayConfig, toIsoDate } from '../lib/working-days.js';
+import { computeNextScheduledAction, resolveWorkingDayConfig, toIsoDate, toZonedIsoDate } from '../lib/working-days.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { readConfig } from '../lib/config.js';
@@ -2179,8 +2179,11 @@ export const executeChannelStep = async ({
     const launchedAt = shouldAdvanceSequence
       ? ((stepNumber === 1 && intent !== 'draft') ? now : String(sendRecord.launched_at || ''))
       : String(sendRecord.launched_at || '');
-    const launchedAtDate = toIsoDate(launchedAt) || now.slice(0, 10);
-    const timing = resolveWorkingDayConfig(sequence || {});
+    const timing = resolveWorkingDayConfig({
+      ...sequence,
+      timezone: sequence?.timezone || projectConfig?.operations?.timezone,
+    });
+    const launchedAtDate = toIsoDate(launchedAt) || toZonedIsoDate(now, timing.timeZone);
     const progression = shouldAdvanceSequence
       ? computeNextScheduledAction({
           steps: Array.isArray(sequence?.steps) ? sequence.steps : [],
@@ -2188,6 +2191,7 @@ export const executeChannelStep = async ({
           launchedAtDate,
           workingDays: timing.workingDays,
           policy: timing.policy,
+          timeZone: timing.timeZone,
         })
       : {
           sequenceStep: Number(sendRecord.sequence_step || 0),

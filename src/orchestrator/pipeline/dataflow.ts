@@ -517,21 +517,33 @@ const waitAnchorAt = ({
 const makeTimeReadiness = ({
   db,
   clock,
+  config,
 }: {
   db: TimeReadinessDb;
   clock?: PipelineClock;
+  config: Record<string, unknown>;
 }) => (recordState: RecordState, step: DataflowStep) => {
   if (step.kind !== 'wait') return true;
   const recordId = getRecordRowId(recordState.record);
   const now = clockIso(clock);
   const persistedWakeAt = existingWakeAt({ db, recordId, stepId: step.id });
   const wakeAt = persistedWakeAt || (() => {
-    const timing = resolveWorkingDayConfig(step.step);
+    const stepConfig = step.step && typeof step.step === 'object'
+      ? step.step as Record<string, unknown>
+      : {};
+    const operations = config.operations && typeof config.operations === 'object'
+      ? config.operations as Record<string, unknown>
+      : {};
+    const timing = resolveWorkingDayConfig({
+      ...stepConfig,
+      timezone: stepConfig.timezone || operations.timezone,
+    });
     const scheduled = computeWaitWakeAt({
       anchorAt: waitAnchorAt({ db, recordState, step, now }),
       after: String(step.step?.after || ''),
       workingDays: timing.workingDays,
       policy: timing.policy,
+      timeZone: timing.timeZone,
     });
     insertPipelineEvent({
       db,
@@ -869,7 +881,7 @@ export const runPipelineDataflow = async ({
       concurrency: globalConcurrency,
       initialResolvedByRecord: resolvedByRecord,
       isApplicable: makeApplicable({ db, listDir, config, force }),
-      isTimeReady: makeTimeReadiness({ db, clock }),
+      isTimeReady: makeTimeReadiness({ db, clock, config }),
       loadStep: async (step, record, inFlight) => {
         emitActivity({ event: 'step_start', phase: 'pipeline', step: step.id, kind: step.kind, rows: 1 });
         tickProgress(db, runId, { activeStep: step.id, stepIndex: step.index, stepTotal: steps.length, message: `${step.kind} · ${step.id}` });

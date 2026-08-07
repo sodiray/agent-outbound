@@ -1,5 +1,6 @@
 import { openListDb } from '../orchestrator/runtime/db.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
+import { readConfig } from '../orchestrator/lib/config.js';
 import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
 import {
   getCallBoard,
@@ -8,6 +9,7 @@ import {
   releaseCallBoardClaim,
   expireCallBoardLeases,
 } from '../orchestrator/operator/call-board.js';
+import { resolvePhoneAttemptPolicyConfig } from '../orchestrator/policy/phone-attempt.js';
 import { runHealthChecks } from '../orchestrator/operator/health.js';
 import {
   getAccountTimeline,
@@ -32,9 +34,16 @@ export const callBoardCommand = ({
   limit?: number;
 }) => {
   const listDir = resolveListDir(list);
+  const { config, errors } = readConfig(listDir);
+  if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   const db = openListDb({ listDir, readonly: true });
   try {
-    return getCallBoard({ db, capacity, limit });
+    return getCallBoard({
+      db,
+      capacity,
+      limit,
+      phonePolicy: resolvePhoneAttemptPolicyConfig(config),
+    });
   } finally {
     db.close();
   }
@@ -51,9 +60,16 @@ export const callBoardClaimCommand = ({
 }) => {
   const listDir = resolveListDir(list);
   assertRecordAccessForMutation({ listDir, recordId: record });
+  const { config, errors } = readConfig(listDir);
+  if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   const db = openListDb({ listDir, readonly: false });
   try {
-    return claimCallBoardEntry({ db, recordId: record, claimedBy: owner });
+    return claimCallBoardEntry({
+      db,
+      recordId: record,
+      claimedBy: owner,
+      phonePolicy: resolvePhoneAttemptPolicyConfig(config),
+    });
   } finally {
     db.close();
   }
@@ -74,6 +90,8 @@ export const callBoardDisposeCommand = ({
 }) => {
   const listDir = resolveListDir(list);
   assertRecordAccessForMutation({ listDir, recordId: record });
+  const { config, errors } = readConfig(listDir);
+  if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   const db = openListDb({ listDir, readonly: false });
   try {
     return disposeCallBoardEntry({
@@ -82,6 +100,7 @@ export const callBoardDisposeCommand = ({
       disposition: disposition as any,
       note,
       disposedBy: owner || undefined,
+      phonePolicy: resolvePhoneAttemptPolicyConfig(config),
     });
   } finally {
     db.close();

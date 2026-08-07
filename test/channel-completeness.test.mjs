@@ -304,6 +304,7 @@ test('bounce: classifier path via applyInboundReplyClassification uses shared bo
 
 /** Wednesday 10:00 America/Boise — claim path enforces attempt window. */
 const BOISE_BUSINESS_MS = Date.parse('2026-08-05T16:00:00.000Z');
+const BOISE_PHONE_POLICY = { timeZone: 'America/Boise' };
 
 test('phone lease: claim / release / expire + owner gate on dispose', () => {
   const { db } = createList({
@@ -336,6 +337,7 @@ test('phone lease: claim / release / expire + owner gate on dispose', () => {
     recordId: 'phone_1',
     claimedBy: 'alice',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   assert.equal(claimed.ok, true);
   assert.equal(claimed.claimed_by, 'alice');
@@ -352,6 +354,7 @@ test('phone lease: claim / release / expire + owner gate on dispose', () => {
       recordId: 'phone_1',
       claimedBy: 'bob',
       nowMs: BOISE_BUSINESS_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     /Already claimed by alice/i,
   );
@@ -384,6 +387,7 @@ test('phone lease: claim / release / expire + owner gate on dispose', () => {
     recordId: 'phone_1',
     claimedBy: 'carol',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   // Force expiry by backdating lease
   ensureRecordColumns({ db, columns: ['call_claim_expires_at'] });
@@ -404,6 +408,7 @@ test('phone lease: claim / release / expire + owner gate on dispose', () => {
     recordId: 'phone_1',
     claimedBy: 'bob',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   const disposed = disposeCallBoardEntry({
     db,

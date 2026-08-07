@@ -25,10 +25,11 @@ import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import {
   addIsoDays,
-  applyWorkingDaysFilter,
+  applyWorkingDaysFilterInTimezone,
   computeNextScheduledAction,
   resolveWorkingDayConfig,
   toIsoDate,
+  toZonedIsoDate,
 } from '../lib/working-days.js';
 import { evaluateStructuredCondition } from '../lib/sequence-conditions.js';
 import { resolveStepTemplate } from '../lib/templates.js';
@@ -191,6 +192,7 @@ const advanceAfterCompletedStep = ({ record, completedStepNumber, steps, timing,
     launchedAtDate,
     workingDays: timing.workingDays,
     policy: timing.policy,
+    timeZone: timing.timeZone,
   });
 
   return {
@@ -209,10 +211,11 @@ const advanceAfterCompletedStep = ({ record, completedStepNumber, steps, timing,
 const getLaunchDecision = ({ sequence, firstStep, today }) => {
   const timing = resolveWorkingDayConfig(sequence || {});
   const launchBaseDate = addIsoDays(today, getStepDay(firstStep));
-  const filtered = applyWorkingDaysFilter({
+  const filtered = applyWorkingDaysFilterInTimezone({
     isoDate: launchBaseDate,
     workingDays: timing.workingDays,
     policy: timing.policy,
+    timeZone: timing.timeZone,
   });
   return { timing, launchBaseDate, filtered };
 };
@@ -708,7 +711,7 @@ export const runSequencer = async ({
 
   const db = openListDb({ listDir, readonly: false });
   const logicalNow = now != null ? (now instanceof Date ? now : new Date(String(now))) : new Date();
-  const today = toIsoDate(logicalNow) || todayIsoDate();
+  const today = toZonedIsoDate(logicalNow, config?.operations?.timezone) || todayIsoDate();
   const sampleLimit = Math.max(0, Number(sample || 0));
   const scope = sequenceScope({ sequenceName: sequenceFilter, holdingNames });
   const sequenceState = (() => {
@@ -1230,7 +1233,7 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
     if (groups.length === 0) return summary;
     const mcp = await getMcpClient();
     const toolCatalog = readToolCatalog(listDir);
-    const launchToday = todayIsoDate();
+    const launchToday = toZonedIsoDate(new Date(), config?.operations?.timezone) || todayIsoDate();
     for (const group of groups) {
       const activeSequenceName = group.name;
       const sequence = group.sequence;
@@ -1264,6 +1267,7 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
               launchedAtDate: launchDecision.launchBaseDate,
               workingDays: launchDecision.timing.workingDays,
               policy: launchDecision.timing.policy,
+              timeZone: launchDecision.timing.timeZone,
             });
             upsertRecord({
               db,
@@ -1400,7 +1404,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
     if (groups.length === 0) return { ...summary, requested_limit: Number(limit) };
     const mcp = await getMcpClient();
     const toolCatalog = readToolCatalog(listDir);
-    const launchToday = todayIsoDate();
+    const launchToday = toZonedIsoDate(new Date(), config?.operations?.timezone) || todayIsoDate();
     for (const group of groups) {
       const activeSequenceName = group.name;
       const sequence = group.sequence;
@@ -1449,6 +1453,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
               launchedAtDate: launchDecision.launchBaseDate,
               workingDays: launchDecision.timing.workingDays,
               policy: launchDecision.timing.policy,
+              timeZone: launchDecision.timing.timeZone,
             });
             upsertRecord({
               db,

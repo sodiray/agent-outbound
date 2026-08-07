@@ -13,7 +13,6 @@ import {
   DEFAULT_ATTEMPT_WINDOW_END_HOUR,
   DEFAULT_ATTEMPT_WINDOW_START_HOUR,
   DEFAULT_MAX_PHONE_ATTEMPTS,
-  DEFAULT_PHONE_TIMEZONE,
   TIER_MAX_PHONE_ATTEMPTS,
   applyCapacityUnserved,
   applyPhoneDisposition,
@@ -25,8 +24,15 @@ import {
   isPhonePathSuppressed,
   isWithinPhoneAttemptWindow,
   maxPhoneAttemptsForTier,
+  resolvePhoneAttemptPolicyConfig,
   scheduleCallbackAt,
 } from '../dist/orchestrator/policy/phone-attempt.js';
+import {
+  isActionDueInTimezone,
+  resolveWorkingDayConfig,
+  toZonedIsoDate,
+} from '../dist/orchestrator/lib/working-days.js';
+import { normalizeConfig } from '../dist/schemas/config.js';
 import {
   claimCallBoardEntry,
   disposeCallBoardEntry,
@@ -40,6 +46,7 @@ const BOISE_BUSINESS_MS = Date.parse('2026-08-05T16:00:00.000Z');
 const BOISE_EVENING_MS = Date.parse('2026-08-05T02:00:00.000Z');
 /** Saturday 2026-08-08 16:00 UTC — weekend. */
 const BOISE_WEEKEND_MS = Date.parse('2026-08-08T16:00:00.000Z');
+const BOISE_PHONE_POLICY = { timeZone: 'America/Boise' };
 
 const phoneNextAction = JSON.stringify({
   action_id: 'na_call',
@@ -134,8 +141,7 @@ function insertPhoneRecord(db, row) {
 
 // ── Pure policy unit tests ──────────────────────────────────────────────────
 
-test('phone-attempt: defaults and tier ceilings', () => {
-  assert.equal(DEFAULT_PHONE_TIMEZONE, 'America/Boise');
+test('phone-attempt: window defaults and tier ceilings', () => {
   assert.equal(DEFAULT_ATTEMPT_WINDOW_START_HOUR, 9);
   assert.equal(DEFAULT_ATTEMPT_WINDOW_END_HOUR, 17);
   assert.equal(DEFAULT_MAX_PHONE_ATTEMPTS, 3);
@@ -147,19 +153,45 @@ test('phone-attempt: defaults and tier ceilings', () => {
 });
 
 test('phone-attempt: attempt window Boise business hours + weekdays', () => {
-  assert.equal(isWithinPhoneAttemptWindow(BOISE_BUSINESS_MS), true);
+  assert.equal(isWithinPhoneAttemptWindow(BOISE_BUSINESS_MS, BOISE_PHONE_POLICY), true);
   assert.equal(getZonedHour(BOISE_BUSINESS_MS, 'America/Boise'), 10);
-  assert.equal(isWithinPhoneAttemptWindow(BOISE_EVENING_MS), false);
-  assert.equal(isWithinPhoneAttemptWindow(BOISE_WEEKEND_MS), false);
+  assert.equal(isWithinPhoneAttemptWindow(BOISE_EVENING_MS, BOISE_PHONE_POLICY), false);
+  assert.equal(isWithinPhoneAttemptWindow(BOISE_WEEKEND_MS, BOISE_PHONE_POLICY), false);
   // Configurable hours
   assert.equal(
-    isWithinPhoneAttemptWindow(BOISE_BUSINESS_MS, { startHour: 11, endHour: 17 }),
+    isWithinPhoneAttemptWindow(BOISE_BUSINESS_MS, { ...BOISE_PHONE_POLICY, startHour: 11, endHour: 17 }),
     false,
   );
   assert.equal(
-    isWithinPhoneAttemptWindow(BOISE_WEEKEND_MS, { weekdaysOnly: false }),
+    isWithinPhoneAttemptWindow(BOISE_WEEKEND_MS, { ...BOISE_PHONE_POLICY, weekdaysOnly: false }),
     true,
   );
+});
+
+test('phone-attempt: configured timezone controls wall-clock day and hours', () => {
+  const instant = '2026-08-05T14:00:00.000Z'; // 08:00 Boise, 10:00 New York.
+  assert.equal(isWithinPhoneAttemptWindow(instant, BOISE_PHONE_POLICY), false);
+  assert.equal(isWithinPhoneAttemptWindow(instant, { timeZone: 'America/New_York' }), true);
+  assert.equal(toZonedIsoDate('2026-08-05T05:00:00.000Z', 'America/Boise'), '2026-08-04');
+  assert.equal(toZonedIsoDate('2026-08-05T05:00:00.000Z', 'America/New_York'), '2026-08-05');
+});
+
+test('phone-attempt: pipeline timezone accepts IANA zones and phone overrides operations', () => {
+  const valid = normalizeConfig({
+    operations: { timezone: 'America/New_York' },
+    channels: { phone: { timezone: 'America/New_York' } },
+  });
+  assert.deepEqual(valid.errors, []);
+  assert.equal(resolvePhoneAttemptPolicyConfig(valid.config).timeZone, 'America/New_York');
+  const timing = resolveWorkingDayConfig(valid.config.sequences.default);
+  assert.equal(timing.timeZone, 'America/New_York');
+  assert.equal(isActionDueInTimezone({
+    nextActionDate: '2026-08-05',
+    now: '2026-08-05T05:00:00.000Z',
+    timeZone: timing.timeZone,
+  }), true);
+  assert.equal(normalizeConfig({ operations: { timezone: 'Not/AZone' } }).errors.length, 1);
+  assert.equal(normalizeConfig({ channels: { phone: { timezone: 'Not/AZone' } } }).errors.length, 1);
 });
 
 test('phone-attempt: ceiling reached', () => {
@@ -267,37 +299,37 @@ test('phone-attempt: capacity_unserved without dial does not bump attempts', () 
 });
 
 test('phone-attempt: evaluatePhoneAttemptEligibility gates', () => {
-  const ok = evaluatePhoneAttemptEligibility(baseRecord(), { nowMs: BOISE_BUSINESS_MS });
+  const ok = evaluatePhoneAttemptEligibility(baseRecord(), { nowMs: BOISE_BUSINESS_MS, config: BOISE_PHONE_POLICY });
   assert.equal(ok.eligible, true);
 
-  const outside = evaluatePhoneAttemptEligibility(baseRecord(), { nowMs: BOISE_EVENING_MS });
+  const outside = evaluatePhoneAttemptEligibility(baseRecord(), { nowMs: BOISE_EVENING_MS, config: BOISE_PHONE_POLICY });
   assert.equal(outside.eligible, false);
   assert.ok(outside.blockers.some((b) => b.includes('outside_attempt_window')));
 
   const ceiling = evaluatePhoneAttemptEligibility(
     baseRecord({ call_attempt_count: 3 }),
-    { nowMs: BOISE_BUSINESS_MS },
+    { nowMs: BOISE_BUSINESS_MS, config: BOISE_PHONE_POLICY },
   );
   assert.equal(ceiling.eligible, false);
   assert.ok(ceiling.blockers.some((b) => b.startsWith('attempt_ceiling')));
 
   const futureCb = evaluatePhoneAttemptEligibility(
     baseRecord({ call_callback_at: '2026-08-10T16:00:00.000Z' }),
-    { nowMs: BOISE_BUSINESS_MS },
+    { nowMs: BOISE_BUSINESS_MS, config: BOISE_PHONE_POLICY },
   );
   assert.equal(futureCb.eligible, false);
   assert.ok(futureCb.blockers.some((b) => b.startsWith('callback_not_due')));
 
   const dueCb = evaluatePhoneAttemptEligibility(
     baseRecord({ call_callback_at: '2026-08-05T12:00:00.000Z' }),
-    { nowMs: BOISE_BUSINESS_MS },
+    { nowMs: BOISE_BUSINESS_MS, config: BOISE_PHONE_POLICY },
   );
   assert.equal(dueCb.eligible, true);
   assert.ok(dueCb.reasons.includes('callback_due'));
 
   const wrong = evaluatePhoneAttemptEligibility(
     baseRecord({ dne_phone: 1 }),
-    { nowMs: BOISE_BUSINESS_MS },
+    { nowMs: BOISE_BUSINESS_MS, config: BOISE_PHONE_POLICY },
   );
   assert.equal(wrong.eligible, false);
   assert.ok(wrong.blockers.includes('phone_path_suppressed'));
@@ -311,6 +343,7 @@ test('call-board: eligibility respects attempt window, ceiling, callback, dne_ph
     isCallBoardEligible(row, {
       hasOpenPhonePark: false,
       nowMs: BOISE_BUSINESS_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     true,
   );
@@ -318,6 +351,7 @@ test('call-board: eligibility respects attempt window, ceiling, callback, dne_ph
     isCallBoardEligible(row, {
       hasOpenPhonePark: false,
       nowMs: BOISE_EVENING_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     false,
   );
@@ -325,6 +359,7 @@ test('call-board: eligibility respects attempt window, ceiling, callback, dne_ph
     isCallBoardEligible(baseRecord({ call_attempt_count: 3 }), {
       hasOpenPhonePark: false,
       nowMs: BOISE_BUSINESS_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     false,
   );
@@ -332,6 +367,7 @@ test('call-board: eligibility respects attempt window, ceiling, callback, dne_ph
     isCallBoardEligible(baseRecord({ call_callback_at: '2026-08-20T00:00:00.000Z' }), {
       hasOpenPhonePark: false,
       nowMs: BOISE_BUSINESS_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     false,
   );
@@ -339,6 +375,7 @@ test('call-board: eligibility respects attempt window, ceiling, callback, dne_ph
     isCallBoardEligible(baseRecord({ dne_phone: 1 }), {
       hasOpenPhonePark: false,
       nowMs: BOISE_BUSINESS_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     false,
   );
@@ -371,7 +408,7 @@ test('call-board: getCallBoard filters ceiling / outside window / future callbac
     fit_score: 70,
   });
 
-  const board = getCallBoard({ db, capacity: 25, nowMs: BOISE_BUSINESS_MS });
+  const board = getCallBoard({ db, capacity: 25, nowMs: BOISE_BUSINESS_MS, phonePolicy: BOISE_PHONE_POLICY });
   const ids = board.entries.map((e) => e.record_id);
   assert.ok(ids.includes('ok_call'), `expected ok_call: ${ids}`);
   assert.ok(ids.includes('due_cb'), `expected due callback: ${ids}`);
@@ -379,7 +416,7 @@ test('call-board: getCallBoard filters ceiling / outside window / future callbac
   assert.ok(!ids.includes('future_cb'), 'future callback must not list');
 
   // Outside window → empty (or no cold candidates)
-  const night = getCallBoard({ db, capacity: 25, nowMs: BOISE_EVENING_MS });
+  const night = getCallBoard({ db, capacity: 25, nowMs: BOISE_EVENING_MS, phonePolicy: BOISE_PHONE_POLICY });
   assert.equal(night.entries.length, 0);
 
   db.close();
@@ -396,12 +433,14 @@ test('call-board: dispose wrong_number / callback / unserved transitions persist
     recordId: 'disp_wrong',
     claimedBy: 'alice',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   const wrong = disposeCallBoardEntry({
     db,
     recordId: 'disp_wrong',
     disposition: 'wrong_number',
     disposedBy: 'alice',
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   assert.equal(wrong.phone_invalidated, true);
   assert.equal(wrong.call_claim_status, 'completed');
@@ -411,7 +450,7 @@ test('call-board: dispose wrong_number / callback / unserved transitions persist
   assert.ok(Number(wrongRow.suppressed) !== 1, 'must not full-account DNC');
   // Board no longer surfaces wrong-number path
   assert.equal(
-    isCallBoardEligible(wrongRow, { hasOpenPhonePark: false, nowMs: BOISE_BUSINESS_MS }),
+    isCallBoardEligible(wrongRow, { hasOpenPhonePark: false, nowMs: BOISE_BUSINESS_MS, phonePolicy: BOISE_PHONE_POLICY }),
     false,
   );
 
@@ -420,6 +459,7 @@ test('call-board: dispose wrong_number / callback / unserved transitions persist
     recordId: 'disp_cb',
     claimedBy: 'alice',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   const cb = disposeCallBoardEntry({
     db,
@@ -427,6 +467,7 @@ test('call-board: dispose wrong_number / callback / unserved transitions persist
     disposition: 'callback',
     disposedBy: 'alice',
     callbackAt: '2026-08-06T15:00:00.000Z',
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   assert.equal(cb.call_claim_status, 'open');
   assert.equal(cb.callback_at, '2026-08-06T15:00:00.000Z');
@@ -435,7 +476,7 @@ test('call-board: dispose wrong_number / callback / unserved transitions persist
   assert.equal(String(cbRow.call_window_status), 'callback_scheduled');
   // Future callback not eligible yet
   assert.equal(
-    isCallBoardEligible(cbRow, { hasOpenPhonePark: false, nowMs: BOISE_BUSINESS_MS }),
+    isCallBoardEligible(cbRow, { hasOpenPhonePark: false, nowMs: BOISE_BUSINESS_MS, phonePolicy: BOISE_PHONE_POLICY }),
     false,
   );
   // Due callback is eligible
@@ -443,6 +484,7 @@ test('call-board: dispose wrong_number / callback / unserved transitions persist
     isCallBoardEligible(cbRow, {
       hasOpenPhonePark: false,
       nowMs: Date.parse('2026-08-06T16:00:00.000Z'),
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     true,
   );
@@ -452,12 +494,14 @@ test('call-board: dispose wrong_number / callback / unserved transitions persist
     recordId: 'disp_na',
     claimedBy: 'bob',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   const na = disposeCallBoardEntry({
     db,
     recordId: 'disp_na',
     disposition: 'no_answer',
     disposedBy: 'bob',
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   assert.equal(na.capacity_unserved, true);
   assert.equal(na.call_attempt_count, 3);
@@ -481,6 +525,7 @@ test('call-board: claim refuses outside attempt window and at ceiling', () => {
       recordId: 'claim_window',
       claimedBy: 'op',
       nowMs: BOISE_EVENING_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     /outside_attempt_window|not call-board eligible/,
   );
@@ -491,6 +536,7 @@ test('call-board: claim refuses outside attempt window and at ceiling', () => {
       recordId: 'claim_ceiling',
       claimedBy: 'op',
       nowMs: BOISE_BUSINESS_MS,
+      phonePolicy: BOISE_PHONE_POLICY,
     }),
     /attempt_ceiling|not call-board eligible/,
   );
@@ -501,6 +547,7 @@ test('call-board: claim refuses outside attempt window and at ceiling', () => {
     recordId: 'claim_window',
     claimedBy: 'op',
     nowMs: BOISE_BUSINESS_MS,
+    phonePolicy: BOISE_PHONE_POLICY,
   });
   assert.equal(claimed.ok, true);
 

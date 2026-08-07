@@ -4,11 +4,24 @@ export type SequenceWorkingDay = typeof SEQUENCE_WORKING_DAY_VALUES[number];
 export const NON_WORKING_DAY_POLICY_VALUES = ['shift_forward', 'skip'] as const;
 export type NonWorkingDayPolicy = typeof NON_WORKING_DAY_POLICY_VALUES[number];
 
+/** Neutral fallback for programmatic callers that do not provide pipeline configuration. */
+export const DEFAULT_TIME_ZONE = 'UTC';
+
 const WEEKDAY_BY_UTC_INDEX: SequenceWorkingDay[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
 export const normalizeWorkingDayToken = (value: any) => {
   if (typeof value !== 'string') return value;
   return value.trim().toLowerCase();
+};
+
+export const isValidIanaTimeZone = (value: unknown): boolean => {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value.trim() }).format();
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 export const toIsoDate = (value: any) => {
@@ -22,9 +35,8 @@ export const toIsoDate = (value: any) => {
 
 /**
  * Calendar date (YYYY-MM-DD) in an IANA timezone for an instant.
- * Used for Boise (America/Boise) wall-clock scheduling across DST.
  */
-export const toZonedIsoDate = (value: string | Date, timeZone = 'America/Boise'): string => {
+export const toZonedIsoDate = (value: string | Date, timeZone = DEFAULT_TIME_ZONE): string => {
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return '';
   // en-CA yields YYYY-MM-DD
@@ -39,7 +51,7 @@ export const toZonedIsoDate = (value: string | Date, timeZone = 'America/Boise')
 /** Weekday token in IANA timezone (DST-aware). */
 export const getWeekdayInTimezone = (
   isoDateOrInstant: string | Date,
-  timeZone = 'America/Boise',
+  timeZone = DEFAULT_TIME_ZONE,
 ): SequenceWorkingDay => {
   const d = typeof isoDateOrInstant === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(isoDateOrInstant)
     ? new Date(`${isoDateOrInstant}T12:00:00.000Z`)
@@ -54,14 +66,13 @@ export const getWeekdayInTimezone = (
 };
 
 /**
- * Apply working-days filter using wall clock in `timeZone` (default America/Boise).
- * Falls back to UTC weekday when timeZone is empty.
+ * Apply working-days filter using wall clock in `timeZone` (default UTC).
  */
 export const applyWorkingDaysFilterInTimezone = ({
   isoDate,
   workingDays,
   policy,
-  timeZone = 'America/Boise',
+  timeZone = DEFAULT_TIME_ZONE,
 }: {
   isoDate: string;
   workingDays: SequenceWorkingDay[];
@@ -71,8 +82,7 @@ export const applyWorkingDaysFilterInTimezone = ({
   const allowed = new Set(workingDays || []);
   if (allowed.size === 0) throw new Error('working_days must include at least one day.');
 
-  const weekdayOf = (day: string) =>
-    timeZone ? getWeekdayInTimezone(day, timeZone) : getUtcWeekday(day);
+  const weekdayOf = (day: string) => getWeekdayInTimezone(day, timeZone);
 
   if (allowed.has(weekdayOf(isoDate))) {
     return { date: isoDate, shifted: false };
@@ -92,7 +102,7 @@ export const applyWorkingDaysFilterInTimezone = ({
 export const isActionDueInTimezone = ({
   nextActionDate,
   now,
-  timeZone = 'America/Boise',
+  timeZone = DEFAULT_TIME_ZONE,
 }: {
   nextActionDate: string;
   now: string | Date;
@@ -118,6 +128,7 @@ const getUtcWeekday = (isoDate: string): SequenceWorkingDay => {
 export const resolveWorkingDayConfig = (sequence: any): {
   workingDays: SequenceWorkingDay[];
   policy: NonWorkingDayPolicy;
+  timeZone: string;
 } => {
   const inputDays = Array.isArray(sequence?.working_days) ? sequence.working_days : SEQUENCE_WORKING_DAY_VALUES;
   const valid = new Set(SEQUENCE_WORKING_DAY_VALUES);
@@ -130,6 +141,9 @@ export const resolveWorkingDayConfig = (sequence: any): {
   return {
     workingDays: workingDays.length > 0 ? workingDays : [...SEQUENCE_WORKING_DAY_VALUES],
     policy: sequence?.non_working_day_policy === 'skip' ? 'skip' : 'shift_forward',
+    timeZone: typeof sequence?.timezone === 'string' && sequence.timezone.trim()
+      ? sequence.timezone.trim()
+      : DEFAULT_TIME_ZONE,
   };
 };
 
@@ -168,14 +182,16 @@ export const computeStepSchedule = ({
   dayOffset,
   workingDays,
   policy,
+  timeZone,
 }: {
   launchedAtDate: string;
   dayOffset: number;
   workingDays: SequenceWorkingDay[];
   policy: NonWorkingDayPolicy;
+  timeZone?: string;
 }) => {
   const rawDate = addIsoDays(launchedAtDate, Number(dayOffset || 0));
-  return applyWorkingDaysFilter({ isoDate: rawDate, workingDays, policy });
+  return applyWorkingDaysFilterInTimezone({ isoDate: rawDate, workingDays, policy, timeZone });
 };
 
 export const computeNextScheduledAction = ({
@@ -184,12 +200,14 @@ export const computeNextScheduledAction = ({
   launchedAtDate,
   workingDays,
   policy,
+  timeZone,
 }: {
   steps: any[];
   completedStepNumber: number;
   launchedAtDate: string;
   workingDays: SequenceWorkingDay[];
   policy: NonWorkingDayPolicy;
+  timeZone?: string;
 }) => {
   const skippedStepNumbers: number[] = [];
   let sequenceStep = Number(completedStepNumber || 0);
@@ -216,6 +234,7 @@ export const computeNextScheduledAction = ({
       dayOffset,
       workingDays,
       policy,
+      timeZone,
     });
 
     if ('skip' in scheduled) {

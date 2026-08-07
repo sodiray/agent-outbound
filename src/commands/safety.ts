@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import yaml from 'js-yaml';
 import { collectConfigToolRefs } from '../orchestrator/lib/tool-catalog.js';
 import { getConfigPath, readConfig } from '../orchestrator/lib/config.js';
-import { addIsoDays, computeStepSchedule, resolveWorkingDayConfig, toIsoDate } from '../orchestrator/lib/working-days.js';
+import { addIsoDays, computeStepSchedule, resolveWorkingDayConfig, toIsoDate, toZonedIsoDate } from '../orchestrator/lib/working-days.js';
 import { getRecordById, openListDb, upsertRecord } from '../orchestrator/runtime/db.js';
 import { listConnectedToolkits } from '../orchestrator/runtime/mcp.js';
 import { getDbPath, getSnapshotsDir, resolveListDir } from '../orchestrator/runtime/paths.js';
@@ -376,13 +376,18 @@ export const recordRevertSequenceCommand = ({ list, rowId, toStep }: { list: str
         retryable: false,
       });
     }
-    const launchedAtDate = toIsoDate(String(row.launched_at || '')) || addIsoDays(nowIso().slice(0, 10), 0);
-    const timing = resolveWorkingDayConfig(sequence || {});
+    const timing = resolveWorkingDayConfig({
+      ...sequence,
+      timezone: sequence?.timezone || config?.operations?.timezone,
+    });
+    const launchedAtDate = toIsoDate(String(row.launched_at || ''))
+      || addIsoDays(toZonedIsoDate(nowIso(), timing.timeZone), 0);
     const scheduled = computeStepSchedule({
       launchedAtDate,
       dayOffset: Number(step?.day || 0),
       workingDays: timing.workingDays,
       policy: timing.policy,
+      timeZone: timing.timeZone,
     });
     const nextActionDate = 'date' in scheduled ? scheduled.date : '';
     const updated = {

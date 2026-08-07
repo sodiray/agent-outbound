@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   NON_WORKING_DAY_POLICY_VALUES,
+  isValidIanaTimeZone,
   normalizeWorkingDayToken,
   SEQUENCE_WORKING_DAY_VALUES,
 } from '../orchestrator/lib/working-days.js';
@@ -279,6 +280,14 @@ const WorkingDaysSchema = z.preprocess((value) => {
 }, z.array(WorkingDaySchema)
   .min(1, 'working_days must include at least one day.')
   .transform((days) => Array.from(new Set(days))));
+
+export const TimeZoneSchema = z.string().trim().min(1).superRefine((value, ctx) => {
+  if (isValidIanaTimeZone(value)) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: `timezone must be a valid IANA timezone, received "${value}".`,
+  });
+});
 
 const PipelineSequenceStepBaseSchema = z.object({
   id: z.string().min(1),
@@ -644,6 +653,7 @@ const SequenceSchema = z.object({
   on_opt_out: z.enum(['pause', 'continue', 'stop']).default('stop'),
   working_days: WorkingDaysSchema,
   non_working_day_policy: z.enum(NON_WORKING_DAY_POLICY_VALUES).default('shift_forward'),
+  timezone: TimeZoneSchema.optional(),
   steps: z.array(SequenceStepSchema).default([]),
 }).partial();
 
@@ -834,6 +844,7 @@ const NotificationRouteSchema = z.object({
 
 const OperationsSchema = z.object({
   instructions: z.string().trim().default(''),
+  timezone: TimeZoneSchema.optional(),
   objectives: z.object({
     primary: z.string().trim().default(''),
     secondary: z.array(z.string()).default([]),
@@ -915,7 +926,19 @@ export const ConfigSchema = z.object({
   ai: AiSchema.default({}),
   model_context: ModelContextSchema,
   budgets: BudgetsSchema.default({}),
-  channels: z.record(z.any()).default({}),
+  channels: z.record(z.any()).default({}).superRefine((channels, ctx) => {
+    const phone = channels.phone;
+    if (!phone || typeof phone !== 'object' || Array.isArray(phone)) return;
+    const timezone = (phone as Record<string, unknown>).timezone;
+    if (timezone === undefined) return;
+    const parsed = TimeZoneSchema.safeParse(timezone);
+    if (parsed.success) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: parsed.error.issues[0]?.message || 'phone timezone must be a valid IANA timezone.',
+      path: ['phone', 'timezone'],
+    });
+  }),
   mailboxes: MailboxesConfigSchema.optional(),
   suppression: SuppressionSchema.default({}),
   crm: CrmSchema.optional(),
@@ -1011,7 +1034,12 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
         ? sequence.working_days
         : [...SEQUENCE_WORKING_DAY_VALUES];
       const nonWorkingDayPolicy = sequence?.non_working_day_policy === 'skip' ? 'skip' : 'shift_forward';
-      return [name, { ...sequence, working_days: workingDays, non_working_day_policy: nonWorkingDayPolicy }];
+      return [name, {
+        ...sequence,
+        working_days: workingDays,
+        non_working_day_policy: nonWorkingDayPolicy,
+        timezone: sequence?.timezone || parsed.data?.operations?.timezone || 'UTC',
+      }];
     })
   );
   if (!withSequenceDefaults.default) {
@@ -1019,6 +1047,7 @@ export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
       steps: [],
       working_days: [...SEQUENCE_WORKING_DAY_VALUES],
       non_working_day_policy: 'shift_forward',
+      timezone: parsed.data?.operations?.timezone || 'UTC',
     };
   }
 

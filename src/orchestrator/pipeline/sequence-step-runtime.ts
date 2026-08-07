@@ -1,6 +1,6 @@
 import { executeChannelStep } from '../channels/execute.js';
 import {
-  applyWorkingDaysFilter,
+  applyWorkingDaysFilterInTimezone,
   type NonWorkingDayPolicy,
   type SequenceWorkingDay,
 } from '../lib/working-days.js';
@@ -36,20 +36,23 @@ export const computeWaitWakeAt = ({
   after,
   workingDays,
   policy,
+  timeZone,
 }: {
   anchorAt: string;
   after: string;
   workingDays: SequenceWorkingDay[];
   policy: NonWorkingDayPolicy;
+  timeZone?: string;
 }): { wakeAt: string; shifted: boolean; skipped: boolean } => {
   const anchor = new Date(String(anchorAt || ''));
   if (Number.isNaN(anchor.getTime())) throw new Error(`Invalid wait anchor "${anchorAt}".`);
   const unadjusted = new Date(anchor.getTime() + parseWaitDurationMs(after));
   const unadjustedIso = unadjusted.toISOString();
-  const adjusted = applyWorkingDaysFilter({
+  const adjusted = applyWorkingDaysFilterInTimezone({
     isoDate: unadjustedIso.slice(0, 10),
     workingDays,
     policy,
+    timeZone,
   });
   if ('skip' in adjusted) {
     return {
