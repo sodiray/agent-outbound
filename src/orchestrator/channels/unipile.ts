@@ -314,10 +314,17 @@ export async function unipileLiveInvite(input: {
   }
   // Unipile users invitation endpoint (account-scoped).
   const url = unipileUsersUrl({ base, path: 'invite', accountId });
+  // account_id is required in the BODY, not only as a query parameter. Sending
+  // it solely on the URL returns:
+  //   400 {"path":"/account_id","message":"Required",
+  //        "description":"The id of the account where the user will be added."}
+  // It is kept on the query string as well; the provider accepts both and the
+  // URL form is what the account-scoped user lookup uses.
   const body: Record<string, unknown> = {
     provider: 'LINKEDIN',
     provider_id: target.provider_id,
   };
+  if (input.accountId) body.account_id = input.accountId;
   if (input.message) body.message = input.message;
 
   const fetchFn = input.fetchImpl || globalThis.fetch;
