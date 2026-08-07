@@ -57,6 +57,8 @@ import {
   applyLinkedinInviteSent,
   evaluateLinkedinConnectGate,
 } from '../policy/linkedin-lifecycle.js';
+import { assertOutboundContent } from '../lib/outbound-content.js';
+import { resolveLinkedinInvitationMessage } from './unipile.js';
 
 const linkedinBodyForReview = ({
   record,
@@ -64,16 +66,10 @@ const linkedinBodyForReview = ({
 }: {
   record: Record<string, unknown>;
   step?: { config?: Record<string, unknown> } | null;
-}) => String(
-  step?.config?.invite_message
-  || step?.config?.message
-  || step?.config?.connection_note
-  || step?.config?.body
-  || record.linkedin_invite_message
-  || record.linkedin_message
-  || record.linkedin_message_body
-  || '',
-).trim();
+}) => {
+  const content = resolveLinkedinInvitationMessage({ record, step });
+  return 'text' in content ? content.text : '';
+};
 
 /**
  * Material asset_version for the outbound about to execute.
@@ -1249,6 +1245,16 @@ export const executeChannelStep = async ({
         };
       }
 
+      const linkedinContent = resolveLinkedinInvitationMessage({ record: sendRecord, step });
+      if ('reason' in linkedinContent) {
+        return {
+          status: 'failed',
+          reason: linkedinContent.reason,
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
+
       const liClaim = reserveProviderInteraction({ providerChannel: 'linkedin' });
       if (liClaim.ok === false) return liClaim.result as any;
 
@@ -1830,6 +1836,22 @@ export const executeChannelStep = async ({
       const preSendTo = String(baseArgs.to || '').trim().toLowerCase();
       const preSendSubject = String(baseArgs.subject || '');
       const preSendBody = String(baseArgs.body || '');
+      const emailContent = assertOutboundContent({
+        channel: 'email',
+        stepId: sequenceStepId,
+        required: {
+          subject: preSendSubject,
+          body: preSendBody,
+        },
+      });
+      if ('reason' in emailContent) {
+        return {
+          status: 'failed',
+          reason: emailContent.reason,
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
       const authEnv = (sendRecord as any).__authorized_provider_envelope as
         | { mailbox_id?: string; from?: string; recipient?: string; subject?: string; body?: string }
         | undefined;

@@ -542,7 +542,7 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
   // Live path requires linkedin URL; without it, honest skip (not fake success).
   const missingUrl = await executeUnipileLinkedinConnect({
     record: { _row_id: 'phase07_li' },
-    step: { id: 'linkedin_1' },
+    step: { id: 'linkedin_1', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://x' },
   });
   assert.equal(missingUrl.status, 'skipped');
@@ -551,7 +551,7 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
   // Live HTTP path with injected fetch — unipileLiveInvite adapter.
   const liveOk = await executeUnipileLinkedinConnect({
     record: { _row_id: 'phase07_li', linkedin_url: 'https://www.linkedin.com/in/x' },
-    step: { id: 'linkedin_1' },
+    step: { id: 'linkedin_1', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.unipile.test' },
     fetchImpl: async (_url, init) =>
       (init?.method === 'GET'
@@ -573,7 +573,7 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
   // Live HTTP failure is failed (not skipped, not fake success).
   const liveFail = await executeUnipileLinkedinConnect({
     record: { _row_id: 'phase07_li', linkedin_url: 'https://www.linkedin.com/in/x' },
-    step: { id: 'linkedin_1' },
+    step: { id: 'linkedin_1', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.unipile.test' },
     fetchImpl: async (_url, init) =>
       (init?.method === 'GET'
@@ -594,7 +594,7 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
   // Fixture path (validation harness only)
   const fixture = await executeUnipileLinkedinConnect({
     record: { _row_id: 'phase07_li' },
-    step: { id: 'linkedin_1' },
+    step: { id: 'linkedin_1', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: {
       UNIPILE_API_KEY: 'test-key',
       UNIPILE_DSN: 'https://api.unipile.test',
@@ -628,7 +628,7 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
       step: {
         kind: 'linkedin_connect',
         id: 'linkedin_1',
-        config: { channel: 'linkedin' },
+        config: { channel: 'linkedin', invite_message: 'Hello — I would be glad to connect.' },
       },
       sequence: { steps: [] },
       channelHint: 'linkedin',
@@ -653,7 +653,7 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
       step: {
         kind: 'linkedin_connect',
         id: 'linkedin_1',
-        config: { channel: 'linkedin' },
+        config: { channel: 'linkedin', invite_message: 'Hello — I would be glad to connect.' },
       },
       sequence: { steps: [] },
       channelHint: 'linkedin',

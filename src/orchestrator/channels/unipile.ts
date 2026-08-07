@@ -6,6 +6,8 @@
  * fixture mode is off. Fixture mode (AO_UNIPILE_FIXTURE=1) is for harness only.
  */
 
+import { assertOutboundContent, resolveExplicitProspectText } from '../lib/outbound-content.js';
+
 export const UNIPILE_ENV_KEYS = [
   'UNIPILE_API_KEY',
   'UNIPILE_DSN',
@@ -161,6 +163,20 @@ export type UnipileLinkedinConnectResult = {
   readiness: UnipileReadiness;
 };
 
+export const resolveLinkedinInvitationMessage = ({
+  record,
+  step,
+}: {
+  record?: Record<string, unknown>;
+  step?: { id?: string; config?: Record<string, unknown> };
+}) => resolveExplicitProspectText({
+  channel: 'linkedin',
+  stepId: nonBlank(step?.id) || 'linkedin_connect',
+  config: step?.config,
+  record,
+  keys: ['invite_message', 'message', 'connection_note', 'body'],
+});
+
 type UnipileTargetResolution = {
   ok: boolean;
   provider_id: string;
@@ -264,6 +280,21 @@ export async function unipileLiveInvite(input: {
   reason: string;
   status: number;
 }> {
+  const content = assertOutboundContent({
+    channel: 'linkedin',
+    stepId: 'unipile_live_invite',
+    required: { invite_message: input.message },
+  });
+  if ('reason' in content) {
+    return {
+      ok: false,
+      provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: '',
+      reason: content.reason,
+      status: 0,
+    };
+  }
   const base = String(input.dsn || '').replace(/\/$/, '');
   if (!base) {
     return {
@@ -462,6 +493,21 @@ export async function executeUnipileLinkedinConnect(
     };
   }
 
+  const message = resolveLinkedinInvitationMessage({
+    record: input.record,
+    step: input.step,
+  });
+  if ('reason' in message) {
+    return {
+      status: 'failed',
+      reason: message.reason,
+      provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: '',
+      readiness,
+    };
+  }
+
   const live = await unipileLiveInvite({
     dsn,
     apiKey,
@@ -471,7 +517,7 @@ export async function executeUnipileLinkedinConnect(
       ? nonBlank(input.record?.linkedin_provider_id)
       : '',
     targetPublicIdentifier: nonBlank(input.record?.linkedin_provider_public_id),
-    message: nonBlank(input.step?.config?.invite_message || input.step?.description),
+    message: message.text,
     fetchImpl: input.fetchImpl,
   });
 

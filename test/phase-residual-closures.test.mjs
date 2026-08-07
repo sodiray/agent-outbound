@@ -168,7 +168,7 @@ test('residual transition audit', () => {
 test('residual Unipile live HTTP via inject fetch', async () => {
   const res = await executeUnipileLinkedinConnect({
     record: { _row_id: 'u1', linkedin_url: 'https://www.linkedin.com/in/test' },
-    step: { id: 'li1' },
+    step: { id: 'li1', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.example' },
     fetchImpl: async (_url, init) => (init?.method === 'GET'
       ? {
@@ -320,7 +320,7 @@ test('residual phase-10: unipile webhook/event fixture shape + network failure p
   const { executeUnipileLinkedinConnect: exec } = await import('../dist/orchestrator/channels/unipile.js');
   const fail = await exec({
     record: { _row_id: 'w1', linkedin_url: 'https://www.linkedin.com/in/w' },
-    step: { id: 'li' },
+    step: { id: 'li', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.example' },
     fetchImpl: async () => {
       throw new Error('ECONNRESET');

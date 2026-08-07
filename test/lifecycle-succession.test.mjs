@@ -309,6 +309,7 @@ test('executeChannelStep success path persists next_action succession via produc
       id: 'email_1',
       config: {
         action: 'tool_call',
+        args: { subject: 'Approved subject', body: 'Approved body' },
         daily_cap: 999,
         tool: { server: 'fake_smtp', tools: ['SEND_TEST'] },
         output_map: { message_id: 'message_id', provider_id: 'provider_id' },
@@ -374,6 +375,7 @@ test('executeChannelStep success without prior next_action still installs one su
       id: 'email_1',
       config: {
         action: 'tool_call',
+        args: { subject: 'Approved subject', body: 'Approved body' },
         daily_cap: 999,
         tool: { server: 'fake_smtp', tools: ['SEND_TEST'] },
         output_map: { message_id: 'message_id', provider_id: 'provider_id' },

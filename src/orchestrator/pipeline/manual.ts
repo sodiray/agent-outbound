@@ -40,6 +40,7 @@ import {
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../policy/lifecycle.js';
 import { stableHash } from '../lib/record.js';
+import { assertOutboundContent } from '../lib/outbound-content.js';
 
 const text = (value: unknown) => String(value || '').trim();
 
@@ -703,6 +704,15 @@ export const completeManualTask = async ({
         providerName: config?.channels?.mail?.provider,
       });
     if (provider) {
+      const mailTemplateId = text(config?.channels?.mail?.template_id);
+      const mailContent = assertOutboundContent({
+        channel: 'mail',
+        stepId: sid,
+        required: { template_id: mailTemplateId },
+      });
+      if ('reason' in mailContent) {
+        throw new Error(mailContent.reason);
+      }
       const submitRequest: MailSubmitRequest = {
         recordId: rid,
         treatment: mail_treatment,
@@ -713,7 +723,7 @@ export const completeManualTask = async ({
           address_state: text(row.state),
           address_zip: text(row.zip || row.postal_code),
         },
-        template_id: text(config?.channels?.mail?.template_id),
+        template_id: mailTemplateId,
         metadata: { step_id: sid },
       };
       const contentVersion = stableHash({

@@ -6,6 +6,11 @@ import {
   parseLinkedinPublicIdentifier,
 } from '../dist/orchestrator/channels/unipile.js';
 
+const invitationStep = (id = 'linkedin_connect') => ({
+  id,
+  config: { invite_message: 'Hello — I would be glad to connect.' },
+});
+
 test('Unipile LinkedIn profile URL forms resolve to the public identifier', () => {
   const references = [
     'https://www.linkedin.com/in/starlineluxury',
@@ -47,6 +52,7 @@ test('Unipile resolves a LinkedIn public identifier and invites with its provide
   const requests = [];
   const result = await executeUnipileLinkedinConnect({
     record: { contact_linkedin_url: 'https://www.linkedin.com/in/starlineluxury?trk=public_profile' },
+    step: invitationStep(),
     env: {
       UNIPILE_API_KEY: 'test-key',
       UNIPILE_DSN: 'https://api.unipile.test',
@@ -83,14 +89,73 @@ test('Unipile resolves a LinkedIn public identifier and invites with its provide
   ]);
   assert.equal(capturedBodies[0].provider_id, 'ACoAAAYbBGYBLbhN6JA2KC');
   assert.equal(capturedBodies[0].provider_public_id, undefined);
+  assert.equal(capturedBodies[0].message, 'Hello — I would be glad to connect.');
   assert.equal(result.status, 'sent');
   assert.equal(result.target_provider_id, 'ACoAAAYbBGYBLbhN6JA2KC');
+});
+
+test('Unipile fails closed when no invitation text is configured and never uses step description', async () => {
+  const fetchCalls = [];
+  const result = await executeUnipileLinkedinConnect({
+    record: { contact_linkedin_url: 'https://www.linkedin.com/in/starlineluxury' },
+    step: {
+      id: 'linkedin_missing_copy',
+      description: 'Internal provider routing notes that must never reach a prospect',
+      config: {},
+    },
+    env: { UNIPILE_API_KEY: 'test-key', UNIPILE_DSN: 'https://api.unipile.test' },
+    fetchImpl: async (...args) => {
+      fetchCalls.push(args);
+      throw new Error('a missing message must stop before provider networking');
+    },
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.match(result.reason, /linkedin_missing_copy.*invite_message/i);
+  assert.doesNotMatch(result.reason, /Internal provider routing notes/);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test('Unipile sends explicitly mapped composed invitation text verbatim', async () => {
+  const invitation = 'Hello Gladys — I would be glad to connect.';
+  const sentBodies = [];
+  const result = await executeUnipileLinkedinConnect({
+    record: {
+      contact_linkedin_url: 'https://www.linkedin.com/in/starlineluxury',
+      composed_invitation: invitation,
+    },
+    step: {
+      id: 'linkedin_composed_copy',
+      config: { args_map: { invite_message: 'composed_invitation' } },
+    },
+    env: { UNIPILE_API_KEY: 'test-key', UNIPILE_DSN: 'https://api.unipile.test' },
+    fetchImpl: async (_url, init) => {
+      if (init?.method === 'GET') {
+        return {
+          status: 200,
+          statusText: 'OK',
+          json: async () => ({ provider_id: 'ACoAAAYbBGYBLbhN6JA2KC' }),
+        };
+      }
+      sentBodies.push(JSON.parse(String(init?.body)));
+      return {
+        status: 201,
+        statusText: 'Created',
+        json: async () => ({ id: 'invite-composed' }),
+      };
+    },
+  });
+
+  assert.equal(result.status, 'sent');
+  assert.equal(sentBodies.length, 1);
+  assert.equal(sentBodies[0].message, invitation);
 });
 
 test('Unipile fails closed when the resolved user has no provider id', async () => {
   const fetchCalls = [];
   const result = await executeUnipileLinkedinConnect({
     record: { contact_linkedin_url: 'https://www.linkedin.com/in/starlineluxury' },
+    step: invitationStep(),
     env: { UNIPILE_API_KEY: 'test-key', UNIPILE_DSN: 'https://api.unipile.test' },
     fetchImpl: async (url, init) => {
       fetchCalls.push({ url: String(url), method: init?.method });
@@ -112,6 +177,7 @@ test('Unipile fails closed when the user lookup returns an HTTP error', async ()
   const fetchCalls = [];
   const result = await executeUnipileLinkedinConnect({
     record: { contact_linkedin_url: 'https://www.linkedin.com/in/starlineluxury' },
+    step: invitationStep(),
     env: { UNIPILE_API_KEY: 'test-key', UNIPILE_DSN: 'https://api.unipile.test' },
     fetchImpl: async (url, init) => {
       fetchCalls.push({ url: String(url), method: init?.method });
@@ -138,6 +204,7 @@ test('Unipile reuses a provider id cached for the same public identifier', async
       linkedin_provider_id: 'ACoAAAYbBGYBLbhN6JA2KC',
       linkedin_provider_public_id: 'starlineluxury',
     },
+    step: invitationStep(),
     env: { UNIPILE_API_KEY: 'test-key', UNIPILE_DSN: 'https://api.unipile.test' },
     fetchImpl: async (url, init) => {
       fetchCalls.push({ url: String(url), method: init?.method, body: init?.body });
@@ -162,6 +229,7 @@ test('Unipile includes provider error detail in the invitation failure reason', 
       linkedin_provider_id: 'ACoAAAYbBGYBLbhN6JA2KC',
       linkedin_provider_public_id: 'starlineluxury',
     },
+    step: invitationStep(),
     env: { UNIPILE_API_KEY: 'test-key', UNIPILE_DSN: 'https://api.unipile.test' },
     fetchImpl: async () => ({
       status: 422,

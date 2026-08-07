@@ -435,6 +435,7 @@ test('executeChannelStep: channel_events.contact_id set when active contact know
     id: 'linkedin_1',
     config: {
       channel: 'linkedin',
+      invite_message: 'Hello — I would be glad to connect.',
       daily_cap: 999,
       idempotency: {
         key_source: ['_row_id', 'step_id', 'active_contact_id'],

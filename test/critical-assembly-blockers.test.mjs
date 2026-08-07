@@ -239,6 +239,7 @@ test('BLOCKER-4 mail complete fails closed when mail_treatment is none (no compl
   await assert.rejects(
     () => completeManualTask({
       db,
+      config: { channels: { mail: { template_id: 'postcard_v1' } } },
       recordId: rid,
       stepId: sid,
       note: 'try mail',
@@ -277,6 +278,7 @@ test('BLOCKER-4 mail provider submit failure leaves task parked', async () => {
   await assert.rejects(
     () => completeManualTask({
       db,
+      config: { channels: { mail: { template_id: 'postcard_v1' } } },
       recordId: rid,
       stepId: sid,
       mailProvider: {

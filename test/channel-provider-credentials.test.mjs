@@ -53,6 +53,7 @@ test('pipeline channel credentials resolve relative to the pipeline and are used
   assert.equal(resolved.path, join(pipeline.listDir, 'credentials', 'unipile.env'));
   const sent = await executeUnipileLinkedinConnect({
     record: { _row_id: 'relative-credentials', linkedin_url: 'https://www.linkedin.com/in/relative' },
+    step: { id: 'linkedin_1', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: resolved.credentials,
     fetchImpl: async (_url, request) => {
       assert.equal(request.headers['X-API-KEY'], 'pipeline-key');

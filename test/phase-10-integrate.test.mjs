@@ -445,7 +445,7 @@ test('failure injection: forbidden work hard-blocked; unipile network fails clos
   );
   const networkFail = await executeUnipileLinkedinConnect({
     record: { _row_id: 'p10_fail', linkedin_url: 'https://www.linkedin.com/in/p10' },
-    step: { id: 'li_p10' },
+    step: { id: 'li_p10', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.example' },
     fetchImpl: async () => {
       throw new Error('ECONNRESET');
@@ -457,7 +457,7 @@ test('failure injection: forbidden work hard-blocked; unipile network fails clos
   // Auth-style HTTP failure also fails closed (no silent success)
   const authFail = await executeUnipileLinkedinConnect({
     record: { _row_id: 'p10_auth', linkedin_url: 'https://www.linkedin.com/in/p10a' },
-    step: { id: 'li_p10a' },
+    step: { id: 'li_p10a', config: { invite_message: 'Hello — I would be glad to connect.' } },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.example' },
     fetchImpl: async () => ({
       status: 401,

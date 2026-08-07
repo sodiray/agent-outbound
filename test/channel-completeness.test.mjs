@@ -7,7 +7,7 @@
  * 4. Mail provider: allocate → submit → confirm/failed via sink adapter
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -667,7 +667,7 @@ test('linkedin lifecycle: executeChannelStep honors invite_sent + sets lifecycle
       record,
       sequenceName: 'default',
       stepNumber: 1,
-      step: { kind: 'linkedin_connect', id: 'linkedin_1', config: { channel: 'linkedin' } },
+      step: { kind: 'linkedin_connect', id: 'linkedin_1', config: { channel: 'linkedin', invite_message: 'Hello — I would be glad to connect.' } },
       sequence: { steps: [] },
       channelHint: 'linkedin',
       intent: 'send',
@@ -803,6 +803,7 @@ test('mail provider: sink allocate → submit → confirm', async () => {
   const completed = await completeManualTask({
     db,
     listDir,
+    config: { channels: { mail: { template_id: 'postcard_v1' } } },
     recordId: 'mail_1',
     stepId: 'mail_standard',
     note: 'mailed via sink',
@@ -819,6 +820,10 @@ test('mail provider: sink allocate → submit → confirm', async () => {
   assert.ok(String(row.mail_last_piece_id).startsWith('sink_piece_'));
   assert.equal(parseMailProviderStatus(row), 'submitted');
   assert.ok(listMailSinkPieces(join(listDir, 'mail-sink')).length >= 1);
+
+  const sinkPiece = listMailSinkPieces(join(listDir, 'mail-sink'))[0];
+  const submittedPayload = JSON.parse(readFileSync(join(listDir, 'mail-sink', sinkPiece), 'utf8'));
+  assert.equal(submittedPayload.request.template_id, 'postcard_v1');
 
   const status = await sink.getStatus(String(row.mail_last_piece_id));
   const confirmed = applyMailConfirmed({ record: row, statusResult: status });
@@ -844,6 +849,45 @@ test('mail provider: sink allocate → submit → confirm', async () => {
     }),
   });
   assert.equal(failApplied.status, 'failed');
+  db.close();
+});
+
+test('mail provider: missing template asset fails closed before submission', async () => {
+  const { db } = createList({ _row_id: 'mail_missing_template' });
+  const calls = [];
+  const provider = {
+    name: 'mail_fixture',
+    submit: async (request) => {
+      calls.push(request);
+      return { ok: true, piece_id: 'should-not-send', status: 'submitted', reason: 'sent', provider: 'mail_fixture' };
+    },
+    getStatus: async () => ({ piece_id: '', status: 'unknown', reason: '', provider: 'mail_fixture' }),
+  };
+  const now = new Date().toISOString();
+  const campaign = buildContactPlan({
+    account_id: 'mail_missing_template',
+    campaign_id: 'campaign_missing_template',
+    treatment_tier: 'A',
+    mail_treatment: 'standard_postcard',
+    contacts: [{ contact_id: 'c1', outbound_disposition: 'eligible_target', outreach_rank: 1 }],
+  });
+  ensureRecordColumns({ db, columns: ['account_contact_plan_json', 'mail_treatment', 'mail_allocated'] });
+  db.prepare(`UPDATE records SET account_contact_plan_json = ?, mail_treatment = 'standard_postcard', mail_allocated = 0 WHERE _row_id = ?`)
+    .run(JSON.stringify(campaign), 'mail_missing_template');
+  db.prepare(`INSERT INTO pipeline_events (event_id, record_id, step_id, kind, passed, reason, occurred_at) VALUES ('mail_missing_template_park', ?, 'mail_standard', 'manual_task', 0, 'awaiting_manual', ?)`)
+    .run('mail_missing_template', now);
+
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      recordId: 'mail_missing_template',
+      stepId: 'mail_standard',
+      config: { channels: { mail: {} } },
+      mailProvider: provider,
+    }),
+    /mail_standard.*template_id/i,
+  );
+  assert.equal(calls.length, 0);
   db.close();
 });
 

@@ -84,6 +84,7 @@ pipeline:
         draft_approval_required: true
         config:
           channel: linkedin
+          invite_message: Hello — I would be glad to connect.
       - kind: manual_task
         id: phone_1
         config:
@@ -574,6 +575,47 @@ test('email: incomplete draft content fails without creating pending approval', 
   db.close();
 });
 
+test('email: missing subject and body fail closed before SMTP receives anything', async () => {
+  const prev = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir, sinkDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+    const step = {
+      ...emailStep,
+      id: 'email_missing_copy',
+      draft_approval_required: false,
+      config: {
+        ...emailStep.config,
+        args: {},
+      },
+    };
+    const out = await executeChannelStep({
+      mcp: null,
+      listDir,
+      listName: 'Channel Real Path',
+      toolCatalog: null,
+      db,
+      record,
+      sequenceName: 'missing-copy',
+      stepNumber: 1,
+      step,
+      sequence: { steps: [] },
+      channelHint: 'email',
+      intent: 'send',
+    });
+
+    assert.equal(out.status, 'failed');
+    assert.match(String(out.reason), /email_missing_copy.*subject and body/i);
+    assert.equal(readdirSync(sinkDir).filter((file) => file.endsWith('.json')).length, 0);
+    db.close();
+  } finally {
+    if (prev === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = prev;
+  }
+});
+
 test('email: incomplete pending draft cannot be approved', () => {
   const { listDir } = createList();
   const db = openListDb({ listDir, readonly: false });
@@ -933,7 +975,7 @@ test('linkedin: not forbidden; production path fails clearly without configured 
         kind: 'linkedin_connect',
         id: 'linkedin_1',
         draft_approval_required: true,
-        config: { channel: 'linkedin' },
+        config: { channel: 'linkedin', invite_message: 'Hello — I would be glad to connect.' },
       },
       sequence: { steps: [] },
       channelHint: 'linkedin',

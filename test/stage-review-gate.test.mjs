@@ -55,7 +55,7 @@ const materialAssetVersion = ({
     assetId: assetId ?? null,
     draftId: draftId ?? null,
     policyVersion: policyVersion ?? null,
-    bodyText: bodyText ?? record?.linkedin_message ?? null,
+    bodyText: bodyText ?? 'Hello — I would be glad to connect.',
     subjectText: subjectText ?? null,
   });
 };
@@ -269,10 +269,12 @@ test('invalidateStageReviewIfAssetChanged: authorized A + current B → invalida
   const versionA = materialAssetVersion({
     record: { ...recordBase, linkedin_message: 'Message A' },
     stageId: 'linkedin_1',
+    bodyText: 'Message A',
   });
   const versionB = materialAssetVersion({
     record: { ...recordBase, linkedin_message: 'Message B' },
     stageId: 'linkedin_1',
+    bodyText: 'Message B',
   });
   assert.notEqual(versionA, versionB);
 
@@ -442,6 +444,7 @@ const linkedinStep = {
   id: 'linkedin_1',
   config: {
     channel: 'linkedin',
+    invite_message: 'Hello — I would be glad to connect.',
     daily_cap: 999,
     idempotency: {
       key_source: ['_row_id', 'step_id'],
@@ -464,7 +467,7 @@ const emailStep = {
   },
 };
 
-const runLinkedin = async ({ listDir, db, record, dryRun = false }) =>
+const runLinkedin = async ({ listDir, db, record, dryRun = false, step = linkedinStep }) =>
   executeChannelStep({
     mcp: null,
     listDir,
@@ -474,8 +477,8 @@ const runLinkedin = async ({ listDir, db, record, dryRun = false }) =>
     record,
     sequenceName: 'default',
     stepNumber: 1,
-    step: linkedinStep,
-    sequence: { steps: [linkedinStep] },
+    step,
+    sequence: { steps: [step] },
     channelHint: 'linkedin',
     intent: 'send',
     dryRun,
@@ -701,6 +704,7 @@ test('executeChannelStep: authorized version A + content change → B blocks sen
     record: withA,
     stageId: 'linkedin_1',
     policyVersion: 'tv-pipeline-v1',
+    bodyText: messageA,
   });
 
   const paused = pauseForStageReview({
@@ -759,6 +763,7 @@ test('executeChannelStep: authorized version A + content change → B blocks sen
     record: { ...beforeSend, linkedin_message: messageB },
     stageId: 'linkedin_1',
     policyVersion: 'tv-pipeline-v1',
+    bodyText: messageB,
   });
   assert.notEqual(versionA, versionB);
 
@@ -766,7 +771,20 @@ test('executeChannelStep: authorized version A + content change → B blocks sen
   const prevFixture = process.env.AO_UNIPILE_FIXTURE;
   delete process.env.AO_UNIPILE_FIXTURE;
   try {
-    const out = await runLinkedin({ listDir, db, record, dryRun: false });
+    const out = await runLinkedin({
+      listDir,
+      db,
+      record,
+      dryRun: false,
+      step: {
+        ...linkedinStep,
+        config: {
+          ...linkedinStep.config,
+          args_map: { invite_message: 'linkedin_message' },
+          invite_message: '',
+        },
+      },
+    });
     assert.equal(out.status, 'skipped', JSON.stringify(out));
     assert.match(
       String(out.reason),

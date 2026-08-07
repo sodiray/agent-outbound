@@ -460,6 +460,12 @@ export const StepConfigSchema = z.object({
   // (output field <- result path). Without these, Zod would strip them and
   // channel execution would fall through to the LLM agent path.
   action: z.string().default(''),
+  channel: z.string().default(''),
+  task_type: z.string().default(''),
+  invite_message: z.string().default(''),
+  message: z.string().default(''),
+  connection_note: z.string().default(''),
+  body: z.string().default(''),
   args_map: z.record(z.string()).default({}),
   output_map: z.record(z.string()).default({}),
   daily_cap: z.coerce.number().int().min(0).optional(),
