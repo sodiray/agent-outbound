@@ -355,6 +355,20 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
         // No mailbox catalog in harness — still refuse blank envelope below.
       }
 
+      const hasSubject = String(existing.subject || '').trim() !== '';
+      const hasBody = String(existing.body || '').trim() !== '';
+      if (!hasSubject || !hasBody) {
+        const missing = [
+          ...(!hasSubject ? ['subject'] : []),
+          ...(!hasBody ? ['body'] : []),
+        ];
+        failures.push({
+          draft_id: id,
+          reason: `draft_content_incomplete:missing_${missing.join('_and_')}`,
+        });
+        continue;
+      }
+
       const recipient = String(record.contact_email || record.email || '').trim().toLowerCase();
       // Refuse approval when the immutable envelope would be incomplete.
       // Human review must bind exact recipient + from + mailbox_id.

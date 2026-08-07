@@ -10,14 +10,15 @@
  * - mail: standard_postcard / golden_ticket allowed; one-mail allocate
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createRequire } from 'node:module';
-import { openListDb, insertDraft, updateDraft, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
+import { openListDb, insertDraft, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
+import { draftsApproveCommand } from '../dist/commands/drafts.js';
 import {
   evaluateUnipileReadiness,
   executeUnipileLinkedinConnect,
@@ -376,6 +377,9 @@ test('email: ready draft sends via sink; second send is idempotent skip', async 
     assert.ok(first.provider_id);
     const sinkFiles = readdirSync(sinkDir).filter((f) => f.endsWith('.json'));
     assert.ok(sinkFiles.length >= 1, 'expected at least one SMTP sink file');
+    const sent = JSON.parse(readFileSync(join(sinkDir, sinkFiles[0]), 'utf8'));
+    assert.equal(sent.subject, 'Approved subject');
+    assert.equal(sent.body, 'Approved body for sink send');
 
     const second = await executeChannelStep({
       mcp: null,
@@ -399,6 +403,185 @@ test('email: ready draft sends via sink; second send is idempotent skip', async 
     if (prev === undefined) delete process.env.AO_SMTP_SINK;
     else process.env.AO_SMTP_SINK = prev;
   }
+});
+
+test('email: compose outputs mapped by args_map become the pending draft content', async () => {
+  const { listDir } = createList();
+  const db = openListDb({ listDir, readonly: false });
+  ensureRecordColumns({ db, columns: ['email_subject', 'email_body'] });
+  db.prepare(`
+    UPDATE records
+    SET email_subject = ?, email_body = ?
+    WHERE _row_id = ?
+  `).run(
+    'Composed subject',
+    'Composed body from the prior compose step.',
+    'fixture_channel_1',
+  );
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+  const step = {
+    ...emailStep,
+    id: 'email_compose_map',
+    config: {
+      ...emailStep.config,
+      args_map: {
+        to: 'contact_email',
+        to_name: 'contact_name',
+        subject: 'email_subject',
+        body: 'email_body',
+      },
+      args: {
+        subject: 'Fallback subject',
+        body: 'Fallback body',
+      },
+    },
+  };
+
+  const out = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Channel Real Path',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'draft-content',
+    stepNumber: 2,
+    step,
+    sequence: { steps: [] },
+    channelHint: 'email',
+    intent: 'draft',
+  });
+
+  assert.equal(out.status, 'drafted', JSON.stringify(out));
+  const draft = db.prepare(`
+    SELECT status, subject, body
+    FROM drafts
+    WHERE row_id = ? AND step_id = ?
+  `).get('fixture_channel_1', 'email_compose_map');
+  assert.deepEqual(draft, {
+    status: 'pending_approval',
+    subject: 'Composed subject',
+    body: 'Composed body from the prior compose step.',
+  });
+  db.close();
+});
+
+test('email: template draft content remains unchanged', async () => {
+  const { listDir } = createList();
+  const db = openListDb({ listDir, readonly: false });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+  const step = {
+    ...emailStep,
+    id: 'email_template_draft',
+    config: {
+      ...emailStep.config,
+      args: {},
+      template_context: {
+        subject: 'Template subject',
+        body: 'Template body preserved exactly.\n\nRay',
+      },
+    },
+  };
+
+  const out = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Channel Real Path',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'draft-content',
+    stepNumber: 3,
+    step,
+    sequence: { steps: [] },
+    channelHint: 'email',
+    intent: 'draft',
+  });
+
+  assert.equal(out.status, 'drafted', JSON.stringify(out));
+  const draft = db.prepare(`
+    SELECT subject, body
+    FROM drafts
+    WHERE row_id = ? AND step_id = ?
+  `).get('fixture_channel_1', 'email_template_draft');
+  assert.deepEqual(draft, {
+    subject: 'Template subject',
+    body: 'Template body preserved exactly.\n\nRay',
+  });
+  db.close();
+});
+
+test('email: incomplete draft content fails without creating pending approval', async () => {
+  const { listDir } = createList();
+  const db = openListDb({ listDir, readonly: false });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+  const step = {
+    ...emailStep,
+    id: 'email_incomplete_draft',
+    config: {
+      ...emailStep.config,
+      args: {},
+      template_context: {},
+    },
+  };
+
+  const out = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Channel Real Path',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'draft-content',
+    stepNumber: 4,
+    step,
+    sequence: { steps: [] },
+    channelHint: 'email',
+    intent: 'draft',
+  });
+
+  assert.equal(out.status, 'failed', JSON.stringify(out));
+  assert.match(String(out.reason), /missing subject and body/i);
+  const pending = db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM drafts
+    WHERE row_id = ? AND step_id = ? AND status = 'pending_approval'
+  `).get('fixture_channel_1', 'email_incomplete_draft');
+  assert.equal(Number(pending.n), 0);
+  const failedRecord = db.prepare('SELECT last_error FROM records WHERE _row_id = ?')
+    .get('fixture_channel_1');
+  assert.match(String(failedRecord.last_error), /draft content incomplete/i);
+  db.close();
+});
+
+test('email: incomplete pending draft cannot be approved', () => {
+  const { listDir } = createList();
+  const db = openListDb({ listDir, readonly: false });
+  insertDraft({
+    db,
+    draft: {
+      draft_id: 'draft_incomplete_approval',
+      row_id: 'fixture_channel_1',
+      sequence_name: 'draft-content',
+      step_number: 5,
+      step_id: 'email_incomplete_approval',
+      channel: 'email',
+      status: 'pending_approval',
+      subject: '',
+      body: 'A body without a subject cannot be approved.',
+    },
+  });
+  db.close();
+
+  assert.throws(
+    () => draftsApproveCommand({ list: listDir, draftId: 'draft_incomplete_approval' }),
+    /draft_content_incomplete:missing_subject/i,
+  );
+  const verified = openListDb({ listDir, readonly: true });
+  const draft = verified.prepare('SELECT status FROM drafts WHERE draft_id = ?')
+    .get('draft_incomplete_approval');
+  assert.equal(draft.status, 'pending_approval');
+  verified.close();
 });
 
 // ---------------------------------------------------------------------------

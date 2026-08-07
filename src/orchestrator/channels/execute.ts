@@ -433,6 +433,44 @@ const assetDraftOverride = ({ asset, usesAssetId, stepArtifacts, stepOutputs }) 
   };
 };
 
+const isBlankValue = (value: unknown): boolean => (
+  value === undefined || value === null || String(value).trim() === ''
+);
+
+/**
+ * Resolve tool-call arguments once from the same record the provider receives.
+ * Drafts use this before review; sends freeze the approved draft afterward.
+ */
+const resolveToolCallArguments = ({
+  stepConfig,
+  record,
+}: {
+  stepConfig: Record<string, unknown>;
+  record: Record<string, unknown>;
+}): Record<string, unknown> => {
+  const staticArgs = stepConfig.args && typeof stepConfig.args === 'object'
+    ? stepConfig.args as Record<string, unknown>
+    : {};
+  const argsMap = stepConfig.args_map && typeof stepConfig.args_map === 'object'
+    ? stepConfig.args_map as Record<string, string>
+    : {};
+
+  return Object.entries(argsMap).reduce<Record<string, unknown>>(
+    (resolvedArgs, [argName, fieldName]) => {
+      const value = record[String(fieldName || '').trim()];
+      return isBlankValue(value)
+        ? resolvedArgs
+        : { ...resolvedArgs, [argName]: value };
+    },
+    { ...staticArgs },
+  );
+};
+
+const firstContentValue = (...values: unknown[]): string => {
+  const value = values.find((candidate) => !isBlankValue(candidate));
+  return value === undefined ? '' : String(value);
+};
+
 export const executeChannelStep = async ({
   mcp,
   listDir,
@@ -1481,11 +1519,22 @@ export const executeChannelStep = async ({
         || String(sendRecord.contact_email || sendRecord.email || '');
       const { composeOutboundReviewVersion: composeSendVersion } = await import('../../commands/drafts.js');
       const stepCfgEarly = (step?.config && typeof step.config === 'object') ? step.config as any : {};
-      const argsEarly = (stepCfgEarly.args && typeof stepCfgEarly.args === 'object') ? stepCfgEarly.args : {};
+      const argsEarly = resolveToolCallArguments({
+        stepConfig: stepCfgEarly,
+        record: sendRecord,
+      });
       const tmplEarly = (stepCfgEarly.template_context && typeof stepCfgEarly.template_context === 'object')
         ? stepCfgEarly.template_context
         : {};
       const blankEarly = (v: unknown) => v === undefined || v === null || String(v).trim() === '';
+      if (approvedDraft && (blankEarly(approvedDraft.subject) || blankEarly(approvedDraft.body))) {
+        return {
+          status: 'failed',
+          reason: 'Approved draft is incomplete; refusing to send unreviewable content.',
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
       // Final provider content: draft envelope > approved draft > args > template.
       let emailSubject = '';
       let emailBody = '';
@@ -1640,16 +1689,9 @@ export const executeChannelStep = async ({
       const templateCtx = (stepConfig.template_context && typeof stepConfig.template_context === 'object')
         ? stepConfig.template_context as Record<string, unknown>
         : {};
-      const baseArgs = (stepConfig.args && typeof stepConfig.args === 'object')
-        ? { ...(stepConfig.args as Record<string, unknown>) }
-        : {};
-      const blank = (v: unknown) => v === undefined || v === null || String(v).trim() === '';
-      const subject = !blank(baseArgs.subject)
-        ? String(baseArgs.subject)
-        : (!blank(templateCtx.subject) ? String(templateCtx.subject) : '');
-      const body = !blank(baseArgs.body)
-        ? String(baseArgs.body)
-        : (!blank(templateCtx.body) ? String(templateCtx.body) : '');
+      const resolvedArgs = resolveToolCallArguments({ stepConfig, record: sendRecord });
+      const subject = firstContentValue(resolvedArgs.subject, templateCtx.subject);
+      const body = firstContentValue(resolvedArgs.body, templateCtx.body);
       const draftId = `draft_${randomUUID()}`;
       stepResult = {
         outputs: {
@@ -1700,18 +1742,7 @@ export const executeChannelStep = async ({
       // Construct FINAL provider arguments FIRST — apply args_map + fallbacks here,
       // fingerprint against the human-approved envelope, then pass frozen args with
       // args_map cleared so tool-call cannot rewrite after comparison.
-      const baseArgs = (stepConfig.args && typeof stepConfig.args === 'object')
-        ? { ...(stepConfig.args as Record<string, unknown>) }
-        : {};
-      const argsMap = (stepConfig.args_map && typeof stepConfig.args_map === 'object')
-        ? stepConfig.args_map as Record<string, string>
-        : {};
-      for (const [argName, fieldName] of Object.entries(argsMap)) {
-        const value = (sendRecord as any)?.[String(fieldName || '').trim()];
-        if (value !== undefined && value !== null && String(value).trim() !== '') {
-          baseArgs[argName] = value;
-        }
-      }
+      const baseArgs = resolveToolCallArguments({ stepConfig, record: sendRecord });
       const templateCtx = (stepConfig.template_context && typeof stepConfig.template_context === 'object')
         ? stepConfig.template_context as Record<string, unknown>
         : {};
@@ -1989,6 +2020,36 @@ export const executeChannelStep = async ({
 
     const stepArtifacts = (stepResult?.artifacts || {}) as any;
     const stepOutputs = (stepResult?.outputs || {}) as any;
+    const draftAssetOverride = intent === 'draft' && assetForStep
+      ? assetDraftOverride({ asset: assetForStep, usesAssetId, stepArtifacts, stepOutputs })
+      : null;
+    const draftTemplateContext = stepConfig.template_context && typeof stepConfig.template_context === 'object'
+      ? stepConfig.template_context as Record<string, unknown>
+      : {};
+    const draftResolvedArgs = resolveToolCallArguments({ stepConfig, record: sendRecord });
+    const draftSubject = draftAssetOverride
+      ? String(draftAssetOverride.subject || '')
+      : firstContentValue(
+        stepArtifacts.subject,
+        stepOutputs.subject,
+        draftResolvedArgs.subject,
+        draftTemplateContext.subject,
+      );
+    const draftBody = draftAssetOverride
+      ? String(draftAssetOverride.body || '')
+      : firstContentValue(
+        stepArtifacts.body,
+        stepOutputs.body,
+        draftResolvedArgs.body,
+        draftTemplateContext.body,
+      );
+    if (!dryRun && intent === 'draft' && (isBlankValue(draftSubject) || isBlankValue(draftBody))) {
+      const missing = [
+        ...(isBlankValue(draftSubject) ? ['subject'] : []),
+        ...(isBlankValue(draftBody) ? ['body'] : []),
+      ];
+      throw new Error(`Draft content incomplete: missing ${missing.join(' and ')}; refusing to create pending approval draft.`);
+    }
     if (!dryRun) {
       recordCostEvent({
         db,
@@ -2079,15 +2140,6 @@ export const executeChannelStep = async ({
       const draftId = String(stepArtifacts.draft_id || stepOutputs.draft_id || providerMessageId || '');
       if (draftId) {
         ensureDraftColumns({ db });
-        const assetOverride = assetForStep
-          ? assetDraftOverride({ asset: assetForStep, usesAssetId, stepArtifacts, stepOutputs })
-          : null;
-        const draftSubject = assetOverride
-          ? String(assetOverride.subject || '')
-          : String(stepArtifacts.subject || stepOutputs.subject || '');
-        const draftBody = assetOverride
-          ? String(assetOverride.body || '')
-          : String(stepArtifacts.body || stepOutputs.body || '');
         const existing = db.prepare('SELECT draft_id FROM drafts WHERE draft_id = ? LIMIT 1').get(draftId);
         if (!existing) {
           const missingAssetArtifacts = usesAssetId && !assetForStep
@@ -2115,7 +2167,7 @@ export const executeChannelStep = async ({
                 summary: stepResult.summary || '',
                 outputs: stepOutputs,
                 artifacts: stepArtifacts,
-                ...(assetOverride ? assetOverride.artifacts : missingAssetArtifacts),
+                ...(draftAssetOverride ? draftAssetOverride.artifacts : missingAssetArtifacts),
               },
             },
           });

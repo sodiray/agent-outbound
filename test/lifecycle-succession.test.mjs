@@ -429,6 +429,10 @@ test('draft intent does not advance lifecycle or next_action', async () => {
       config: {
         action: 'tool_call',
         tool: { server: 'fake_smtp', tools: ['SEND_TEST'] },
+        args: {
+          subject: 'Lifecycle review draft',
+          body: 'This draft exists only to verify lifecycle succession behavior.',
+        },
       },
     },
     sequence: { steps: [{ kind: 'send_email', id: 'email_1', day: 0 }] },
