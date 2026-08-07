@@ -124,7 +124,18 @@ export const declaredOutputWriteFailures = ({
   if (!declaredOutputWrites) return declaredOutputsUnwritten({ outputNames, record });
   return outputNames.filter((name) => {
     const write = declaredOutputWrites[name];
-    if (!write?.provided) return true;
+    // A step that did not produce this output is not failing. Declaring an
+    // output means "this step MAY write this field", not "every record must
+    // receive a value". `linkedin_company_resolution` declares
+    // `user_rating_count`, and 89 of 251 sourced businesses have no Google
+    // reviews at all — blank is the correct answer, and requiring a value
+    // errored 197 records in one pass.
+    //
+    // The defect this guard exists for is narrower and specific: the step
+    // PRODUCED a value and the record does not reflect it, because something
+    // dropped or overwrote it between the step and persistence. That is
+    // checked below and still caught.
+    if (!write?.provided) return false;
     if (!isPersistedOutputValue(write.value)) return false;
     return !isPersistedOutputValue(record[name]) || !samePersistedValue(record[name], write.value);
   });
