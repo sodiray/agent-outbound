@@ -114,8 +114,14 @@ const guardDeclaredOutputWrites = (
   if (outputNames.length === 0) return outcomes;
   const db = ctx.db as QueryableDb;
   const guarded = new Map<string, StepExecutionOutcome>();
+  // A step that deliberately did not execute cannot owe its declared outputs.
+  // Some skips report passed=true so the sequence can advance past them — a
+  // channel refused by readiness is "complete" for routing purposes — and
+  // reading that as "it ran, so its outputs must exist" errored a correct
+  // refusal, which then poisoned the record for every remaining step.
+  const NON_EXECUTION_REASONS = /^(channel_not_permitted:|sequence_outbound_gated|skipped)/i;
   for (const [recordId, outcome] of outcomes) {
-    if (!outcome.passed || outcome.errored) {
+    if (!outcome.passed || outcome.errored || NON_EXECUTION_REASONS.test(String(outcome.reason || ''))) {
       guarded.set(recordId, outcome);
       continue;
     }
