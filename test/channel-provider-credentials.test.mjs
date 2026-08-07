@@ -56,6 +56,13 @@ test('pipeline channel credentials resolve relative to the pipeline and are used
     env: resolved.credentials,
     fetchImpl: async (_url, request) => {
       assert.equal(request.headers['X-API-KEY'], 'pipeline-key');
+      if (request.method === 'GET') {
+        return {
+          status: 200,
+          statusText: 'OK',
+          json: async () => ({ provider_id: 'target-relative' }),
+        };
+      }
       return {
         status: 200,
         statusText: 'OK',

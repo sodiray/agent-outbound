@@ -452,7 +452,7 @@ test('failure injection: forbidden work hard-blocked; unipile network fails clos
     },
   });
   assert.equal(networkFail.status, 'failed');
-  assert.match(String(networkFail.reason || ''), /unipile_live_network_error/);
+  assert.match(String(networkFail.reason || ''), /unipile_user_lookup_network_error/);
 
   // Auth-style HTTP failure also fails closed (no silent success)
   const authFail = await executeUnipileLinkedinConnect({

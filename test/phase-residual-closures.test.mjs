@@ -170,11 +170,17 @@ test('residual Unipile live HTTP via inject fetch', async () => {
     record: { _row_id: 'u1', linkedin_url: 'https://www.linkedin.com/in/test' },
     step: { id: 'li1' },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.example' },
-    fetchImpl: async () => ({
-      status: 201,
-      statusText: 'Created',
-      json: async () => ({ id: 'live_inv_99' }),
-    }),
+    fetchImpl: async (_url, init) => (init?.method === 'GET'
+      ? {
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({ provider_id: 'target_u1' }),
+      }
+      : {
+        status: 201,
+        statusText: 'Created',
+        json: async () => ({ id: 'live_inv_99' }),
+      }),
   });
   assert.equal(res.status, 'sent');
   assert.equal(res.provider_id, 'live_inv_99');
@@ -321,7 +327,7 @@ test('residual phase-10: unipile webhook/event fixture shape + network failure p
     },
   });
   assert.equal(fail.status, 'failed');
-  assert.match(fail.reason, /unipile_live_network_error/);
+  assert.match(fail.reason, /unipile_user_lookup_network_error/);
 
   // Replayable webhook fixture artifact (provider contract)
   const webhook = {

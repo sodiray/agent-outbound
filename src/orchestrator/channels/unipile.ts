@@ -156,7 +156,90 @@ export type UnipileLinkedinConnectResult = {
   status: 'skipped' | 'sent' | 'failed';
   reason: string;
   provider_id: string;
+  target_provider_id: string;
+  target_public_identifier: string;
   readiness: UnipileReadiness;
+};
+
+type UnipileTargetResolution = {
+  ok: boolean;
+  provider_id: string;
+  reason: string;
+  status: number;
+};
+
+const unipileUsersUrl = ({
+  base,
+  path,
+  accountId,
+}: {
+  base: string;
+  path: string;
+  accountId: string;
+}): string => {
+  const accountQuery = accountId ? `?account_id=${encodeURIComponent(accountId)}` : '';
+  return `${base}/api/v1/users/${path}${accountQuery}`;
+};
+
+const resolveUnipileLinkedinProviderId = async (input: {
+  dsn: string;
+  apiKey: string;
+  accountId: string;
+  publicIdentifier: string;
+  fetchImpl?: typeof fetch;
+}): Promise<UnipileTargetResolution> => {
+  const base = String(input.dsn || '').replace(/\/$/, '');
+  const fetchFn = input.fetchImpl || globalThis.fetch;
+  if (typeof fetchFn !== 'function') {
+    return { ok: false, provider_id: '', reason: 'unipile_fetch_unavailable', status: 0 };
+  }
+
+  try {
+    const res = await fetchFn(unipileUsersUrl({
+      base,
+      path: encodeURIComponent(input.publicIdentifier),
+      accountId: input.accountId,
+    }), {
+      method: 'GET',
+      headers: {
+        'X-API-KEY': input.apiKey,
+        accept: 'application/json',
+      },
+    });
+    const status = Number(res.status || 0);
+    const payload = await readUnipileJson(res);
+    const payloadRecord = asRecord(payload);
+    const providerId = nonBlank(payloadRecord?.provider_id);
+    if (status >= 200 && status < 300 && providerId) {
+      return {
+        ok: true,
+        provider_id: providerId,
+        reason: 'unipile_user_resolved',
+        status,
+      };
+    }
+    if (status >= 200 && status < 300) {
+      return {
+        ok: false,
+        provider_id: '',
+        reason: `unipile_user_lookup_missing_provider_id:${unipileFailureDetail(payload, res.statusText)}`,
+        status,
+      };
+    }
+    return {
+      ok: false,
+      provider_id: '',
+      reason: `unipile_user_lookup_http_${status}:${unipileFailureDetail(payload, res.statusText)}`,
+      status,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      provider_id: '',
+      reason: `unipile_user_lookup_network_error:${String((err as Error)?.message || err).slice(0, 200)}`,
+      status: 0,
+    };
+  }
 };
 
 /**
@@ -169,36 +252,84 @@ export async function unipileLiveInvite(input: {
   providerId?: string;
   accountId?: string;
   linkedinUrl?: string;
+  targetProviderId?: string;
+  targetPublicIdentifier?: string;
   message?: string;
   fetchImpl?: typeof fetch;
-}): Promise<{ ok: boolean; provider_id: string; reason: string; status: number }> {
+}): Promise<{
+  ok: boolean;
+  provider_id: string;
+  target_provider_id: string;
+  target_public_identifier: string;
+  reason: string;
+  status: number;
+}> {
   const base = String(input.dsn || '').replace(/\/$/, '');
   if (!base) {
-    return { ok: false, provider_id: '', reason: 'unipile_dsn_empty', status: 0 };
+    return {
+      ok: false,
+      provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: '',
+      reason: 'unipile_dsn_empty',
+      status: 0,
+    };
   }
   const publicIdentifier = parseLinkedinPublicIdentifier(input.linkedinUrl || '');
   if (!publicIdentifier) {
     return {
       ok: false,
       provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: '',
       reason: `unipile_invalid_linkedin_reference: field linkedinUrl has ${linkedinReferenceShape(input.linkedinUrl || '')}`,
       status: 0,
     };
   }
   const accountId = String(input.accountId || input.providerId || '').trim();
+  const targetProviderId = nonBlank(input.targetProviderId);
+  const target = targetProviderId && nonBlank(input.targetPublicIdentifier) === publicIdentifier
+    ? {
+      ok: true,
+      provider_id: targetProviderId,
+      reason: 'unipile_user_resolution_cached',
+      status: 200,
+    }
+    : await resolveUnipileLinkedinProviderId({
+      dsn: base,
+      apiKey: input.apiKey,
+      accountId,
+      publicIdentifier,
+      fetchImpl: input.fetchImpl,
+    });
+  if (!target.ok) {
+    return {
+      ok: false,
+      provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: publicIdentifier,
+      reason: target.reason,
+      status: target.status,
+    };
+  }
   // Unipile users invitation endpoint (account-scoped).
-  const url = accountId
-    ? `${base}/api/v1/users/invite?account_id=${encodeURIComponent(accountId)}`
-    : `${base}/api/v1/users/invite`;
+  const url = unipileUsersUrl({ base, path: 'invite', accountId });
   const body: Record<string, unknown> = {
     provider: 'LINKEDIN',
-    provider_public_id: publicIdentifier,
+    provider_id: target.provider_id,
   };
   if (input.message) body.message = input.message;
 
   const fetchFn = input.fetchImpl || globalThis.fetch;
   if (typeof fetchFn !== 'function') {
-    return { ok: false, provider_id: '', reason: 'unipile_fetch_unavailable', status: 0 };
+    return {
+      ok: false,
+      provider_id: '',
+      target_provider_id: target.provider_id,
+      target_public_identifier: publicIdentifier,
+      reason: 'unipile_fetch_unavailable',
+      status: 0,
+    };
   }
 
   try {
@@ -221,6 +352,8 @@ export async function unipileLiveInvite(input: {
       return {
         ok: true,
         provider_id: provider_id || `unipile_live_${Date.now()}`,
+        target_provider_id: target.provider_id,
+        target_public_identifier: publicIdentifier,
         reason: 'unipile_live_invite_sent',
         status,
       };
@@ -228,6 +361,8 @@ export async function unipileLiveInvite(input: {
     return {
       ok: false,
       provider_id: provider_id || '',
+      target_provider_id: target.provider_id,
+      target_public_identifier: publicIdentifier,
       reason: `unipile_live_http_${status}:${unipileFailureDetail(payload, res.statusText)}`,
       status,
     };
@@ -235,6 +370,8 @@ export async function unipileLiveInvite(input: {
     return {
       ok: false,
       provider_id: '',
+      target_provider_id: target.provider_id,
+      target_public_identifier: publicIdentifier,
       reason: `unipile_live_network_error:${String((err as Error)?.message || err).slice(0, 200)}`,
       status: 0,
     };
@@ -254,6 +391,8 @@ export async function executeUnipileLinkedinConnect(
       status: 'skipped',
       reason: readiness.reason,
       provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: '',
       readiness,
     };
   }
@@ -262,6 +401,8 @@ export async function executeUnipileLinkedinConnect(
       status: 'skipped',
       reason: 'unipile_dry_run',
       provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: '',
       readiness,
     };
   }
@@ -278,6 +419,8 @@ export async function executeUnipileLinkedinConnect(
       status: 'sent',
       reason: 'unipile_fixture_success',
       provider_id: `unipile_fixture_${rowId}_${stepId}`,
+      target_provider_id: '',
+      target_public_identifier: '',
       readiness,
     };
   }
@@ -295,6 +438,8 @@ export async function executeUnipileLinkedinConnect(
       status: 'skipped',
       reason: 'unipile_missing_linkedin_url',
       provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: '',
       readiness,
     };
   }
@@ -304,6 +449,8 @@ export async function executeUnipileLinkedinConnect(
       status: 'failed',
       reason: `unipile_invalid_linkedin_reference: field ${linkedinReference.field} has ${linkedinReferenceShape(linkedinReference.value)}`,
       provider_id: '',
+      target_provider_id: '',
+      target_public_identifier: '',
       readiness,
     };
   }
@@ -313,6 +460,10 @@ export async function executeUnipileLinkedinConnect(
     apiKey,
     accountId,
     linkedinUrl: publicIdentifier,
+    targetProviderId: nonBlank(input.record?.linkedin_provider_public_id) === publicIdentifier
+      ? nonBlank(input.record?.linkedin_provider_id)
+      : '',
+    targetPublicIdentifier: nonBlank(input.record?.linkedin_provider_public_id),
     message: nonBlank(input.step?.config?.invite_message || input.step?.description),
     fetchImpl: input.fetchImpl,
   });
@@ -322,6 +473,8 @@ export async function executeUnipileLinkedinConnect(
       status: 'sent',
       reason: live.reason,
       provider_id: live.provider_id,
+      target_provider_id: live.target_provider_id,
+      target_public_identifier: live.target_public_identifier,
       readiness,
     };
   }
@@ -329,6 +482,8 @@ export async function executeUnipileLinkedinConnect(
     status: 'failed',
     reason: live.reason,
     provider_id: live.provider_id || '',
+    target_provider_id: live.target_provider_id,
+    target_public_identifier: live.target_public_identifier,
     readiness,
   };
 }

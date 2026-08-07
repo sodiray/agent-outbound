@@ -1286,6 +1286,28 @@ export const executeChannelStep = async ({
           ? { AO_UNIPILE_FIXTURE: '1' }
           : providerCredentials?.credentials,
       });
+      const resolvedTargetProviderId = String(linkedinResult.target_provider_id || '').trim();
+      const resolvedTargetPublicIdentifier = String(linkedinResult.target_public_identifier || '').trim();
+      const resolvedTargetIdentity = resolvedTargetProviderId && resolvedTargetPublicIdentifier
+        ? {
+          linkedin_provider_id: resolvedTargetProviderId,
+          linkedin_provider_public_id: resolvedTargetPublicIdentifier,
+        }
+        : {};
+      if (!dryRun && resolvedTargetProviderId && resolvedTargetPublicIdentifier) {
+        try {
+          ensureRecordColumns({
+            db,
+            columns: ['linkedin_provider_id', 'linkedin_provider_public_id'],
+          });
+          upsertRecord({
+            db,
+            row: { ...sendRecord, ...resolvedTargetIdentity },
+          });
+        } catch {
+          // A sent invitation must still complete its idempotency record if caching fails.
+        }
+      }
       if (linkedinResult.status !== 'sent') {
         releaseProviderInteraction({ mode: liClaim.mode });
         if (idemKey && linkedinResult.status === 'failed') {
@@ -1397,7 +1419,7 @@ export const executeChannelStep = async ({
       }
 
       const lifecyclePatch = applyLinkedinInviteSent({
-        record: sendRecord,
+        record: { ...sendRecord, ...resolvedTargetIdentity },
         providerId: liProviderId,
         at: now,
       });

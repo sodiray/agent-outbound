@@ -553,12 +553,18 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
     record: { _row_id: 'phase07_li', linkedin_url: 'https://www.linkedin.com/in/x' },
     step: { id: 'linkedin_1' },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.unipile.test' },
-    fetchImpl: async () =>
-      ({
+    fetchImpl: async (_url, init) =>
+      (init?.method === 'GET'
+        ? {
+          status: 200,
+          statusText: 'OK',
+          json: async () => ({ provider_id: 'target_phase07' }),
+        }
+        : {
         status: 200,
         statusText: 'OK',
         json: async () => ({ id: 'inv_live_1' }),
-      }),
+        }),
   });
   assert.equal(liveOk.status, 'sent');
   assert.equal(liveOk.reason, 'unipile_live_invite_sent');
@@ -569,12 +575,18 @@ test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolatio
     record: { _row_id: 'phase07_li', linkedin_url: 'https://www.linkedin.com/in/x' },
     step: { id: 'linkedin_1' },
     env: { UNIPILE_API_KEY: 'k', UNIPILE_DSN: 'https://api.unipile.test' },
-    fetchImpl: async () =>
-      ({
+    fetchImpl: async (_url, init) =>
+      (init?.method === 'GET'
+        ? {
+          status: 200,
+          statusText: 'OK',
+          json: async () => ({ provider_id: 'target_phase07' }),
+        }
+        : {
         status: 429,
         statusText: 'Too Many Requests',
         json: async () => ({ message: 'rate limited' }),
-      }),
+        }),
   });
   assert.equal(liveFail.status, 'failed');
   assert.match(liveFail.reason, /unipile_live_http_429/);
