@@ -6,6 +6,7 @@
 import {
   calculateFitScore,
   calculatePriority,
+  FIT_ASSESSABLE_WEIGHT_MINIMUM,
   assignCandidateTier,
   FIT_COMPONENT_WEIGHTS,
   type FitComponentId,
@@ -177,6 +178,7 @@ type BreakdownItem = {
   /** Runner marks unsupported components; must not be discarded by parse. */
   missing?: boolean;
   unknown?: boolean;
+  assessable?: boolean;
 };
 
 const FIT_IDS = new Set(Object.keys(FIT_COMPONENT_WEIGHTS));
@@ -217,6 +219,7 @@ const parseBreakdown = (raw: unknown): BreakdownItem[] => {
           : null,
         missing,
         unknown: missing || Boolean(item?.unknown),
+        assessable: item?.assessable === false ? false : undefined,
       };
     }).filter((item) => item.id && (Number.isFinite(item.grade) || item.points != null || item.missing));
   } catch {
@@ -335,6 +338,7 @@ export function fitComponentsFromBreakdown(
         id,
         grade: 0,
         missing: true,
+        unassessable: hit.assessable === false,
         reasoning: hit.reasoning,
         evidence_ids: eids,
       };
@@ -409,6 +413,13 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     : [];
   const hasCommercialFit = fitComponents.some((c) => !c.missing);
   const fitCalc = hasCommercialFit ? calculateFitScore(fitComponents) : null;
+  const derivedFitCoverage = fitCalc?.assessable_weight ?? null;
+  const recordedFitCoverage = num(record.fit_coverage, null);
+  const fitCoverage = derivedFitCoverage != null && recordedFitCoverage != null
+    ? Math.min(derivedFitCoverage, recordedFitCoverage)
+    : derivedFitCoverage ?? recordedFitCoverage;
+  const insufficientFitCoverage = fitCoverage != null
+    && fitCoverage < FIT_ASSESSABLE_WEIGHT_MINIMUM;
   const missing_inputs = fitCalc?.missing_inputs || [];
   const source_observation_refs = (() => {
     const refs: string[] = [];
@@ -421,8 +432,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     return refs;
   })();
 
-  let fitScore = num(record.fit_score, null);
-  if (input.recomputeFitFromBreakdown && fitCalc && hasCommercialFit) {
+  let fitScore = insufficientFitCoverage ? null : num(record.fit_score, null);
+  if (input.recomputeFitFromBreakdown && fitCalc && hasCommercialFit && !insufficientFitCoverage) {
     fitScore = fitCalc.fit_score;
   } else if (
     // Stored fit was wiped to 0 by the prior score_breakdown-only bug, or never set —
@@ -592,6 +603,17 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     if (fitEvidence == null || Number(fitEvidence) >= 40) {
       fitEvidence = thinEvidenceByConf ? Number(fitEvidence) : 0;
     }
+  }
+  if (insufficientFitCoverage) {
+    const coverageReason = `fit_assessable_weight_below_${FIT_ASSESSABLE_WEIGHT_MINIMUM}`;
+    treatment = {
+      ...treatment,
+      treatment_tier: 'enrichment_hold',
+      mail_treatment: 'none',
+      golden_ticket_eligible: false,
+      reasons: [...treatment.reasons, coverageReason],
+      mail_withheld_reasons: [...treatment.mail_withheld_reasons, `coverage:${coverageReason}`],
+    };
   }
   // Partial unknown: never Tier A / golden_ticket (confidence already capped <80 by derive).
   if (
@@ -1123,7 +1145,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   const patch: Record<string, unknown> = {
     identity_confidence: observationStore.identity_resolution?.identity_confidence ?? 0,
-    fit_score: fitScore ?? record.fit_score ?? '',
+    fit_score: insufficientFitCoverage ? null : fitScore ?? record.fit_score ?? '',
+    fit_coverage: fitCoverage ?? '',
     fit_evidence_confidence: fitEvidence ?? '',
     candidate_tier: candidate.candidate_tier,
     treatment_tier: treatment.treatment_tier,
@@ -1210,7 +1233,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   // Only overwrite fit_score from deterministic calculator when commercial components exist.
   // Never write fit_score=0 from all-missing commercial calc while treatment used a high legacy fit.
-  if (input.recomputeFitFromBreakdown && fitCalc && hasCommercialFit) {
+  if (input.recomputeFitFromBreakdown && fitCalc && hasCommercialFit && !insufficientFitCoverage) {
     patch.fit_score = fitCalc.fit_score;
     patch.fit_calculation_json = JSON.stringify(fitCalc);
     patch.fit_breakdown_source = selected.source;

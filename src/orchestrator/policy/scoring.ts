@@ -5,6 +5,7 @@
 
 export const FIT_RULE_VERSION = 'tv-fit-v1';
 export const PRIORITY_RULE_VERSION = 'tv-priority-v1';
+export const FIT_ASSESSABLE_WEIGHT_MINIMUM = 0.5;
 
 /** Fit components — commercial value only (no walk-in, HIPAA, contact availability). */
 export const FIT_COMPONENT_WEIGHTS = {
@@ -25,6 +26,8 @@ export type FitComponentGrade = {
   evidence_ids?: string[];
   reasoning?: string;
   missing?: boolean;
+  /** Explicitly unavailable evidence is excluded from a covered-score mean. */
+  unassessable?: boolean;
 };
 
 export type FitScoreResult = {
@@ -38,6 +41,8 @@ export type FitScoreResult = {
     reasoning: string;
   }>;
   missing_inputs: string[];
+  /** Canonical-weight share represented by assessable fit components. */
+  assessable_weight: number;
   calculation_rule_version: string;
 };
 
@@ -47,20 +52,29 @@ export type FitScoreResult = {
  */
 export function calculateFitScore(components: FitComponentGrade[]): FitScoreResult {
   const byId = new Map(components.map((c) => [c.id, c]));
+  const hasUnassessableComponent = components.some((component) => component.unassessable === true);
+  const assessable_weight = Object.entries(FIT_COMPONENT_WEIGHTS)
+    .filter(([id]) => byId.get(id as FitComponentId)?.unassessable !== true)
+    .reduce((sum, [, weight]) => sum + weight, 0);
+  const normalization = hasUnassessableComponent && assessable_weight > 0
+    ? assessable_weight
+    : 1;
   const missing_inputs: string[] = [];
   const detail: FitScoreResult['components'] = [];
   let sum = 0;
 
   for (const [id, weight] of Object.entries(FIT_COMPONENT_WEIGHTS) as Array<[FitComponentId, number]>) {
     const c = byId.get(id);
-    const grade = c && !c.missing ? clamp(Number(c.grade) || 0, 0, 10) : 0;
-    if (!c || c.missing) missing_inputs.push(id);
-    const contribution = grade * 10 * weight;
+    const unavailable = c?.unassessable === true;
+    const grade = c && !c.missing && !unavailable ? clamp(Number(c.grade) || 0, 0, 10) : 0;
+    if (!c || c.missing || unavailable) missing_inputs.push(id);
+    const normalizedWeight = unavailable ? 0 : weight / normalization;
+    const contribution = grade * 10 * normalizedWeight;
     sum += contribution;
     detail.push({
       id,
       grade,
-      weight,
+      weight: normalizedWeight,
       contribution: round1(contribution),
       evidence_ids: c?.evidence_ids || [],
       reasoning: c?.reasoning || '',
@@ -71,6 +85,7 @@ export function calculateFitScore(components: FitComponentGrade[]): FitScoreResu
     fit_score: round1(clamp(sum, 0, 100)),
     components: detail,
     missing_inputs,
+    assessable_weight: round1(assessable_weight),
     calculation_rule_version: FIT_RULE_VERSION,
   };
 }
