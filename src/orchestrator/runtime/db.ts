@@ -2844,6 +2844,11 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
 
     if (!contact) return null;
 
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?')
+      .get(normalizedRecordId);
+    const accountEmailBounced = isAffirmativeFlag(record?.email_bounced, { failClosed: true })
+      && String(record?.email_status || '').toLowerCase() === 'account_bounced';
+
     const recordColumns = new Set(
       db.prepare('PRAGMA table_info(records)').all().map((row) => String(row.name || '')),
     );
@@ -2880,6 +2885,9 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
       email_verification_status: String(contact?.email_verification_status || ''),
       email_verification_confidence: String(contact?.email_verification_confidence || 0),
       email_verified_at: String(contact?.email_verified_at || ''),
+      ...(accountEmailBounced ? {} : {
+        dne_email: isAffirmativeFlag(contact?.dne_email, { failClosed: true }) ? '1' : '0',
+      }),
     };
     const writableProjection = Object.entries(projection)
       .filter(([column]) => recordColumns.has(column));

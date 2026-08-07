@@ -39,6 +39,8 @@ export type ApplyEmailBounceInput = {
   scope?: BounceScope;
   /** Soft bounces at or above this count harden (default 3). */
   softBounceThreshold?: number;
+  /** Prior soft bounces for the resolved scope, supplied by the durable event store. */
+  priorSoftBounceCount?: number;
   /**
    * When true, a second application of the same messageId is a no-op (caller
    * already checked channel_events). Pure policy layer still returns a full
@@ -50,6 +52,7 @@ export type ApplyEmailBounceInput = {
 export type BounceChannelEvent = {
   id: string;
   row_id: string;
+  contact_id: string;
   channel: 'email';
   event_type: 'bounced';
   action: 'bounce_detected';
@@ -251,6 +254,7 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
       channel_event: {
         id: randomUUID(),
         row_id: recordId,
+        contact_id: '',
         channel: 'email',
         event_type: 'bounced',
         action: 'bounce_detected',
@@ -276,12 +280,25 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
     };
   }
 
+  const contactId = String(
+    input.contactId !== undefined
+      ? input.contactId
+      : record.active_contact_id || record.contact_id || record.primary_contact_id || '',
+  ).trim();
+  const scope = resolveBounceScope({
+    scope: input.scope,
+    contactId,
+    snippet: input.snippet,
+  });
   let bounceType = resolveBounceType({
     bounceType: input.bounceType,
     snippet: input.snippet,
   });
 
-  let softCount = Math.max(0, Number(record.email_soft_bounce_count) || 0);
+  let softCount = Math.max(
+    0,
+    Number(input.priorSoftBounceCount ?? record.email_soft_bounce_count) || 0,
+  );
   let hardened_from_soft = false;
 
   if (bounceType === 'soft') {
@@ -293,17 +310,6 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
   }
 
   const isHard = bounceType === 'hard';
-  const contactId = String(
-    input.contactId !== undefined
-      ? input.contactId
-      : record.active_contact_id || record.contact_id || record.primary_contact_id || '',
-  ).trim();
-  const scope = resolveBounceScope({
-    scope: input.scope,
-    contactId,
-    snippet: input.snippet,
-  });
-
   const existingSuppressedContactIds = parseSuppressedContactIds(record);
   const suppressed_contact_ids = scope === 'contact' && contactId && !existingSuppressedContactIds.includes(contactId)
     ? [...existingSuppressedContactIds, contactId]
@@ -327,16 +333,15 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
 
   const patch: Record<string, unknown> = {
     ...record,
-    // Record-level flags close the whole account channel, so recipient bounces
-    // must leave them untouched. The durable contact DNE is applied by the
-    // runtime after the contact identity has been verified against contacts.
-    email_bounced: scope === 'account' ? 1 : Number(isAffirmativeFlag(record.email_bounced, { failClosed: true })),
-    email_status: scope === 'account' ? 'bounced' : String(record.email_status || ''),
-    email_bounce_type: bounceType,
-    email_bounce_at: bounceAt,
-    email_bounce_source: source,
-    email_soft_bounce_count: softCount,
-    email_last_bounce_message_id: messageId,
+    ...(scope === 'account' ? {
+      email_bounced: 1,
+      email_status: 'account_bounced',
+      email_bounce_type: bounceType,
+      email_bounce_at: bounceAt,
+      email_bounce_source: source,
+      email_soft_bounce_count: softCount,
+      email_last_bounce_message_id: messageId,
+    } : {}),
     dne_email: scope === 'account'
       ? 1
       : Number(isAffirmativeFlag(record.dne_email, { failClosed: true })),
@@ -350,7 +355,7 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
     next_action_date: scope === 'account' && isHard ? '' : record.next_action_date,
   };
 
-  if (emailAddress) {
+  if (emailAddress && scope === 'account') {
     patch.email_bounced_address = emailAddress;
   }
 
@@ -360,6 +365,7 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
   const channel_event: BounceChannelEvent = {
     id: randomUUID(),
     row_id: recordId,
+    contact_id: scope === 'contact' ? contactId : '',
     channel: 'email',
     event_type: 'bounced',
     action: 'bounce_detected',
@@ -375,6 +381,7 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
       snippet: String(input.snippet || '').slice(0, 2000),
       threshold,
       scope,
+      contact_id: scope === 'contact' ? contactId : '',
     },
     occurred_at: bounceAt,
   };

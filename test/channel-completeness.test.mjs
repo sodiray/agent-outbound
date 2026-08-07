@@ -72,6 +72,7 @@ import {
   parseAccountCampaignFromRecord,
 } from '../dist/orchestrator/policy/contact-campaign.js';
 import { evaluateCampaignProcess } from '../dist/orchestrator/policy/campaign-process.js';
+import { evaluateReachability } from '../dist/orchestrator/policy/timing-reachability.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -216,9 +217,9 @@ test('bounce: recipient-specific hard failure is contact-scoped in pure policy',
   assert.equal(applied.bounce_type, 'hard');
   assert.equal(applied.scope, 'contact');
   assert.equal(applied.already_applied, false);
-  assert.equal(Number(applied.patch.email_bounced), 0);
-  assert.equal(applied.patch.email_status, '');
-  assert.equal(applied.patch.email_bounce_type, 'hard');
+  assert.equal(applied.patch.email_bounced, undefined);
+  assert.equal(applied.patch.email_status, undefined);
+  assert.equal(applied.patch.email_bounce_type, undefined);
   assert.equal(Number(applied.patch.dne_email), 0);
   assert.equal(applied.sequence_status, 'active');
   assert.equal(applied.patch.account_sequence_state, 'active');
@@ -284,8 +285,8 @@ test('bounce: processInboundReplyText routes DSN text without inventing reply en
   });
   assert.equal(out.classification, 'bounce');
   assert.equal(out.sequence_status, 'active');
-  assert.equal(Number(out.record.email_bounced), 0);
-  assert.equal(Number(out.record.dne_email), 0);
+  assert.equal(out.record.email_bounced, undefined);
+  assert.equal(Number(out.record.dne_email), 1);
   assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c1').dne_email), 1);
 
   // Idempotent reprocess
@@ -297,7 +298,7 @@ test('bounce: processInboundReplyText routes DSN text without inventing reply en
     threadId: 'thr_dsn',
   });
   assert.equal(again.classification, 'bounce');
-  assert.equal(Number(again.record.email_bounced), 0);
+  assert.equal(again.record.email_bounced, undefined);
 
   const events = db.prepare(
     `SELECT action, disposition FROM channel_events WHERE row_id = ?`,
@@ -361,6 +362,19 @@ test('bounce: recipient hard bounce suppresses one contact and rotates to the ne
   assert.deepEqual(campaign.held_contact_ids, []);
   assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_owner').dne_email), 1);
   assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_manager').dne_email), 0);
+  const evidence = db.prepare(`
+    SELECT contact_id, disposition, provider_message_id, payload_json, occurred_at
+    FROM channel_events WHERE row_id = ? AND action = 'bounce_detected'
+  `).get('bounce_rotate');
+  assert.equal(evidence.contact_id, 'c_owner');
+  assert.equal(evidence.disposition, 'hard');
+  assert.equal(evidence.provider_message_id, 'bounce_rotate_1');
+  assert.equal(JSON.parse(evidence.payload_json).scope, 'contact');
+  const email = evaluateReachability(applied.record).channels.find((channel) => channel.channel === 'email');
+  assert.deepEqual(email, {
+    channel: 'email', state: 'named_validated', confidence: 100, ready: true, reason: 'validated_address',
+  });
+  assert.equal(JSON.parse(applied.record.reachability_json).channels.find((channel) => channel.channel === 'email').ready, true);
   db.close();
 });
 
@@ -411,6 +425,10 @@ test('bounce: domain-level failure closes the account email channel', () => {
   assert.equal(applied.sequence_status, 'bounced');
   assert.equal(Number(applied.record.dne_email), 1);
   assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c1').dne_email), 0);
+  const email = evaluateReachability(applied.record).channels.find((channel) => channel.channel === 'email');
+  assert.deepEqual(email, {
+    channel: 'email', state: 'bounced', confidence: 100, ready: false, reason: 'bounced',
+  });
   db.close();
 });
 

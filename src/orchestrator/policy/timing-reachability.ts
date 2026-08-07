@@ -176,16 +176,24 @@ function readConfidence(...values: unknown[]): number | null {
 
 function emailState(record: Record<string, unknown>, config?: ReachabilityConfigInput): ChannelReachability {
   const mins = { ...DEFAULT_SCORE_REACHABILITY.minimums, ...config?.minimums };
+  const email = String(record.contact_email || record.email_primary || '').trim();
   if (
     isAffirmativeFlag(record.email_opted_out, { failClosed: true })
     || isAffirmativeFlag(record.opted_out_email, { failClosed: true })
   ) {
     return { channel: 'email', state: 'opted_out', confidence: 100, ready: false, reason: 'opted_out' };
   }
-  if (
-    isAffirmativeFlag(record.email_bounced, { failClosed: true })
-    || String(record.email_status || '').toLowerCase() === 'bounced'
-  ) {
+  const emailStatus = String(record.email_status || '').toLowerCase();
+  const bouncedAddress = String(record.email_bounced_address || '').trim().toLowerCase();
+  const accountSequenceState = String(record.account_sequence_state || '').toLowerCase();
+  const sequenceStatus = String(record.sequence_status || '').toLowerCase();
+  const accountBounce = emailStatus === 'account_bounced'
+    || (
+      isAffirmativeFlag(record.email_bounced, { failClosed: true })
+      && (!bouncedAddress || bouncedAddress === email.toLowerCase()
+        || accountSequenceState === 'completed' || sequenceStatus === 'bounced')
+    );
+  if (accountBounce) {
     return { channel: 'email', state: 'bounced', confidence: 100, ready: false, reason: 'bounced' };
   }
   if (
@@ -200,7 +208,6 @@ function emailState(record: Record<string, unknown>, config?: ReachabilityConfig
       reason: isAffirmativeFlag(record.dne_email, { failClosed: true }) ? 'dne_email' : 'email_suppressed',
     };
   }
-  const email = String(record.contact_email || record.email_primary || '').trim();
   if (!email) return { channel: 'email', state: 'missing', confidence: 0, ready: false };
   const verificationStatus = String(record.email_verification_status || '').trim().toLowerCase();
   const verificationConfidence = readConfidence(record.email_verification_confidence);

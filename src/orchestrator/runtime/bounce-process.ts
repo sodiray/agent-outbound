@@ -5,6 +5,7 @@
 import {
   applyEmailBounce,
   detectBounceFromText,
+  resolveBounceScope,
   resolveBounceType,
   type BounceSource,
   type BounceType,
@@ -13,6 +14,7 @@ import {
   parseAccountCampaignFromRecord,
   removeSuppressedContactsFromCampaign,
 } from '../policy/contact-campaign.js';
+import { evaluateReachability } from '../policy/timing-reachability.js';
 import {
   ensureRecordColumns,
   insertChannelEvent,
@@ -26,6 +28,32 @@ type BounceDb = {
     run: (...args: unknown[]) => unknown;
   };
   transaction: <T>(operation: () => T) => () => T;
+};
+
+const contactSoftBounceCount = ({
+  db,
+  recordId,
+  contactId,
+}: {
+  db: BounceDb;
+  recordId: string;
+  contactId: string;
+}) => {
+  if (!contactId) return 0;
+  try {
+    const row = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM channel_events
+      WHERE row_id = ?
+        AND contact_id = ?
+        AND channel = 'email'
+        AND action = 'bounce_detected'
+        AND disposition = 'soft'
+    `).get(recordId, contactId);
+    return Math.max(0, Number(row?.count) || 0);
+  } catch {
+    return 0;
+  }
 };
 
 /** True when this provider message id was already recorded as a bounce. */
@@ -194,6 +222,14 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
     record,
     contactId: input.contactId,
   });
+  const scope = resolveBounceScope({
+    scope: input.scope,
+    contactId,
+    snippet: input.snippet,
+  });
+  const priorSoftBounceCount = scope === 'contact'
+    ? contactSoftBounceCount({ db: input.db, recordId, contactId })
+    : Math.max(0, Number(record.email_soft_bounce_count) || 0);
 
   const applied = applyEmailBounce({
     record,
@@ -208,13 +244,14 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
     email: input.email,
     contactId,
     snippet: input.snippet,
-    scope: input.scope,
+    scope,
     softBounceThreshold: input.softBounceThreshold,
+    priorSoftBounceCount,
   });
 
   ensureRecordColumns({
     db: input.db,
-    columns: Object.keys(applied.patch),
+    columns: [...Object.keys(applied.patch), 'reachability_json'],
   });
   const persisted = input.db.transaction(() => {
     if (applied.scope === 'contact') {
@@ -239,6 +276,16 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
         db: input.db,
         recordId,
         contactId: String(rotated.patch.active_contact_id),
+      });
+    }
+    const projected = input.db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId);
+    if (projected) {
+      upsertRecord({
+        db: input.db,
+        row: {
+          ...projected,
+          reachability_json: JSON.stringify(evaluateReachability(projected)),
+        },
       });
     }
     insertChannelEvent({ db: input.db, event: applied.channel_event });

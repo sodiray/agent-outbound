@@ -225,6 +225,9 @@ export function denormalizedFieldsFromContact(
   }
   // Always project email when a contact row is provided — blank means blank.
   out.contact_email = email;
+  if (contact.dne_email !== undefined) {
+    out.dne_email = isAffirmativeFlag(contact.dne_email, { failClosed: true }) ? '1' : '0';
+  }
   const hasVerificationFields = contact.email_verification_status !== undefined
     || contact.email_verification_confidence !== undefined
     || contact.email_verified_at !== undefined;
