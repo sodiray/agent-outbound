@@ -28,6 +28,7 @@ import {
   IDEMPOTENCY_PENDING_LEASE_MS,
 } from '../dist/orchestrator/runtime/idempotency.js';
 import { reconcileOverrides, reconcileFieldOverrides } from '../dist/orchestrator/runtime/db.js';
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -543,6 +544,7 @@ test('14 partial unknown fit components never yield Tier A / golden_ticket', asy
     unknown: i === 5,
   }));
   const result = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acc_partial',
       fit_breakdown: JSON.stringify(breakdown),
@@ -586,6 +588,7 @@ test('15 all-unknown fit becomes enrichment_hold not Tier D', async () => {
     unknown: true,
   }));
   const result = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acc_unknown',
       fit_breakdown: JSON.stringify(breakdown),

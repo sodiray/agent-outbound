@@ -33,6 +33,10 @@ import { evaluateOutboundReadiness } from '../dist/orchestrator/policy/readiness
 import { evaluateGoldenTicket } from '../dist/orchestrator/policy/treatment.js';
 import { openListDb, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
 import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
+import {
+  treasureValleyGoldenTicket,
+  treasureValleyTreatmentStrategy,
+} from './fixtures/treatment-strategy.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TV_ROOT =
@@ -432,6 +436,8 @@ test('readiness: undefined contentReady fails closed (content_not_ready)', () =>
 
 test('golden ticket: null fitScore fails closed with fit_score_missing', () => {
   const g = evaluateGoldenTicket({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
     treatmentTier: 'A',
     fitScore: null,
     fitEvidenceConfidence: 90,

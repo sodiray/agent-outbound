@@ -3,6 +3,11 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import {
+  treasureValleyGoldenTicket,
+  treasureValleyPostcard,
+  treasureValleyTreatmentStrategy,
+} from './fixtures/treatment-strategy.mjs';
 
 const {
   applyOutboundPolicy,
@@ -54,6 +59,9 @@ test('planEnrichmentRepair: foundational → candidate_tier → targeted order',
 
 test('applyOutboundPolicy: enrichment_hold → next_action enrichment_repair + hold reasons', () => {
   const out = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     record: {
       _row_id: 'hold_repair_1',
       is_a_business: true,
@@ -82,6 +90,9 @@ test('applyOutboundPolicy: enrichment_hold → next_action enrichment_repair + h
 
 test('applyOutboundPolicy: unresolved buyer affiliation holds (not invent confirmed)', () => {
   const out = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     record: {
       _row_id: 'aff_unres',
       is_a_business: true,
@@ -111,6 +122,9 @@ test('applyOutboundPolicy: unresolved buyer affiliation holds (not invent confir
 
 test('applyOutboundPolicy: tier A missing named buyer → hold + repair', () => {
   const out = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     record: {
       _row_id: 'tier_a_no_buyer',
       is_a_business: true,
@@ -204,17 +218,17 @@ test('GT: missing / unresolved affiliation fails closed', () => {
     localBuyingAuthority: 'confirmed',
     cohortCapacityOk: true,
   };
-  assert.equal(evaluateGoldenTicket(base).eligible, true);
+  assert.equal(evaluateGoldenTicket({ ...base, treatmentStrategy: treasureValleyTreatmentStrategy, goldenTicket: treasureValleyGoldenTicket }).eligible, true);
 
-  const missing = evaluateGoldenTicket({ ...base, buyerAffiliationStatus: null });
+  const missing = evaluateGoldenTicket({ ...base, buyerAffiliationStatus: null, treatmentStrategy: treasureValleyTreatmentStrategy, goldenTicket: treasureValleyGoldenTicket });
   assert.equal(missing.eligible, false);
   assert.ok(missing.withheld.includes('buyer_affiliation_status_missing'));
 
-  const unres = evaluateGoldenTicket({ ...base, buyerAffiliationStatus: 'unresolved' });
+  const unres = evaluateGoldenTicket({ ...base, buyerAffiliationStatus: 'unresolved', treatmentStrategy: treasureValleyTreatmentStrategy, goldenTicket: treasureValleyGoldenTicket });
   assert.equal(unres.eligible, false);
   assert.ok(unres.withheld.includes('buyer_affiliation_unresolved'));
 
-  const noRole = evaluateGoldenTicket({ ...base, buyingCenterRole: null });
+  const noRole = evaluateGoldenTicket({ ...base, buyingCenterRole: null, treatmentStrategy: treasureValleyTreatmentStrategy, goldenTicket: treasureValleyGoldenTicket });
   assert.equal(noRole.eligible, false);
   assert.ok(noRole.withheld.includes('buying_center_role_missing'));
 });
@@ -235,6 +249,9 @@ test('resolveBuyerAffiliationFromRecord: never invents confirmed from blank', ()
 
 test('field_evidence_json carries confidence + source_ids from durable observations', () => {
   const out = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     record: {
       _row_id: 'fev1',
       is_a_business: true,
@@ -273,6 +290,9 @@ test('field_evidence_json carries confidence + source_ids from durable observati
 
 test('assignTreatmentAndMail: GT still requires named buyer (matrix regression)', () => {
   const g = assignTreatmentAndMail({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     fitScore: 90,
     fitEvidenceConfidence: 90,
     identityConfidence: 90,
@@ -291,4 +311,11 @@ test('assignTreatmentAndMail: GT still requires named buyer (matrix regression)'
   assert.ok(
     g.mail_withheld_reasons.some((w) => w.includes('named_buyer')),
   );
+});
+
+test('assignTreatmentAndMail: absent strategy does not invent a tier or mail product', () => {
+  const result = assignTreatmentAndMail({ fitScore: 90, fitEvidenceConfidence: 90 });
+  assert.equal(result.treatment_tier, '');
+  assert.equal(result.mail_treatment, 'none');
+  assert.ok(result.reasons.includes('treatment_not_configured'));
 });

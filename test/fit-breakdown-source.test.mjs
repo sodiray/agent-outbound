@@ -4,6 +4,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 const {
   applyOutboundPolicy,
@@ -69,6 +70,7 @@ test('recoverLegacyFitScore sums fit_breakdown points (Butter Classics shape)', 
 
 test('applyOutboundPolicy recomputes fit from commercial fit_breakdown not legacy score_breakdown', () => {
   const out = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     recomputeFitFromBreakdown: true,
     record: {
       _row_id: 'acct_fit_src',
@@ -89,6 +91,7 @@ test('applyOutboundPolicy recomputes fit from commercial fit_breakdown not legac
 
 test('applyOutboundPolicy does NOT zero fit_score when only legacy score_breakdown present', () => {
   const out = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     recomputeFitFromBreakdown: true,
     record: {
       _row_id: 'acct_legacy',
@@ -116,6 +119,7 @@ test('applyOutboundPolicy does NOT zero fit_score when only legacy score_breakdo
 
 test('Butter Classics shape: recovery + treatment consistent (no fit0/tierB contradiction)', () => {
   const out = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     recomputeFitFromBreakdown: true,
     record: {
       _row_id: 'ChIJEecJ8V9XrlQRv7AnWgVQMOw',

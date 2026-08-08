@@ -22,7 +22,6 @@ import {
   assignTreatmentTier,
   assignTreatmentAndMail,
   enrichmentBudgetRemaining,
-  ENRICHMENT_COST_CEILINGS,
 } from '../dist/orchestrator/policy/treatment.js';
 import { assignCandidateTier } from '../dist/orchestrator/policy/scoring.js';
 import { evaluateOutboundReadiness } from '../dist/orchestrator/policy/readiness.js';
@@ -32,6 +31,13 @@ import {
   loadVerticalTaxonomy,
 } from '../dist/orchestrator/policy/taxonomy.js';
 import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
+import {
+  treasureValleyEnrichmentBudget,
+  treasureValleyCandidateTier,
+  treasureValleyGoldenTicket,
+  treasureValleyPostcard,
+  treasureValleyTreatmentStrategy,
+} from './fixtures/treatment-strategy.mjs';
 
 const TV_ROOT =
   process.env.TV_ROOT ||
@@ -226,16 +232,27 @@ test('phase-04: Monid scrape is statically configured; suite never calls live Mo
 
 test('phase-04: thin evidence / unscored fit → treatment_tier enrichment_hold', () => {
   // Strong fit, insufficient evidence confidence
-  const thin = assignTreatmentTier({ fitScore: 85, fitEvidenceConfidence: 30 });
+  const thin = assignTreatmentTier({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    fitScore: 85,
+    fitEvidenceConfidence: 30,
+  });
   assert.equal(thin.tier, 'enrichment_hold');
   assert.ok(thin.reasons.some((r) => /insufficient_evidence|unscored/.test(r) || r.includes('fit_evidence_band=below40')));
 
   // Unscored fit
-  const unscored = assignTreatmentTier({ fitScore: null, fitEvidenceConfidence: 90 });
+  const unscored = assignTreatmentTier({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    fitScore: null,
+    fitEvidenceConfidence: 90,
+  });
   assert.equal(unscored.tier, 'enrichment_hold');
 
   // Full assignment + mail: hold does not open mail by default
   const full = assignTreatmentAndMail({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     fitScore: 88,
     fitEvidenceConfidence: 25,
     identityConfidence: 90,
@@ -278,14 +295,11 @@ test('phase-04: a pipeline may restrict an enrichment tier from outbound readine
 });
 
 test('phase-04: candidate tier + enrichment ceilings support decision-driven depth', () => {
-  assert.equal(assignCandidateTier(90).candidate_tier, 'A');
+  assert.equal(assignCandidateTier(90, treasureValleyCandidateTier).candidate_tier, 'A');
   assert.equal(assignCandidateTier(null).candidate_tier, 'hold');
 
-  assert.equal(ENRICHMENT_COST_CEILINGS.foundational, 0.15);
-  assert.equal(ENRICHMENT_COST_CEILINGS.enrichment_hold, 0.3);
-  assert.equal(ENRICHMENT_COST_CEILINGS.A, 3);
-
   const holdBudget = enrichmentBudgetRemaining({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     candidateOrTreatment: 'enrichment_hold',
     spentUsd: 0.1,
   });
@@ -379,6 +393,7 @@ test('phase-04: validateTaxonomyLabels rejects unsupported labels with controlle
 test('phase-04: applyOutboundPolicy writes only controlled taxonomy labels', () => {
   // Eligible HVAC with controlled labels survives apply
   const hvac = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     listDir: TV_ROOT,
     record: {
       _row_id: 'p4_hvac',
@@ -399,6 +414,7 @@ test('phase-04: applyOutboundPolicy writes only controlled taxonomy labels', () 
 
   // Unsupported free-text labels are rewritten at apply — no invented production ids
   const junk = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     listDir: TV_ROOT,
     record: {
       _row_id: 'p4_junk',

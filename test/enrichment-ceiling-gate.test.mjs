@@ -27,7 +27,9 @@ import {
   appendCostEntry,
   ledgerFromCostEventRows,
 } from '../dist/orchestrator/policy/cost-ledger.js';
-import { ENRICHMENT_COST_CEILINGS } from '../dist/orchestrator/policy/treatment.js';
+import { treasureValleyEnrichmentBudget, treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
+
+const ENRICHMENT_COST_CEILINGS = treasureValleyEnrichmentBudget.ceilings;
 import {
   executeEnrichmentAction,
   isEnrichmentCeilingSkip,
@@ -100,6 +102,7 @@ test('withinEnrichmentCeiling: tier table (at/under/over + golden floor)', () =>
 
   for (const c of cases) {
     const result = withinEnrichmentCeiling({
+      enrichmentBudget: treasureValleyEnrichmentBudget,
       treatment_tier: c.tier,
       candidate_tier: c.candidate,
       enrichment_usd: c.spend,
@@ -143,6 +146,7 @@ test('recordHasEnrichmentTier: treatment or candidate only', () => {
 
 test('gate: tool_call over ceiling → apply, !within_budget, reason enrichment_ceiling', () => {
   const gate = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: overspentRecord('C', 5),
     stepConfig: { action: 'tool_call', tool: { server: 'hunter', tools: ['HUNTER_EMAIL_FINDER'] } },
   });
@@ -156,6 +160,7 @@ test('gate: tool_call over ceiling → apply, !within_budget, reason enrichment_
 
 test('gate: model enrich (empty action) over ceiling → blocked same as tool_call', () => {
   const gate = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: overspentRecord('B', 2),
     stepConfig: { action: '', outputs: { site_summary: { type: 'string' } } },
   });
@@ -167,6 +172,7 @@ test('gate: model enrich (empty action) over ceiling → blocked same as tool_ca
 
 test('gate: same action under ceiling → proceeds (apply + within_budget)', () => {
   const gate = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: underCeilingRecord('C', 0.1),
     stepConfig: { action: 'tool_call' },
   });
@@ -179,6 +185,7 @@ test('gate: same action under ceiling → proceeds (apply + within_budget)', () 
 
 test('gate: policy_apply never blocked even when enrichment spend is huge', () => {
   const gate = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: overspentRecord('C', 99),
     stepConfig: { action: 'policy_apply' },
   });
@@ -189,6 +196,7 @@ test('gate: policy_apply never blocked even when enrichment spend is huge', () =
 
 test('gate: linkedin_company_resolution not gated (free local path)', () => {
   const gate = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: overspentRecord('A', 10),
     stepConfig: { action: 'linkedin_company_resolution' },
   });
@@ -198,6 +206,7 @@ test('gate: linkedin_company_resolution not gated (free local path)', () => {
 
 test('gate: no treatment_tier/candidate_tier → not gated even if spend high', () => {
   const gate = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: {
       _row_id: 'early_enrich',
       enrichment_cost_usd: 50,
@@ -216,6 +225,7 @@ test('gate: no treatment_tier/candidate_tier → not gated even if spend high', 
 
 test('gate: candidate_tier alone is enough to apply ceiling', () => {
   const gate = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: {
       _row_id: 'cand_only',
       candidate_tier: 'C',
@@ -277,12 +287,14 @@ test('gate: cost_events hydration used when db present (overrides understated sc
   };
 
   const withoutDb = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record,
     stepConfig: { action: 'tool_call' },
   });
   assert.equal(withoutDb.within_budget, true, 'stale scalar alone is under C ceiling');
 
   const withDb = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     db,
     record,
     stepConfig: { action: 'tool_call' },
@@ -317,6 +329,8 @@ test('ledgerFromCostEventRows: tool_calls on model step counts toward enrichment
 
 test('executeEnrichmentAction: tool_call over ceiling skips with enrichment_ceiling (no provider)', async () => {
   const result = await executeEnrichmentAction({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     mcp: null, // would throw if provider path reached
     listDir: mkdtempSync(join(tmpdir(), 'ao-ceil-exec-')),
     stepId: 'email_finder',
@@ -343,6 +357,8 @@ test('executeEnrichmentAction: tool_call over ceiling skips with enrichment_ceil
 
 test('executeEnrichmentAction: model-style enrich over ceiling skips before model path', async () => {
   const result = await executeEnrichmentAction({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     mcp: null,
     listDir: mkdtempSync(join(tmpdir(), 'ao-ceil-model-')),
     stepId: 'site_research',
@@ -434,6 +450,8 @@ sequences:
 
   const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
   const result = await executeEnrichmentAction({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     db,
     mcp: null,
     listDir,
@@ -459,12 +477,14 @@ test('executeEnrichmentAction: early enrich without tier is not ceiling-gated', 
   // tool_call (which needs mcp). Unit gate already covers !apply; here we only
   // confirm overspent *tiered* path is the one that sets cost_blocked.
   const early = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: { _row_id: 'early', enrichment_cost_usd: 99 },
     stepConfig: { action: 'tool_call' },
   });
   assert.equal(early.apply, false);
 
   const tiered = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     record: overspentRecord('C', 99),
     stepConfig: { action: 'tool_call' },
   });

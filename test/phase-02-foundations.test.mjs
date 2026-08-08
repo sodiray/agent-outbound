@@ -57,6 +57,7 @@ import {
   TRANSITION_AUDIT_VERSION,
   STAGE_REVIEW_POLICY_VERSION,
 } from '../dist/orchestrator/policy/transition-audit.js';
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 // ---------------------------------------------------------------------------
 // 1. createInitialColdState integrity
@@ -201,6 +202,7 @@ test('rotate + merge via applyOutboundPolicy preserves rotation and mail across 
   assert.equal(afterMail.mail_allocated, true);
 
   const result = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_policy_merge',
       fit_score: 72,
@@ -741,6 +743,7 @@ test('transition audit: create/append + advanceAfterSuccessfulAction writes ledg
 
 test('detectCollision feeds applyOutboundPolicy readiness collision blocker', () => {
   const out = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_col',
       fit_score: 80,
@@ -834,6 +837,7 @@ test('Complete-when path: multi-contact through cold → review → authorize �
 
   // Policy projection with multi-contact plan (no provider, no TV content)
   const policy = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: accountId,
       fit_score: 75,

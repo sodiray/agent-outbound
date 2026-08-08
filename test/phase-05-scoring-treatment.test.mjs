@@ -29,25 +29,54 @@ import {
   PRIORITY_RULE_VERSION,
 } from '../dist/orchestrator/policy/scoring.js';
 import {
-  assignTreatmentTier,
-  assignTreatmentAndMail,
-  evaluateGoldenTicket,
-  evaluateStandardPostcard,
+  assignTreatmentTier as assignRawTreatmentTier,
+  assignTreatmentAndMail as assignRawTreatmentAndMail,
+  evaluateGoldenTicket as evaluateRawGoldenTicket,
+  evaluateStandardPostcard as evaluateRawStandardPostcard,
   enrichmentBudgetRemaining,
   countStrongTimingSignals,
-  ENRICHMENT_COST_CEILINGS,
-  GOLDEN_TICKET_MIN,
   CALCULATION_RULE_VERSION as TREATMENT_RULE_VERSION,
 } from '../dist/orchestrator/policy/treatment.js';
+import {
+  treasureValleyCandidateTier,
+  treasureValleyEnrichmentBudget,
+  treasureValleyGoldenTicket,
+  treasureValleyPostcard,
+  treasureValleyTreatmentStrategy,
+} from './fixtures/treatment-strategy.mjs';
+
+const assignTreatmentTier = (input) => assignRawTreatmentTier({ treatmentStrategy: treasureValleyTreatmentStrategy, ...input });
+const assignTreatmentAndMail = (input) => assignRawTreatmentAndMail({
+  treatmentStrategy: treasureValleyTreatmentStrategy,
+  goldenTicket: treasureValleyGoldenTicket,
+  postcard: treasureValleyPostcard,
+  ...input,
+});
+const evaluateGoldenTicket = (input) => evaluateRawGoldenTicket({
+  treatmentStrategy: treasureValleyTreatmentStrategy,
+  goldenTicket: treasureValleyGoldenTicket,
+  ...input,
+});
+const evaluateStandardPostcard = (input) => evaluateRawStandardPostcard({
+  treatmentStrategy: treasureValleyTreatmentStrategy,
+  postcard: treasureValleyPostcard,
+  ...input,
+});
 import {
   evaluateOutboundReadiness,
 } from '../dist/orchestrator/policy/readiness.js';
 import {
-  applyOutboundPolicy,
+  applyOutboundPolicy as applyRawOutboundPolicy,
   guardChannelExecution,
   fitComponentsFromBreakdown,
   deriveFitEvidenceConfidence,
 } from '../dist/orchestrator/policy/apply-record.js';
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({
+  treatmentStrategy: treasureValleyTreatmentStrategy,
+  goldenTicket: treasureValleyGoldenTicket,
+  postcard: treasureValleyPostcard,
+  ...input,
+});
 import {
   calculateTimingScore,
   decayStrength,
@@ -323,14 +352,12 @@ test('phase-05 treatment: mail_treatment independent; A/B postcard; C/D none by 
 });
 
 test('phase-05 treatment: candidate tier is research-depth only (not outreach treatment)', () => {
-  assert.equal(assignCandidateTier(90).candidate_tier, 'A');
-  assert.equal(assignCandidateTier(70).candidate_tier, 'B');
-  assert.equal(assignCandidateTier(55).candidate_tier, 'C');
-  assert.equal(assignCandidateTier(20).candidate_tier, 'D');
-  assert.equal(assignCandidateTier(null).candidate_tier, 'hold');
-  assert.equal(ENRICHMENT_COST_CEILINGS.A, 3);
-  assert.equal(ENRICHMENT_COST_CEILINGS.golden_ticket_total, 8);
-  const budget = enrichmentBudgetRemaining({ candidateOrTreatment: 'B', spentUsd: 0.5 });
+  assert.equal(assignCandidateTier(90, treasureValleyCandidateTier).candidate_tier, 'A');
+  assert.equal(assignCandidateTier(70, treasureValleyCandidateTier).candidate_tier, 'B');
+  assert.equal(assignCandidateTier(55, treasureValleyCandidateTier).candidate_tier, 'C');
+  assert.equal(assignCandidateTier(20, treasureValleyCandidateTier).candidate_tier, 'D');
+  assert.equal(assignCandidateTier(null, treasureValleyCandidateTier).candidate_tier, 'hold');
+  const budget = enrichmentBudgetRemaining({ candidateOrTreatment: 'B', spentUsd: 0.5, enrichmentBudget: treasureValleyEnrichmentBudget });
   assert.equal(budget.ceiling, 1);
   assert.ok(budget.withinBudget);
 });
@@ -598,18 +625,6 @@ test('phase-05 readiness: evaluateOutboundReadiness blocks weak identity and tie
 // 5. Golden Ticket — full production multi-domain matrix
 // ---------------------------------------------------------------------------
 
-test('phase-05 golden ticket: production mins are codified', () => {
-  assert.equal(GOLDEN_TICKET_MIN.fitScore, 85);
-  assert.equal(GOLDEN_TICKET_MIN.fitEvidenceConfidence, 80);
-  assert.equal(GOLDEN_TICKET_MIN.identityConfidence, 90);
-  assert.equal(GOLDEN_TICKET_MIN.classificationConfidence, 90);
-  assert.equal(GOLDEN_TICKET_MIN.buyerConfidence, 80);
-  assert.equal(GOLDEN_TICKET_MIN.mailConfidence, 90);
-  assert.equal(GOLDEN_TICKET_MIN.timingScore, 70);
-  assert.equal(GOLDEN_TICKET_MIN.strongSignalCount, 2);
-  assert.equal(GOLDEN_TICKET_MIN.enrichmentBudgetUsd, 8);
-});
-
 test('phase-05 golden ticket: identity confidence gate is mandatory', () => {
   const base = gtPassBase();
 
@@ -688,7 +703,7 @@ test('phase-05 golden ticket: non-A tiers never eligible even with strong gates'
     treatmentTier: 'B',
   });
   assert.equal(g.eligible, false);
-  assert.ok(g.withheld.includes('not_tier_a'));
+  assert.ok(g.withheld.includes('tier_not_declared_for_golden_ticket'));
 });
 
 test('phase-05 golden ticket: missing fitScore fails closed with fit_score_missing', () => {
@@ -961,7 +976,7 @@ test('phase-05 golden ticket: full TV matrix table (parameterized fail-closed)',
     );
     for (const code of c.withheldAny) {
       assert.ok(
-        g.withheld.includes(code),
+        g.withheld.includes(code === 'not_tier_a' ? 'tier_not_declared_for_golden_ticket' : code),
         `${c.name}: expected withheld ${code}, got ${JSON.stringify(g.withheld)}`,
       );
     }
@@ -1373,6 +1388,7 @@ test('phase-05 cost-ledger: ceilings feed readiness; overspend does not authoriz
   assert.ok(ledger.enrichment_usd >= 5);
 
   const overC = withinEnrichmentCeiling({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     treatment_tier: 'C',
     enrichment_usd: ledger.enrichment_usd,
   });

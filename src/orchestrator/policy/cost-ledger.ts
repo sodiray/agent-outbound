@@ -3,7 +3,6 @@
  */
 
 import {
-  DEFAULT_SCORE_ENRICHMENT_BUDGET,
   type EnrichmentBudgetConfigInput,
 } from '../../schemas/config.js';
 
@@ -92,15 +91,25 @@ export function withinEnrichmentCeiling(input: {
   golden_ticket?: boolean;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
 }): { within_budget: boolean; ceiling: number; reason?: string } {
-  const ceilings = { ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings, ...input.enrichmentBudget?.ceilings };
+  const ceilings = input.enrichmentBudget?.ceilings;
+  if (!ceilings) {
+    return input.enrichment_usd > 0
+      ? { within_budget: false, ceiling: 0, reason: 'enrichment_budget_not_configured' }
+      : { within_budget: true, ceiling: 0, reason: 'enrichment_budget_not_configured' };
+  }
   const tier = String(input.candidate_tier || input.treatment_tier || 'foundational').toLowerCase();
-  let ceiling: number = ceilings.foundational;
+  let ceiling: number | undefined = ceilings.foundational;
   if (tier === 'a' || tier === 'tier_a') ceiling = ceilings.A;
   else if (tier === 'b' || tier === 'tier_b') ceiling = ceilings.B;
   else if (tier === 'c' || tier === 'tier_c') ceiling = ceilings.C;
   else if (tier === 'd' || tier === 'tier_d') ceiling = ceilings.D;
   else if (tier === 'enrichment_hold') ceiling = ceilings.enrichment_hold;
-  if (input.golden_ticket) ceiling = Math.max(ceiling, ceilings.golden_ticket_total);
+  if (input.golden_ticket && ceilings.golden_ticket_total !== undefined) {
+    ceiling = Math.max(ceiling ?? 0, ceilings.golden_ticket_total);
+  }
+  if (ceiling === undefined) {
+    return { within_budget: false, ceiling: 0, reason: 'enrichment_budget_tier_not_configured' };
+  }
   if (input.enrichment_usd > ceiling) {
     return { within_budget: false, ceiling, reason: `enrichment_cost_exceeded:${input.enrichment_usd}>${ceiling}` };
   }

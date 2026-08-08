@@ -30,6 +30,12 @@ import {
   classifyEligibility,
 } from '../dist/orchestrator/policy/readiness.js';
 import { findProhibitedSteps } from '../dist/orchestrator/policy/pipeline-prohibitions.js';
+import {
+  treasureValleyGoldenTicket,
+  treasureValleyCandidateTier,
+  treasureValleyPostcard,
+  treasureValleyTreatmentStrategy,
+} from './fixtures/treatment-strategy.mjs';
 
 const TV_YAML = '/Users/rayepps/projects/mission/.outbound/treasure-valley/outbound.yaml';
 const TAXONOMY = '/Users/rayepps/projects/mission/.outbound/treasure-valley/build/registries/vertical-taxonomy.json';
@@ -140,9 +146,12 @@ test('fixture path: eligibility → fit → treatment → readiness', () => {
   ]);
   assert.ok(fit.fit_score >= 70);
 
-  const candidate = assignCandidateTier(fit.fit_score);
+  const candidate = assignCandidateTier(fit.fit_score, treasureValleyCandidateTier);
   assert.ok(['A', 'B'].includes(candidate.candidate_tier));
   const treatment = assignTreatmentAndMail({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     fitScore: fit.fit_score,
     fitEvidenceConfidence: 85,
     identityConfidence: 90,

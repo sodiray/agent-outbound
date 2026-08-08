@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
+
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
 import { ensureRecordColumns, openListDb } from '../dist/orchestrator/runtime/db.js';
 import {
@@ -26,6 +28,8 @@ sequences:
     steps: []
 policy:
   enforce_readiness: false
+score:
+  treatment: ${JSON.stringify(treasureValleyTreatmentStrategy)}
 ${budget ? `live_interaction_budget:
   max_accounts: ${budget.max_accounts}
   max_interactions: ${budget.max_interactions}
@@ -55,14 +59,14 @@ const insertRecord = ({ db, recordId, contactId = `contact_${recordId}` }) => {
   const now = new Date().toISOString();
   ensureRecordColumns({
     db,
-    columns: ['lifecycle_stage', 'account_sequence_state', 'work_state', 'next_action_json', 'active_contact_id'],
+    columns: ['lifecycle_stage', 'account_sequence_state', 'work_state', 'next_action_json', 'active_contact_id', 'treatment_tier'],
   });
   db.prepare(`
     INSERT INTO records (
       _row_id, business_name, sequence_name, sequence_status, contact_email,
-      lifecycle_stage, account_sequence_state, work_state, next_action_json, active_contact_id,
+      lifecycle_stage, account_sequence_state, work_state, next_action_json, active_contact_id, treatment_tier,
       _created_at, _updated_at, created_at, updated_at
-    ) VALUES (?, ?, 'default', 'active', ?, 'contacted', 'active', 'executing_external_action', ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, 'default', 'active', ?, 'contacted', 'active', 'executing_external_action', ?, ?, 'B', ?, ?, ?, ?)
   `).run(
     recordId,
     `Business ${recordId}`,

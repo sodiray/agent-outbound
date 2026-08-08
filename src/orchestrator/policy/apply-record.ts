@@ -15,7 +15,6 @@ import {
 import {
   assignTreatmentAndMail,
   countStrongTimingSignals,
-  LEGACY_TREATMENT_STRATEGY,
   type TreatmentBandLadders,
   type TreatmentTier,
 } from './treatment.js';
@@ -583,13 +582,13 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     postcard: input.postcard,
     enrichmentBudget: input.enrichmentBudget,
   });
-  const treatmentStrategy = input.treatmentStrategy ?? LEGACY_TREATMENT_STRATEGY;
-  const configuredHoldTier = treatmentStrategy.unscored_tier;
-  const tierRoute = (tier: string) => treatmentStrategy.tiers[tier]?.route;
+  const treatmentStrategy = input.treatmentStrategy;
+  const configuredHoldTier = treatmentStrategy?.unscored_tier || '';
+  const tierRoute = (tier: string) => treatmentStrategy?.tiers?.[tier]?.route;
   const tierPermitsOutreach = (tier: string) => tierRoute(tier) === 'outbound';
   const tierNeedsEnrichment = (tier: string) => tierRoute(tier) === 'enrichment';
   const tierNeedsRecycleMonitoring = (tier: string) => tierRoute(tier) === 'recycle_monitoring';
-  const tierAllowsGoldenTicket = (tier: string) => treatmentStrategy.tiers[tier]?.golden_ticket === true;
+  const tierAllowsGoldenTicket = (tier: string) => treatmentStrategy?.tiers?.[tier]?.golden_ticket === true;
 
   const taxonomyResolutionFailed = taxonomy.reasons.includes('taxonomy_not_loaded')
     || taxonomy.reasons.includes('taxonomy_version_missing')
@@ -794,6 +793,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const needsEnrichmentRepairAction = () =>
     tierNeedsEnrichment(treatment.treatment_tier)
     || eligibility.outcome === 'enrichment_hold';
+  const needsTreatmentConfiguration = !input.treatmentStrategy;
 
   /**
    * A repair action the record has outgrown must be recomputed.
@@ -855,7 +855,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   };
 
   if (!next_action || String(next_action.action_type || '').includes('reprocess') || !next_action.action_id
-    || needsEnrichmentRepairAction() || holdsStaleRepairAction()) {
+    || needsEnrichmentRepairAction() || needsTreatmentConfiguration || holdsStaleRepairAction()) {
     if (eligibility.outcome === 'disqualified' || eligibility.outcome === 'suppressed') {
       next_action = {
         action_id: `na_terminal_${rowId}`,
@@ -870,6 +870,19 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       };
       lifecycle_stage = eligibility.outcome === 'disqualified' ? 'disqualified' : lifecycle_stage;
       work_state = 'terminal_recordkeeping';
+    } else if (needsTreatmentConfiguration) {
+      next_action = {
+        action_id: `na_policy_configuration_${rowId}`,
+        action_type: 'pending_human_review',
+        account_id: rowId,
+        lifecycle_stage,
+        sequence_state: 'paused_review',
+        work_state: 'pending_human_review',
+        reason: 'treatment_not_configured',
+        on_success: 'none',
+        policy_version: NEXT_ACTION_POLICY_VERSION,
+      };
+      work_state = 'pending_human_review';
     } else if (tierNeedsRecycleMonitoring(treatment.treatment_tier)) {
       const cold = createInitialColdState(rowId);
       next_action = {
@@ -1271,7 +1284,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     actor: 'system',
   });
 
-  const pipelineNameFinal = treatmentStrategy.tiers[treatment.treatment_tier]?.pipeline || '';
+  const pipelineNameFinal = treatmentStrategy?.tiers?.[treatment.treatment_tier]?.pipeline || '';
 
   const patch: Record<string, unknown> = {
     identity_confidence: observationStore.identity_resolution?.identity_confidence ?? 0,
@@ -1658,6 +1671,9 @@ export function guardChannelExecution(input: {
     intent: input.intent,
     dryRun: input.dryRun,
   })) {
+    if (!String(input.record.treatment_tier || '').trim()) {
+      return { allowed: false, reason: 'treatment_not_configured', blockers: ['treatment_not_configured'] };
+    }
     const campaign = parseAccountCampaignFromRecord(input.record);
     if (campaign) {
       const proc = evaluateCampaignProcess({

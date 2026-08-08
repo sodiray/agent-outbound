@@ -80,10 +80,6 @@ const resolveMailProductType = ({
       : 'mail';
   }
 
-  const sid = stepId.toLowerCase();
-  if (sid.includes('golden_ticket')) return 'golden_ticket';
-  if (sid.includes('postcard') || sid.includes('standard_postcard')) return 'standard_postcard';
-  if (sid.includes('mail') || sid.includes('letter')) return 'mail';
   return null;
 };
 
@@ -643,20 +639,25 @@ export const completeManualTask = async ({
       + '.',
     );
   }
+  const configuredStep = config
+    ? flattenPipelineSteps(config).find((step: any) => text(step?.id) === sid) as Record<string, unknown> | undefined
+    : undefined;
+  const configuredMailProduct = resolveMailProductType({ stepId: sid, configured: configuredStep || null });
+  const recordMailTreatment = text(recordRow?.mail_treatment).toLowerCase();
+  const mailProduct = configuredMailProduct
+    || (MAIL_PRODUCT_TYPES.has(recordMailTreatment) ? recordMailTreatment : null);
+  if (!configuredStep && config?.channels?.mail && recordMailTreatment === 'none') {
+    throw new Error(`Manual task ${sid} has no declared mail product and mail_treatment is none.`);
+  }
+  const configuredChannel = text(
+    (configuredStep?.config as Record<string, unknown> | undefined)?.channel || configuredStep?.channel,
+  ).toLowerCase();
   if (recordRow) {
-    const mailProductPreview = resolveMailProductType({ stepId: sid, configured: null });
-    const channelHint =
-      mailProductPreview
-        ? 'mail'
-        : (sid.toLowerCase().includes('phone') || sid.toLowerCase().includes('call')
-          ? 'phone'
-          : sid.toLowerCase().includes('linkedin')
-            ? 'linkedin'
-            : 'manual');
+    const channelHint = mailProduct ? 'mail' : configuredChannel || 'manual';
     const gate = shouldExecuteSequenceOutbound(recordRow, new Date(effectiveNowMs), {
       channel: channelHint,
       stepKind: 'manual_task',
-      taskType: mailProductPreview || channelHint,
+      taskType: mailProduct || channelHint,
       timeZone: config?.operations?.timezone,
     });
     if (!gate.execute) {
@@ -667,19 +668,13 @@ export const completeManualTask = async ({
   }
 
   // Guard: only complete steps that are configured as manual_task when config is present.
-  let configuredStep: Record<string, unknown> | undefined;
   if (config) {
-    const steps = flattenPipelineSteps(config);
-    configuredStep = steps.find((step: any) => text(step?.id) === sid) as
-      | Record<string, unknown>
-      | undefined;
     if (configuredStep && text(configuredStep.kind) !== 'manual_task') {
       throw new Error(`Step "${sid}" is not a manual_task (kind=${text(configuredStep.kind)}).`);
     }
 
     // Mail product types: refuse complete without stage_review authorization when
     // policy.review_required_for includes that type (fail closed).
-    const mailProduct = resolveMailProductType({ stepId: sid, configured: configuredStep || null });
     if (mailProduct) {
       assertMailStageReviewAuthorized({
         db,
@@ -691,11 +686,7 @@ export const completeManualTask = async ({
     }
   }
 
-  const isMailStep =
-    sid.toLowerCase().includes('mail')
-    || sid.toLowerCase().includes('postcard')
-    || sid.toLowerCase().includes('golden_ticket')
-    || sid.toLowerCase().includes('letter');
+  const isMailStep = Boolean(mailProduct);
 
   // Completion timestamps must be strictly after the park event so
   // listAwaitingManualTasks (done.occurred_at > park.occurred_at) closes the park.

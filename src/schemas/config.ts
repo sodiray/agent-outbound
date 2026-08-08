@@ -10,25 +10,6 @@ import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 import { findProhibitedSteps } from '../orchestrator/policy/pipeline-prohibitions.js';
 
 export const DEFAULT_SCORE_MIN_COVERAGE = 0.5;
-export const DEFAULT_SCORE_TREATMENT_BANDS = {
-  fit: [0, 50, 65, 80, 100],
-  fit_evidence_confidence: [0, 40, 60, 80, 100],
-} as const;
-
-export const DEFAULT_SCORE_GOLDEN_TICKET = {
-  minimums: {
-    fit_score: 85,
-    fit_evidence_confidence: 80,
-    identity_confidence: 90,
-    classification_confidence: 90,
-    buyer_confidence: 80,
-    mail_confidence: 90,
-    timing_score: 70,
-    strong_signal_strength: 60,
-    strong_signal_count: 2,
-    enrichment_budget_usd: 8,
-  },
-} as const;
 
 export const DEFAULT_SCORE_ACTION_CONFIDENCE = {
   minimums: {
@@ -51,19 +32,6 @@ export const DEFAULT_SCORE_REACHABILITY = {
   },
 } as const;
 
-export const DEFAULT_SCORE_CANDIDATE_TIER = {
-  bands: [0, 50, 65, 80, 100],
-} as const;
-
-export const DEFAULT_SCORE_POSTCARD = {
-  minimums: {
-    identity_confidence: 80,
-    strong_fit: 80,
-    fit_evidence: 40,
-    fit_evidence_exclusive_maximum: 60,
-  },
-} as const;
-
 export const DEFAULT_SCORE_ENRICHMENT_REPAIR = {
   minimums: {
     identity_confidence: 80,
@@ -74,18 +42,6 @@ export const DEFAULT_SCORE_ENRICHMENT_REPAIR = {
     strong_fit_evidence: 60,
   },
   channel_evidence_candidate_tiers: ['A', 'B', 'hold'],
-} as const;
-
-export const DEFAULT_SCORE_ENRICHMENT_BUDGET = {
-  ceilings: {
-    foundational: 0.15,
-    A: 3,
-    B: 1,
-    C: 0.3,
-    D: 0.15,
-    enrichment_hold: 0.3,
-    golden_ticket_total: 8,
-  },
 } as const;
 
 export const DEFAULT_CONTACT_POLICY = {
@@ -199,8 +155,20 @@ export const resolveContactPolicy = (
   fallback_wait_days: input?.fallback_wait_days,
 });
 
+export type GoldenTicketMinimum =
+  | 'fit_score'
+  | 'fit_evidence_confidence'
+  | 'identity_confidence'
+  | 'classification_confidence'
+  | 'buyer_confidence'
+  | 'mail_confidence'
+  | 'timing_score'
+  | 'strong_signal_strength'
+  | 'strong_signal_count'
+  | 'enrichment_budget_usd';
+
 export type GoldenTicketConfigInput = {
-  minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_GOLDEN_TICKET.minimums, number>>;
+  minimums?: Partial<Record<GoldenTicketMinimum, number>>;
 };
 
 export type ActionConfidenceConfigInput = {
@@ -239,8 +207,14 @@ export type PriorityConfigInput = {
   tier_lanes?: Record<string, 'reply_interest' | 'promised_followup' | 'blocking_repair' | 'enrichment' | 'outbound' | 'recycle_monitoring'>;
 };
 
+export type PostcardMinimum =
+  | 'identity_confidence'
+  | 'strong_fit'
+  | 'fit_evidence'
+  | 'fit_evidence_exclusive_maximum';
+
 export type PostcardConfigInput = {
-  minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_POSTCARD.minimums, number>>;
+  minimums?: Partial<Record<PostcardMinimum, number>>;
 };
 
 export type EnrichmentRepairConfigInput = {
@@ -248,8 +222,17 @@ export type EnrichmentRepairConfigInput = {
   channel_evidence_candidate_tiers?: Array<'A' | 'B' | 'C' | 'D' | 'hold'>;
 };
 
+export type EnrichmentBudgetCeiling =
+  | 'foundational'
+  | 'A'
+  | 'B'
+  | 'C'
+  | 'D'
+  | 'enrichment_hold'
+  | 'golden_ticket_total';
+
 export type EnrichmentBudgetConfigInput = {
-  ceilings?: Partial<Record<keyof typeof DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings, number>>;
+  ceilings?: Partial<Record<EnrichmentBudgetCeiling, number>>;
 };
 
 export type IdentityConfidenceConfig = {
@@ -1199,14 +1182,9 @@ const ScoreTreatmentBandLadderSchema = z.array(z.coerce.number().min(0).max(100)
   });
 
 const ScoreTreatmentBandsSchema = z.object({
-  fit: ScoreTreatmentBandLadderSchema.default(() => [...DEFAULT_SCORE_TREATMENT_BANDS.fit]),
-  fit_evidence_confidence: ScoreTreatmentBandLadderSchema.default(
-    () => [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
-  ),
-}).partial().default({
-  fit: [...DEFAULT_SCORE_TREATMENT_BANDS.fit],
-  fit_evidence_confidence: [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
-});
+  fit: ScoreTreatmentBandLadderSchema,
+  fit_evidence_confidence: ScoreTreatmentBandLadderSchema,
+}).partial();
 
 const TreatmentStrategyTierSchema = z.object({
   route: z.enum(['outbound', 'enrichment', 'recycle_monitoring']),
@@ -1288,18 +1266,18 @@ const ContactPolicySchema = z.object({
 
 const GoldenTicketConfigSchema = z.object({
   minimums: z.object({
-    fit_score: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.fit_score),
-    fit_evidence_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.fit_evidence_confidence),
-    identity_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.identity_confidence),
-    classification_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.classification_confidence),
-    buyer_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.buyer_confidence),
-    mail_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.mail_confidence),
-    timing_score: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.timing_score),
-    strong_signal_strength: ConfidenceMinimumSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_strength),
-    strong_signal_count: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_count),
-    enrichment_budget_usd: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_GOLDEN_TICKET.minimums.enrichment_budget_usd),
-  }).partial().default(() => ({ ...DEFAULT_SCORE_GOLDEN_TICKET.minimums })),
-}).default(() => ({ minimums: { ...DEFAULT_SCORE_GOLDEN_TICKET.minimums } }));
+    fit_score: ConfidenceMinimumSchema,
+    fit_evidence_confidence: ConfidenceMinimumSchema,
+    identity_confidence: ConfidenceMinimumSchema,
+    classification_confidence: ConfidenceMinimumSchema,
+    buyer_confidence: ConfidenceMinimumSchema,
+    mail_confidence: ConfidenceMinimumSchema,
+    timing_score: ConfidenceMinimumSchema,
+    strong_signal_strength: ConfidenceMinimumSchema,
+    strong_signal_count: NonNegativePolicyValueSchema,
+    enrichment_budget_usd: NonNegativePolicyValueSchema,
+  }).partial(),
+}).strict();
 
 const ActionConfidenceConfigSchema = z.object({
   minimums: z.object({
@@ -1331,17 +1309,15 @@ const ReachabilityConfigSchema = z.object({
 }).default(() => ({ minimums: { ...DEFAULT_SCORE_REACHABILITY.minimums } }));
 
 const CandidateTierConfigSchema = z.object({
-  bands: ScoreTreatmentBandLadderSchema.default(() => [...DEFAULT_SCORE_CANDIDATE_TIER.bands]),
-}).default(() => ({ bands: [...DEFAULT_SCORE_CANDIDATE_TIER.bands] }));
+  bands: ScoreTreatmentBandLadderSchema,
+}).partial().strict();
 
 const PostcardConfigSchema = z.object({
   minimums: z.object({
-    identity_confidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_POSTCARD.minimums.identity_confidence),
-    strong_fit: ConfidenceMinimumSchema.default(DEFAULT_SCORE_POSTCARD.minimums.strong_fit),
-    fit_evidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_POSTCARD.minimums.fit_evidence),
-    fit_evidence_exclusive_maximum: ConfidenceMinimumSchema.default(
-      DEFAULT_SCORE_POSTCARD.minimums.fit_evidence_exclusive_maximum,
-    ),
+    identity_confidence: ConfidenceMinimumSchema,
+    strong_fit: ConfidenceMinimumSchema,
+    fit_evidence: ConfidenceMinimumSchema,
+    fit_evidence_exclusive_maximum: ConfidenceMinimumSchema,
   }).partial().superRefine((minimums, ctx) => {
     if (minimums.fit_evidence === undefined || minimums.fit_evidence_exclusive_maximum === undefined) return;
     if (minimums.fit_evidence_exclusive_maximum > minimums.fit_evidence) return;
@@ -1350,8 +1326,8 @@ const PostcardConfigSchema = z.object({
       message: 'score.postcard.minimums.fit_evidence_exclusive_maximum must exceed fit_evidence.',
       path: ['fit_evidence_exclusive_maximum'],
     });
-  }).default(() => ({ ...DEFAULT_SCORE_POSTCARD.minimums })),
-}).default(() => ({ minimums: { ...DEFAULT_SCORE_POSTCARD.minimums } }));
+  }),
+}).strict();
 
 const EnrichmentRepairConfigSchema = z.object({
   minimums: z.object({
@@ -1373,15 +1349,15 @@ const EnrichmentRepairConfigSchema = z.object({
 
 const EnrichmentBudgetConfigSchema = z.object({
   ceilings: z.object({
-    foundational: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.foundational),
-    A: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.A),
-    B: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.B),
-    C: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.C),
-    D: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.D),
-    enrichment_hold: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.enrichment_hold),
-    golden_ticket_total: NonNegativePolicyValueSchema.default(DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings.golden_ticket_total),
-  }).partial().default(() => ({ ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings })),
-}).default(() => ({ ceilings: { ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings } }));
+    foundational: NonNegativePolicyValueSchema,
+    A: NonNegativePolicyValueSchema,
+    B: NonNegativePolicyValueSchema,
+    C: NonNegativePolicyValueSchema,
+    D: NonNegativePolicyValueSchema,
+    enrichment_hold: NonNegativePolicyValueSchema,
+    golden_ticket_total: NonNegativePolicyValueSchema,
+  }).partial(),
+}).strict();
 
 const validateConfidenceWeightTotal = (path: string) => (
   (weights: Record<string, number>, ctx: z.RefinementCtx) => {
@@ -2080,11 +2056,6 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
         ...(parsed.data?.score || {}),
         samples: parsed.data?.score?.samples ?? 1,
         min_coverage: parsed.data?.score?.min_coverage ?? DEFAULT_SCORE_MIN_COVERAGE,
-        treatment_bands: {
-          fit: parsed.data?.score?.treatment_bands?.fit ?? [...DEFAULT_SCORE_TREATMENT_BANDS.fit],
-          fit_evidence_confidence: parsed.data?.score?.treatment_bands?.fit_evidence_confidence
-            ?? [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
-        },
         identity_confidence: {
           weights: {
             business_name: parsed.data?.score?.identity_confidence?.weights?.business_name
@@ -2159,12 +2130,6 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
               ?? DEFAULT_SCORE_MAIL_CONFIDENCE.penalties.maximum_total,
           },
         },
-        golden_ticket: {
-          minimums: {
-            ...DEFAULT_SCORE_GOLDEN_TICKET.minimums,
-            ...(parsed.data?.score?.golden_ticket?.minimums || {}),
-          },
-        },
         action_confidence: {
           minimums: {
             ...DEFAULT_SCORE_ACTION_CONFIDENCE.minimums,
@@ -2177,15 +2142,6 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
             ...(parsed.data?.score?.reachability?.minimums || {}),
           },
         },
-        candidate_tier: {
-          bands: parsed.data?.score?.candidate_tier?.bands ?? [...DEFAULT_SCORE_CANDIDATE_TIER.bands],
-        },
-        postcard: {
-          minimums: {
-            ...DEFAULT_SCORE_POSTCARD.minimums,
-            ...(parsed.data?.score?.postcard?.minimums || {}),
-          },
-        },
         enrichment_repair: {
           minimums: {
             ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums,
@@ -2194,12 +2150,6 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
           channel_evidence_candidate_tiers:
             parsed.data?.score?.enrichment_repair?.channel_evidence_candidate_tiers
             ?? [...DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers],
-        },
-        enrichment_budget: {
-          ceilings: {
-            ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings,
-            ...(parsed.data?.score?.enrichment_budget?.ceilings || {}),
-          },
         },
       },
       ai: {

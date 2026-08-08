@@ -32,6 +32,7 @@ import {
   extractObservationsFromRecord,
   buildIdentityResolution,
 } from '../dist/orchestrator/policy/evidence.js';
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 const TV_YAML =
   process.env.TV_PROJECT_PATH
@@ -166,6 +167,7 @@ test('classifyEligibility: priority order suppressed > not_business > closed > t
 
 test('applyOutboundPolicy: writes evidence_resolution_json with required envelope fields', () => {
   const r = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_phase3_ev',
       business_name: 'Meridian Peak Plumbing',
@@ -230,6 +232,7 @@ test('applyOutboundPolicy: writes evidence_resolution_json with required envelop
 
 test('applyOutboundPolicy: material_contradiction populates inspectable contradictions', () => {
   const r = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_conflict',
       business_name: 'Conflict Co',
@@ -261,6 +264,7 @@ test('applyOutboundPolicy: material_contradiction populates inspectable contradi
 
 test('applyOutboundPolicy: unresolvable company_resolution → eligibility enrichment_hold', () => {
   const r = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_unresolvable',
       company_resolution: 'unresolvable',
@@ -277,6 +281,7 @@ test('applyOutboundPolicy: unresolvable company_resolution → eligibility enric
 
 test('applyOutboundPolicy: permanently closed → disqualified terminal next_action', () => {
   const r = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_closed',
       company_resolution: 'resolved',
@@ -454,6 +459,7 @@ test('Complete-when: raw-shaped sourced record → canonical account with inspec
   };
 
   const r = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: rawShaped,
     recomputeFitFromBreakdown: true,
   });
@@ -506,6 +512,7 @@ test('Complete-when: raw-shaped sourced record → canonical account with inspec
 
   // Reproducible: same inputs → same structural eligibility / treatment / facts
   const r2 = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: { ...rawShaped, next_action_json: r.patch.next_action_json },
     recomputeFitFromBreakdown: true,
   });

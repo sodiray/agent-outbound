@@ -8,6 +8,7 @@ import { normalizeConfig } from '../dist/schemas/config.js';
 import { openListDb } from '../dist/orchestrator/runtime/db.js';
 import { applyOutboundPolicy } from '../dist/orchestrator/policy/index.js';
 import { scoreAxisCriteriaGraded } from '../dist/orchestrator/scoring/runner.js';
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 const criteria = [{ id: 'commercial_fit', description: 'Commercial fit', weight: 1 }];
 
@@ -340,6 +341,7 @@ test('graded scoring coverage guard sends thin fit evidence to enrichment_hold',
       generateObject,
     });
     const policy = applyOutboundPolicy({
+      treatmentStrategy: treasureValleyTreatmentStrategy,
       recomputeFitFromBreakdown: true,
       record: {
         ...record,

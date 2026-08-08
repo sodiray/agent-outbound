@@ -13,68 +13,20 @@ const TITLE_PHRASES = [
   'proprietor',
   'president',
   'principal',
-  'engineer',
   'operator',
   'founder',
   'investor',
   'advisor',
   'partner',
-  'realtor',
   'owner',
   'cto',
   'ceo',
-  'dds',
-  'lpc',
 ] as const;
 
-const GENERIC_CATEGORY_PHRASES = new Set([
-  'accountant',
-  'attorney at law',
-  'bookkeeping services',
-  'chiropractor',
-  'cleaning service',
-  'cleaning services',
-  'consultant',
-  'consulting services',
-  'counselor at law',
-  'dental services',
-  'doctor of medicine',
-  'financial services',
-  'financial advisor',
-  'health and wellness services',
-  'home services',
-  'independent contractor',
-  'insurance agent',
-  'interior design services',
-  'legal services',
-  'marketing services',
-  'notary public',
-  'professional cleaning service',
-  'professional cleaning services',
-  'professional services',
-  'real estate agent',
-  'real estate services',
-  'realtor',
-]);
-
-const COMMON_NON_DISTINCTIVE_WORDS = new Set([
+const GENERIC_COMPANY_WORDS = new Set([
   'business',
-  'chiropractic',
-  'cleaning',
   'company',
-  'construction',
-  'consulting',
-  'contracting',
-  'design',
-  'dentistry',
-  'electrical',
   'group',
-  'law',
-  'marketing',
-  'media',
-  'plumbing',
-  'professional',
-  'roofing',
   'service',
   'services',
   'solutions',
@@ -127,21 +79,16 @@ const isTitleSequence = (value: string) => {
 
 const genericCategoryIn = (value: string): string | null => {
   const normalized = normalizePhrase(value);
-  const category = Array.from(GENERIC_CATEGORY_PHRASES).find((phrase) => {
-    if (normalized === phrase) return true;
-    if (!normalized.endsWith(` ${phrase}`)) return false;
-
-    return isTitleOnly(normalized.slice(0, -(phrase.length + 1)));
-  });
-
-  return category || null;
+  const tokens = normalized.split(' ').filter(Boolean);
+  if (!tokens.length || !tokens.every((token) => GENERIC_COMPANY_WORDS.has(token))) return null;
+  return normalized;
 };
 
 const isGenericCategory = (value: string) => Boolean(genericCategoryIn(value));
 
 const isNonDistinctiveSingleWord = (value: string) => {
   const tokens = phraseTokens(value);
-  return tokens.length === 1 && COMMON_NON_DISTINCTIVE_WORDS.has(tokens[0]);
+  return tokens.length === 1 && GENERIC_COMPANY_WORDS.has(tokens[0]);
 };
 
 const cleanCandidate = (value: string) => normalizeWhitespace(value)

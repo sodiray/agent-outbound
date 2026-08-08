@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  applyOutboundPolicy,
+  applyOutboundPolicy as applyRawOutboundPolicy,
   deriveFitEvidenceConfidence,
 } from '../dist/orchestrator/policy/apply-record.js';
 import {
@@ -22,6 +22,18 @@ import {
   evaluateOutboundReadiness,
 } from '../dist/orchestrator/policy/readiness.js';
 import { allocateMail } from '../dist/orchestrator/policy/contact-campaign.js';
+import {
+  treasureValleyGoldenTicket,
+  treasureValleyPostcard,
+  treasureValleyTreatmentStrategy,
+} from './fixtures/treatment-strategy.mjs';
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({
+  treatmentStrategy: treasureValleyTreatmentStrategy,
+  goldenTicket: treasureValleyGoldenTicket,
+  postcard: treasureValleyPostcard,
+  ...input,
+});
 
 // ── RES-EVIDENCE ─────────────────────────────────────────────────────────────
 

@@ -55,6 +55,7 @@ import {
 import { advanceAfterSuccessfulAction } from '../dist/orchestrator/policy/lifecycle.js';
 import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
 import { openListDb, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TV_ROOT =
@@ -294,6 +295,7 @@ test('mergeContactPlan via applyOutboundPolicy preserves rotation + mail on re-a
   assert.equal(afterMail.mail_allocated, true);
 
   const result = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_p8_policy',
       fit_score: 72,
@@ -484,6 +486,7 @@ test('applyOutboundPolicy maps treatment tiers to pipeline_name tier_*', () => {
   ];
   for (const c of cases) {
     const result = applyOutboundPolicy({
+      treatmentStrategy: treasureValleyTreatmentStrategy,
       record: {
         _row_id: `map_${c.tier}`,
         fit_score: c.fit,
@@ -596,6 +599,7 @@ test('campaign-process: rankCallCapacity uses pipeline priority without tier ass
 test('applyOutboundPolicy: process blockers land in readiness; new plan increments annual count', () => {
   const contacts = contactsFixture().filter((c) => c.outbound_disposition === 'eligible_target');
   const first = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_annual',
       fit_score: 72,
@@ -618,6 +622,7 @@ test('applyOutboundPolicy: process blockers land in readiness; new plan incremen
   // Over age + over annual → readiness not ready
   const agedPlan = { ...plan, started_at: '2019-01-01T00:00:00.000Z' };
   const blocked = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_annual',
       fit_score: 72,

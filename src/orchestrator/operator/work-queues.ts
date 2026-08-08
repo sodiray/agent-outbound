@@ -268,7 +268,8 @@ export function listRepairQueue(input: {
 }
 
 /**
- * Enrichment hold: treatment_tier = enrichment_hold OR eligibility_outcome = enrichment_hold.
+ * Enrichment hold: only an explicit treatment or eligibility outcome may place a
+ * record in this queue. Generic research work is not a hold assignment.
  */
 export function listEnrichmentHoldQueue(input: {
   db: any;
@@ -284,9 +285,6 @@ export function listEnrichmentHoldQueue(input: {
   }
   if (tableHasColumn(db, 'records', 'eligibility_outcome')) {
     clauses.push(`lower(COALESCE(eligibility_outcome, '')) = 'enrichment_hold'`);
-  }
-  if (tableHasColumn(db, 'records', 'work_state')) {
-    clauses.push(`lower(COALESCE(work_state, '')) = 'research_enrichment'`);
   }
   if (clauses.length === 0) {
     return envelope('enrichment_hold', [], limit, offset, 0);
@@ -306,7 +304,6 @@ export function listEnrichmentHoldQueue(input: {
     const reasons: string[] = [];
     if (text(r.treatment_tier).toLowerCase() === 'enrichment_hold') reasons.push('treatment_tier');
     if (text(r.eligibility_outcome).toLowerCase() === 'enrichment_hold') reasons.push('eligibility_outcome');
-    if (text(r.work_state).toLowerCase() === 'research_enrichment') reasons.push('research_enrichment');
     return mapRow(r, reasons.join(',') || 'enrichment_hold', {
       eligibility_outcome: text(r.eligibility_outcome) || undefined,
     });

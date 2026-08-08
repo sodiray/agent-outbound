@@ -37,6 +37,7 @@ import {
 } from '../dist/orchestrator/policy/contact-campaign.js';
 import { evaluateOutboundReadiness } from '../dist/orchestrator/policy/readiness.js';
 import { guardChannelExecution, readinessInputFromRecord } from '../dist/orchestrator/policy/apply-record.js';
+import { treasureValleyEnrichmentBudget } from './fixtures/treatment-strategy.mjs';
 
 const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -112,6 +113,8 @@ policy:
   prohibited_channels: [sms]
   prohibited_task_types: [visit, field_visit]
   enforce_readiness: true
+score:
+  enrichment_budget: ${JSON.stringify(treasureValleyEnrichmentBudget)}
 channels:
   email:
     draft_approval_required: true

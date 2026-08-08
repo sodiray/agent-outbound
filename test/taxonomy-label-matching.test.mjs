@@ -9,6 +9,7 @@ import {
   validateTaxonomyLabels,
 } from '../dist/orchestrator/policy/taxonomy.js';
 import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 const taxonomy = {
   taxonomy_version: 'example-taxonomy-v1',
@@ -106,6 +107,7 @@ test('taxonomy: a missing list-local registry never resolves another pipeline ta
 test('taxonomy: policy application holds records when taxonomy resolution fails', () => {
   const missingListDir = join(tmpdir(), `agent-outbound-no-taxonomy-${randomUUID()}`);
   const result = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     listDir: missingListDir,
     record: {
       _row_id: 'taxonomy_unresolved',

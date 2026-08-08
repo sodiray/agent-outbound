@@ -140,24 +140,31 @@ const isDueAtOrBefore = (
 /** Normalize channel/step hints into a coarse channel token. */
 export function resolveOutboundChannelHint(opts?: SequenceOutboundOptions | null): string {
   if (!opts) return '';
-  const hay = [
+  const values = [
     opts.channel,
-    opts.stepKind,
     opts.taskType,
+    opts.stepKind,
   ]
     .map((x) => String(x || '').trim().toLowerCase())
-    .filter(Boolean)
-    .join(' ');
-  if (!hay) return '';
-  if (hay.includes('linkedin')) return 'linkedin';
-  if (hay.includes('email') || hay.includes('send_email')) return 'email';
-  if (/\bmail\b/.test(hay) || hay.includes('postcard') || hay.includes('golden_ticket') || hay.includes('send_mail')) {
-    return 'mail';
-  }
-  if (hay.includes('sms') || hay.includes('send_sms')) return 'sms';
-  if (hay.includes('phone') || hay.includes('call') || hay.includes('human_phone')) return 'phone';
-  if (hay.includes('manual')) return 'manual';
-  return String(opts.channel || opts.stepKind || '').trim().toLowerCase();
+    .filter(Boolean);
+  const channels: Record<string, string> = {
+    email: 'email',
+    send_email: 'email',
+    linkedin: 'linkedin',
+    linkedin_connect: 'linkedin',
+    mail: 'mail',
+    send_mail: 'mail',
+    standard_postcard: 'mail',
+    golden_ticket: 'mail',
+    sms: 'sms',
+    send_sms: 'sms',
+    phone: 'phone',
+    phone_call: 'phone',
+    human_phone: 'phone',
+    manual: 'manual',
+    manual_task: 'manual',
+  };
+  return values.map((value) => channels[value] || '').find(Boolean) || values[0] || '';
 }
 
 /** True when action_type / work_state indicates phone capacity work. */

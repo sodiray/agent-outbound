@@ -7,8 +7,20 @@ import {
   deriveMailConfidence,
   resolveBuyerEvidenceFromRecord,
 } from '../dist/orchestrator/policy/evidence.js';
-import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
+import { applyOutboundPolicy as applyRawOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
 import { evaluateReachability } from '../dist/orchestrator/policy/timing-reachability.js';
+import {
+  treasureValleyGoldenTicket,
+  treasureValleyPostcard,
+  treasureValleyTreatmentStrategy,
+} from './fixtures/treatment-strategy.mjs';
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({
+  treatmentStrategy: treasureValleyTreatmentStrategy,
+  goldenTicket: treasureValleyGoldenTicket,
+  postcard: treasureValleyPostcard,
+  ...input,
+});
 
 const durableObservation = (predicate, value) => ({
   evidence_id: `evidence_${predicate}`,

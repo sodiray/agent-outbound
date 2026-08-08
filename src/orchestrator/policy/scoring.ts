@@ -5,7 +5,6 @@
 
 import {
   DEFAULT_SCORE_ACTION_CONFIDENCE,
-  DEFAULT_SCORE_CANDIDATE_TIER,
   type ActionConfidenceConfigInput,
   type CandidateTierConfigInput,
   type PriorityConfigInput,
@@ -246,9 +245,12 @@ export function assignCandidateTier(preliminaryFit: number | null, config?: Cand
   candidate_tier: 'A' | 'B' | 'C' | 'D' | 'hold';
   reasons: string[];
 } {
-  const bands = config?.bands || DEFAULT_SCORE_CANDIDATE_TIER.bands;
   if (preliminaryFit == null || Number.isNaN(preliminaryFit)) {
     return { candidate_tier: 'hold', reasons: ['unscored'] };
+  }
+  const bands = config?.bands;
+  if (!bands || bands.length !== 5) {
+    return { candidate_tier: 'hold', reasons: ['candidate_tier_not_configured'] };
   }
   if (preliminaryFit >= bands[3]) return { candidate_tier: 'A', reasons: [`prelim_fit_${bands[3]}_100`] };
   if (preliminaryFit >= bands[2]) return { candidate_tier: 'B', reasons: [`prelim_fit_${bands[2]}_${bands[3] - 1}`] };

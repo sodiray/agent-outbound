@@ -18,6 +18,7 @@ import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
 import { policyApplyCommand } from '../dist/commands/index.js';
 import { calculateFitScore } from '../dist/orchestrator/policy/scoring.js';
+import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -59,6 +60,7 @@ policy:
   prohibited_task_types: [visit, field_visit]
   enforce_readiness: true
 score:
+  treatment: ${JSON.stringify(treasureValleyTreatmentStrategy)}
   grading: graded
   criteria:
     - id: operational_coordination_burden
@@ -148,6 +150,7 @@ test('enrich action policy_apply writes treatment and next_action via production
     record,
     aiConfig: {},
     context: {},
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     outputSchema: { parse: (x) => x },
   });
   assert.ok(result.outputs.treatment_tier);
@@ -161,7 +164,7 @@ test('enrich action policy_apply writes treatment and next_action via production
   const summary = await executeEnrichmentStepOnRecords({
     db,
     listDir,
-    config: { ai: {} },
+    config: { ai: {}, score: { treatment: treasureValleyTreatmentStrategy } },
     mcp: null,
     toolCatalog: null,
     step: {
@@ -282,6 +285,7 @@ test('applyOutboundPolicy does not mirror priority to fit', () => {
     { id: 'local_buying_autonomy', grade: 9 },
   ]);
   const r = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'x',
       fit_score: fit.fit_score,
@@ -311,6 +315,7 @@ test('applyOutboundPolicy does not mirror priority to fit', () => {
 
 test('applyOutboundPolicy writes evidence_resolution_json envelope', () => {
   const r = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_ev',
       score_breakdown: JSON.stringify([
@@ -397,6 +402,7 @@ test('re-applyOutboundPolicy preserves rotation and mail_allocated (no double ma
 
   // Full applyOutboundPolicy path: record carries prior plan JSON
   const reapplied = applyOutboundPolicy({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'acct_merge',
       fit_score: 70,

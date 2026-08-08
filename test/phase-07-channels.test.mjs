@@ -40,6 +40,7 @@ import {
   allocateMail,
   parseAccountCampaignFromRecord,
 } from '../dist/orchestrator/policy/contact-campaign.js';
+import { treasureValleyEnrichmentBudget } from './fixtures/treatment-strategy.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -104,6 +105,8 @@ policy:
   prohibited_channels: [sms, automated_voice]
   prohibited_task_types: [visit, field_visit]
   enforce_readiness: true
+score:
+  enrichment_budget: ${JSON.stringify(treasureValleyEnrichmentBudget)}
 channels:
   email:
     draft_approval_required: true

@@ -9,8 +9,13 @@ import {
   assignTreatmentTier,
   evaluateGoldenTicket,
   enrichmentBudgetRemaining,
-  ENRICHMENT_COST_CEILINGS,
 } from '../dist/orchestrator/policy/treatment.js';
+import {
+  treasureValleyGoldenTicket,
+  treasureValleyCandidateTier,
+  treasureValleyPostcard,
+  treasureValleyTreatmentStrategy,
+} from './fixtures/treatment-strategy.mjs';
 import {
   calculateFitScore,
   calculatePriority,
@@ -93,22 +98,18 @@ test('priority is not a mirror of fit', () => {
   assert.notEqual(t1.priority_rank, t2.priority_rank);
 });
 
-test('treatment matrix assigns A/B/C/D/hold per design', () => {
-  assert.equal(assignTreatmentTier({ fitScore: 85, fitEvidenceConfidence: 90 }).tier, 'A');
-  assert.equal(assignTreatmentTier({ fitScore: 85, fitEvidenceConfidence: 70 }).tier, 'B');
-  assert.equal(assignTreatmentTier({ fitScore: 70, fitEvidenceConfidence: 70 }).tier, 'B');
-  assert.equal(assignTreatmentTier({ fitScore: 55, fitEvidenceConfidence: 70 }).tier, 'C');
-  assert.equal(assignTreatmentTier({ fitScore: 40, fitEvidenceConfidence: 90 }).tier, 'D');
-  assert.equal(assignTreatmentTier({ fitScore: 85, fitEvidenceConfidence: 30 }).tier, 'enrichment_hold');
-  assert.equal(assignTreatmentTier({ fitScore: null, fitEvidenceConfidence: 90 }).tier, 'enrichment_hold');
+test('declared treatment matrix assigns the pipeline tiers', () => {
+  assert.equal(assignTreatmentTier({ fitScore: 85, fitEvidenceConfidence: 90, treatmentStrategy: treasureValleyTreatmentStrategy }).tier, 'A');
+  assert.equal(assignTreatmentTier({ fitScore: 85, fitEvidenceConfidence: 70, treatmentStrategy: treasureValleyTreatmentStrategy }).tier, 'B');
+  assert.equal(assignTreatmentTier({ fitScore: 70, fitEvidenceConfidence: 70, treatmentStrategy: treasureValleyTreatmentStrategy }).tier, 'B');
+  assert.equal(assignTreatmentTier({ fitScore: 55, fitEvidenceConfidence: 70, treatmentStrategy: treasureValleyTreatmentStrategy }).tier, 'C');
+  assert.equal(assignTreatmentTier({ fitScore: 40, fitEvidenceConfidence: 90, treatmentStrategy: treasureValleyTreatmentStrategy }).tier, 'D');
+  assert.equal(assignTreatmentTier({ fitScore: 85, fitEvidenceConfidence: 30, treatmentStrategy: treasureValleyTreatmentStrategy }).tier, 'enrichment_hold');
+  assert.equal(assignTreatmentTier({ fitScore: null, fitEvidenceConfidence: 90, treatmentStrategy: treasureValleyTreatmentStrategy }).tier, 'enrichment_hold');
 });
 
-test('treatment bands default exactly to the existing matrix labels and cuts', () => {
-  const config = normalizeConfig({ score: {} }).config;
-  assert.deepEqual(config.score.treatment_bands, {
-    fit: [0, 50, 65, 80, 100],
-    fit_evidence_confidence: [0, 40, 60, 80, 100],
-  });
+test('declared treatment bands control the assigned tier', () => {
+  const config = normalizeConfig({ score: { treatment: treasureValleyTreatmentStrategy } }).config;
 
   const cases = [
     { score: 49.9, label: 'below50', tier: 'D' },
@@ -122,7 +123,7 @@ test('treatment bands default exactly to the existing matrix labels and cuts', (
     const result = assignTreatmentTier({
       fitScore: item.score,
       fitEvidenceConfidence: 90,
-      treatmentBands: config.score.treatment_bands,
+      treatmentStrategy: config.score.treatment,
     });
     assert.equal(result.tier, item.tier);
     assert.ok(result.reasons.includes(`fit_band=${item.label}`));
@@ -139,9 +140,9 @@ test('configured treatment bands use their configured fit cut and reject malform
   const configured = assignTreatmentTier({
     fitScore: 47,
     fitEvidenceConfidence: 90,
-    treatmentBands: tv.config.score.treatment_bands,
+    treatmentStrategy: { ...treasureValleyTreatmentStrategy, bands: { ...treasureValleyTreatmentStrategy.bands, fit: [0, 45, 65, 80, 100] } },
   });
-  assert.equal(defaults.tier, 'D');
+  assert.equal(defaults.tier, '');
   assert.equal(configured.tier, 'C');
   assert.ok(configured.reasons.includes('fit_band=45-64'));
 
@@ -189,6 +190,9 @@ test('declared treatment strategy applies opaque tier keys and routes', () => {
 
 test('mail treatment is independent; golden ticket is tier-A overlay', () => {
   const full = assignTreatmentAndMail({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     fitScore: 90,
     fitEvidenceConfidence: 90,
     identityConfidence: 90,
@@ -211,6 +215,9 @@ test('mail treatment is independent; golden ticket is tier-A overlay', () => {
   assert.equal(full.golden_ticket_eligible, true);
 
   const postcardOnly = assignTreatmentAndMail({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     fitScore: 70,
     fitEvidenceConfidence: 70,
     identityConfidence: 85,
@@ -220,6 +227,9 @@ test('mail treatment is independent; golden ticket is tier-A overlay', () => {
   assert.equal(postcardOnly.mail_treatment, 'standard_postcard');
 
   const tierC = assignTreatmentAndMail({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
+    postcard: treasureValleyPostcard,
     fitScore: 55,
     fitEvidenceConfidence: 70,
     identityConfidence: 85,
@@ -231,6 +241,8 @@ test('mail treatment is independent; golden ticket is tier-A overlay', () => {
 
 test('golden ticket fails when identity weak', () => {
   const g = evaluateGoldenTicket({
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    goldenTicket: treasureValleyGoldenTicket,
     treatmentTier: 'A',
     fitScore: 90,
     fitEvidenceConfidence: 90,
@@ -251,17 +263,15 @@ test('golden ticket fails when identity weak', () => {
 });
 
 test('candidate tier controls research depth', () => {
-  assert.equal(assignCandidateTier(90).candidate_tier, 'A');
-  assert.equal(assignCandidateTier(70).candidate_tier, 'B');
-  assert.equal(assignCandidateTier(55).candidate_tier, 'C');
-  assert.equal(assignCandidateTier(20).candidate_tier, 'D');
+  assert.equal(assignCandidateTier(90, treasureValleyCandidateTier).candidate_tier, 'A');
+  assert.equal(assignCandidateTier(70, treasureValleyCandidateTier).candidate_tier, 'B');
+  assert.equal(assignCandidateTier(55, treasureValleyCandidateTier).candidate_tier, 'C');
+  assert.equal(assignCandidateTier(20, treasureValleyCandidateTier).candidate_tier, 'D');
   assert.equal(assignCandidateTier(null).candidate_tier, 'hold');
 });
 
 test('enrichment ceilings match provisional policy', () => {
-  assert.equal(ENRICHMENT_COST_CEILINGS.A, 3);
-  assert.equal(ENRICHMENT_COST_CEILINGS.golden_ticket_total, 8);
-  const r = enrichmentBudgetRemaining({ candidateOrTreatment: 'B', spentUsd: 0.5 });
+  const r = enrichmentBudgetRemaining({ candidateOrTreatment: 'B', spentUsd: 0.5, enrichmentBudget: { ceilings: { B: 1, golden_ticket_total: 8 } } });
   assert.ok(r.withinBudget);
   assert.ok(r.remaining < 1);
 });

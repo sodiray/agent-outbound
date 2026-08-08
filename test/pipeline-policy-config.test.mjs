@@ -29,44 +29,6 @@ const goldenTicketPassInput = () => ({
   cohortCapacityOk: true,
 });
 
-test('pipeline policy defaults reproduce the existing Golden Ticket, postcard, action, reachability, candidate, repair, and budget values', () => {
-  const score = normalizeConfig({ score: {} }).config.score;
-  assert.deepEqual(score.golden_ticket.minimums, {
-    fit_score: 85,
-    fit_evidence_confidence: 80,
-    identity_confidence: 90,
-    classification_confidence: 90,
-    buyer_confidence: 80,
-    mail_confidence: 90,
-    timing_score: 70,
-    strong_signal_strength: 60,
-    strong_signal_count: 2,
-    enrichment_budget_usd: 8,
-  });
-  assert.deepEqual(score.action_confidence.minimums, {
-    identity: 80, email: 60, phone: 70, linkedin: 60, mail: 80, fit_evidence: 40,
-  });
-  assert.deepEqual(score.reachability.minimums, {
-    email_verification: 70, phone_ready: 60, phone_named_validated: 70, linkedin_invite_ready: 60, mail_ready: 60,
-  });
-  assert.deepEqual(score.candidate_tier.bands, [0, 50, 65, 80, 100]);
-  assert.deepEqual(score.postcard.minimums, {
-    identity_confidence: 80, strong_fit: 80, fit_evidence: 40, fit_evidence_exclusive_maximum: 60,
-  });
-  assert.deepEqual(score.enrichment_repair.minimums, {
-    identity_confidence: 80,
-    fit_evidence_confidence: 40,
-    classification_confidence: 40,
-    buyer_confidence: 60,
-    strong_fit: 65,
-    strong_fit_evidence: 60,
-  });
-  assert.deepEqual(score.enrichment_repair.channel_evidence_candidate_tiers, ['A', 'B', 'hold']);
-  assert.deepEqual(score.enrichment_budget.ceilings, {
-    foundational: 0.15, A: 3, B: 1, C: 0.3, D: 0.15, enrichment_hold: 0.3, golden_ticket_total: 8,
-  });
-});
-
 test('configured pipeline policy thresholds are honored across every moved policy family', () => {
   const score = normalizeConfig({
     score: {

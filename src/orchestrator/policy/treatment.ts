@@ -4,10 +4,6 @@
  */
 
 import {
-  DEFAULT_SCORE_ENRICHMENT_BUDGET,
-  DEFAULT_SCORE_GOLDEN_TICKET,
-  DEFAULT_SCORE_POSTCARD,
-  DEFAULT_SCORE_TREATMENT_BANDS,
   type EnrichmentBudgetConfigInput,
   type GoldenTicketConfigInput,
   type PostcardConfigInput,
@@ -18,41 +14,6 @@ export const CALCULATION_RULE_VERSION = 'tv-treatment-v1';
 
 export type TreatmentTier = string;
 export type MailTreatment = 'none' | 'standard_postcard' | 'golden_ticket';
-export const LEGACY_TREATMENT_STRATEGY: Required<TreatmentStrategyConfigInput> = {
-  bands: {
-    fit: [...DEFAULT_SCORE_TREATMENT_BANDS.fit],
-    fit_evidence_confidence: [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
-  },
-  matrix: [
-    ['D', 'D', 'D', 'D'],
-    ['D', 'D', 'C', 'C'],
-    ['enrichment_hold', 'C', 'B', 'B'],
-    ['enrichment_hold', 'B', 'B', 'A'],
-  ],
-  unscored_tier: 'enrichment_hold',
-  tiers: {
-    A: { route: 'outbound', pipeline: 'tier_a', standard_postcard: true, golden_ticket: true },
-    B: { route: 'outbound', pipeline: 'tier_b', standard_postcard: true, postcard_exception: true },
-    C: { route: 'outbound', pipeline: 'tier_c' },
-    D: { route: 'recycle_monitoring', pipeline: 'tier_d' },
-    enrichment_hold: { route: 'enrichment', pipeline: 'enrichment_hold' },
-  },
-};
-/** @deprecated Use score.enrichment_budget; retained for compatibility with policy consumers. */
-export const ENRICHMENT_COST_CEILINGS = DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings;
-/** @deprecated Use score.golden_ticket.minimums; retained for compatibility with policy consumers. */
-export const GOLDEN_TICKET_MIN = {
-  fitScore: DEFAULT_SCORE_GOLDEN_TICKET.minimums.fit_score,
-  fitEvidenceConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.fit_evidence_confidence,
-  identityConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.identity_confidence,
-  classificationConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.classification_confidence,
-  buyerConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.buyer_confidence,
-  mailConfidence: DEFAULT_SCORE_GOLDEN_TICKET.minimums.mail_confidence,
-  timingScore: DEFAULT_SCORE_GOLDEN_TICKET.minimums.timing_score,
-  strongSignalStrength: DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_strength,
-  strongSignalCount: DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_count,
-  enrichmentBudgetUsd: DEFAULT_SCORE_GOLDEN_TICKET.minimums.enrichment_budget_usd,
-} as const;
 export type TreatmentBandLadders = {
   fit?: readonly number[];
   fit_evidence_confidence?: readonly number[];
@@ -161,15 +122,12 @@ export function assignTreatmentTier(input: {
   treatmentBands?: TreatmentBandLadders;
   treatmentStrategy?: TreatmentStrategyConfigInput;
 }): { tier: TreatmentTier; reasons: string[] } {
-  const strategy = input.treatmentStrategy ?? LEGACY_TREATMENT_STRATEGY;
-  const fitBoundaries = input.treatmentStrategy?.bands?.fit
-    || input.treatmentBands?.fit
-    || strategy.bands.fit
-    || DEFAULT_SCORE_TREATMENT_BANDS.fit;
-  const confidenceBoundaries = input.treatmentStrategy?.bands?.fit_evidence_confidence
-    || input.treatmentBands?.fit_evidence_confidence
-    || strategy.bands.fit_evidence_confidence
-    || DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence;
+  const strategy = input.treatmentStrategy;
+  if (!strategy?.bands?.fit || !strategy.bands.fit_evidence_confidence || !strategy.matrix || !strategy.unscored_tier) {
+    return { tier: '', reasons: ['treatment_not_configured'] };
+  }
+  const fitBoundaries = strategy.bands.fit;
+  const confidenceBoundaries = strategy.bands.fit_evidence_confidence;
   const fit = band(input.fitScore, fitBoundaries);
   const conf = band(input.fitEvidenceConfidence, confidenceBoundaries);
   const reasons: string[] = [
@@ -203,7 +161,8 @@ export function evaluateStandardPostcard(input: {
 }): { eligible: boolean; reasons: string[]; withheld: string[] } {
   const reasons: string[] = [];
   const withheld: string[] = [];
-  const mins = { ...DEFAULT_SCORE_POSTCARD.minimums, ...input.postcard?.minimums };
+  const mins = input.postcard?.minimums;
+  if (!mins) return { eligible: false, reasons, withheld: ['postcard_not_configured'] };
   if (!input.mailAddressReady) {
     withheld.push('mail_address_not_ready');
   }
@@ -212,7 +171,7 @@ export function evaluateStandardPostcard(input: {
   }
   const fit = input.fitScore ?? 0;
   const conf = input.fitEvidenceConfidence ?? 0;
-  const tierRule = (input.treatmentStrategy ?? LEGACY_TREATMENT_STRATEGY).tiers[input.treatmentTier];
+  const tierRule = input.treatmentStrategy?.tiers?.[input.treatmentTier];
   const tierOk = tierRule?.standard_postcard === true;
   const strongFitException = fit >= mins.strong_fit
     && conf >= mins.fit_evidence
@@ -233,7 +192,7 @@ export function evaluateStandardPostcard(input: {
  */
 export function countStrongTimingSignals(
   signals: Array<{ id?: string; decayed_strength?: number; strength?: number }> | null | undefined,
-  minStrength: number = DEFAULT_SCORE_GOLDEN_TICKET.minimums.strong_signal_strength,
+  minStrength: number = 0,
 ): number {
   if (!Array.isArray(signals) || !signals.length) return 0;
   let n = 0;
@@ -286,10 +245,11 @@ export function evaluateGoldenTicket(input: {
 }): { eligible: boolean; reasons: string[]; withheld: string[] } {
   const reasons: string[] = [];
   const withheld: string[] = [];
-  const mins = { ...DEFAULT_SCORE_GOLDEN_TICKET.minimums, ...input.goldenTicket?.minimums };
+  const mins = input.goldenTicket?.minimums;
+  if (!mins) return { eligible: false, reasons, withheld: ['golden_ticket_not_configured'] };
 
-  if ((input.treatmentStrategy ?? LEGACY_TREATMENT_STRATEGY).tiers[input.treatmentTier]?.golden_ticket !== true) {
-    withheld.push(input.treatmentStrategy ? 'tier_not_declared_for_golden_ticket' : 'not_tier_a');
+  if (input.treatmentStrategy?.tiers?.[input.treatmentTier]?.golden_ticket !== true) {
+    withheld.push('tier_not_declared_for_golden_ticket');
   }
 
   if (isMissingScore(input.fitScore)) withheld.push('fit_score_missing');
@@ -497,10 +457,10 @@ export function enrichmentBudgetRemaining(input: {
   forGoldenTicket?: boolean;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
 }): { ceiling: number; remaining: number; withinBudget: boolean } {
-  const ceilings = { ...DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings, ...input.enrichmentBudget?.ceilings };
+  const ceilings = input.enrichmentBudget?.ceilings || {};
   const ceiling = input.forGoldenTicket
     ? ceilings.golden_ticket_total
-    : ceilings[input.candidateOrTreatment] ?? ceilings.foundational;
+    : ceilings[input.candidateOrTreatment] ?? ceilings.foundational ?? 0;
   const remaining = Math.max(0, ceiling - (input.spentUsd || 0));
   return { ceiling, remaining, withinBudget: remaining > 0 || (input.spentUsd || 0) <= ceiling };
 }
