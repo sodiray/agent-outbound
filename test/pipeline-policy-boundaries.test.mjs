@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -115,12 +115,25 @@ test('configured IMAP inboxes require a reply classifier', () => {
   assert.deepEqual(declared.errors, []);
 });
 
-test('engine has no duplicated deterministic opt-out predicate', () => {
-  const source = [
-    'src/orchestrator/runtime/polling.ts',
-    'src/orchestrator/runtime/inbound-reply-process.ts',
-  ].map((path) => readFileSync(path, 'utf8')).join('\n');
-  assert.doesNotMatch(source, /hasExplicitStopIntent|hasDeclaredOptOutIntent|includes\(['"] stop /);
+test('inbound reply handling honors classifier output over a keyword fallback', async () => {
+  const db = createInboundDb();
+  try {
+    const result = await processInboundReplyText({
+      db,
+      recordId: 'inbound-policy-record',
+      replyText: 'Please stop emailing me.',
+      classifier,
+      generate: async () => ({
+        object: { classification: 'needs_review', reason: 'Needs a human decision.' },
+      }),
+    });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('inbound-policy-record');
+    assert.equal(result.classification, 'needs_review');
+    assert.equal(record.account_sequence_state, 'paused_inbound');
+    assert.equal(Number(record.suppressed), 0);
+  } finally {
+    db.close();
+  }
 });
 
 test('undeclared tier names inherit no contact cadence or limits', () => {
