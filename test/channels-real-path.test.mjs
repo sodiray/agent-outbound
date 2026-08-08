@@ -410,6 +410,98 @@ test('email: ready draft sends via sink; second send is idempotent skip', async 
   }
 });
 
+test('email: a send with no derivable idempotency key refuses before transmission', async () => {
+  const prev = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir, sinkDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    insertDraft({
+      db,
+      draft: {
+        draft_id: 'draft_no_idempotency',
+        row_id: 'fixture_channel_1',
+        sequence_name: 'default',
+        step_number: 1,
+        step_id: 'email_no_idempotency',
+        channel: 'email',
+        status: 'ready',
+        subject: 'Approved subject',
+        body: 'Approved body',
+      },
+    });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+    const result = await executeChannelStep({
+      mcp: null,
+      listDir,
+      listName: 'Channel Real Path',
+      db,
+      record,
+      sequenceName: 'default',
+      stepNumber: 1,
+      step: {
+        ...emailStep,
+        id: 'email_no_idempotency',
+        config: { ...emailStep.config, idempotency: undefined },
+      },
+      sequence: { steps: [] },
+      channelHint: 'email',
+      intent: 'send',
+    });
+    assert.equal(result.status, 'failed');
+    assert.match(String(result.reason), /idempotency key is required/i);
+    assert.equal(readdirSync(sinkDir).filter((f) => f.endsWith('.json')).length, 0);
+    db.close();
+  } finally {
+    if (prev === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = prev;
+  }
+});
+
+test('email: concurrent same-record sends transmit exactly once', async () => {
+  const prev = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir, sinkDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    insertDraft({
+      db,
+      draft: {
+        draft_id: 'draft_concurrent_idempotency',
+        row_id: 'fixture_channel_1',
+        sequence_name: 'default',
+        step_number: 1,
+        step_id: 'email_1',
+        channel: 'email',
+        status: 'ready',
+        subject: 'Approved subject',
+        body: 'Approved body',
+      },
+    });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+    const send = () => executeChannelStep({
+      mcp: null,
+      listDir,
+      listName: 'Channel Real Path',
+      db,
+      record,
+      sequenceName: 'default',
+      stepNumber: 1,
+      step: emailStep,
+      sequence: { steps: [] },
+      channelHint: 'email',
+      intent: 'send',
+    });
+    const outcomes = await Promise.all([send(), send()]);
+    assert.equal(outcomes.filter((outcome) => outcome.status === 'sent').length, 1);
+    assert.equal(readdirSync(sinkDir).filter((f) => f.endsWith('.json')).length, 1);
+    db.close();
+  } finally {
+    if (prev === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = prev;
+  }
+});
+
 test('email: compose outputs mapped by args_map become the pending draft content', async () => {
   const { listDir, sinkDir } = createList();
   const db = openListDb({ listDir, readonly: false });
@@ -979,7 +1071,11 @@ test('linkedin: not forbidden; production path fails clearly without configured 
         kind: 'linkedin_connect',
         id: 'linkedin_1',
         draft_approval_required: true,
-        config: { channel: 'linkedin', invite_message: 'Hello — I would be glad to connect.' },
+        config: {
+          channel: 'linkedin',
+          invite_message: 'Hello — I would be glad to connect.',
+          idempotency: { key_source: ['_row_id'], scope: 'list' },
+        },
       },
       sequence: { steps: [] },
       channelHint: 'linkedin',

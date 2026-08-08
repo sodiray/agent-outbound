@@ -649,12 +649,15 @@ export const executeChannelStep = async ({
   }
 
   const idemConfig = step?.config?.idempotency;
-  let idemKey = '';
+  const idemKeySource = Array.isArray(idemConfig?.key_source)
+    ? idemConfig.key_source.filter((value: unknown) => String(value || '').trim() !== '')
+    : [];
   // Build the key early for complete/fail paths, but claim exclusively only
   // immediately before a provider side-effect (after draft/review gates). Claiming
   // before gates left pending leases that blocked approve→send and concurrent
   // workers incorrectly.
-  if (intent !== 'draft' && !dryRun && idemConfig?.key_source?.length) {
+  const idemKey = intent !== 'draft' && !dryRun && idemKeySource.length > 0
+    ? (() => {
     const idemRecipient = String(
       resolveActiveContactEmailForSend({ record: sendRecord }).email
       || sendRecord.contact_email
@@ -665,8 +668,8 @@ export const executeChannelStep = async ({
       sendRecord.email_last_body
       || '',
     ).trim().slice(0, 64);
-    idemKey = buildIdempotencyKey({
-      keySource: idemConfig.key_source,
+    const key = buildIdempotencyKey({
+      keySource: idemKeySource,
       record: sendRecord,
       scope: idemConfig.scope || 'list',
       context: {
@@ -678,6 +681,10 @@ export const executeChannelStep = async ({
         content_version: idemContentVer,
       },
     });
+    return key.endsWith(':') ? '' : key;
+  })()
+    : '';
+  if (idemKey) {
     // Fast path: already sent — skip without provider work.
     const existingIdem = getIdempotencyRecord({
       db,
@@ -704,8 +711,19 @@ export const executeChannelStep = async ({
   const claimExclusiveSend = ():
     | { ok: true; claim_id: string }
     | { ok: false; result: Record<string, unknown> } => {
-    if (!idemKey || dryRun || intent === 'draft') {
+    if (dryRun || intent === 'draft') {
       return { ok: true, claim_id: '' };
+    }
+    if (!idemKey) {
+      return {
+        ok: false,
+        result: {
+          status: 'failed',
+          reason: 'Idempotency key is required before an external send; refusing unprotected transmission.',
+          provider_id: '',
+          auto_skipped_steps: [],
+        },
+      };
     }
     // Production reconcile path: if a prior attempt already recorded a provider id
     // (SMTP/Unipile accepted) but status is still pending/failed after a lost response,
@@ -715,7 +733,7 @@ export const executeChannelStep = async ({
       idemKey,
       scope: idemConfig?.scope || 'list',
     });
-    if (priorIdem && priorIdem.status !== 'sent') {
+    if (priorIdem && (priorIdem.status === 'pending' || priorIdem.status === 'failed')) {
       const priorPid = String(priorIdem.provider_id || '').trim();
       let priorPayloadPid = '';
       try {
@@ -1292,6 +1310,19 @@ export const executeChannelStep = async ({
         });
       if (providerCredentials && !providerCredentials.ready) {
         releaseProviderInteraction({ mode: liClaim.mode });
+        if (idemKey) {
+          failIdempotency({
+            db,
+            idemKey,
+            scope: idemConfig?.scope || 'list',
+            claimId: String((sendRecord as any).__idempotency_claim_id || ''),
+            payload: {
+              error: providerCredentials.reason,
+              stepNumber,
+              step_id: sequenceStepId,
+            },
+          });
+        }
         return {
           status: 'failed',
           reason: providerCredentials.reason,
@@ -1339,6 +1370,7 @@ export const executeChannelStep = async ({
             claimId: String((sendRecord as any).__idempotency_claim_id || ''),
             payload: {
               error: linkedinResult.reason,
+              ...(linkedinResult.outcome_unknown ? { provider_uncertain: true } : {}),
               stepNumber,
               step_id: sequenceStepId,
             },
@@ -1962,6 +1994,7 @@ export const executeChannelStep = async ({
           ...stepConfig,
           args: baseArgs,
           args_map: {},
+          external_send: true,
         },
         record: sendRecord,
         toolCatalog,

@@ -1384,10 +1384,6 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
           step: {
             ...executableStep,
             day: getStepDay(executableStep),
-            config: {
-              ...(executableStep.config || {}),
-              idempotency: null,
-            },
           },
           sequence,
           aiConfig: config?.ai || {},

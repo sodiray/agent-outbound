@@ -133,7 +133,8 @@ const parsePayload = (raw: unknown): Record<string, unknown> => {
  *
  * - `sent` → not claimed (idempotent skip; provider_id available for reconcile)
  * - `pending` with unexpired lease → not claimed (another worker owns it)
- * - `pending` with expired lease / `failed` / missing → exclusive claim
+ * - `pending` with expired lease → uncertain (provider outcome was not observed)
+ * - `failed` / missing → exclusive claim
  *
  * Uses INSERT OR ignore + conditional UPDATE so two concurrent workers cannot
  * both observe claimed:true for the same key.
@@ -200,34 +201,28 @@ export const claimIdempotency = ({
         claim_id: String(prev._claim_id || ''),
       };
     }
-    // Expired pending or legacy pending without lease: exclusive steal by
-    // matching the previous claim_id (or empty) so two stealers cannot both win.
-    const priorClaim = String(prev._claim_id || '');
-    const stolen = db.prepare(`
+    const quarantined = db.prepare(`
       UPDATE idempotency
-      SET status = 'pending',
-          payload_json = ?,
-          updated_at = ?
+      SET status = 'uncertain', updated_at = ?
       WHERE idem_key = ? AND scope = ? AND status = 'pending'
         AND payload_json = ?
-    `).run(
-      JSON.stringify(envelope),
-      now,
-      idemKey,
-      scope,
-      existing.payload_json,
-    );
-    if (Number(stolen?.changes || 0) === 1) {
-      return { claimed: true, status: 'pending' as const, provider_id: '', reason: 'reclaimed', claim_id: claimId };
+    `).run(now, idemKey, scope, existing.payload_json);
+    if (Number(quarantined?.changes || 0) === 1) {
+      return {
+        claimed: false,
+        status: 'uncertain' as const,
+        provider_id: existing.provider_id || '',
+        reason: 'expired_pending_requires_reconcile',
+        claim_id: String(prev._claim_id || ''),
+      };
     }
-    // Lost race to another stealer.
     const again = getIdempotencyRecord({ db, idemKey, scope });
     return {
       claimed: false,
-      status: String(again?.status || 'pending') as 'pending' | 'sent' | 'failed',
+      status: String(again?.status || 'pending') as 'pending' | 'sent' | 'failed' | 'uncertain',
       provider_id: again?.provider_id || '',
       reason: 'race_lost',
-      claim_id: String(parsePayload(again?.payload_json)._claim_id || priorClaim),
+      claim_id: String(parsePayload(again?.payload_json)._claim_id || ''),
     };
   }
 
@@ -293,14 +288,19 @@ export const claimIdempotency = ({
           claim_id: String(prev._claim_id || ''),
         };
       }
-      // Expired pending: CAS steal only.
-      const stolen = db.prepare(`
+      const quarantined = db.prepare(`
         UPDATE idempotency
-        SET status = 'pending', payload_json = ?, updated_at = ?
+        SET status = 'uncertain', updated_at = ?
         WHERE idem_key = ? AND scope = ? AND status = 'pending' AND payload_json = ?
-      `).run(JSON.stringify(envelope), now, idemKey, scope, race.payload_json);
-      if (Number(stolen?.changes || 0) === 1) {
-        return { claimed: true, status: 'pending' as const, provider_id: '', reason: 'reclaimed', claim_id: claimId };
+      `).run(now, idemKey, scope, race.payload_json);
+      if (Number(quarantined?.changes || 0) === 1) {
+        return {
+          claimed: false,
+          status: 'uncertain' as const,
+          provider_id: race.provider_id || '',
+          reason: 'expired_pending_requires_reconcile',
+          claim_id: String(prev._claim_id || ''),
+        };
       }
     }
     if (race?.status === 'failed') {
@@ -361,19 +361,20 @@ export const completeIdempotency = ({
     _completed_at: now,
   });
   // Single conditional UPDATE: ownership + status in one CAS (no TOCTOU race).
-  // uncertain may complete only via claimId owner (known acceptance after ambiguous path).
+  // An uncertain send requires an explicit provider reconciliation, never a
+  // normal completion path.
   const result = want
     ? db.prepare(`
         UPDATE idempotency
         SET status = 'sent', provider_id = ?, payload_json = ?, updated_at = ?
         WHERE idem_key = ? AND scope = ?
-          AND status IN ('pending', 'failed', 'uncertain')
+          AND status IN ('pending', 'failed')
           AND payload_json = ?
       `).run(providerId, body, now, idemKey, scope, existing.payload_json)
     : db.prepare(`
         UPDATE idempotency
         SET status = 'sent', provider_id = ?, payload_json = ?, updated_at = ?
-        WHERE idem_key = ? AND scope = ? AND status IN ('pending', 'failed', 'uncertain')
+        WHERE idem_key = ? AND scope = ? AND status IN ('pending', 'failed')
       `).run(providerId, body, now, idemKey, scope);
   if (Number(result?.changes || 0) !== 1) {
     return { completed: false, reason: 'race_lost' as const };

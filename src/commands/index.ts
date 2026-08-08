@@ -1935,12 +1935,12 @@ export const reconcileCommand = ({ list, staleMinutes = 30 }) => {
 
     for (const row of pending) {
       db.prepare('UPDATE idempotency SET status = ?, updated_at = ? WHERE id = ?')
-        .run('failed', new Date().toISOString(), row.id);
+        .run('uncertain', new Date().toISOString(), row.id);
     }
 
     return {
       status: 'ok',
-      pending_marked_failed: pending.length,
+      pending_marked_uncertain: pending.length,
       cutoff,
     };
   } finally {

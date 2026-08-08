@@ -181,8 +181,9 @@ test('3 failIdempotency refuses to poison a newer claim', () => {
     scope: 'list',
     nowMs: t0 + IDEMPOTENCY_PENDING_LEASE_MS + 2000,
   });
-  assert.equal(b.claimed, true, 'expired lease reclaimed by B');
-  // Stale worker A tries to fail — must not wipe B's claim
+  assert.equal(b.claimed, false, 'expired send lease is quarantined as uncertain');
+  assert.equal(b.status, 'uncertain');
+  // Stale worker A cannot convert an uncertain provider outcome into a retryable failure.
   const failA = failIdempotency({
     db,
     idemKey: 'k',
@@ -191,17 +192,10 @@ test('3 failIdempotency refuses to poison a newer claim', () => {
     payload: { error: 'stale' },
   });
   assert.equal(failA.failed, false);
-  assert.equal(failA.reason, 'not_owner');
-  completeIdempotency({
-    db,
-    idemKey: 'k',
-    scope: 'list',
-    providerId: 'msg_b',
-    claimId: b.claim_id,
-  });
+  assert.equal(failA.reason, 'provider_uncertain');
   const row = db.prepare('SELECT * FROM idempotency WHERE idem_key = ?').get('k');
-  assert.equal(row.status, 'sent');
-  assert.equal(row.provider_id, 'msg_b');
+  assert.equal(row.status, 'uncertain');
+  assert.equal(row.provider_id, '');
 });
 
 test('4 inbound pause is persisted before classification completes', async () => {

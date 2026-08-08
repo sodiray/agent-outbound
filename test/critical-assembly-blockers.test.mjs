@@ -101,7 +101,7 @@ test('BLOCKER-3 concurrent claim: second worker does not claim active lease', ()
   assert.equal(row.provider_id, 'msg_1');
 });
 
-test('BLOCKER-3 expired lease can be reclaimed; sent cannot', () => {
+test('BLOCKER-3 expired send lease becomes uncertain and cannot be reclaimed', () => {
   const db = openIdemDb();
   const t0 = Date.now();
   const a = claimIdempotency({
@@ -118,11 +118,11 @@ test('BLOCKER-3 expired lease can be reclaimed; sent cannot', () => {
     scope: 'list',
     nowMs: t0 + IDEMPOTENCY_PENDING_LEASE_MS + 5000,
   });
-  assert.equal(b.claimed, true, 'expired lease reclaimed');
-  completeIdempotency({ db, idemKey: 'k2', scope: 'list', providerId: 'p', claimId: b.claim_id });
+  assert.equal(b.claimed, false, 'expired send lease must not be reclaimed');
+  assert.equal(b.status, 'uncertain');
   const c = claimIdempotency({ db, idemKey: 'k2', scope: 'list', nowMs: t0 + 999999 });
   assert.equal(c.claimed, false);
-  assert.equal(c.status, 'sent');
+  assert.equal(c.status, 'uncertain');
 });
 
 test('BLOCKER-5 inbound pause-first: booking_intent does not auto meeting_booked', () => {

@@ -16,7 +16,7 @@ import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 
 import { join } from 'node:path';
 import { nowIso } from '../lib/record.js';
 
-export type MailProviderStatus = 'allocated' | 'submitted' | 'confirmed' | 'failed';
+export type MailProviderStatus = 'allocated' | 'submitted' | 'confirmed' | 'failed' | 'uncertain';
 
 export type MailSubmitRequest = {
   recordId: string;
@@ -42,6 +42,8 @@ export type MailSubmitResult = {
   cost_cents?: number;
   expected_delivery_date?: string;
   provider: string;
+  /** POST response was not observed, so provider acceptance cannot be disproved. */
+  outcome_unknown?: boolean;
   raw?: Record<string, unknown>;
 };
 
@@ -319,9 +321,10 @@ export function createLobMailProvider(opts: {
         return {
           ok: false,
           piece_id: '',
-          status: 'failed',
+          status: 'uncertain',
           reason: `lob_network_error:${String((err as Error)?.message || err)}`,
           provider: 'lob',
+          outcome_unknown: true,
         };
       }
     },

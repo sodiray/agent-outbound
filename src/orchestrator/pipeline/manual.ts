@@ -240,7 +240,12 @@ export const submitMailWithIdempotency = async ({
     throw error;
   });
 
-  if (!submitResult?.ok || submitResult.status === 'failed') {
+  if (
+    !submitResult?.ok
+    || submitResult.status === 'failed'
+    || submitResult.status === 'uncertain'
+    || submitResult.outcome_unknown === true
+  ) {
     releaseInteraction();
     failIdempotency({
       db,
@@ -249,6 +254,9 @@ export const submitMailWithIdempotency = async ({
       payload: {
         ...claimPayload,
         provider_result: submitResult,
+        ...(submitResult.status === 'uncertain' || submitResult.outcome_unknown === true
+          ? { provider_uncertain: true }
+          : {}),
       },
     });
     return submitResult;

@@ -292,17 +292,10 @@ test('4 atomic fail cannot poison newer claim; complete is CAS', () => {
     scope: 'list',
     nowMs: t0 + IDEMPOTENCY_PENDING_LEASE_MS + 1000,
   });
-  assert.equal(b.claimed, true);
+  assert.equal(b.claimed, false);
+  assert.equal(b.status, 'uncertain');
   const failA = failIdempotency({ db, idemKey: 'k', scope: 'list', claimId: a.claim_id });
   assert.equal(failA.failed, false);
-  const completeB = completeIdempotency({
-    db,
-    idemKey: 'k',
-    scope: 'list',
-    providerId: 'pB',
-    claimId: b.claim_id,
-  });
-  assert.equal(completeB.completed, true);
   const failUncertain = failIdempotency({
     db,
     idemKey: 'k2',

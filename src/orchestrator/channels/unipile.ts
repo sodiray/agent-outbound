@@ -161,6 +161,7 @@ export type UnipileLinkedinConnectResult = {
   target_provider_id: string;
   target_public_identifier: string;
   readiness: UnipileReadiness;
+  outcome_unknown?: boolean;
 };
 
 export const resolveLinkedinInvitationMessage = ({
@@ -279,6 +280,7 @@ export async function unipileLiveInvite(input: {
   target_public_identifier: string;
   reason: string;
   status: number;
+  outcome_unknown?: boolean;
 }> {
   const content = assertOutboundContent({
     channel: 'linkedin',
@@ -412,6 +414,7 @@ export async function unipileLiveInvite(input: {
       target_public_identifier: publicIdentifier,
       reason: `unipile_live_network_error:${String((err as Error)?.message || err).slice(0, 200)}`,
       status: 0,
+      outcome_unknown: true,
     };
   }
 }
@@ -538,6 +541,7 @@ export async function executeUnipileLinkedinConnect(
     target_provider_id: live.target_provider_id,
     target_public_identifier: live.target_public_identifier,
     readiness,
+    outcome_unknown: live.outcome_unknown,
   };
 }
 

@@ -313,6 +313,7 @@ test('executeChannelStep success path persists next_action succession via produc
         daily_cap: 999,
         tool: { server: 'fake_smtp', tools: ['SEND_TEST'] },
         output_map: { message_id: 'message_id', provider_id: 'provider_id' },
+        idempotency: { key_source: ['_row_id'], scope: 'list' },
       },
     },
     sequence: {
@@ -379,6 +380,7 @@ test('executeChannelStep success without prior next_action still installs one su
         daily_cap: 999,
         tool: { server: 'fake_smtp', tools: ['SEND_TEST'] },
         output_map: { message_id: 'message_id', provider_id: 'provider_id' },
+        idempotency: { key_source: ['_row_id'], scope: 'list' },
       },
     },
     sequence: {

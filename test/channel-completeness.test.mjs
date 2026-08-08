@@ -667,7 +667,15 @@ test('linkedin lifecycle: executeChannelStep honors invite_sent + sets lifecycle
       record,
       sequenceName: 'default',
       stepNumber: 1,
-      step: { kind: 'linkedin_connect', id: 'linkedin_1', config: { channel: 'linkedin', invite_message: 'Hello — I would be glad to connect.' } },
+      step: {
+        kind: 'linkedin_connect',
+        id: 'linkedin_1',
+        config: {
+          channel: 'linkedin',
+          invite_message: 'Hello — I would be glad to connect.',
+          idempotency: { key_source: ['_row_id'], scope: 'list' },
+        },
+      },
       sequence: { steps: [] },
       channelHint: 'linkedin',
       intent: 'send',

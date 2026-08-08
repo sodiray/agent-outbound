@@ -310,6 +310,7 @@ export const executeToolCallAction = async ({
     stepId,
     chain,
     tryTool,
+    externalSend: stepConfig.external_send === true,
   }).catch((error: unknown) => {
     if (!isRecordScopedProviderOutcome({ error, args })) throw error;
     throw recordScopedToolFailure(error);
@@ -332,6 +333,7 @@ export const runProviderWaterfall = async ({
   stepId,
   chain,
   tryTool,
+  externalSend = false,
 }: {
   stepId: string;
   chain: ToolSpec[];
@@ -340,6 +342,8 @@ export const runProviderWaterfall = async ({
     usage?: Record<string, unknown> | null;
     provider?: string;
   }>;
+  /** A transmission may have succeeded even when its response was not observed. */
+  externalSend?: boolean;
 }): Promise<{
   result: unknown;
   usage: Record<string, unknown> | null;
@@ -369,6 +373,7 @@ export const runProviderWaterfall = async ({
       if (isBudgetExceededError(error)) throw error;
       const detail = String((error as Error)?.message || error);
       errors.push(`${label}: ${detail}`);
+      if (externalSend) break;
       const more = i < chain.length - 1;
       if (!more) break;
       // Resolve / not-connected: advance so a configured fallback can try.

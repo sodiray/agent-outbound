@@ -348,13 +348,26 @@ export function runHealthChecks(input: {
   // while still treated as active/in-play sequence.
   {
     const hasLifecycle = tableHasColumn(input.db, 'records', 'lifecycle_stage');
+    const hasLaunchedAt = tableHasColumn(input.db, 'records', 'launched_at');
+    const hasNextAction = tableHasColumn(input.db, 'records', 'next_action_json');
+    const hasSequenceStep = tableHasColumn(input.db, 'records', 'sequence_step');
     const dqClauses = [`COALESCE(disqualified_at, '') != ''`];
     if (hasLifecycle) {
       dqClauses.push(`lower(COALESCE(lifecycle_stage, '')) = 'disqualified'`);
     }
+    const idleEnrollmentEvidence = [
+      hasAccountSeq ? `COALESCE(account_sequence_state, '') != ''` : '',
+      hasLaunchedAt ? `COALESCE(launched_at, '') != ''` : '',
+      hasNextAction ? `TRIM(COALESCE(next_action_json, '')) NOT IN ('', '{}', 'null', '[]')` : '',
+      hasSequenceStep ? `COALESCE(sequence_step, 0) > 0` : '',
+    ].filter(Boolean);
+    const idleInPlay = idleEnrollmentEvidence.length > 0
+      ? `(lower(COALESCE(sequence_status, '')) = 'idle' AND (${idleEnrollmentEvidence.join(' OR ')}))`
+      : '0=1';
     const inPlayActive = `
       (
-        lower(COALESCE(sequence_status, '')) IN ('active', 'engaged', 'idle')
+        lower(COALESCE(sequence_status, '')) IN ('active', 'engaged')
+        OR ${idleInPlay}
         ${hasAccountSeq ? `OR lower(COALESCE(account_sequence_state, '')) IN ('active', 'paused_review', 'paused_inbound', 'waiting')` : ''}
       )
     `;
