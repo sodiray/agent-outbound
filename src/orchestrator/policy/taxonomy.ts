@@ -51,7 +51,7 @@ type NormalizedVertical = {
   sub_verticals: Array<{ id: string; label?: string }>;
 };
 
-let cached: { path: string; data: VerticalTaxonomy } | null = null;
+let cached: { path: string; content: string; data: VerticalTaxonomy } | null = null;
 
 /** Resolve taxonomy JSON path: env override or a conventional list-relative registry location. */
 export function resolveTaxonomyPath(listDir?: string): string | null {
@@ -75,9 +75,10 @@ export function loadVerticalTaxonomy(listDirOrPath?: string): VerticalTaxonomy |
     ? listDirOrPath
     : resolveTaxonomyPath(listDirOrPath);
   if (!path || !existsSync(path)) return null;
-  if (cached?.path === path) return cached.data;
-  const data = JSON.parse(readFileSync(path, 'utf8')) as VerticalTaxonomy;
-  cached = { path, data };
+  const content = readFileSync(path, 'utf8');
+  if (cached?.path === path && cached.content === content) return cached.data;
+  const data = JSON.parse(content) as VerticalTaxonomy;
+  cached = { path, content, data };
   return data;
 }
 

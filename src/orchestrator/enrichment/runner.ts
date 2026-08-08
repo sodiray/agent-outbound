@@ -5,6 +5,7 @@ import { ensureRecordColumns, inPlayWhere, openListDb, storeRawContent, upsertCo
 import { readConfig } from '../lib/config.js';
 import { getRecordRowId, nowIso, stableHash } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
+import { readPromptFileIfAny } from '../actions/shared.js';
 import { emitActivity } from '../runtime/activity.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getMcpClient } from '../runtime/mcp.js';
@@ -35,6 +36,7 @@ import {
   preservePriorNonBlankFields,
 } from '../policy/evidence.js';
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
+import { loadVerticalTaxonomy } from '../policy/taxonomy.js';
 import type { FitModelConfigInput } from '../policy/scoring.js';
 import type { TreatmentBandLadders } from '../policy/treatment.js';
 import type {
@@ -340,13 +342,23 @@ export const enrichmentPolicyInputs = (config: Record<string, any> = {}) => {
 export const executionConfigForEnrichmentStep = ({
   stepConfig,
   config,
+  listDir = '',
 }: {
   stepConfig: Record<string, unknown>;
   config: Record<string, any>;
+  listDir?: string;
 }): Record<string, unknown> | undefined => (
-  String(stepConfig.action || '').trim().toLowerCase() === 'policy_apply'
-    ? enrichmentPolicyInputs(config)
-    : undefined
+  (() => {
+    const isPolicyApply = String(stepConfig.action || '').trim().toLowerCase() === 'policy_apply';
+    const promptFile = String(stepConfig.prompt_file || '').trim();
+    if (!isPolicyApply && !promptFile) return undefined;
+    return {
+      ...(isPolicyApply
+        ? { policy: enrichmentPolicyInputs(config), taxonomy: loadVerticalTaxonomy(listDir) }
+        : {}),
+      ...(promptFile ? { prompt_file: { path: promptFile, body: readPromptFileIfAny({ listDir, promptFile }) } } : {}),
+    };
+  })()
 );
 
 export const enrichDependencyHashes = ({
@@ -751,7 +763,7 @@ const resolveStepId = (step: any, index: number) => {
 export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, stepId = '', rows = [], force = false }: { db: any; listDir?: string; config?: Record<string, any>; step: any; stepId?: string; rows?: any[]; force?: boolean }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
-  const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config });
+  const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
   const legacyColumns = getLegacyColumns(stepConfig || {});
   const expectedOutputs = Object.keys(declaredOutputs).length > 0
@@ -1066,7 +1078,7 @@ export const executeEnrichmentStepOnRecords = async ({
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
-  const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config });
+  const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
   const legacyColumns = getLegacyColumns(stepConfig || {});
   const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
@@ -1561,7 +1573,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         }> = [];
         const failures: Array<{ recordId: string; rowLabel: string; error: string }> = [];
         const snapshot = [...recordState.values()];
-        const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config });
+        const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
 
         await mapWithConcurrency(snapshot, async (record) => {
           const recordId = getRecordRowId(record);
