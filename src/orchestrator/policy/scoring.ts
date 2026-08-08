@@ -53,7 +53,7 @@ export type FitScoreResult = {
   /** Pipeline-owned model identifier, when the pipeline declares one. */
   fit_model_version: string | null;
   calculation_rule_version: string;
-  reason?: 'fit_components_not_configured';
+  reason?: 'fit_components_not_configured' | 'fit_not_graded';
 };
 
 const configuredFitComponents = (config: FitModelConfigInput | undefined): Array<{ id: string; weight: number }> => {
@@ -95,6 +95,23 @@ export function calculateFitScore(
       fit_model_version: modelVersion,
       calculation_rule_version: FIT_ARITHMETIC_RULE_VERSION,
       reason: 'fit_components_not_configured',
+    };
+  }
+  const gradedComponents = components.filter((component) => (
+    configured.some(({ id }) => id === component.id)
+    && component.missing !== true
+    && component.unassessable !== true
+    && Number.isFinite(Number(component.grade))
+  ));
+  if (gradedComponents.length === 0) {
+    return {
+      fit_score: null,
+      components: [],
+      missing_inputs: configured.map(({ id }) => id),
+      assessable_weight: 0,
+      fit_model_version: modelVersion,
+      calculation_rule_version: FIT_ARITHMETIC_RULE_VERSION,
+      reason: 'fit_not_graded',
     };
   }
   const byId = new Map(components.map((c) => [c.id, c]));

@@ -450,7 +450,15 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     : [];
   const hasCommercialFit = fitComponents.some((c) => !c.missing);
   const fitCalc = calculateFitScore(fitComponents, input.fitModel);
-  const derivedFitCoverage = fitCalc?.assessable_weight ?? null;
+  const recoveredLegacyFit = recoverLegacyFitScore(record);
+  const fitNotGraded = input.recomputeFitFromBreakdown === true
+    && fitModelConfigured
+    && fitCalc.reason === 'fit_not_graded'
+    && recoveredLegacyFit === null;
+  const derivedFitCoverage = (!input.recomputeFitFromBreakdown && !hasCommercialFit)
+    || (!hasCommercialFit && recoveredLegacyFit !== null)
+    ? null
+    : fitCalc.assessable_weight;
   const recordedFitCoverage = num(record.fit_coverage, null);
   const fitCoverage = derivedFitCoverage != null && recordedFitCoverage != null
     ? Math.min(derivedFitCoverage, recordedFitCoverage)
@@ -469,7 +477,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     return refs;
   })();
 
-  let fitScore = !fitModelConfigured || insufficientFitCoverage ? null : num(record.fit_score, null);
+  let fitScore = !fitModelConfigured || insufficientFitCoverage || fitNotGraded
+    ? null
+    : num(record.fit_score, null);
   if (input.recomputeFitFromBreakdown && fitModelConfigured && hasCommercialFit && !insufficientFitCoverage) {
     fitScore = fitCalc.fit_score;
   } else if (
@@ -479,9 +489,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     && fitModelConfigured
     && !hasCommercialFit
   ) {
-    const recovered = recoverLegacyFitScore(record);
-    if (recovered != null && recovered > 0) {
-      fitScore = recovered;
+    if (recoveredLegacyFit != null && recoveredLegacyFit > 0) {
+      fitScore = recoveredLegacyFit;
     }
   }
 
@@ -1283,7 +1292,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     account_id: rowId,
     fit_score: !fitModelConfigured
       ? null
-      : fitScore ?? (typeof record.fit_score === 'number' ? Number(record.fit_score) : null),
+      : fitScore,
     fit_evidence_confidence: fitEvidence,
     treatment_tier: treatment.treatment_tier,
     eligibility_outcome: eligibility.outcome,
@@ -1314,7 +1323,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   const patch: Record<string, unknown> = {
     identity_confidence: observationStore.identity_resolution?.identity_confidence ?? 0,
-    fit_score: !fitModelConfigured || insufficientFitCoverage ? null : fitScore ?? record.fit_score ?? '',
+    fit_score: !fitModelConfigured || insufficientFitCoverage || fitNotGraded ? null : fitScore,
     fit_coverage: fitCoverage ?? '',
     fit_evidence_confidence: fitEvidence ?? '',
     candidate_tier: candidate.candidate_tier,
@@ -1423,6 +1432,10 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     patch.fit_score = null;
     patch.fit_calculation_json = JSON.stringify(fitCalc);
     patch.fit_breakdown_source = 'none';
+  } else if (fitNotGraded) {
+    patch.fit_score = null;
+    patch.fit_calculation_json = JSON.stringify(fitCalc);
+    patch.fit_breakdown_source = selected.source;
   } else if (input.recomputeFitFromBreakdown && hasCommercialFit && !insufficientFitCoverage) {
     patch.fit_score = fitCalc.fit_score;
     patch.fit_calculation_json = JSON.stringify(fitCalc);

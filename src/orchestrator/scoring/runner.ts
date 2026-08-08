@@ -903,6 +903,11 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           return;
         }
 
+        // Pipeline-declared score criteria define the fit model; deterministic rules own only arithmetic.
+        const fitModel = {
+          criteria: scoreConfig?.criteria,
+          modelVersion: config?.policy?.fit_rule_version,
+        };
         const scoreRaw = hasScoreOverride(record.score_override)
           ? {
               score: Number(record.score_override),
@@ -933,11 +938,57 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
             }));
 
         if (scoreRaw.error && scoreRaw.score === null && !record.score_override) {
-          // Scoring failed (provider error, invalid response). Never destroy an
-          // existing score with nulls — record the error, roll back the
-          // optimistic staleness stamp so the next run retries, and move on.
+          // Scoring failed (provider error, invalid response). A failed grade
+          // is not a zero fit; persist the explicit unscored state and retry.
           db.prepare("DELETE FROM staleness WHERE record_id = ? AND step_id = 'score:score'").run(recordId);
-          upsertRecord({ db, row: { ...record, score_scoring_error: scoreRaw.error } });
+          const updatedAt = new Date().toISOString();
+          const failedFitCalculation = calculateFitScore([], fitModel);
+          const failedPrePolicy = {
+            ...record,
+            fit_score: null,
+            fit_coverage: 0,
+            score_breakdown: '[]',
+            score_scoring_error: scoreRaw.error,
+            score_status: 'needs_discovery',
+            score_updated_at: updatedAt,
+            fit_score_updated_at: updatedAt,
+            fit_updated_at: updatedAt,
+          };
+          const failedPolicy = applyOutboundPolicy({
+            record: { ...failedPrePolicy, _list_dir: failedPrePolicy._list_dir || listDir },
+            recomputeFitFromBreakdown: true,
+            fitModel,
+            listDir,
+            minFitCoverage: minimumCoverage,
+            treatmentBands: scoreConfig?.treatment_bands,
+            treatmentStrategy: scoreConfig?.treatment,
+            priority: scoreConfig?.priority,
+            identityConfidence: scoreConfig?.identity_confidence,
+            phoneConfidence: scoreConfig?.phone_confidence,
+            buyerConfidence: scoreConfig?.buyer_confidence,
+            mailConfidence: scoreConfig?.mail_confidence,
+            actionConfidence: scoreConfig?.action_confidence,
+            reachability: scoreConfig?.reachability,
+            candidateTier: scoreConfig?.candidate_tier,
+            enrichmentRepair: scoreConfig?.enrichment_repair,
+            enrichmentBudget: scoreConfig?.enrichment_budget,
+            contactPolicy: config?.contact_policy,
+          });
+          const failedUpdated = {
+            ...failedPrePolicy,
+            ...failedPolicy.patch,
+            fit_score: null,
+            fit_coverage: 0,
+            score_breakdown: '[]',
+            score_scoring_error: scoreRaw.error,
+            score_status: 'needs_discovery',
+            score_updated_at: updatedAt,
+            fit_score_updated_at: updatedAt,
+            fit_updated_at: updatedAt,
+            fit_calculation_json: JSON.stringify(failedFitCalculation),
+          };
+          ensureRecordColumns({ db, columns: Object.keys(failedPolicy.patch) });
+          upsertRecord({ db, row: failedUpdated });
           summary.failed += 1;
           summary.errors.push({ record_id: recordId, error: scoreRaw.error });
           emitActivity({ event: 'error', phase: 'scoring', row: record.business_name || recordId, detail: scoreRaw.error });
@@ -954,11 +1005,6 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
 
         const updatedAt = new Date().toISOString();
         const breakdown = Array.isArray(scoreRaw.breakdown) ? scoreRaw.breakdown : [];
-        // Pipeline-declared score criteria define the fit model; deterministic rules own only arithmetic.
-        const fitModel = {
-          criteria: scoreConfig?.criteria,
-          modelVersion: config?.policy?.fit_rule_version,
-        };
         const fitIds = new Set(fitModelComponentIds(fitModel));
         const fitModelConfigured = fitIds.size > 0;
         const usesFitComponents = fitModelConfigured;
@@ -972,7 +1018,12 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           : null;
         const finalScore = !fitModelConfigured || coverageGuarded
           ? null
-          : fitCalculation?.fit_score ?? (scored.score === null ? null : numericOr(scored.score, 0));
+          : fitCalculation?.fit_score ?? null;
+        const hasGradedFitComponents = fitComponentsFromBreakdown(breakdown, fitModel)
+          .some((component) => component.missing !== true && component.unassessable !== true);
+        if (finalScore !== null && !hasGradedFitComponents) {
+          throw new Error('fit_score_requires_graded_component_breakdown');
+        }
 
         const prePolicy = {
           ...record,
@@ -1037,7 +1088,9 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           fit_score_updated_at: updatedAt,
           fit_updated_at: updatedAt,
           // Clear evidence-mutation stale flag after a successful confident re-score.
-          score_status: !fitModelConfigured || coverageGuarded ? 'needs_discovery' : 'fresh',
+          score_status: !fitModelConfigured || coverageGuarded || finalScore === null
+            ? 'needs_discovery'
+            : 'fresh',
           ...(fitCalculation ? { fit_calculation_json: JSON.stringify(fitCalculation) } : {
             fit_calculation_json: JSON.stringify(calculateFitScore([], fitModel)),
           }),

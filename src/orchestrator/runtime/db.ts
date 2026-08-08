@@ -92,7 +92,7 @@ const SCHEMA_SQL = `
     email_verification_status TEXT DEFAULT '',
     email_verification_confidence REAL DEFAULT 0,
     email_verified_at TEXT DEFAULT '',
-    fit_score REAL DEFAULT 0,
+    fit_score REAL DEFAULT NULL,
     trigger_score REAL DEFAULT 0,
     trigger_score_peak REAL DEFAULT 0,
     fit_reasoning TEXT DEFAULT '',
@@ -1724,6 +1724,12 @@ const scoreValueForWrite = (value) => {
   return Number.isFinite(num) ? num : null;
 };
 
+const fitScoreValueForWrite = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+};
+
 const isDynamicRecordValue = (value) => (
   value === null
     || typeof value === 'string'
@@ -1861,7 +1867,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       email_verification_status: row.email_verification_status || '',
       email_verification_confidence: Number(row.email_verification_confidence || 0),
       email_verified_at: row.email_verified_at || '',
-      fit_score: scoreValueForWrite(row.fit_score),
+      fit_score: fitScoreValueForWrite(row.fit_score),
       trigger_score: scoreValueForWrite(row.trigger_score),
       priority_rank: scoreValueForWrite(row.priority_rank),
       pipeline_name: row.pipeline_name || current.pipeline_name || 'default',
@@ -2002,7 +2008,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     email_primary: row.email_primary || '',
     contact_name_primary: '',
     contact_title_primary: '',
-    fit_score: scoreValueForWrite(row.fit_score),
+    fit_score: fitScoreValueForWrite(row.fit_score),
     trigger_score: scoreValueForWrite(row.trigger_score),
     fit_reasoning: row.fit_reasoning || '',
     trigger_reasoning: row.trigger_reasoning || '',

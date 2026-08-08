@@ -41,6 +41,44 @@ test('an undeclared fit model produces no score instead of a silent zero', () =>
   assert.equal(JSON.parse(String(applied.patch.fit_calculation_json)).reason, 'fit_components_not_configured');
 });
 
+test('configured fit components with no grades remain unscored and do not band into treatment', () => {
+  const ungraded = calculateFitScore([], treasureValleyFitModel);
+  assert.equal(ungraded.fit_score, null);
+  assert.equal(ungraded.reason, 'fit_not_graded');
+
+  const missingBreakdown = treasureValleyFitModel.criteria.map(({ id }) => ({
+    id,
+    grade: 0,
+    missing: true,
+    evidence_ids: [],
+  }));
+  const applied = applyOutboundPolicy({
+    recomputeFitFromBreakdown: true,
+    fitModel: treasureValleyFitModel,
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    record: {
+      _row_id: 'fit_not_graded',
+      fit_score: 0,
+      score_breakdown: JSON.stringify(missingBreakdown),
+    },
+  });
+  assert.equal(applied.patch.fit_score, null);
+  assert.equal(applied.treatment_tier, 'enrichment_hold');
+  assert.match(String(applied.patch.treatment_reasons), /fit_band=unscored/);
+  assert.equal(JSON.parse(String(applied.patch.fit_calculation_json)).reason, 'fit_not_graded');
+});
+
+test('all genuinely graded zero components preserve a zero fit score and breakdown', () => {
+  const zeroes = calculateFitScore(treasureValleyFitModel.criteria.map(({ id }) => ({
+    id,
+    grade: 0,
+    evidence_ids: [`obs_${id}`],
+  })), treasureValleyFitModel);
+  assert.equal(zeroes.fit_score, 0);
+  assert.equal(zeroes.reason, undefined);
+  assert.equal(zeroes.components.length, treasureValleyFitModel.criteria.length);
+});
+
 test('an equivalent Treasure Valley declaration preserves fit arithmetic and assessable normalization', () => {
   const complete = calculateFitScore([
     { id: 'operational_coordination_burden', grade: 8 },
