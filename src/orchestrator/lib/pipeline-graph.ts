@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { getTargetColumnsForStepConfig } from './step-columns.js';
+import { isReviewFieldAvailable } from './review-field-resolution.js';
 import {
   flattenPipelineSteps,
   namespaceSubpipelineStepId,
@@ -707,15 +708,15 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
       errors.push(`pipeline.${id} review.require_non_empty field "${field}" must also appear in review.present.`);
     });
     fields.forEach((field) => {
-      const hasUpstreamProducer = reviewFieldProducers.some((producer) => (
-        producer.field === field
-        && producer.index < index
-      ));
-      const configValue = stepConfig[field];
-      const hasStepConfigField = Object.prototype.hasOwnProperty.call(stepConfig, field)
-        && configValue !== undefined
-        && configValue !== '';
-      if (suppliedReviewFields.has(field) || hasUpstreamProducer || hasStepConfigField) return;
+      const producedFields = reviewFieldProducers
+        .filter((producer) => producer.index < index)
+        .map((producer) => producer.field);
+      if (isReviewFieldAvailable({
+        field,
+        producedFields,
+        recordFields: suppliedReviewFields,
+        stepConfig,
+      })) return;
       errors.push(`pipeline.${id} review.present field "${field}" is unavailable: no record field or upstream step produces it.`);
     });
   });
@@ -749,8 +750,12 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
       errors.push(`${nameWithStep} review.require_non_empty field "${field}" must also appear in review.present.`);
     });
     fields.forEach((field) => {
-      const hasPipelineProducer = reviewFieldProducers.some((producer) => producer.field === field);
-      if (suppliedReviewFields.has(field) || hasPipelineProducer) return;
+      if (isReviewFieldAvailable({
+        field,
+        producedFields: reviewFieldProducers.map((producer) => producer.field),
+        recordFields: suppliedReviewFields,
+        stepConfig,
+      })) return;
       errors.push(`${nameWithStep} review.present field "${field}" is unavailable: no record field or upstream step produces it.`);
     });
   });

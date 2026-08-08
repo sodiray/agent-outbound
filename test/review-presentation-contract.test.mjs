@@ -6,7 +6,11 @@ import {
   authorizeStageReview,
   pauseForStageReview,
 } from '../dist/orchestrator/policy/transition-audit.js';
-import { resolveReviewPresentation } from '../dist/orchestrator/policy/review-presentation.js';
+import {
+  isReviewFieldAvailable,
+  missingRequiredReviewFields,
+  resolveReviewPresentation,
+} from '../dist/orchestrator/policy/review-presentation.js';
 
 const review = {
   purpose: 'Confirm the outbound message and its supporting evidence.',
@@ -49,6 +53,109 @@ test('review presentation snapshots labeled record and upstream-output values fo
     existing: paused.authorization,
   });
   assert.deepEqual(authorized.authorization.presentation, paused.authorization.presentation);
+});
+
+test('review presentation resolves a field declared only in the step config', () => {
+  const presentation = resolveReviewPresentation({
+    step: {
+      config: { invite_message: 'Configured fallback message.' },
+      review: {
+        present: [{ field: 'invite_message', label: 'Message' }],
+        require_non_empty: ['invite_message'],
+      },
+    },
+    record: {},
+  });
+
+  assert.equal(presentation?.present[0]?.value, 'Configured fallback message.');
+  assert.deepEqual(missingRequiredReviewFields(presentation), []);
+});
+
+test('review presentation prefers an upstream produced value over a static step config value', () => {
+  const presentation = resolveReviewPresentation({
+    step: {
+      config: { invite_message: 'Configured fallback message.' },
+      review: { present: [{ field: 'invite_message', label: 'Message' }] },
+    },
+    producedValues: { invite_message: 'Composed for this record.' },
+    record: {},
+  });
+
+  assert.equal(presentation?.present[0]?.value, 'Composed for this record.');
+});
+
+test('review presentation resolves a field declared only on the record', () => {
+  const presentation = resolveReviewPresentation({
+    step: { review: { present: [{ field: 'record_note', label: 'Record note' }] } },
+    record: { record_note: 'Record-only value.' },
+  });
+
+  assert.equal(presentation?.present[0]?.value, 'Record-only value.');
+});
+
+test('review presentation fails closed when a required field has no value in any source', () => {
+  const presentation = resolveReviewPresentation({
+    step: {
+      review: {
+        present: [{ field: 'missing_value', label: 'Missing value' }],
+        require_non_empty: ['missing_value'],
+      },
+    },
+    record: {},
+  });
+
+  assert.deepEqual(missingRequiredReviewFields(presentation), ['missing_value']);
+});
+
+test('review availability and runtime resolution agree across representative sources', () => {
+  const cases = [
+    {
+      field: 'produced_value',
+      producedFields: ['produced_value'],
+      recordFields: [],
+      stepConfig: {},
+      producedValues: { produced_value: 'Produced value.' },
+      record: {},
+    },
+    {
+      field: 'record_value',
+      producedFields: [],
+      recordFields: ['record_value'],
+      stepConfig: {},
+      producedValues: {},
+      record: { record_value: 'Record value.' },
+    },
+    {
+      field: 'configured_value',
+      producedFields: [],
+      recordFields: [],
+      stepConfig: { configured_value: 'Configured value.' },
+      producedValues: {},
+      record: {},
+    },
+    {
+      field: 'missing_value',
+      producedFields: [],
+      recordFields: [],
+      stepConfig: {},
+      producedValues: {},
+      record: {},
+    },
+  ];
+
+  for (const entry of cases) {
+    const available = isReviewFieldAvailable(entry);
+    const presentation = resolveReviewPresentation({
+      step: {
+        config: entry.stepConfig,
+        review: { present: [{ field: entry.field, label: entry.field }] },
+      },
+      producedValues: entry.producedValues,
+      record: entry.record,
+    });
+    const resolved = presentation?.present[0]?.value !== undefined;
+    assert.equal(resolved, available, entry.field);
+  }
 });
 
 test('stage authorization refuses a review whose required presented field is empty', () => {

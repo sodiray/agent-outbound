@@ -1,3 +1,11 @@
+import {
+  hasResolvableReviewFieldValue,
+  resolveReviewField,
+  type ReviewFieldValues,
+} from '../lib/review-field-resolution.js';
+
+export { isReviewFieldAvailable } from '../lib/review-field-resolution.js';
+
 export type ReviewPresentationSpec = {
   purpose: string;
   present: Array<{
@@ -48,30 +56,34 @@ export const reviewPresentationForStep = (step: unknown): ReviewPresentationSpec
   };
 };
 
-/** Pipeline outputs are materialized on the record, as they are for args_map. */
 export const resolveReviewPresentation = ({
   step,
   record: source,
+  producedValues = {},
 }: {
   step: unknown;
   record: Record<string, unknown>;
+  producedValues?: ReviewFieldValues;
 }): ResolvedReviewPresentation | null => {
   const configured = reviewPresentationForStep(step);
   if (!configured) return null;
+  const stepConfig = record(record(step).config);
   return {
     ...configured,
     present: configured.present.map((entry) => ({
       ...entry,
-      value: source[entry.field],
+      value: resolveReviewField({
+        field: entry.field,
+        producedValues,
+        recordValues: source,
+        stepConfig,
+      })?.value,
     })),
   };
 };
 
 export const isEmptyReviewValue = (value: unknown): boolean => (
-  value === undefined
-  || value === null
-  || (typeof value === 'string' && value.trim() === '')
-  || (Array.isArray(value) && value.length === 0)
+  !hasResolvableReviewFieldValue(value)
 );
 
 export const missingRequiredReviewFields = (
