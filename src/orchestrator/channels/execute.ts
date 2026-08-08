@@ -11,7 +11,6 @@ import {
   findAsset,
   insertChannelEvent,
   insertDraft,
-  listContactsByRecord,
   insertPipelineEvent,
   nowTimestamp,
   upsertRecord,
@@ -55,11 +54,7 @@ import {
   evaluateTransmitterSuppression,
 } from '../policy/index.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
-import {
-  evaluateSequenceReachability,
-  reenteredSequencePatch,
-  unreachableSequencePatch,
-} from '../policy/sequence-reachability.js';
+import { reconcileSequenceReachability } from '../policy/sequence-reachability-reconcile.js';
 import {
   applyLinkedinInviteSent,
   evaluateLinkedinConnectGate,
@@ -531,29 +526,12 @@ export const executeChannelStep = async ({
       };
     }
   }
-  const sequenceReachability = evaluateSequenceReachability({
+  const reachability = reconcileSequenceReachability({
+    db,
     record: reachableRecord,
-    contacts: listContactsByRecord({ db, recordId }),
+    persist: !dryRun,
   });
-  if (sequenceReachability.applicable && !sequenceReachability.reachable) {
-    if (!dryRun) {
-      ensureRecordColumns({
-        db,
-        columns: [
-          'sequence_status',
-          'account_sequence_state',
-          'next_action_date',
-          'last_error',
-        ],
-      });
-      upsertRecord({
-        db,
-        row: {
-          ...reachableRecord,
-          ...unreachableSequencePatch(),
-        },
-      });
-    }
+  if (!reachability.reachable) {
     return {
       status: 'skipped',
       reason: 'sequence_unreachable:no_reachable_contact',
@@ -562,21 +540,7 @@ export const executeChannelStep = async ({
     };
   }
 
-  const shouldReenter = sequenceReachability.applicable
-    && String(reachableRecord.account_sequence_state || '').trim().toLowerCase() === 'unreachable';
-  const sequenceRecord = shouldReenter
-    ? {
-      ...reachableRecord,
-      ...reenteredSequencePatch(),
-    }
-    : reachableRecord;
-  if (shouldReenter && !dryRun) {
-    ensureRecordColumns({
-      db,
-      columns: ['sequence_status', 'account_sequence_state', 'last_error'],
-    });
-    upsertRecord({ db, row: sequenceRecord });
-  }
+  const sequenceRecord = reachability.record;
 
   const usesAssetId = String(step?.uses_asset || '').trim();
   const assetForStep = usesAssetId ? findAsset({ db, rowId: recordId, stepId: usesAssetId }) : null;

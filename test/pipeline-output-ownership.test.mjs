@@ -30,6 +30,42 @@ test('config rejects two steps that declare the same record column', () => {
   )));
 });
 
+test('config rejects two nested steps that declare the same record column', () => {
+  const { errors } = normalizeConfig({
+    pipeline: [
+      {
+        kind: 'assign',
+        id: 'route_nested',
+        target: 'pipeline_name',
+        fallback: 'nested',
+      },
+      {
+        kind: 'pipeline',
+        id: 'nested',
+        manual: true,
+        steps: [
+          {
+            kind: 'enrich',
+            id: 'first_producer',
+            outputs: { shared_column: { type: 'string', description: 'first value' } },
+          },
+          {
+            kind: 'enrich',
+            id: 'second_producer',
+            outputs: { shared_column: { type: 'string', description: 'second value' } },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.ok(errors.some((error) => (
+    error.includes('record column "shared_column"')
+    && error.includes('"nested.first_producer"')
+    && error.includes('"nested.second_producer"')
+  )));
+});
+
 test('declared-output guard catches a partial output drop', () => {
   const failures = declaredOutputWriteFailures({
     outputNames: ['kept_output', 'dropped_output'],

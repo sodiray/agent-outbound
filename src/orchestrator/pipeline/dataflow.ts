@@ -46,6 +46,7 @@ import {
   filterRecordsForCanary,
   loadCanaryConfig,
 } from '../policy/canary-isolation.js';
+import { reconcileSequenceReachability } from '../policy/sequence-reachability-reconcile.js';
 
 type DataflowRecord = Record<string, any>;
 
@@ -827,9 +828,14 @@ export const runPipelineDataflow = async ({
     // Filter canary before limit so excluded production rows cannot starve allowlist.
     const rawInPlay = readInPlayRows({ db, where, limit: 0 });
     const canaryRows = filterRecordsForCanary(rawInPlay, canaryConfig);
+    const reconciledRows = canaryRows.flatMap((record) => {
+      if (dryRun || !pipelineNameForRecord({ config, record })) return [record];
+      const reconciled = reconcileSequenceReachability({ db, record });
+      return reconciled.reachable ? [reconciled.record] : [];
+    });
     const selectedRows = selectedPipeline
-      ? canaryRows.filter((record) => pipelineNameForRecord({ config, record }) === selectedPipeline)
-      : canaryRows;
+      ? reconciledRows.filter((record) => pipelineNameForRecord({ config, record }) === selectedPipeline)
+      : reconciledRows;
     const rows = Number(limit || 0) > 0 ? selectedRows.slice(0, Number(limit)) : selectedRows;
     // Honor human decision overrides only for the canary-scoped set.
     if (!dryRun) {

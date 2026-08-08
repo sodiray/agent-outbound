@@ -56,11 +56,8 @@ import { applyContactRotation } from '../policy/contact-campaign.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
 import { evaluateTransmitterSuppression } from '../policy/transmitter-suppression.js';
 import { hydrateActiveContactOntoRecord } from '../policy/load-contacts.js';
-import {
-  evaluateSequenceReachability,
-  reenteredSequencePatch,
-  unreachableSequencePatch,
-} from '../policy/sequence-reachability.js';
+import { evaluateSequenceReachability } from '../policy/sequence-reachability.js';
+import { reconcileSequenceReachability } from '../policy/sequence-reachability-reconcile.js';
 
 const parseExtra = (value) => {
   try {
@@ -250,37 +247,6 @@ const getLaunchDecision = ({ sequence, firstStep, today }) => {
     timeZone: timing.timeZone,
   });
   return { timing, launchBaseDate, filtered };
-};
-
-const reconcileSequenceReachability = ({ db, record }) => {
-  const hydrated = hydrateActiveContactOntoRecord({ db, record });
-  const targetRecord = hydrated.record;
-  const reachability = evaluateSequenceReachability({
-    record: targetRecord,
-    contacts: listContactsByRecord({ db, recordId: getRecordRowId(targetRecord) }),
-  });
-  if (!reachability.applicable || reachability.reachable) {
-    const shouldReenter = reachability.applicable
-      && String(targetRecord.account_sequence_state || '').trim().toLowerCase() === 'unreachable';
-    const reentered = shouldReenter
-      ? { ...targetRecord, ...reenteredSequencePatch() }
-      : targetRecord;
-    if (shouldReenter) {
-      ensureRecordColumns({ db, columns: ['sequence_status', 'account_sequence_state', 'last_error'] });
-      upsertRecord({ db, row: reentered });
-    }
-    return { reachable: true, record: reentered };
-  }
-
-  ensureRecordColumns({
-    db,
-    columns: ['sequence_status', 'account_sequence_state', 'next_action_date', 'last_error'],
-  });
-  upsertRecord({
-    db,
-    row: { ...targetRecord, ...unreachableSequencePatch() },
-  });
-  return { reachable: false, record: targetRecord };
 };
 
 /**

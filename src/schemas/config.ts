@@ -464,6 +464,8 @@ export const StepConfigSchema = z.object({
   action: z.string().default(''),
   channel: z.string().default(''),
   task_type: z.string().default(''),
+  taskType: z.string().default(''),
+  unipile_account_id: z.string().default(''),
   invite_message: z.string().default(''),
   message: z.string().default(''),
   connection_note: z.string().default(''),
@@ -474,6 +476,8 @@ export const StepConfigSchema = z.object({
   mailbox: z.string().trim().min(1).optional(),
   mailbox_from: z.string().trim().min(1).optional(),
   draft_approval_required: z.boolean().optional(),
+  lookback_minutes: z.coerce.number().int().min(1).max(10080).optional(),
+  max_results: z.coerce.number().int().min(1).max(5000).optional(),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(), // Deprecated alias; prefer config.outputs.
   // The only non-identity record scalars visible to a model for this step.
@@ -493,6 +497,35 @@ export const StepConfigSchema = z.object({
   run_in_pipeline: z.boolean().optional(),
 }).partial().default({});
 
+const ExternalStepConfigSchema = StepConfigSchema.removeDefault().pick({
+  action: true,
+  channel: true,
+  task_type: true,
+  taskType: true,
+  unipile_account_id: true,
+  invite_message: true,
+  tool: true,
+  waterfall: true,
+  fallback_tools: true,
+  args: true,
+  args_map: true,
+  output_map: true,
+  daily_cap: true,
+  mailbox: true,
+  mailbox_from: true,
+  draft_approval_required: true,
+  outputs: true,
+  columns: true,
+  idempotency: true,
+}).strict();
+
+const ReplyCheckConfigSchema = StepConfigSchema.removeDefault().pick({
+  model: true,
+  tool: true,
+  lookback_minutes: true,
+  max_results: true,
+}).strict();
+
 const SourceMaxResultsSchema = z.coerce.number().int().min(1).max(5000).default(100);
 
 export const SourceSearchSchema = z.object({
@@ -504,7 +537,12 @@ export const SourceSearchSchema = z.object({
   tool: ToolSpecSchema.optional(),
   args: z.record(z.any()).default({}),
   output_map: z.record(z.string()).default({}),
-  pagination: z.record(z.any()).optional(),
+  pagination: z.unknown().superRefine((_value, context) => {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'source search pagination is runtime-managed and cannot be configured',
+    });
+  }).optional(),
   manual_results: z.array(z.record(z.any())).default([]),
 }).partial().default({});
 
@@ -791,7 +829,12 @@ const PipelineEnrichmentStepSchema = z.object({
   ...PipelineWhenFields,
   prompt_file: z.string().default(''),
   prompt_args: z.record(z.any()).default({}),
-  idempotency: IdempotencySchema.optional(),
+  idempotency: z.unknown().superRefine((_value, context) => {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'idempotency is only supported by external side-effect steps',
+    });
+  }).optional(),
 }).partial({
   description: true,
   depends_on: true,
@@ -944,7 +987,7 @@ const PipelineExternalStepFields = {
   variables: z.record(z.any()).default({}),
   uses_asset: z.string().optional(),
   draft_approval_required: z.boolean().optional(),
-  config: StepConfigSchema.default({}),
+  config: ExternalStepConfigSchema.default({}),
   ...PipelineWhenFields,
 };
 
@@ -969,7 +1012,7 @@ const PipelineLinkedinConnectStepSchema = z.object({
 const PipelineManualTaskStepSchema = PipelineSequenceStepBaseSchema.extend({
   kind: z.literal('manual_task'),
   side_effecting: z.boolean().default(false),
-  config: StepConfigSchema.default({}),
+  config: ExternalStepConfigSchema.default({}),
   ...PipelineWhenFields,
 });
 
@@ -1026,6 +1069,13 @@ export const PipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineSubpipelineStepSchema,
 ]);
 
+const unsupportedSequenceStepConfig = (name: string) => z.unknown().superRefine((_value, context) => {
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: `sequence step config.${name} is not supported`,
+  });
+});
+
 export const SequenceStepSchema = z.preprocess((value) => {
   if (!value || typeof value !== 'object') return value;
   const step: any = { ...(value as any) };
@@ -1051,32 +1101,33 @@ export const SequenceStepSchema = z.preprocess((value) => {
   defer: z.string().optional(),
   config: z.object({
     tool: ToolSpecSchema.optional(),
-    disposition_options: z.array(z.string()).optional(),
-    model: ProviderModelSchema.optional(),
-    step_budget: z.coerce.number().int().min(1).max(40).optional(),
-    concurrency: z.coerce.number().int().min(1).max(200).optional(),
-    cache: z.string().optional(),
+    disposition_options: unsupportedSequenceStepConfig('disposition_options').optional(),
+    model: unsupportedSequenceStepConfig('model').optional(),
+    step_budget: unsupportedSequenceStepConfig('step_budget').optional(),
+    concurrency: unsupportedSequenceStepConfig('concurrency').optional(),
+    cache: unsupportedSequenceStepConfig('cache').optional(),
     outputs: z.record(EnrichmentOutputDefSchema).optional(),
     columns: z.record(z.string()).optional(),
     idempotency: IdempotencySchema.optional(),
   }).partial().default({}),
 }));
 
-const TriggerDecaySchema = z.object({
-  window_days: z.coerce.number().int().min(1).max(365).default(30),
-  floor: z.coerce.number().min(0).max(1).default(0),
-  mode: z.enum(['linear']).default('linear'),
-}).partial().default({});
+const unsupportedScoringCriterionOption = (name: string) => z.unknown().superRefine((_value, context) => {
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: `score criterion ${name} is not supported`,
+  });
+});
 
 export const ScoringCriterionSchema = z.object({
   id: z.string().default(''),
   description: z.string().default(''),
-  condition: z.string().default(''),
+  condition: unsupportedScoringCriterionOption('condition').optional(),
   weight: z.coerce.number().default(1),
   reward_only: z.boolean().default(false),
-  anchor_column: z.string().default(''),
-  decay: TriggerDecaySchema.optional(),
-  config: StepConfigSchema.default({}),
+  anchor_column: unsupportedScoringCriterionOption('anchor_column').optional(),
+  decay: unsupportedScoringCriterionOption('decay').optional(),
+  config: z.object({}).strict().optional(),
 }).partial().default({});
 
 const ScoreTreatmentBandLadderSchema = z.array(z.coerce.number().min(0).max(100)).length(5)
@@ -1472,7 +1523,7 @@ const CrmSchema = z.object({
 const SequenceSchema = z.object({
   manual: z.boolean().default(false),
   start_when: z.string().default(''),
-  reply_check: StepConfigSchema.optional(),
+  reply_check: ReplyCheckConfigSchema.optional(),
   on_reply: z.enum(['pause', 'continue', 'stop']).default('pause'),
   on_bounce: z.enum(['pause', 'continue', 'stop']).default('stop'),
   on_opt_out: z.enum(['pause', 'continue', 'stop']).default('stop'),

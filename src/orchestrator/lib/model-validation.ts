@@ -61,14 +61,8 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
     }
   }
   addExplicitRef(refs, 'score.model', config?.score?.model, 'evaluation');
-  for (const [index, criterion] of asArray(config?.score?.criteria).entries()) {
-    addExplicitRef(refs, `score.criteria[${index}].config.model`, criterion?.config?.model, 'evaluation');
-  }
   for (const [sequenceName, sequence] of Object.entries(config?.sequences || {})) {
     addExplicitRef(refs, `sequences.${sequenceName}.reply_check.model`, (sequence as any)?.reply_check?.model, 'evaluation');
-    for (const [index, step] of asArray((sequence as any)?.steps).entries()) {
-      addExplicitRef(refs, `sequences.${sequenceName}.steps[${index}].config.model`, step?.config?.model, 'research');
-    }
   }
   addExplicitRef(refs, 'crm.model', config?.crm?.model, 'research');
   return refs;
@@ -101,17 +95,11 @@ const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source'
   }
   if (phase === 'score') {
     addResolvedRef(refs, 'score', config?.score?.model, 'evaluation', aiConfig);
-    for (const [index, criterion] of asArray(config?.score?.criteria).entries()) {
-      addResolvedRef(refs, `score.criteria[${index}]`, criterion?.config?.model, 'evaluation', aiConfig);
-    }
     return refs;
   }
   if (phase === 'sequence') {
     for (const [sequenceName, sequence] of Object.entries(config?.sequences || {})) {
       addResolvedRef(refs, `sequences.${sequenceName}.reply_check`, (sequence as any)?.reply_check?.model, 'evaluation', aiConfig);
-      for (const [index, step] of asArray((sequence as any)?.steps).entries()) {
-        addResolvedRef(refs, `sequences.${sequenceName}.steps[${index}]`, step?.config?.model, 'copywriting', aiConfig);
-      }
     }
     addResolvedRef(refs, 'sequence.condition_eval', '', 'evaluation', aiConfig);
     addResolvedRef(refs, 'sequence.plan_route', '', 'research', aiConfig);
