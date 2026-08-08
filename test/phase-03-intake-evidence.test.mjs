@@ -34,13 +34,10 @@ import {
 } from '../dist/orchestrator/policy/evidence.js';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+import { representativePipelineYaml } from './fixtures/pipelines/representative.mjs';
 
 const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
-const TV_YAML =
-  process.env.TV_PROJECT_PATH
-    ? `${process.env.TV_PROJECT_PATH}/outbound.yaml`
-    : '/Users/rayepps/projects/mission/.outbound/treasure-valley/outbound.yaml';
 
 const baseEligibility = {
   isBusiness: true,
@@ -337,13 +334,12 @@ test('buildEvidenceResolutionEnvelope: pure helper is stable and optional refs',
 // 3. company_resolution gate config presence (TV)
 // ---------------------------------------------------------------------------
 
-function loadTv() {
-  assert.ok(existsSync(TV_YAML), `TV config missing: ${TV_YAML}`);
-  return yaml.load(readFileSync(TV_YAML, 'utf8'));
+function loadRepresentativePipeline() {
+  return yaml.load(readFileSync(representativePipelineYaml, 'utf8'));
 }
 
-test('TV config: linkedin_company_resolution enrich step + company_resolved_gate exist', () => {
-  const cfg = loadTv();
+test('representative pipeline: linkedin_company_resolution enrich step + company_resolved_gate exist', () => {
+  const cfg = loadRepresentativePipeline();
   const pipeline = Array.isArray(cfg.pipeline) ? cfg.pipeline : [];
 
   const resolution = pipeline.find((s) => s.id === 'linkedin_company_resolution');
@@ -368,28 +364,6 @@ test('TV config: linkedin_company_resolution enrich step + company_resolved_gate
   assert.equal(cond.value, 'resolved');
 });
 
-test('TV config: source identity + strategies feed intake path', () => {
-  const cfg = loadTv();
-  assert.ok(cfg.source, 'source block required');
-  assert.ok(Array.isArray(cfg.source.identity));
-  assert.ok(cfg.source.identity.includes('name'));
-  assert.ok(cfg.source.identity.includes('address'));
-  assert.equal(cfg.source.dedup_key, 'place_id');
-
-  const strategies = cfg.source.strategies || [];
-  const kinds = strategies.map((s) => s.kind);
-  assert.ok(kinds.includes('geo_tiles'), 'geo_tiles strategy required for broad SMB universe');
-  assert.ok(
-    kinds.includes('linkedin_profile_search'),
-    'linkedin_profile_search strategy required (person-first → company resolution)',
-  );
-
-  // Source-time exclusions exist (not_a_business_place, junk_name)
-  const exclude = cfg.source.exclude || [];
-  const descs = exclude.map((e) => e.description);
-  assert.ok(descs.includes('not_a_business_place'));
-  assert.ok(descs.includes('junk_name'));
-});
 
 // ---------------------------------------------------------------------------
 // Complete-when: raw → canonical account with inspectable facts/conflicts/

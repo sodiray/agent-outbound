@@ -39,13 +39,14 @@ import { calculateFitScore } from '../dist/orchestrator/policy/scoring.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
 import { readConfig } from '../dist/orchestrator/lib/config.js';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+import { representativePipelineRoot, representativePipelineYaml } from './fixtures/pipelines/representative.mjs';
 
 const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AO_ROOT = join(__dirname, '..');
-const TV_ROOT = '/Users/rayepps/projects/mission/.outbound/treasure-valley';
-const TV_YAML = join(TV_ROOT, 'outbound.yaml');
+const TV_ROOT = representativePipelineRoot;
+const TV_YAML = representativePipelineYaml;
 
 const PRODUCTION_IMPORTERS = [
   {
@@ -95,7 +96,6 @@ const PRODUCTION_IMPORTERS = [
 ];
 
 function loadTvRaw() {
-  assert.ok(existsSync(TV_YAML), `TV outbound.yaml missing at ${TV_YAML}`);
   return yaml.load(readFileSync(TV_YAML, 'utf8'));
 }
 
@@ -158,7 +158,7 @@ test('TV config: policy.enforce_readiness true; treatment_assignment is policy_a
   assert.equal(treatment.action, 'policy_apply');
 });
 
-test('TV config reports its strict-input migration checklist and preserves enforce_readiness', () => {
+test('representative config preserves policy fields through normalization and loading', () => {
   const raw = loadTvRaw();
   const normalized = normalizeConfig(raw, { listDir: TV_ROOT });
   const errors = Array.isArray(normalized.errors)
@@ -166,8 +166,7 @@ test('TV config reports its strict-input migration checklist and preserves enfor
     : normalized.error
       ? [normalized.error]
       : [];
-  assert.ok(errors.some((error) => error.includes('pipeline.school_gate (filter)')));
-  assert.ok(errors.some((error) => error.includes('pipeline.franchise_profile (enrich) must declare at least one input')));
+  assert.deepEqual(errors, []);
 
   // PolicySchema preserves readiness + rule versions + review gates (no strip).
   assert.equal(normalized.config.policy?.enforce_readiness, true);
@@ -193,7 +192,7 @@ test('TV config reports its strict-input migration checklist and preserves enfor
 
   // readConfig path (production config loader)
   const loaded = readConfig(TV_ROOT);
-  assert.ok((loaded.errors || []).some((error) => error.includes('pipeline.school_gate (filter)')));
+  assert.deepEqual(loaded.errors, []);
   assert.equal(loaded.config.policy?.enforce_readiness, true);
   assert.equal(loaded.config.policy?.fit_rule_version, raw.policy?.fit_rule_version);
   assert.equal(

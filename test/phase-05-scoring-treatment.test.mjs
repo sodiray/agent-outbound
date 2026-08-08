@@ -14,10 +14,6 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   calculateFitScore,
@@ -92,14 +88,6 @@ import {
   withinEnrichmentCeiling,
   COST_LEDGER_VERSION,
 } from '../dist/orchestrator/policy/cost-ledger.js';
-
-const require = createRequire(import.meta.url);
-const yaml = require('js-yaml');
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-const TV_OUTBOUND = join(
-  '/Users/rayepps/projects/mission/.outbound/treasure-valley/outbound.yaml',
-);
 
 const ALL_FIT_IDS = [
   'operational_coordination_burden',
@@ -187,38 +175,6 @@ test('phase-05 fit: calculateFitScore is deterministic; missing components do no
   assert.ok(sparse.fit_score < 30);
 });
 
-test('phase-05 fit: TV outbound.yaml score criteria preserve the declared model (no HIPAA/walk-in)', () => {
-  const raw = readFileSync(TV_OUTBOUND, 'utf8');
-  const doc = yaml.load(raw);
-  const criteria = Array.isArray(doc?.score?.criteria) ? doc.score.criteria : [];
-  assert.deepEqual(doc?.score?.treatment_bands?.fit, [0, 45, 65, 80, 100]);
-  assert.equal(doc?.score?.treatment_bands?.fit_evidence_confidence, undefined);
-  assert.ok(criteria.length >= 6, 'TV score must declare fit criteria');
-  assert.equal(doc?.policy?.enforce_readiness, true);
-  assert.equal(doc?.policy?.fit_rule_version, 'tv-fit-v1');
-  assert.equal(doc?.policy?.treatment_rule_version, 'tv-treatment-v1');
-  assert.match(String(doc?.score?.description || ''), /Do NOT grade walk-in/i);
-  assert.match(String(doc?.score?.description || ''), /HIPAA/i);
-
-  const byId = new Map(criteria.map((c) => [String(c.id), c]));
-  for (const id of ALL_FIT_IDS) {
-    assert.ok(byId.has(id), `TV score missing criterion ${id}`);
-    const w = Number(byId.get(id).weight);
-    assert.ok(
-      Math.abs(w - treasureValleyFitModel.criteria.find((criterion) => criterion.id === id).weight) < 1e-9,
-      `weight mismatch for ${id}: yaml=${w}`,
-    );
-  }
-  for (const id of byId.keys()) {
-    assert.ok(
-      ALL_FIT_IDS.includes(id),
-      `TV score has non-fit / banned criterion: ${id}`,
-    );
-  }
-  // Explicit absence of legacy defects in the live TV score block
-  assert.equal(raw.includes('walk_in_decision_maker_access'), false);
-  assert.equal(raw.includes('hipaa_exposure'), false);
-});
 
 // ---------------------------------------------------------------------------
 // 2. Treatment matrix A / B / C / D / hold

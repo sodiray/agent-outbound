@@ -57,13 +57,11 @@ import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
 import { openListDb, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+import { representativePipelineYaml } from './fixtures/pipelines/representative.mjs';
 
 const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const TV_ROOT =
-  process.env.TV_ROOT || '/Users/rayepps/projects/mission/.outbound/treasure-valley';
-const TV_YAML = join(TV_ROOT, 'outbound.yaml');
+const TV_YAML = representativePipelineYaml;
 
 const TIER_PIPELINE_IDS = ['tier_a', 'tier_b', 'tier_c', 'tier_d'];
 const VISIT_LIKE =
@@ -79,7 +77,6 @@ const contactPolicy = {
 };
 
 function loadTvRaw() {
-  assert.ok(existsSync(TV_YAML), `TV outbound.yaml missing at ${TV_YAML}`);
   return yaml.load(readFileSync(TV_YAML, 'utf8'));
 }
 

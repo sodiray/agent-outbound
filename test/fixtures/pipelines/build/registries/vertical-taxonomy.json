@@ -1,0 +1,20 @@
+{
+  "taxonomy_version": "representative-v1",
+  "verticals": {
+    "trades_field_services": { "sub_verticals": ["hvac", "other_trades_field_services"] },
+    "construction_project_services": { "sub_verticals": ["general_contractor"] },
+    "automotive_equipment": { "sub_verticals": ["automotive_repair"] },
+    "manufacturing_distribution_logistics": { "sub_verticals": ["manufacturer"] },
+    "professional_advisory_services": { "sub_verticals": ["accounting_bookkeeping"] },
+    "healthcare_clinical": { "sub_verticals": ["dental_practice"] },
+    "personal_care_wellness": { "sub_verticals": ["hair_salon"] },
+    "property_real_estate": { "sub_verticals": ["property_management"] },
+    "retail_hospitality_food": { "sub_verticals": ["specialty_retail"] },
+    "education_child_family_services": { "sub_verticals": ["childcare"] },
+    "agriculture_animal_rural_services": { "sub_verticals": ["farm_ranch"] },
+    "technology_communications": { "sub_verticals": ["managed_it_services"] },
+    "other_local_smb": { "sub_verticals": ["other_local_smb"] }
+  },
+  "fallback_vertical": "other_local_smb",
+  "fallback_sub_vertical": "other_local_smb"
+}

@@ -1,0 +1,35 @@
+{
+  "library_version": "representative-v1",
+  "proofs": [
+    {
+      "proof_id": "representative_trades_admin",
+      "category": "trades_admin_automation",
+      "provenance": "Representative engine test data",
+      "usage_restrictions": ["Never present fixture data as a customer result"]
+    },
+    {
+      "proof_id": "representative_professional_admin",
+      "category": "professional_services_admin",
+      "provenance": "Representative engine test data",
+      "usage_restrictions": ["Never present fixture data as a customer result"]
+    },
+    {
+      "proof_id": "representative_project_admin",
+      "category": "project_services_admin",
+      "provenance": "Representative engine test data",
+      "usage_restrictions": ["Never present fixture data as a customer result"]
+    },
+    {
+      "proof_id": "representative_clinical_admin",
+      "category": "clinical_admin_non_phi",
+      "provenance": "Representative engine test data",
+      "usage_restrictions": ["Never present fixture data as a customer result"]
+    },
+    {
+      "proof_id": "representative_general_admin",
+      "category": "general_smb_admin",
+      "provenance": "Representative engine test data",
+      "usage_restrictions": ["Never present fixture data as a customer result"]
+    }
+  ]
+}

@@ -38,12 +38,11 @@ import {
   treasureValleyPostcard,
   treasureValleyTreatmentStrategy,
 } from './fixtures/treatment-strategy.mjs';
+import { representativePipelineRoot, representativePipelineYaml, representativeTaxonomy } from './fixtures/pipelines/representative.mjs';
 
-const TV_ROOT =
-  process.env.TV_ROOT ||
-  '/Users/rayepps/projects/mission/.outbound/treasure-valley';
-const TV_YAML = join(TV_ROOT, 'outbound.yaml');
-const TAXONOMY = join(TV_ROOT, 'build/registries/vertical-taxonomy.json');
+const TV_ROOT = representativePipelineRoot;
+const TV_YAML = representativePipelineYaml;
+const TAXONOMY = representativeTaxonomy;
 
 const REQUIRED_ACCOUNT_INTELLIGENCE_OUTPUTS = [
   'regulatory_context',
@@ -99,7 +98,7 @@ test('phase-04: vertical-taxonomy.json loads with version, fallbacks, and seed v
   // Must be parseable JSON (registry asset, not prose)
   const taxonomy = JSON.parse(raw);
 
-  assert.equal(taxonomy.taxonomy_version, 'tv-vertical-v1');
+  assert.equal(taxonomy.taxonomy_version, 'representative-v1');
   assert.equal(taxonomy.fallback_vertical, 'other_local_smb');
   assert.equal(taxonomy.fallback_sub_vertical, 'other_local_smb');
   assert.ok(taxonomy.verticals && typeof taxonomy.verticals === 'object');
@@ -333,7 +332,7 @@ test('phase-04: representative HVAC fixture uses controlled taxonomy labels only
       fixtureClassification.sub_vertical,
     ),
   );
-  assert.equal(fixtureClassification.taxonomy_version, 'tv-vertical-v1');
+  assert.equal(fixtureClassification.taxonomy_version, 'representative-v1');
 
   // No unsupported invented vertical may pass the registry check
   assert.equal(
@@ -414,7 +413,7 @@ test('phase-04: applyOutboundPolicy writes only controlled taxonomy labels', () 
   });
   assert.equal(hvac.patch.vertical, 'trades_field_services');
   assert.equal(hvac.patch.sub_vertical, 'hvac');
-  assert.equal(hvac.patch.taxonomy_version, 'tv-vertical-v1');
+  assert.equal(hvac.patch.taxonomy_version, 'representative-v1');
   assert.ok(['A', 'B', 'C', 'D', 'enrichment_hold'].includes(hvac.treatment_tier));
 
   // Unsupported free-text labels are rewritten at apply — no invented production ids

@@ -12,8 +12,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -37,11 +36,6 @@ import {
   treasureValleyGoldenTicket,
   treasureValleyTreatmentStrategy,
 } from './fixtures/treatment-strategy.mjs';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const TV_ROOT =
-  process.env.TV_ROOT ||
-  '/Users/rayepps/projects/mission/.outbound/treasure-valley';
 
 // ── 1. Evidence: site_scrape success + failure preserve ─────────────────────
 

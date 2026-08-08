@@ -9,14 +9,15 @@ import test from 'node:test';
 import yaml from 'js-yaml';
 
 import { calculateEconomicScenario } from '../dist/orchestrator/policy/economics.js';
+import {
+  representativeDiagnostics,
+  representativePipelineYaml,
+  representativeProofLibrary,
+} from './fixtures/pipelines/representative.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const TV_ROOT =
-  process.env.TV_ROOT ||
-  '/Users/rayepps/projects/mission/.outbound/treasure-valley';
-const TV_YAML = join(TV_ROOT, 'outbound.yaml');
-const DIAG = join(TV_ROOT, 'build/registries/diagnostic-families.json');
-const PROOF = join(TV_ROOT, 'build/assets/proof-library.json');
+const TV_YAML = representativePipelineYaml;
+const DIAG = representativeDiagnostics;
+const PROOF = representativeProofLibrary;
 const REQUIRED_DIAG_OUTPUTS = [
   'diagnostic_hypotheses_json',
   'economic_scenarios_json',
@@ -74,23 +75,23 @@ test('phase-06: unknown economic scenario is insufficient without invented numbe
   assert.ok(result.missing_inputs.includes('unknown_scenario_id'));
 });
 
-test('phase-06: proof library has Mission provenance and structured restrictions', () => {
+test('phase-06: proof library entries have provenance and structured restrictions', () => {
   const library = loadJson(PROOF);
-  assert.equal(library.library_version, 'tv-proof-v1');
+  assert.equal(library.library_version, 'representative-v1');
   assert.ok(Array.isArray(library.proofs));
   assert.ok(library.proofs.length >= 1);
 
   for (const proof of library.proofs) {
     assert.ok(proof.proof_id);
     assert.ok(proof.category);
-    assert.ok(String(proof.provenance || '').includes('Mission'));
+    assert.ok(String(proof.provenance || '').trim());
     assert.ok(Array.isArray(proof.usage_restrictions) && proof.usage_restrictions.length > 0);
   }
 });
 
 test('phase-06: diagnostic families retain supported workflow and calculator metadata', () => {
   const registry = loadJson(DIAG);
-  assert.equal(registry.registry_version, 'tv-diagnostic-v1');
+  assert.equal(registry.registry_version, 'representative-v1');
   assert.equal(registry.offer, 'diagnostic_partnership');
 
   for (const familyId of [

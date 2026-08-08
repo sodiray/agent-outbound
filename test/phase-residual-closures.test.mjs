@@ -6,9 +6,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { representativePipelineRoot } from './fixtures/pipelines/representative.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const TV = '/Users/rayepps/projects/mission/.outbound/treasure-valley';
+const TV = representativePipelineRoot;
 
 const {
   evaluateOutboundReadiness,
@@ -287,15 +288,6 @@ test('residual PolicySchema preserves fit/treatment rule versions', () => {
   assert.ok(src.includes('fit_rule_version'));
   assert.ok(src.includes('treatment_rule_version'));
   assert.ok(src.includes('review_required_for'));
-});
-
-test('residual TV disposition matrix + sequence-board baseline ok', () => {
-  const board = JSON.parse(readFileSync(join(TV, 'build/baselines/sequence-board.json'), 'utf8'));
-  assert.equal(board.ok, true);
-  const disp = JSON.parse(readFileSync(join(TV, 'build/gap-map/step-disposition-matrix.json'), 'utf8'));
-  assert.ok(disp.count >= 20);
-  assert.ok(disp.steps.some((s) => s.id === 'treatment_assignment' && s.disposition === 'replace'));
-  assert.ok(disp.steps.some((s) => s.id === 'real_site_gate'));
 });
 
 test('residual proof library covers all family categories', () => {

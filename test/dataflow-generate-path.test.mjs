@@ -8,7 +8,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import yaml from 'js-yaml';
 import {
   criticalPathGenerateIds,
@@ -16,8 +16,8 @@ import {
   selectDataflowSteps,
 } from '../dist/orchestrator/pipeline/dataflow.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
+import { representativePipelineRoot, representativePipelineYaml } from './fixtures/pipelines/representative.mjs';
 
-const TV_YAML = '/Users/rayepps/projects/mission/.outbound/treasure-valley/outbound.yaml';
 
 const tvLikeSteps = [
   { id: 'site_profile', kind: 'enrich', deps: [], step: { id: 'site_profile', kind: 'enrich' } },
@@ -109,19 +109,16 @@ test('fixture mode keeps all generate', () => {
   }
 });
 
-test('TV yaml: diagnostic_content_pack run_in_pipeline survives normalizeConfig', () => {
-  assert.ok(existsSync(TV_YAML), 'TV outbound.yaml must exist');
-  const raw = yaml.load(readFileSync(TV_YAML, 'utf8'));
+test('representative diagnostic_content_pack run_in_pipeline survives normalizeConfig', () => {
+  const raw = yaml.load(readFileSync(representativePipelineYaml, 'utf8'));
   const rawDiag = (raw.pipeline || []).find((s) => s?.id === 'diagnostic_content_pack');
   assert.equal(rawDiag?.kind, 'generate');
   assert.equal(rawDiag?.run_in_pipeline, true, 'TV author intent: diagnostic on production path');
 
   const normalized = normalizeConfig(raw, {
-    listDir: '/Users/rayepps/projects/mission/.outbound/treasure-valley',
+    listDir: representativePipelineRoot,
   });
-  assert.ok(
-    (normalized.errors || []).some((error) => error.includes('pipeline.diagnostic_content_pack (generate) reads undeclared input fields')),
-  );
+  assert.deepEqual(normalized.errors, []);
   const diag = (normalized.config.pipeline || []).find((s) => s?.id === 'diagnostic_content_pack');
   assert.ok(diag, 'diagnostic_content_pack present after normalize');
   assert.equal(
@@ -141,6 +138,6 @@ test('TV yaml: diagnostic_content_pack run_in_pipeline survives normalizeConfig'
   assert.ok(selected.includes('account_intelligence'), 'critical generate on normal path');
   assert.ok(
     selected.includes('diagnostic_content_pack'),
-    'TV diagnostic pack opt-in must run without AO_PIPELINE_FIXTURE / AO_RUN_GENERATE',
+    'diagnostic pack opt-in must run without AO_PIPELINE_FIXTURE / AO_RUN_GENERATE',
   );
 });

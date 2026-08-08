@@ -1,0 +1,11 @@
+{
+  "registry_version": "representative-v1",
+  "offer": "diagnostic_partnership",
+  "families": {
+    "trades_field_services": { "workflow_areas": ["dispatch"], "hypotheses": [{ "id": "coordination_load" }], "discovery_questions": ["Where does work wait?"], "economic_calculators": ["admin_labor_leak"] },
+    "construction_project_services": { "workflow_areas": ["bids"], "hypotheses": [{ "id": "bid_load" }], "discovery_questions": ["Who follows up?"], "economic_calculators": ["admin_labor_leak"] },
+    "professional_advisory_services": { "workflow_areas": ["intake"], "hypotheses": [{ "id": "document_chase" }], "discovery_questions": ["Who chases documents?"], "economic_calculators": ["admin_labor_leak"] },
+    "healthcare_clinical": { "workflow_areas": ["scheduling"], "hypotheses": [{ "id": "front_desk_load" }], "discovery_questions": ["How are calls handled?"], "economic_calculators": ["missed_lead_revenue"] },
+    "default": { "workflow_areas": ["followup"], "hypotheses": [{ "id": "admin_load" }], "discovery_questions": ["Where does work pile up?"], "economic_calculators": ["admin_labor_leak"] }
+  }
+}

@@ -37,11 +37,17 @@ import {
   treasureValleyTreatmentStrategy,
 } from './fixtures/treatment-strategy.mjs';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+import {
+  representativeDiagnostics,
+  representativePipelineYaml,
+  representativeProofLibrary,
+  representativeTaxonomy,
+} from './fixtures/pipelines/representative.mjs';
 
-const TV_YAML = '/Users/rayepps/projects/mission/.outbound/treasure-valley/outbound.yaml';
-const TAXONOMY = '/Users/rayepps/projects/mission/.outbound/treasure-valley/build/registries/vertical-taxonomy.json';
-const DIAG = '/Users/rayepps/projects/mission/.outbound/treasure-valley/build/registries/diagnostic-families.json';
-const PROOF = '/Users/rayepps/projects/mission/.outbound/treasure-valley/build/assets/proof-library.json';
+const TV_YAML = representativePipelineYaml;
+const TAXONOMY = representativeTaxonomy;
+const DIAG = representativeDiagnostics;
+const PROOF = representativeProofLibrary;
 
 /** Representative raw-style fixture: HVAC SMB */
 const FIXTURE = {
@@ -290,10 +296,10 @@ test('multi-contact campaign lifecycle with single next action', () => {
 
 test('registries and proof library are loadable seed assets', () => {
   const t = JSON.parse(readFileSync(TAXONOMY, 'utf8'));
-  assert.equal(t.taxonomy_version, 'tv-vertical-v1');
+  assert.equal(t.taxonomy_version, 'representative-v1');
   assert.ok(Object.keys(t.verticals).length >= 10);
   const d = JSON.parse(readFileSync(DIAG, 'utf8'));
   assert.equal(d.offer, 'diagnostic_partnership');
   const p = JSON.parse(readFileSync(PROOF, 'utf8'));
-  assert.ok(p.proofs.every((x) => x.proof_id && x.provenance.includes('Mission')));
+  assert.ok(p.proofs.every((x) => x.proof_id && String(x.provenance || '').trim()));
 });

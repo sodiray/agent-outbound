@@ -1,0 +1,199 @@
+list:
+  name: representative-outbound
+source:
+  identity: [name, address]
+  dedup_key: place_id
+policy:
+  enforce_readiness: true
+  fit_rule_version: representative-fit-v1
+  treatment_rule_version: representative-treatment-v1
+  deterministic_treatment: true
+  prohibited_channels: [sms]
+  prohibited_task_types: [visit]
+  review_required_for: [send_email]
+channels:
+  phone:
+    sms: false
+    automated_voice: false
+    mode: human_only
+  email:
+    draft_approval_required: true
+pipeline:
+  - kind: enrich
+    id: linkedin_company_resolution
+    action: linkedin_company_resolution
+    inputs: [linkedin_name, linkedin_headline, linkedin_urn, business_name, city, address, source_query, sourced_at]
+    outputs:
+      company_resolution: { type: string, description: Resolution outcome. }
+  - kind: filter
+    id: company_resolved_gate
+    type: field_check
+    on_fail: drop
+    depends_on: [linkedin_company_resolution]
+    inputs: [company_resolution]
+    conditions:
+      - field: company_resolution
+        operator: eq
+        value: resolved
+  - kind: enrich
+    id: site_scrape
+    action: tool_call
+    tool:
+      server: monid
+      tools: [MONID__CONTEXT_DEV__WEB_SCRAPE_MARKDOWN]
+    args_map:
+      url: website
+    inputs: [website]
+    outputs:
+      site_text: { type: string, description: Retrieved public website content. }
+  - kind: enrich
+    id: site_profile
+    action: model_generate
+    model: openrouter/anthropic/claude-haiku-4.5
+    depends_on: [site_scrape]
+    inputs: [site_text, business_name]
+    outputs:
+      site_profile_json: { type: string, description: Public site profile. }
+  - kind: enrich
+    id: decision_makers
+    action: decision_makers
+    inputs: [business_name, website, domain]
+    outputs:
+      decision_makers_json: { type: string, description: Public decision-maker research. }
+  - kind: enrich
+    id: franchise_profile
+    action: model_generate
+    model: openrouter/anthropic/claude-haiku-4.5
+    inputs: [business_name, site_text]
+    outputs:
+      franchise_profile_json: { type: string, description: Ownership and franchise evidence. }
+  - kind: enrich
+    id: vertical_classify
+    action: model_generate
+    model: openrouter/anthropic/claude-haiku-4.5
+    depends_on: [site_scrape]
+    inputs: [business_name, site_text]
+    outputs:
+      vertical: { type: string, description: Controlled vertical classification. }
+      sub_vertical: { type: string, description: Controlled sub-vertical classification. }
+  - kind: generate
+    id: account_intelligence
+    depends_on: [site_profile, decision_makers, franchise_profile, vertical_classify]
+    model: openrouter/anthropic/claude-haiku-4.5
+    inputs: [business_name, site_text, site_profile_json, decision_makers_json, franchise_profile_json, vertical, sub_vertical]
+    outputs:
+      regulatory_context: { type: string, description: Regulatory context from public evidence. }
+      ownership_type: { type: string, description: Ownership classification. }
+      owner_operated: { type: boolean, description: Owner-operated likelihood. }
+      local_buying_authority: { type: boolean, description: Local buying authority likelihood. }
+      primary_buyer_role: { type: string, description: Most likely buyer role. }
+      likely_champion_role: { type: string, description: Most likely champion role. }
+      size_tier: { type: string, description: Operating size tier. }
+      classification_confidence: { type: number, description: Classification confidence. }
+      classification_evidence: { type: string, description: Classification evidence summary. }
+      account_classification_json: { type: string, description: Structured account classification. }
+      account_intelligence_json: { type: string, description: Account intelligence evidence. }
+  - kind: score
+    id: score_fit_initial
+    key: fit
+    depends_on: [account_intelligence]
+    inputs:
+      business_name: { from: business_name, required: true }
+      site_text: { from: site_text, required: true }
+    model: openrouter/anthropic/claude-haiku-4.5
+    criteria:
+      - id: operational_coordination_burden
+        weight: 1
+        description: Recurring administrative coordination burden.
+    outputs:
+      fit_score: { type: number }
+      fit_breakdown: { type: json }
+      fit_reasoning: { type: string }
+  - kind: enrich
+    id: treatment_assignment
+    action: policy_apply
+    depends_on: [account_intelligence, score_fit_initial]
+    inputs: [fit_score, fit_breakdown_json, fit_reasoning, fit_evidence_confidence, identity_confidence, phone_confidence, buyer_confidence, mail_confidence, timing_score, strong_signal_strength, strong_signal_count, enrichment_cost_usd, treatment_tier, candidate_tier, suppressed, address, phone, email_primary, contact_name, contact_email, contact_title, website, domain, vertical]
+    outputs:
+      treatment_tier: { type: string, description: "Policy-selected treatment tier, including enrichment_hold when evidence is insufficient." }
+  - kind: generate
+    id: diagnostic_content_pack
+    depends_on: [treatment_assignment, account_intelligence]
+    run_in_pipeline: true
+    model: openrouter/anthropic/claude-haiku-4.5
+    inputs: [treatment_tier, account_intelligence_json]
+    when:
+      match: all
+      conditions:
+        - field: treatment_tier
+          operator: not_in
+          value: [D]
+    outputs:
+      diagnostic_hypotheses_json: { type: string, description: Diagnostic hypotheses. }
+      economic_scenarios_json: { type: string, description: Economic scenarios. }
+      proof_match_ids: { type: string, description: Matched proof identifiers. }
+      preliminary_snapshot: { type: string, description: Preliminary account snapshot. }
+  - kind: assign
+    id: sequence_assign
+    depends_on: [treatment_assignment]
+    target: pipeline_name
+    fallback: enrichment_hold
+    inputs: [sequence_status, treatment_tier]
+    rules:
+      - id: tier_a_rule
+        pipeline: tier_a
+        conditions: [{ field: treatment_tier, operator: eq, value: A }]
+      - id: tier_b_rule
+        pipeline: tier_b
+        conditions: [{ field: treatment_tier, operator: eq, value: B }]
+      - id: tier_c_rule
+        pipeline: tier_c
+        conditions: [{ field: treatment_tier, operator: eq, value: C }]
+      - id: tier_d_rule
+        pipeline: tier_d
+        conditions: [{ field: treatment_tier, operator: eq, value: D }]
+  - kind: pipeline
+    id: tier_a
+    steps:
+      - kind: send_email
+        id: email_1
+        side_effecting: true
+        inputs: [email_subject, email_body, contact_email]
+      - kind: linkedin_connect
+        id: linkedin_1
+        side_effecting: true
+        inputs: [invite_message]
+      - kind: manual_task
+        id: phone_1
+        config: { task_type: human_phone, channel: phone }
+      - kind: manual_task
+        id: mail_1
+        config: { task_type: golden_ticket, channel: mail }
+  - kind: pipeline
+    id: tier_b
+    steps:
+      - kind: send_email
+        id: email_1
+        side_effecting: true
+        inputs: [email_subject, email_body, contact_email]
+      - kind: manual_task
+        id: phone_1
+        config: { task_type: human_phone, channel: phone }
+      - kind: manual_task
+        id: mail_1
+        config: { task_type: standard_postcard, channel: mail }
+  - kind: pipeline
+    id: tier_c
+    steps:
+      - kind: send_email
+        id: email_1
+        side_effecting: true
+        inputs: [email_subject, email_body, contact_email]
+  - kind: pipeline
+    id: tier_d
+    manual: true
+    steps: []
+  - kind: pipeline
+    id: enrichment_hold
+    manual: true
+    steps: []
