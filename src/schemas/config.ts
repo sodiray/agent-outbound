@@ -815,6 +815,26 @@ const PipelineEnrichmentStepSchema = z.object({
   idempotency: true,
 });
 
+const ExtractOutputDefSchema = z.object({
+  type: z.enum(['string', 'string[]']),
+  description: z.string(),
+});
+
+const PipelineExtractStepSchema = z.object({
+  kind: z.literal('extract'),
+  id: z.string().min(1),
+  description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
+  from: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+  using: z.enum(['email', 'phone', 'url']),
+  select: z.enum(['first', 'last', 'all']).default('first'),
+  // Exclusions are literal substrings by default. `*` enables a safe glob,
+  // never a user-supplied regular expression.
+  exclude: z.array(z.string().min(1)).default([]),
+  outputs: z.record(ExtractOutputDefSchema),
+}).strict();
+
 const PipelineGenerateStepSchema = z.object({
   kind: z.literal('generate'),
   id: z.string(),
@@ -947,6 +967,7 @@ const PipelineExitStepSchema = PipelineFilterStepSchema.omit({ kind: true }).ext
 
 const ExecutablePipelineStepSchemas = [
   PipelineEnrichmentStepSchema,
+  PipelineExtractStepSchema,
   PipelineGenerateStepSchema,
   PipelineComposeStepSchema,
   PipelineFilterStepSchema,
@@ -964,6 +985,7 @@ export const ExecutablePipelineStepSchema = z.discriminatedUnion('kind', Executa
 
 const SubpipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
+  PipelineExtractStepSchema,
   PipelineComposeStepSchema,
   PipelineFilterStepSchema,
   PipelineReviewStepSchema,

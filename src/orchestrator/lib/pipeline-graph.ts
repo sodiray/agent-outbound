@@ -135,7 +135,7 @@ const proseTextsForStep = (step: any, options: PipelineGraphOptions) => {
 
 const producedFieldsByStep = (config: any): Producer[] => {
   const entries = pipelineSteps(config).flatMap((step: any, index: number) => {
-    if (!['enrich', 'generate'].includes(String(step?.kind || ''))) return [];
+    if (!['enrich', 'extract', 'generate'].includes(String(step?.kind || ''))) return [];
     const id = stepId(step);
     if (!id) return [];
     const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
@@ -166,7 +166,7 @@ const producedFieldsByStep = (config: any): Producer[] => {
 const declaredColumnProducers = (config: any): DeclaredColumnProducer[] => (
   pipelineSteps(config).flatMap((step: any) => {
     const id = stepId(step);
-    if (!id || !['enrich', 'generate'].includes(String(step?.kind || ''))) return [];
+    if (!id || !['enrich', 'extract', 'generate'].includes(String(step?.kind || ''))) return [];
     const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
     return getTargetColumnsForStepConfig(stepConfig)
       .map(({ name }) => String(name || '').trim())
@@ -297,6 +297,7 @@ export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = 
       ...(String(step?.kind || '') === 'assign'
         ? (Array.isArray(step?.rules) ? step.rules.flatMap((rule: any) => conditionFields(rule)) : [])
         : []),
+      ...(String(step?.kind || '') === 'extract' ? stringArray(step?.from) : []),
       ...collectTokens(step?.prompt_args),
       ...collectTokens(step?.args),
     ];
@@ -632,6 +633,25 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
   duplicateIds(ids).forEach((id) => {
     errors.push(`resolved pipeline step id "${id}" is ambiguous because more than one step uses it.`);
   });
+  steps
+    .filter((step: any) => String(step?.kind || '') === 'extract')
+    .forEach((step: any) => {
+      const id = stepId(step) || 'unknown';
+      const select = String(step?.select || 'first').trim();
+      const outputs = step?.outputs && typeof step.outputs === 'object' && !Array.isArray(step.outputs)
+        ? step.outputs as Record<string, unknown>
+        : {};
+      if (Object.keys(outputs).length === 0) {
+        errors.push(`pipeline.${id} kind: extract must declare at least one output.`);
+      }
+      Object.entries(outputs).forEach(([name, definition]) => {
+        const type = String((definition as Record<string, unknown>)?.type || '').trim();
+        const expected = select === 'all' ? 'string[]' : 'string';
+        if (type !== expected) {
+          errors.push(`pipeline.${id} extract output "${name}" must have type "${expected}" for select: ${select}.`);
+        }
+      });
+    });
   errors.push(...declaredColumnCollisionErrors(config));
 
   if (hasLinkedinSource && resolutionStepIds.length === 0) {

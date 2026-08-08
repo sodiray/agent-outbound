@@ -1,4 +1,5 @@
 import { executeEnrichmentStepOnRecords } from '../enrichment/runner.js';
+import { executeExtractStepOnRecords } from '../extract/runner.js';
 import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/conditions.js';
 import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 import { getRecordRowId } from '../lib/record.js';
@@ -296,6 +297,16 @@ const executeEnrichBatch = async (
   });
   return outcomes;
 };
+
+const executeExtractBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  rows: Array<Record<string, unknown>>,
+) => executeExtractStepOnRecords({
+  db: ctx.db,
+  step,
+  rows,
+});
 
 /** Production generate path: classification / content packs via generate runner (not fixture). */
 const executeGenerateBatch = async (
@@ -800,6 +811,7 @@ const executeStepBatchUnchecked = async (
   }
 
   if (kind === 'enrich') return executeEnrichBatch(ctx, step, stepId, rows);
+  if (kind === 'extract') return executeExtractBatch(ctx, step, rows);
   if (kind === 'compose') return executeComposeBatch(ctx, step, stepId, rows);
   if (kind === 'assign') return executeAssignBatch(ctx, step, stepId, rows);
   if (kind === 'review') return executeReviewBatch(ctx, step, stepId, rows);
