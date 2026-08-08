@@ -19,6 +19,7 @@ import {
   whenPredicateForStep,
 } from '../lib/step-when.js';
 import { executePipelineSequenceAction } from './sequence-step-runtime.js';
+import { promoteContactSource } from './contact-source.js';
 import { stageInputRecord } from '../lib/stage-inputs.js';
 import { runScoreStage, type ScoreStage } from '../scoring/stage-runner.js';
 
@@ -171,6 +172,7 @@ const NON_EXECUTION_REASONS = /^(channel_not_permitted:|sequence_outbound_gated|
 const WHEN_GATED_STEP_KINDS = new Set([
   'compose',
   'extract',
+  'contact_source',
   'assign',
   'review',
   'wait',
@@ -583,6 +585,36 @@ const executeAssignBatch = async (
   return outcomes;
 };
 
+const executeContactSourceBatch = (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+) => {
+  const field = textValue(step.field);
+  const outcomes = new Map<string, StepExecutionOutcome>();
+  rows.forEach((row) => {
+    const recordId = getRecordRowId(row);
+    try {
+      const result = promoteContactSource({
+        db: ctx.db as Parameters<typeof promoteContactSource>[0]['db'],
+        record: row,
+        field,
+        role: step.role,
+        stepId,
+      });
+      outcomes.set(recordId, { passed: true, reason: result.reason });
+    } catch (error) {
+      outcomes.set(recordId, {
+        passed: false,
+        reason: String((error as Error)?.message || error),
+        errored: true,
+      });
+    }
+  });
+  return outcomes;
+};
+
 const channelForPipelineStep = (step: PipelineStepLike) => {
   const configuredChannel = textValue((step.config as Record<string, unknown> | undefined)?.channel);
   if (configuredChannel) return configuredChannel;
@@ -858,6 +890,7 @@ const executeStepBatchUnchecked = async (
 
   if (kind === 'enrich') return executeEnrichBatch(ctx, step, stepId, rows);
   if (kind === 'extract') return executeExtractBatch(ctx, step, rows);
+  if (kind === 'contact_source') return executeContactSourceBatch(ctx, step, stepId, rows);
   if (kind === 'compose') return executeComposeBatch(ctx, step, stepId, rows);
   if (kind === 'assign') return executeAssignBatch(ctx, step, stepId, rows);
   if (kind === 'review') return executeReviewBatch(ctx, step, stepId, rows);

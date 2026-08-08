@@ -143,8 +143,13 @@ export const declaredStageInputs = (stepValue: unknown): string[] => {
   const step = asRecord(stepValue);
   const config = effectiveConfig(step);
   const inputs = config.inputs;
-  if (Array.isArray(inputs)) return strings(inputs);
-  return referencesForInputMap(inputs, 'inputs').map((reference) => reference.field);
+  const explicit = Array.isArray(inputs)
+    ? strings(inputs)
+    : referencesForInputMap(inputs, 'inputs').map((reference) => reference.field);
+  const contactSourceField = text(step.kind).toLowerCase() === 'contact_source'
+    ? [fieldRoot(config.field)].filter(Boolean)
+    : [];
+  return [...new Set([...explicit, ...contactSourceField])];
 };
 
 export type ResolvedStageInputs = {
@@ -216,6 +221,12 @@ export const stageInputReferences = (stepValue: unknown, options: StageInputDiag
       ...from.map(fieldRoot).filter(Boolean).map((field) => ({ field, source: 'from' })),
       { field: 'domain', source: 'extract ranking' },
       { field: 'website', source: 'extract ranking' },
+    ];
+  }
+  if (kind === 'contact_source') {
+    return [
+      ...direct,
+      ...[fieldRoot(config.field)].filter(Boolean).map((field) => ({ field, source: 'contact source' })),
     ];
   }
   if (kind === 'compose') return [...direct, ...referencesForInputMap(config.inputs, 'inputs')];

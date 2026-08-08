@@ -933,6 +933,17 @@ const PipelineExtractStepSchema = z.object({
   ...PipelineWhenFields,
 }).strict();
 
+const PipelineContactSourceStepSchema = z.object({
+  kind: z.literal('contact_source'),
+  id: z.string().min(1),
+  description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
+  field: z.string().trim().min(1),
+  role: z.enum(['primary', 'secondary']).default('primary'),
+  ...PipelineWhenFields,
+}).strict();
+
 const PipelineGenerateStepSchema = z.object({
   kind: z.literal('generate'),
   id: z.string(),
@@ -1109,6 +1120,7 @@ const PipelineExitStepSchema = PipelineFilterStepSchema.omit({ kind: true }).ext
 const ExecutablePipelineStepSchemas = [
   PipelineEnrichmentStepSchema,
   PipelineExtractStepSchema,
+  PipelineContactSourceStepSchema,
   PipelineGenerateStepSchema,
   PipelineScoreStepSchema,
   PipelineComposeStepSchema,
@@ -1128,6 +1140,7 @@ export const ExecutablePipelineStepSchema = z.discriminatedUnion('kind', Executa
 const SubpipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
   PipelineExtractStepSchema,
+  PipelineContactSourceStepSchema,
   PipelineGenerateStepSchema,
   PipelineScoreStepSchema,
   PipelineComposeStepSchema,

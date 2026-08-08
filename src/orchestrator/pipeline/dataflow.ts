@@ -645,6 +645,7 @@ const initializeResolved = ({
       // every pass so unchanged inputs are visibly skipped.
       if (step.kind === 'score') return false;
       if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose') return !force;
+      if (step.kind === 'contact_source') return false;
       if (step.kind === 'review') {
         if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
         return hasActiveReviewVerdict({ db, recordId, stepId: step.id });
@@ -963,7 +964,7 @@ export const runPipelineDataflow = async ({
         const recordId = getRecordRowId(recordState.record);
         const now = clockIso(clock);
         // enrich + generate both write fields then must refresh so dependents (policy_apply) see them.
-        if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose' || step.kind === 'score') {
+        if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'contact_source' || step.kind === 'generate' || step.kind === 'compose' || step.kind === 'score') {
           if (outcome.errored) {
             const error = String(outcome.reason || 'failed');
             if (step.kind === 'score') {

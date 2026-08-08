@@ -304,6 +304,7 @@ export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = 
         ? (Array.isArray(step?.rules) ? step.rules.flatMap((rule: any) => conditionFields(rule)) : [])
         : []),
       ...(String(step?.kind || '') === 'extract' ? stringArray(step?.from) : []),
+      ...(String(step?.kind || '') === 'contact_source' ? stringArray([step?.field]) : []),
       ...collectTokens(step?.prompt_args),
       ...collectTokens(step?.args),
     ];

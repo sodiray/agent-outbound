@@ -2747,6 +2747,14 @@ const contactSeniorityRank = (contact) => {
   return 0;
 };
 
+const contactVerificationRank = (contact) => (
+  ['valid', 'verified'].includes(String(contact?.email_verification_status || '').trim().toLowerCase()) ? 1 : 0
+);
+
+const contactRoleRank = (contact) => (
+  String(contact?.role || '').trim().toLowerCase() === 'primary' ? 1 : 0
+);
+
 const stablePrimaryContactKey = (contact) => [
   normalizeContactIdentityPart(contact?.full_name || contact?.name),
   normalizeContactIdentityPart(contact?.title),
@@ -2775,6 +2783,10 @@ const contactByIdForRecord = ({ db, recordId, contactId }) => db.prepare(`
 const primaryContactForRecord = ({ db, recordId }) => {
   const contacts = db.prepare('SELECT rowid AS contact_rowid, * FROM contacts WHERE row_id = ? ORDER BY rowid ASC').all(recordId);
   return contacts.filter((contact) => !contactIsSuppressedForProjection(contact)).sort((left, right) => {
+    const verificationDifference = contactVerificationRank(right) - contactVerificationRank(left);
+    if (verificationDifference !== 0) return verificationDifference;
+    const roleDifference = contactRoleRank(right) - contactRoleRank(left);
+    if (roleDifference !== 0) return roleDifference;
     const seniorityDifference = contactSeniorityRank(right) - contactSeniorityRank(left);
     if (seniorityDifference !== 0) return seniorityDifference;
     const emailDifference = Number(Boolean(String(right?.email || '').trim()))
