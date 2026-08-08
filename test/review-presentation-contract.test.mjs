@@ -111,3 +111,45 @@ test('config rejects a review presentation field with no record or upstream prod
     error.includes('linkedin_1') && error.includes('not_produced_anywhere')
   )));
 });
+
+test('config resolves review fields from records, flattened upstream outputs, and local step config', () => {
+  const normalized = normalizeConfig({
+    pipeline: [
+      {
+        kind: 'compose',
+        id: 'compose_email',
+        model: 'test/model',
+        structure: { composed_subject: 'A concise subject.' },
+        inputs: { account: { from: 'business_name', required: true } },
+        length: { max_words: 12, max_sentences: 2 },
+        outputs: {
+          composed_subject: { type: 'string', description: 'Composed subject' },
+        },
+      },
+      {
+        kind: 'pipeline',
+        id: 'tier_a',
+        steps: [{
+          kind: 'linkedin_connect',
+          id: 'send',
+          side_effecting: true,
+          config: { invite_message: 'Hello from the configured message.' },
+          review: {
+            present: [
+              { field: 'record_column', label: 'Record column' },
+              { field: 'composed_subject', label: 'Top-level output' },
+              { field: 'invite_message', label: 'Local config value' },
+              { field: 'emial_subject', label: 'Genuine typo' },
+            ],
+          },
+        }],
+      },
+    ],
+    policy: { review_required_for: ['linkedin_connect'] },
+  }, { recordFields: ['record_column'] });
+
+  const reviewErrors = normalized.errors.filter((error) => error.includes('review.present field'));
+  assert.deepEqual(reviewErrors, [
+    'pipeline.tier_a.send review.present field "emial_subject" is unavailable: no record field or upstream step produces it.',
+  ]);
+});

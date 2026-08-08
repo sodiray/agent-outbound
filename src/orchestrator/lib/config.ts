@@ -12,7 +12,7 @@ export {
 
 export const getConfigPath = (listDir) => join(listDir, 'outbound.yaml');
 
-export const readConfig = (listDir) => {
+export const readConfig = (listDir, options: { recordFields?: Iterable<string> } = {}) => {
   const path = getConfigPath(listDir);
   if (!existsSync(path)) {
     return {
@@ -27,7 +27,7 @@ export const readConfig = (listDir) => {
   try {
     const rawText = readFileSync(path, 'utf8');
     const raw = yaml.load(rawText) || {};
-    const normalized = normalizeConfig(raw, { listDir });
+    const normalized = normalizeConfig(raw, { listDir, ...options });
     return {
       path,
       raw,

@@ -223,13 +223,23 @@ export const configDiffCommand = ({ list, filePath = '', snapshotId = '' }: { li
 
 export const configValidateCommand = async ({ list, filePath = '' }: { list: string; filePath?: string }) => {
   const listDir = resolveListDir(list);
+  const recordFields = (() => {
+    const db = openListDb({ listDir, readonly: true });
+    try {
+      return db.prepare('PRAGMA table_info(records)').all()
+        .map((column: { name?: unknown }) => String(column.name || '').trim())
+        .filter(Boolean);
+    } finally {
+      db.close();
+    }
+  })();
   const loaded: any = filePath
     ? (() => {
       const raw = readFileSync(filePath, 'utf8');
       const parsed = yaml.load(raw) || {};
-      return normalizeConfig(parsed, { listDir });
+      return normalizeConfig(parsed, { listDir, recordFields });
     })()
-    : readConfig(listDir);
+    : readConfig(listDir, { recordFields });
   const errors = [...(Array.isArray(loaded?.errors) ? loaded.errors : [])];
   const warnings: string[] = [...(Array.isArray(loaded?.warnings) ? loaded.warnings : [])];
   const config = loaded?.config || {};

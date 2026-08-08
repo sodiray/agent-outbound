@@ -2004,7 +2004,7 @@ const isSimpleRing = (ring: any[]) => {
   return true;
 };
 
-export const normalizeConfig = (value, options: { listDir?: string } = {}) => {
+export const normalizeConfig = (value, options: { listDir?: string; recordFields?: Iterable<string> } = {}) => {
   const parsed = ConfigSchema.safeParse(coerceLegacyScore(coerceLegacyContactPolicy(value || {})));
   if (!parsed.success) {
     return {

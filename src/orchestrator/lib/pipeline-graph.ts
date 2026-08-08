@@ -14,6 +14,7 @@ import {
 
 type PipelineGraphOptions = {
   listDir?: string;
+  recordFields?: Iterable<string>;
 };
 
 type ProseHit = {
@@ -141,7 +142,6 @@ const proseTextsForStep = (step: any, options: PipelineGraphOptions) => {
 
 const producedFieldsByStep = (config: any): Producer[] => {
   const entries = pipelineSteps(config).flatMap((step: any, index: number) => {
-    if (!['enrich', 'extract', 'generate'].includes(String(step?.kind || ''))) return [];
     const id = stepId(step);
     if (!id) return [];
     const stepConfig = step?.config && typeof step.config === 'object' ? step.config : step;
@@ -355,7 +355,7 @@ const BASE_RECORD_FIELDS = new Set([
   'needs_review', 'review_reason', 'review_flagged_at', 'routed_by', 'created_at', 'updated_at',
 ]);
 
-const sourceSuppliedFields = (config: any) => {
+const sourceSuppliedFields = (config: any, recordFields: Iterable<string> = []) => {
   const source = config?.source || {};
   const searches = Array.isArray(source?.searches) ? source.searches : [];
   const strategies = Array.isArray(source?.strategies) ? source.strategies : [];
@@ -372,6 +372,7 @@ const sourceSuppliedFields = (config: any) => {
   ));
   return new Set([
     ...BASE_RECORD_FIELDS,
+    ...Array.from(recordFields),
     ...stringArray(source?.identity),
     ...mapped,
     ...manual,
@@ -677,7 +678,7 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
 
   const reviewRequiredTokens = new Set(stringArray(config?.policy?.review_required_for)
     .map((token) => token.toLowerCase()));
-  const suppliedReviewFields = sourceSuppliedFields(config);
+  const suppliedReviewFields = sourceSuppliedFields(config, options.recordFields);
   const reviewFieldProducers = producedFieldsByStep(config);
   steps.forEach((step, index) => {
     const id = stepId(step);
@@ -698,7 +699,6 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
       return;
     }
 
-    const scope = stepSubpipelineName(step);
     const fields = present
       .map((entry) => String(configRecord(entry).field || '').trim())
       .filter(Boolean);
@@ -710,12 +710,12 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
       const hasUpstreamProducer = reviewFieldProducers.some((producer) => (
         producer.field === field
         && producer.index < index
-        && (
-          producer.subpipeline === scope
-          || (!producer.subpipeline && Boolean(scope))
-        )
       ));
-      if (suppliedReviewFields.has(field) || hasUpstreamProducer) return;
+      const configValue = stepConfig[field];
+      const hasStepConfigField = Object.prototype.hasOwnProperty.call(stepConfig, field)
+        && configValue !== undefined
+        && configValue !== '';
+      if (suppliedReviewFields.has(field) || hasUpstreamProducer || hasStepConfigField) return;
       errors.push(`pipeline.${id} review.present field "${field}" is unavailable: no record field or upstream step produces it.`);
     });
   });
