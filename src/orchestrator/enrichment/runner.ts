@@ -35,6 +35,7 @@ import {
   preservePriorNonBlankFields,
 } from '../policy/evidence.js';
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
+import type { FitModelConfigInput } from '../policy/scoring.js';
 import type { TreatmentBandLadders } from '../policy/treatment.js';
 import type {
   ActionConfidenceConfigInput,
@@ -702,6 +703,7 @@ export const executeEnrichmentAction = async ({
   record,
   aiConfig,
   context,
+  fitModel,
   treatmentBands,
   treatmentStrategy,
   priority,
@@ -729,6 +731,7 @@ export const executeEnrichmentAction = async ({
   record: Record<string, unknown>;
   aiConfig: Record<string, unknown>;
   context: Record<string, unknown>;
+  fitModel?: FitModelConfigInput;
   treatmentBands?: TreatmentBandLadders;
   treatmentStrategy?: TreatmentStrategyConfigInput;
   priority?: PriorityConfigInput;
@@ -865,6 +868,7 @@ export const executeEnrichmentAction = async ({
       costLedger: costHydrate?.ledger,
       enrichmentSpendUsd: costHydrate?.enrichment_usd,
       minFitCoverage: Number(context?.min_fit_coverage),
+      fitModel,
       treatmentBands,
       treatmentStrategy,
       priority,
@@ -1075,6 +1079,10 @@ export const executeEnrichmentStepOnRecords = async ({
           source_identity: Array.isArray(config?.source?.identity) ? config.source.identity : [],
           min_fit_coverage: config?.score?.min_coverage,
           linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
+        },
+        fitModel: {
+          criteria: config?.score?.criteria,
+          modelVersion: config?.policy?.fit_rule_version,
         },
         treatmentBands: config?.score?.treatment_bands,
         treatmentStrategy: config?.score?.treatment,
@@ -1551,6 +1559,10 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 source_identity: Array.isArray(config?.source?.identity) ? config.source.identity : [],
                 min_fit_coverage: config?.score?.min_coverage,
                 linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
+              },
+              fitModel: {
+                criteria: config?.score?.criteria,
+                modelVersion: config?.policy?.fit_rule_version,
               },
               treatmentBands: config?.score?.treatment_bands,
               treatmentStrategy: config?.score?.treatment,

@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  applyOutboundPolicy,
+  applyOutboundPolicy as applyRawOutboundPolicy,
 } from '../dist/orchestrator/policy/apply-record.js';
 import {
   buildContactPlan,
@@ -58,6 +58,9 @@ import {
   STAGE_REVIEW_POLICY_VERSION,
 } from '../dist/orchestrator/policy/transition-audit.js';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
 // ---------------------------------------------------------------------------
 // 1. createInitialColdState integrity

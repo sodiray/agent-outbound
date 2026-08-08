@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createRequire } from 'node:module';
 import { openListDb, ensureRecordColumns, upsertRecord } from '../dist/orchestrator/runtime/db.js';
-import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
+import { applyOutboundPolicy as applyRawOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
 import {
   executeEnrichmentAction,
   executeEnrichmentStepOnRecords,
@@ -19,6 +19,9 @@ import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js
 import { policyApplyCommand } from '../dist/commands/index.js';
 import { calculateFitScore } from '../dist/orchestrator/policy/scoring.js';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
 const require = createRequire(import.meta.url);
 
@@ -108,7 +111,7 @@ const createList = () => {
     { id: 'operating_scale_surface_area', grade: 7 },
     { id: 'mission_delivery_compatibility', grade: 8 },
     { id: 'local_buying_autonomy', grade: 9 },
-  ]);
+  ], treasureValleyFitModel);
   ensureRecordColumns({
     db,
     columns: [
@@ -283,7 +286,7 @@ test('applyOutboundPolicy does not mirror priority to fit', () => {
     { id: 'operating_scale_surface_area', grade: 9 },
     { id: 'mission_delivery_compatibility', grade: 9 },
     { id: 'local_buying_autonomy', grade: 9 },
-  ]);
+  ], treasureValleyFitModel);
   const r = applyOutboundPolicy({
     treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {

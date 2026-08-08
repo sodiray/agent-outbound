@@ -36,7 +36,7 @@ import {
   filterRecordsForSequenceOutbound,
 } from '../dist/orchestrator/policy/sequence-outbound.js';
 import {
-  applyOutboundPolicy,
+  applyOutboundPolicy as applyRawOutboundPolicy,
   guardChannelExecution,
 } from '../dist/orchestrator/policy/apply-record.js';
 import { findProhibitedSteps } from '../dist/orchestrator/policy/pipeline-prohibitions.js';
@@ -56,6 +56,9 @@ import { advanceAfterSuccessfulAction } from '../dist/orchestrator/policy/lifecy
 import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
 import { openListDb, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TV_ROOT =

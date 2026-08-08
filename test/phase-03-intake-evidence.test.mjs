@@ -18,7 +18,7 @@ import test from 'node:test';
 import yaml from 'js-yaml';
 
 import {
-  applyOutboundPolicy,
+  applyOutboundPolicy as applyRawOutboundPolicy,
   buildEvidenceResolutionEnvelope,
 } from '../dist/orchestrator/policy/apply-record.js';
 import {
@@ -33,6 +33,9 @@ import {
   buildIdentityResolution,
 } from '../dist/orchestrator/policy/evidence.js';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
 const TV_YAML =
   process.env.TV_PROJECT_PATH

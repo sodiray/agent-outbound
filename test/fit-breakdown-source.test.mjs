@@ -5,12 +5,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 
 const {
-  applyOutboundPolicy,
+  applyOutboundPolicy: applyRawOutboundPolicy,
   selectFitBreakdownSource,
   recoverLegacyFitScore,
 } = await import('../dist/orchestrator/policy/index.js');
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
 const commercialBreakdown = [
   { id: 'operational_coordination_burden', grade: 8, reasoning: 'multi-channel ops', evidence_ids: ['obs_ops'] },
@@ -37,7 +40,7 @@ test('selectFitBreakdownSource prefers fit_breakdown commercial over score_break
   const sel = selectFitBreakdownSource({
     fit_breakdown: JSON.stringify(commercialBreakdown),
     score_breakdown: JSON.stringify(legacyScoreBreakdown),
-  });
+  }, treasureValleyFitModel);
   assert.equal(sel.source, 'fit_breakdown');
   assert.equal(sel.hasCommercialComponents, true);
   assert.ok(sel.breakdown.some((b) => b.id === 'operational_coordination_burden'));
@@ -47,7 +50,7 @@ test('selectFitBreakdownSource uses score_breakdown when it has commercial ids',
   const sel = selectFitBreakdownSource({
     fit_breakdown: JSON.stringify(legacyFitBreakdownPoints),
     score_breakdown: JSON.stringify(commercialBreakdown),
-  });
+  }, treasureValleyFitModel);
   assert.equal(sel.source, 'score_breakdown');
   assert.equal(sel.hasCommercialComponents, true);
 });

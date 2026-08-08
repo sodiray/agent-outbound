@@ -17,7 +17,7 @@ import {
   applyOutboundPolicy,
   calculateFitScore,
   fitComponentsFromBreakdown,
-  FIT_COMPONENT_WEIGHTS,
+  fitModelComponentIds,
   loadCampaignContactsFromDb,
   hydrateRecordCostLedger,
 } from '../policy/index.js';
@@ -954,20 +954,23 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
 
         const updatedAt = new Date().toISOString();
         const breakdown = Array.isArray(scoreRaw.breakdown) ? scoreRaw.breakdown : [];
-        // When criteria are TV fit components, final fit_score comes from policy calculator
-        // (models only grade components; deterministic rules own the score).
-        const fitIds = new Set(Object.keys(FIT_COMPONENT_WEIGHTS));
-        const breakdownIds = breakdown.map((item: any) => String(item?.id || ''));
-        const usesFitComponents = breakdownIds.length > 0 && breakdownIds.every((id: string) => fitIds.has(id));
+        // Pipeline-declared score criteria define the fit model; deterministic rules own only arithmetic.
+        const fitModel = {
+          criteria: scoreConfig?.criteria,
+          modelVersion: config?.policy?.fit_rule_version,
+        };
+        const fitIds = new Set(fitModelComponentIds(fitModel));
+        const fitModelConfigured = fitIds.size > 0;
+        const usesFitComponents = fitModelConfigured;
         const scoreMetadata = scoreRaw as Record<string, unknown>;
         const fitCoverage = numericOr(scoreMetadata.fit_coverage, null);
         const coverageGuarded = usesFitComponents
           && fitCoverage !== null
           && fitCoverage < minimumCoverage;
         const fitCalculation = usesFitComponents && !coverageGuarded
-          ? calculateFitScore(fitComponentsFromBreakdown(breakdown))
+          ? calculateFitScore(fitComponentsFromBreakdown(breakdown, fitModel), fitModel)
           : null;
-        const finalScore = coverageGuarded
+        const finalScore = !fitModelConfigured || coverageGuarded
           ? null
           : fitCalculation?.fit_score ?? (scored.score === null ? null : numericOr(scored.score, 0));
 
@@ -999,7 +1002,8 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
             ...costHydrate.patch,
             _list_dir: prePolicy._list_dir || listDir,
           },
-          recomputeFitFromBreakdown: usesFitComponents && !coverageGuarded,
+          recomputeFitFromBreakdown: fitModelConfigured && usesFitComponents && !coverageGuarded,
+          fitModel,
           contacts: scoreContacts.length ? scoreContacts : undefined,
           campaignId: `camp_${recordId}`,
           listDir,
@@ -1035,8 +1039,10 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           fit_score_updated_at: updatedAt,
           fit_updated_at: updatedAt,
           // Clear evidence-mutation stale flag after a successful confident re-score.
-          score_status: coverageGuarded ? 'needs_discovery' : 'fresh',
-          ...(fitCalculation ? { fit_calculation_json: JSON.stringify(fitCalculation) } : {}),
+          score_status: !fitModelConfigured || coverageGuarded ? 'needs_discovery' : 'fresh',
+          ...(fitCalculation ? { fit_calculation_json: JSON.stringify(fitCalculation) } : {
+            fit_calculation_json: JSON.stringify(calculateFitScore([], fitModel)),
+          }),
         };
 
         ensureRecordColumns({

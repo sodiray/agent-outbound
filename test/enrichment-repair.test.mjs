@@ -8,9 +8,10 @@ import {
   treasureValleyPostcard,
   treasureValleyTreatmentStrategy,
 } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 
 const {
-  applyOutboundPolicy,
+  applyOutboundPolicy: applyRawOutboundPolicy,
   planEnrichmentRepair,
   collectBuyerResolutionHoldReasons,
   resolveBuyerAffiliationFromRecord,
@@ -20,6 +21,8 @@ const {
   WORK_STATES,
   NON_OUTBOUND_ACTION_TYPES,
 } = await import('../dist/orchestrator/policy/index.js');
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
 test('WORK_STATES / NON_OUTBOUND include enrichment_repair', () => {
   assert.ok(WORK_STATES.includes('enrichment_repair'));

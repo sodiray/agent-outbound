@@ -34,10 +34,13 @@ import {
   completeActionAndCreateSuccessor,
   LIFECYCLE_STAGES,
 } from '../dist/orchestrator/policy/lifecycle.js';
-import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
+import { applyOutboundPolicy as applyRawOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
 import { calculateFitScore } from '../dist/orchestrator/policy/scoring.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
 import { readConfig } from '../dist/orchestrator/lib/config.js';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
+
+const applyOutboundPolicy = (input) => applyRawOutboundPolicy({ fitModel: treasureValleyFitModel, ...input });
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AO_ROOT = join(__dirname, '..');
@@ -384,7 +387,7 @@ test('idempotency: re-applyOutboundPolicy yields stable treatment for same input
     { id: 'mission_delivery_compatibility', grade: 8 },
     { id: 'local_buying_autonomy', grade: 9 },
   ];
-  const fit = calculateFitScore(breakdown);
+  const fit = calculateFitScore(breakdown, treasureValleyFitModel);
   const record = {
     _row_id: 'phase10_idem',
     business_name: 'Phase10 HVAC',

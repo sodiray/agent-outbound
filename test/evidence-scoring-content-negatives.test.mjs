@@ -27,8 +27,10 @@ import {
   treasureValleyPostcard,
   treasureValleyTreatmentStrategy,
 } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 
 const applyOutboundPolicy = (input) => applyRawOutboundPolicy({
+  fitModel: treasureValleyFitModel,
   treatmentStrategy: treasureValleyTreatmentStrategy,
   goldenTicket: treasureValleyGoldenTicket,
   postcard: treasureValleyPostcard,
@@ -268,7 +270,7 @@ test('RES-EVIDENCE: deriveFitEvidenceConfidence returns 0 without evidence_ids',
     { id: 'operating_scale_surface_area', grade: 7, reasoning: 'scale', evidence_ids: [] },
     { id: 'mission_delivery_compatibility', grade: 7, reasoning: 'ok', evidence_ids: [] },
     { id: 'local_buying_autonomy', grade: 9, reasoning: 'owner', evidence_ids: [] },
-  ]);
+  ], treasureValleyFitModel);
   assert.equal(conf, 0);
 });
 

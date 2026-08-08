@@ -7,9 +7,9 @@ import {
   calculateFitScore,
   calculatePriority,
   assignCandidateTier,
-  FIT_COMPONENT_WEIGHTS,
-  type FitComponentId,
+  fitModelComponentIds,
   type FitComponentGrade,
+  type FitModelConfigInput,
   type EvidenceConfidenceProfile,
 } from './scoring.js';
 import {
@@ -101,8 +101,10 @@ export type PolicyApplyInput = {
   record: Record<string, unknown>;
   /** Evaluation instant for decision-time policy checks. */
   asOf?: string;
-  /** When true, recompute fit from score_breakdown grades using FIT_COMPONENT_WEIGHTS. */
+  /** When true, recompute fit from score_breakdown grades using the pipeline fit model. */
   recomputeFitFromBreakdown?: boolean;
+  /** Pipeline-declared fit model from score.criteria and policy.fit_rule_version. */
+  fitModel?: FitModelConfigInput;
   /**
    * When true, collapse observations to durable-preferring singletons (explicit
    * rebuild). Default is append history — prior observations_json is preserved.
@@ -208,8 +210,6 @@ type BreakdownItem = {
   assessable?: boolean;
 };
 
-const FIT_IDS = new Set(Object.keys(FIT_COMPONENT_WEIGHTS));
-
 const parseBreakdown = (raw: unknown): BreakdownItem[] => {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw || '[]') : raw;
@@ -255,18 +255,22 @@ const parseBreakdown = (raw: unknown): BreakdownItem[] => {
 };
 
 /**
- * Prefer commercial TV fit-component breakdowns over legacy score criteria.
- * Order: fit_breakdown (if any commercial ids) → score_breakdown (if any commercial) → empty.
+ * Prefer pipeline-declared fit-component breakdowns over legacy score criteria.
+ * Order: fit_breakdown (if any declared ids) → score_breakdown (if any declared ids) → empty.
  */
-export function selectFitBreakdownSource(record: Record<string, unknown>): {
+export function selectFitBreakdownSource(
+  record: Record<string, unknown>,
+  fitModel?: FitModelConfigInput,
+): {
   breakdown: BreakdownItem[];
   source: 'fit_breakdown' | 'score_breakdown' | 'none';
   hasCommercialComponents: boolean;
 } {
   const fromFit = parseBreakdown(record.fit_breakdown);
   const fromScore = parseBreakdown(record.score_breakdown);
-  const fitHasCommercial = fromFit.some((b) => FIT_IDS.has(b.id));
-  const scoreHasCommercial = fromScore.some((b) => FIT_IDS.has(b.id));
+  const fitIds = new Set(fitModelComponentIds(fitModel));
+  const fitHasCommercial = fromFit.some((b) => fitIds.has(b.id));
+  const scoreHasCommercial = fromScore.some((b) => fitIds.has(b.id));
   if (fitHasCommercial) {
     return { breakdown: fromFit, source: 'fit_breakdown', hasCommercialComponents: true };
   }
@@ -277,8 +281,8 @@ export function selectFitBreakdownSource(record: Record<string, unknown>): {
 }
 
 /**
- * Recover a 0–100 fit score from legacy breakdowns when commercial fit components
- * are absent (pre-tv-fit-v1 rows). Prefer fit_breakdown points sum, else weighted grades.
+ * Recover a 0–100 fit score from legacy breakdowns when declared fit components
+ * are absent. Prefer fit_breakdown points sum, else weighted grades.
  */
 export function recoverLegacyFitScore(record: Record<string, unknown>): number | null {
   const fromFit = parseBreakdown(record.fit_breakdown);
@@ -314,8 +318,11 @@ export function recoverLegacyFitScore(record: Record<string, unknown>): number |
  * evidence_ids (0–100). Coverage + reasoning alone must never yield 100 with
  * zero evidence IDs — that path previously invented confident commercial grades.
  */
-export function deriveFitEvidenceConfidence(breakdown: BreakdownItem[]): number {
-  const fitIds = Object.keys(FIT_COMPONENT_WEIGHTS) as FitComponentId[];
+export function deriveFitEvidenceConfidence(
+  breakdown: BreakdownItem[],
+  fitModel?: FitModelConfigInput,
+): number {
+  const fitIds = fitModelComponentIds(fitModel);
   if (!fitIds.length) return 0;
   let covered = 0;
   let reasoned = 0;
@@ -353,8 +360,9 @@ export function deriveFitEvidenceConfidence(breakdown: BreakdownItem[]): number 
 
 export function fitComponentsFromBreakdown(
   breakdown: BreakdownItem[],
+  fitModel?: FitModelConfigInput,
 ): FitComponentGrade[] {
-  const fitIds = Object.keys(FIT_COMPONENT_WEIGHTS) as FitComponentId[];
+  const fitIds = fitModelComponentIds(fitModel);
   return fitIds.map((id) => {
     const hit = breakdown.find((b) => b.id === id);
     if (!hit) return { id, grade: 0, missing: true };
@@ -437,14 +445,15 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     ? Number(input.minFitCoverage)
     : DEFAULT_SCORE_MIN_COVERAGE;
   const rowId = String(record._row_id || record.id || 'unknown');
-  // Prefer fit_breakdown commercial components; never invent zeros from legacy ticket_size score_breakdown alone.
-  const selected = selectFitBreakdownSource(record);
+  const fitModelConfigured = fitModelComponentIds(input.fitModel).length > 0;
+  // Prefer pipeline-declared fit components; never invent zeros from unrelated legacy score breakdowns.
+  const selected = selectFitBreakdownSource(record, input.fitModel);
   const breakdown = selected.breakdown;
   const fitComponents = selected.hasCommercialComponents
-    ? fitComponentsFromBreakdown(breakdown)
+    ? fitComponentsFromBreakdown(breakdown, input.fitModel)
     : [];
   const hasCommercialFit = fitComponents.some((c) => !c.missing);
-  const fitCalc = hasCommercialFit ? calculateFitScore(fitComponents) : null;
+  const fitCalc = calculateFitScore(fitComponents, input.fitModel);
   const derivedFitCoverage = fitCalc?.assessable_weight ?? null;
   const recordedFitCoverage = num(record.fit_coverage, null);
   const fitCoverage = derivedFitCoverage != null && recordedFitCoverage != null
@@ -464,13 +473,14 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     return refs;
   })();
 
-  let fitScore = insufficientFitCoverage ? null : num(record.fit_score, null);
-  if (input.recomputeFitFromBreakdown && fitCalc && hasCommercialFit && !insufficientFitCoverage) {
+  let fitScore = !fitModelConfigured || insufficientFitCoverage ? null : num(record.fit_score, null);
+  if (input.recomputeFitFromBreakdown && fitModelConfigured && hasCommercialFit && !insufficientFitCoverage) {
     fitScore = fitCalc.fit_score;
   } else if (
     // Stored fit was wiped to 0 by the prior score_breakdown-only bug, or never set —
     // recover from legacy fit_breakdown points / score grades so treatment stays explainable.
     (fitScore == null || fitScore === 0)
+    && fitModelConfigured
     && !hasCommercialFit
   ) {
     const recovered = recoverLegacyFitScore(record);
@@ -486,9 +496,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   // successfully could never lift it back out of enrichment_hold. The comment
   // below already promised "until re-scored" — this makes that true.
   let fitEvidence = hasCommercialFit && breakdown.length
-    ? deriveFitEvidenceConfidence(breakdown)
+    ? deriveFitEvidenceConfidence(breakdown, input.fitModel)
     : num(record.fit_evidence_confidence, null);
-  // Legacy scores without TV fit components: low evidence until re-scored.
+  // Legacy scores without declared fit components: low evidence until re-scored.
   // 45 is an explicit "thin" band (not invent-high); null would hold treatment.
   if (fitEvidence == null && fitScore != null) {
     fitEvidence = 45;
@@ -616,7 +626,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   // RES-SCORING: thin / unknown evidence must not yield A/B/C or Tier D as weak fit.
   // All-unknown → enrichment_hold (not D). Any missing component → not Tier A.
   const thinEvidenceByConf = fitEvidence != null && Number(fitEvidence) < 40;
-  const fitBreakdownItems = breakdown.filter((b) => FIT_IDS.has(String(b.id || '')));
+  const fitIds = new Set(fitModelComponentIds(input.fitModel));
+  const fitBreakdownItems = breakdown.filter((b) => fitIds.has(String(b.id || '')));
   const thinEvidenceByIds =
     fitBreakdownItems.length > 0
     && fitBreakdownItems.every((b) => {
@@ -627,7 +638,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const thinEvidenceDerivedZero =
     hasCommercialFit
     && breakdown.length > 0
-    && deriveFitEvidenceConfidence(breakdown) === 0;
+    && deriveFitEvidenceConfidence(breakdown, input.fitModel) === 0;
   const anyMissingComponent =
     hasCommercialFit
     && fitComponents.some((c) => c.missing || !(c.evidence_ids && c.evidence_ids.length));
@@ -1253,17 +1264,23 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     next_action: NEXT_ACTION_POLICY_VERSION,
     timing: timingCalc.calculation_rule_version,
     reachability: reachability.calculation_rule_version,
-    ...(fitCalc ? { fit: fitCalc.calculation_rule_version } : {}),
+    ...(fitCalc ? {
+      fit_arithmetic: fitCalc.calculation_rule_version,
+      ...(fitCalc.fit_model_version ? { fit_model: fitCalc.fit_model_version } : {}),
+    } : {}),
   };
 
   const evidenceResolution = buildEvidenceResolutionEnvelope({
     account_id: rowId,
-    fit_score: fitScore ?? (typeof record.fit_score === 'number' ? Number(record.fit_score) : null),
+    fit_score: !fitModelConfigured
+      ? null
+      : fitScore ?? (typeof record.fit_score === 'number' ? Number(record.fit_score) : null),
     fit_evidence_confidence: fitEvidence,
     treatment_tier: treatment.treatment_tier,
     eligibility_outcome: eligibility.outcome,
     missing_inputs: [
       ...missing_inputs,
+      ...(fitCalc.reason ? [fitCalc.reason] : []),
       ...timingCalc.missing_inputs,
     ],
     contradictions,
@@ -1288,7 +1305,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   const patch: Record<string, unknown> = {
     identity_confidence: observationStore.identity_resolution?.identity_confidence ?? 0,
-    fit_score: insufficientFitCoverage ? null : fitScore ?? record.fit_score ?? '',
+    fit_score: !fitModelConfigured || insufficientFitCoverage ? null : fitScore ?? record.fit_score ?? '',
     fit_coverage: fitCoverage ?? '',
     fit_evidence_confidence: fitEvidence ?? '',
     candidate_tier: candidate.candidate_tier,
@@ -1390,9 +1407,13 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     patch.campaigns_in_last_12_months = prior + 1;
   }
 
-  // Only overwrite fit_score from deterministic calculator when commercial components exist.
-  // Never write fit_score=0 from all-missing commercial calc while treatment used a high legacy fit.
-  if (input.recomputeFitFromBreakdown && fitCalc && hasCommercialFit && !insufficientFitCoverage) {
+  // Only overwrite fit_score from deterministic calculator when declared components exist.
+  // Never write fit_score=0 from an all-missing calculation while treatment used a high legacy fit.
+  if (input.recomputeFitFromBreakdown && !fitModelConfigured) {
+    patch.fit_score = null;
+    patch.fit_calculation_json = JSON.stringify(fitCalc);
+    patch.fit_breakdown_source = 'none';
+  } else if (input.recomputeFitFromBreakdown && hasCommercialFit && !insufficientFitCoverage) {
     patch.fit_score = fitCalc.fit_score;
     patch.fit_calculation_json = JSON.stringify(fitCalc);
     patch.fit_breakdown_source = selected.source;
@@ -1400,17 +1421,17 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       ...evidenceResolution,
       fit_score: fitCalc.fit_score,
     });
-  } else if (!hasCommercialFit && fitScore != null && (num(record.fit_score, null) === 0 || num(record.fit_score, null) == null)) {
+  } else if (fitModelConfigured && !hasCommercialFit && fitScore != null && (num(record.fit_score, null) === 0 || num(record.fit_score, null) == null)) {
     // Persist recovered legacy fit so corpus no longer shows fit_score=0 with Tier B treatment.
     patch.fit_score = fitScore;
     patch.fit_breakdown_source = 'legacy_recovery';
     patch.fit_calculation_json = JSON.stringify({
       fit_score: fitScore,
       components: [],
-      missing_inputs: Object.keys(FIT_COMPONENT_WEIGHTS),
-      calculation_rule_version: 'tv-fit-legacy-recovery-v1',
+      missing_inputs: [],
+      calculation_rule_version: 'fit-legacy-recovery-v1',
       recovered_from: 'legacy_breakdown_points_or_grades',
-      note: 'Commercial fit components not present; recovered pre-tv-fit-v1 score for treatment consistency',
+      note: 'Declared fit components not present; recovered legacy score for treatment consistency',
     });
   }
 

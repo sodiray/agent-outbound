@@ -1301,6 +1301,10 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       costLedger: costHydrate.ledger,
       enrichmentSpendUsd: costHydrate.enrichment_usd,
       minFitCoverage: config?.score?.min_coverage,
+      fitModel: {
+        criteria: config?.score?.criteria,
+        modelVersion: config?.policy?.fit_rule_version,
+      },
       treatmentBands: config?.score?.treatment_bands,
       treatmentStrategy: config?.score?.treatment,
       priority: config?.score?.priority,

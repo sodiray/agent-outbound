@@ -14,8 +14,10 @@ import {
   treasureValleyPostcard,
   treasureValleyTreatmentStrategy,
 } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 
 const applyOutboundPolicy = (input) => applyRawOutboundPolicy({
+  fitModel: treasureValleyFitModel,
   treatmentStrategy: treasureValleyTreatmentStrategy,
   goldenTicket: treasureValleyGoldenTicket,
   postcard: treasureValleyPostcard,

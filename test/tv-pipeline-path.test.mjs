@@ -36,6 +36,7 @@ import {
   treasureValleyPostcard,
   treasureValleyTreatmentStrategy,
 } from './fixtures/treatment-strategy.mjs';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 
 const TV_YAML = '/Users/rayepps/projects/mission/.outbound/treasure-valley/outbound.yaml';
 const TAXONOMY = '/Users/rayepps/projects/mission/.outbound/treasure-valley/build/registries/vertical-taxonomy.json';
@@ -143,7 +144,7 @@ test('fixture path: eligibility → fit → treatment → readiness', () => {
     { id: 'operating_scale_surface_area', grade: 7 },
     { id: 'mission_delivery_compatibility', grade: 8 },
     { id: 'local_buying_autonomy', grade: 9 },
-  ]);
+  ], treasureValleyFitModel);
   assert.ok(fit.fit_score >= 70);
 
   const candidate = assignCandidateTier(fit.fit_score, treasureValleyCandidateTier);

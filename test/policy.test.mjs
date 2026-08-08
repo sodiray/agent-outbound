@@ -21,8 +21,8 @@ import {
   calculatePriority,
   actionConfidenceAllows,
   assignCandidateTier,
-  FIT_COMPONENT_WEIGHTS,
 } from '../dist/orchestrator/policy/scoring.js';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 import {
   checkStateIntegrity,
   completeActionAndCreateSuccessor,
@@ -44,10 +44,10 @@ import {
 } from '../dist/orchestrator/policy/readiness.js';
 import { findProhibitedSteps, assertWorkAllowed } from '../dist/orchestrator/policy/pipeline-prohibitions.js';
 
-test('fit score weights sum to 1 and exclude walk-in/HIPAA components', () => {
-  const sum = Object.values(FIT_COMPONENT_WEIGHTS).reduce((a, b) => a + b, 0);
+test('fit score weights come from the pipeline and exclude walk-in/HIPAA components', () => {
+  const sum = treasureValleyFitModel.criteria.reduce((total, criterion) => total + criterion.weight, 0);
   assert.ok(Math.abs(sum - 1) < 1e-9);
-  const ids = Object.keys(FIT_COMPONENT_WEIGHTS);
+  const ids = treasureValleyFitModel.criteria.map((criterion) => criterion.id);
   assert.equal(ids.includes('walk_in_decision_maker_access'), false);
   assert.equal(ids.includes('hipaa_exposure'), false);
   assert.equal(ids.includes('ticket_size'), false);
@@ -62,18 +62,18 @@ test('calculateFitScore is deterministic and reproducible', () => {
     { id: 'mission_delivery_compatibility', grade: 7 },
     { id: 'local_buying_autonomy', grade: 9 },
   ];
-  const a = calculateFitScore(components);
-  const b = calculateFitScore(components);
+  const a = calculateFitScore(components, treasureValleyFitModel);
+  const b = calculateFitScore(components, treasureValleyFitModel);
   assert.equal(a.fit_score, b.fit_score);
   assert.ok(a.fit_score >= 70 && a.fit_score <= 85);
   assert.equal(a.missing_inputs.length, 0);
-  assert.equal(a.calculation_rule_version, 'tv-fit-v1');
+  assert.equal(a.fit_model_version, 'tv-fit-v1');
 });
 
 test('missing fit components do not invent values', () => {
   const r = calculateFitScore([
     { id: 'operational_coordination_burden', grade: 10 },
-  ]);
+  ], treasureValleyFitModel);
   assert.ok(r.missing_inputs.includes('repetition_and_volume'));
   assert.ok(r.fit_score < 30);
 });

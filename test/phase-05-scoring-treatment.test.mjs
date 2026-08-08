@@ -24,10 +24,10 @@ import {
   calculatePriority,
   actionConfidenceAllows,
   assignCandidateTier,
-  FIT_COMPONENT_WEIGHTS,
-  FIT_RULE_VERSION,
+  FIT_ARITHMETIC_RULE_VERSION,
   PRIORITY_RULE_VERSION,
 } from '../dist/orchestrator/policy/scoring.js';
+import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 import {
   assignTreatmentTier as assignRawTreatmentTier,
   assignTreatmentAndMail as assignRawTreatmentAndMail,
@@ -72,6 +72,7 @@ import {
   deriveFitEvidenceConfidence,
 } from '../dist/orchestrator/policy/apply-record.js';
 const applyOutboundPolicy = (input) => applyRawOutboundPolicy({
+  fitModel: treasureValleyFitModel,
   treatmentStrategy: treasureValleyTreatmentStrategy,
   goldenTicket: treasureValleyGoldenTicket,
   postcard: treasureValleyPostcard,
@@ -130,11 +131,11 @@ const fullComponents = (grades = {}) =>
 // 1. Fit components — no HIPAA / walk-in
 // ---------------------------------------------------------------------------
 
-test('phase-05 fit: component registry is commercial-only (no HIPAA / walk-in / contact)', () => {
-  const ids = Object.keys(FIT_COMPONENT_WEIGHTS);
+test('phase-05 fit: pipeline criteria declare the commercial fit model', () => {
+  const ids = treasureValleyFitModel.criteria.map((criterion) => criterion.id);
   assert.deepEqual(ids.sort(), [...ALL_FIT_IDS].sort());
 
-  const sum = Object.values(FIT_COMPONENT_WEIGHTS).reduce((a, b) => a + b, 0);
+  const sum = treasureValleyFitModel.criteria.reduce((total, criterion) => total + criterion.weight, 0);
   assert.ok(Math.abs(sum - 1) < 1e-9, `weights must sum to 1, got ${sum}`);
 
   const banned = [
@@ -156,7 +157,7 @@ test('phase-05 fit: component registry is commercial-only (no HIPAA / walk-in / 
   for (const id of banned) {
     assert.equal(ids.includes(id), false, `banned fit component present: ${id}`);
   }
-  assert.equal(FIT_RULE_VERSION, 'tv-fit-v1');
+  assert.equal(treasureValleyFitModel.modelVersion, 'tv-fit-v1');
 });
 
 test('phase-05 fit: calculateFitScore is deterministic; missing components do not invent grades', () => {
@@ -168,16 +169,17 @@ test('phase-05 fit: calculateFitScore is deterministic; missing components do no
     mission_delivery_compatibility: 7,
     local_buying_autonomy: 9,
   });
-  const a = calculateFitScore(components);
-  const b = calculateFitScore(components);
+  const a = calculateFitScore(components, treasureValleyFitModel);
+  const b = calculateFitScore(components, treasureValleyFitModel);
   assert.equal(a.fit_score, b.fit_score);
   assert.equal(a.fit_score, 74.7);
   assert.equal(a.missing_inputs.length, 0);
-  assert.equal(a.calculation_rule_version, 'tv-fit-v1');
+  assert.equal(a.calculation_rule_version, FIT_ARITHMETIC_RULE_VERSION);
+  assert.equal(a.fit_model_version, 'tv-fit-v1');
 
   const sparse = calculateFitScore([
     { id: 'operational_coordination_burden', grade: 10 },
-  ]);
+  ], treasureValleyFitModel);
   assert.ok(sparse.missing_inputs.includes('repetition_and_volume'));
   assert.ok(sparse.missing_inputs.length >= 5);
   // Only 0.22 * 100 = 22 contribution max from one full component
@@ -185,7 +187,7 @@ test('phase-05 fit: calculateFitScore is deterministic; missing components do no
   assert.ok(sparse.fit_score < 30);
 });
 
-test('phase-05 fit: TV outbound.yaml score criteria match FIT_COMPONENT_WEIGHTS (no HIPAA/walk-in)', () => {
+test('phase-05 fit: TV outbound.yaml score criteria preserve the declared model (no HIPAA/walk-in)', () => {
   const raw = readFileSync(TV_OUTBOUND, 'utf8');
   const doc = yaml.load(raw);
   const criteria = Array.isArray(doc?.score?.criteria) ? doc.score.criteria : [];
@@ -203,8 +205,8 @@ test('phase-05 fit: TV outbound.yaml score criteria match FIT_COMPONENT_WEIGHTS 
     assert.ok(byId.has(id), `TV score missing criterion ${id}`);
     const w = Number(byId.get(id).weight);
     assert.ok(
-      Math.abs(w - FIT_COMPONENT_WEIGHTS[id]) < 1e-9,
-      `weight mismatch for ${id}: yaml=${w} code=${FIT_COMPONENT_WEIGHTS[id]}`,
+      Math.abs(w - treasureValleyFitModel.criteria.find((criterion) => criterion.id === id).weight) < 1e-9,
+      `weight mismatch for ${id}: yaml=${w}`,
     );
   }
   for (const id of byId.keys()) {
@@ -419,7 +421,7 @@ test('phase-05 priority: applyOutboundPolicy does not set priority_rank = fit_sc
     mission_delivery_compatibility: 9,
     local_buying_autonomy: 9,
   });
-  const fit = calculateFitScore(fitComponentsFromBreakdown(breakdown));
+  const fit = calculateFitScore(fitComponentsFromBreakdown(breakdown, treasureValleyFitModel), treasureValleyFitModel);
   const r = applyOutboundPolicy({
     record: {
       _row_id: 'pri_1',
@@ -1129,9 +1131,9 @@ test('phase-05 production path: same evidence bundle → explainable fit/priorit
     mission_delivery_compatibility: 8,
     local_buying_autonomy: 9,
   });
-  const fitComponents = fitComponentsFromBreakdown(breakdown);
-  const fitCalc = calculateFitScore(fitComponents);
-  const fitEvidence = deriveFitEvidenceConfidence(breakdown);
+  const fitComponents = fitComponentsFromBreakdown(breakdown, treasureValleyFitModel);
+  const fitCalc = calculateFitScore(fitComponents, treasureValleyFitModel);
+  const fitEvidence = deriveFitEvidenceConfidence(breakdown, treasureValleyFitModel);
   assert.ok(fitEvidence >= 80, `full reasoned breakdown should yield high fit evidence, got ${fitEvidence}`);
 
   const prePolicy = {
@@ -1534,7 +1536,7 @@ test('phase-05 complete-when: one evidence bundle → all eight outcomes; score 
   const readiness = JSON.parse(String(a.patch.readiness_json));
   const fitCalc = JSON.parse(String(a.patch.fit_calculation_json));
 
-  assert.equal(fitCalc.calculation_rule_version, 'tv-fit-v1');
+  assert.equal(fitCalc.calculation_rule_version, FIT_ARITHMETIC_RULE_VERSION);
   assert.equal(timing.calculation_rule_version, 'tv-timing-v1');
   assert.equal(reach.calculation_rule_version, 'tv-reachability-v1');
   assert.equal(treatment.calculation_rule_version, 'tv-treatment-v1');
