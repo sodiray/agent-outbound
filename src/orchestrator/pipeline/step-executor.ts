@@ -20,6 +20,7 @@ import {
 } from '../lib/step-when.js';
 import { executePipelineSequenceAction } from './sequence-step-runtime.js';
 import { stageInputRecord } from '../lib/stage-inputs.js';
+import { runScoreStage, type ScoreStage } from '../scoring/stage-runner.js';
 
 export type StepExecutionOutcome = {
   passed: boolean;
@@ -176,6 +177,7 @@ const WHEN_GATED_STEP_KINDS = new Set([
   'send_email',
   'linkedin_connect',
   'manual_task',
+  'score',
 ]);
 
 export const shouldGuardDeclaredOutputWrites = (outcome: StepExecutionOutcome): boolean => (
@@ -370,6 +372,33 @@ const executeGenerateBatch = async (
       });
   });
   return outcomes;
+};
+
+const executeScoreBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+) => {
+  const scoreStep: ScoreStage = {
+    id: stepId,
+    key: textValue(step.key),
+    model: textValue(step.model),
+    criteria: Array.isArray(step.criteria) ? step.criteria as ScoreStage['criteria'] : [],
+    inputs: step.inputs,
+    outputs: step.outputs && typeof step.outputs === 'object' && !Array.isArray(step.outputs)
+      ? step.outputs as ScoreStage['outputs']
+      : {},
+  };
+  return runScoreStage({
+    db: ctx.db as Parameters<typeof runScoreStage>[0]['db'],
+    listDir: ctx.listDir,
+    config: (ctx.config || { ai: ctx.aiConfig || {} }) as Record<string, unknown>,
+    step: scoreStep,
+    rows,
+    stepId,
+    force: Boolean(ctx.force),
+  });
 };
 
 const executeComposeBatch = async (
@@ -931,6 +960,8 @@ const executeStepBatchUnchecked = async (
   if (kind === 'generate') {
     return executeGenerateBatch(ctx, step, stepId, rows);
   }
+
+  if (kind === 'score') return executeScoreBatch(ctx, step, stepId, rows);
 
   // Nested pipeline containers are flattened by subpipelines; never execute the parent kind.
   if (kind === 'pipeline') {

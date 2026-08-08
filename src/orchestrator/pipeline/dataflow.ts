@@ -150,7 +150,7 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
     executable: (() => {
       // generate is executable on the normal path when selected by selectDataflowSteps
       // (critical-path / AO_RUN_GENERATE / run_in_pipeline / fixture).
-      const base = ['filter', 'enrich', 'extract', 'compose', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate'];
+      const base = ['filter', 'enrich', 'extract', 'compose', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate', 'score'];
       // Deterministic pipeline fixture mode also executes sourcing-like kinds via fixtures.
       if (String(process.env.AO_PIPELINE_FIXTURE || '').trim() === '1') {
         return [...base, 'geo_tiles', 'linkedin_profile_search', 'pipeline'].includes(kind);
@@ -622,6 +622,10 @@ const initializeResolved = ({
     const initial = new Set(Array.from(passed.get(recordId) || []).filter((stepId) => {
       const step = steps.find((entry) => entry.id === stepId);
       if (!step) return true;
+      // Score staleness is based on its declared capability values, not the
+      // existence of a prior event. Let the stage compare that exact hash on
+      // every pass so unchanged inputs are visibly skipped.
+      if (step.kind === 'score') return false;
       if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose') return !force;
       if (step.kind === 'review') {
         if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
@@ -941,9 +945,23 @@ export const runPipelineDataflow = async ({
         const recordId = getRecordRowId(recordState.record);
         const now = clockIso(clock);
         // enrich + generate both write fields then must refresh so dependents (policy_apply) see them.
-        if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose') {
+        if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose' || step.kind === 'score') {
           if (outcome.errored) {
             const error = String(outcome.reason || 'failed');
+            if (step.kind === 'score') {
+              insertPipelineEvent({
+                db,
+                event: {
+                  event_id: randomUUID(),
+                  record_id: recordId,
+                  step_id: step.id,
+                  kind: step.kind,
+                  passed: false,
+                  reason: error,
+                  occurred_at: now,
+                },
+              });
+            }
             db.prepare(`
               INSERT INTO errored_events (run_id, record_id, step_id, kind, error, occurred_at)
               VALUES (?, ?, ?, ?, ?, ?)

@@ -126,6 +126,7 @@ const actionReferences = (step: StageLike, config: StageLike): StageInputReferen
 
 const modelContextReadsInputs = (kind: string, config: StageLike): boolean => {
   if (kind === 'filter') return text(config.type || 'semantic') === 'semantic';
+  if (kind === 'score') return true;
   if (kind === 'compose') return false;
   if (kind === 'enrich' || kind === 'generate') {
     const action = text(config.action).toLowerCase();
@@ -144,6 +145,52 @@ export const declaredStageInputs = (stepValue: unknown): string[] => {
   const inputs = config.inputs;
   if (Array.isArray(inputs)) return strings(inputs);
   return referencesForInputMap(inputs, 'inputs').map((reference) => reference.field);
+};
+
+export type ResolvedStageInputs = {
+  values: Record<string, unknown>;
+  missingRequired: string[];
+};
+
+const valueAtPath = (source: Record<string, unknown>, path: string): unknown => (
+  path.split('.').filter(Boolean).reduce<unknown>((current, segment) => (
+    current && typeof current === 'object' && !Array.isArray(current)
+      ? (current as Record<string, unknown>)[segment]
+      : undefined
+  ), source)
+);
+
+const absentInputValue = (value: unknown): boolean => (
+  value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
+);
+
+/** Resolve the declared capability map without exposing the rest of the record. */
+export const resolveStageInputs = ({
+  step: stepValue,
+  record,
+}: {
+  step: unknown;
+  record: Record<string, unknown>;
+}): ResolvedStageInputs => {
+  const step = asRecord(stepValue);
+  const config = effectiveConfig(step);
+  const inputs = config.inputs;
+  if (Array.isArray(inputs)) {
+    const values = Object.fromEntries(strings(inputs).map((field) => [field, record[field]]));
+    return { values, missingRequired: [] };
+  }
+  const entries = Object.entries(asRecord(inputs)).map(([name, definition]) => {
+    const input = asRecord(definition);
+    const hasValue = Object.prototype.hasOwnProperty.call(input, 'value');
+    const value = hasValue ? input.value : valueAtPath(record, text(input.from));
+    return { name, value, required: input.required !== false };
+  });
+  return {
+    values: Object.fromEntries(entries.map(({ name, value }) => [name, value])),
+    missingRequired: entries
+      .filter(({ value, required }) => required && absentInputValue(value))
+      .map(({ name }) => name),
+  };
 };
 
 export const stageInputReferences = (stepValue: unknown, options: StageInputDiagnosticOptions = {}): StageInputReference[] => {

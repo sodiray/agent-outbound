@@ -9,6 +9,7 @@ import { validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 import { findProhibitedSteps } from '../orchestrator/policy/pipeline-prohibitions.js';
 import { stageInputDiagnosticMessages } from '../orchestrator/lib/stage-inputs.js';
+import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
 
 export const DEFAULT_SCORE_MIN_COVERAGE = 0.5;
 
@@ -432,7 +433,7 @@ export const IdempotencySchema = z.object({
 const ModelContextProjectionSchema = z.enum(['business_evidence']);
 
 const EnrichmentOutputDefSchema = z.object({
-  type: z.enum(['string', 'number', 'integer', 'boolean']),
+  type: z.enum(['string', 'number', 'integer', 'boolean', 'json']),
   description: z.string(),
   enum: z.array(z.string()).optional(),
 });
@@ -964,6 +965,31 @@ const PipelineGenerateStepSchema = z.object({
   run_in_pipeline: z.boolean().optional(),
 });
 
+const ScoreCriterionSchema = z.object({
+  id: z.string().trim().min(1),
+  weight: z.coerce.number().positive(),
+  description: z.string().trim().min(1),
+}).strict();
+
+const ScoreOutputDefSchema = z.object({
+  type: z.enum(['string', 'number', 'json']),
+  description: z.string().default(''),
+}).strict();
+
+const PipelineScoreStepSchema = z.object({
+  kind: z.literal('score'),
+  id: z.string().trim().min(1),
+  key: z.string().trim().min(1).regex(/^[a-z][a-z0-9_]*$/, 'score key must be a snake_case identifier.'),
+  description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
+  inputs: StageInputsSchema,
+  model: ProviderModelSchema,
+  criteria: z.array(ScoreCriterionSchema).default([]),
+  outputs: z.record(ScoreOutputDefSchema).default({}),
+  ...PipelineWhenFields,
+}).strict();
+
 const ComposeInputSchema = z.object({
   from: z.string().min(1).optional(),
   value: z.union([z.string().min(1), z.number()]).transform((value) => String(value)).optional(),
@@ -1084,6 +1110,7 @@ const ExecutablePipelineStepSchemas = [
   PipelineEnrichmentStepSchema,
   PipelineExtractStepSchema,
   PipelineGenerateStepSchema,
+  PipelineScoreStepSchema,
   PipelineComposeStepSchema,
   PipelineFilterStepSchema,
   PipelineAssignStepSchema,
@@ -1102,6 +1129,7 @@ const SubpipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
   PipelineExtractStepSchema,
   PipelineGenerateStepSchema,
+  PipelineScoreStepSchema,
   PipelineComposeStepSchema,
   PipelineFilterStepSchema,
   PipelineReviewStepSchema,
@@ -2192,6 +2220,36 @@ const isSafetyCriticalUnknownKey = ({ path, suggestion }: UnknownConfigKey): boo
   return ['policy', 'contact_policy', 'suppression', 'live_interaction_budget', 'budgets'].includes(suggestion || '');
 };
 
+const scoreStageValidationMessages = (config: Record<string, unknown>): string[] => (
+  flattenPipelineSteps(config).flatMap((step) => {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) return [];
+    const scoreStep = step as Record<string, unknown>;
+    if (String(scoreStep.kind || '') !== 'score') return [];
+    const id = String(scoreStep.id || '').trim() || 'unknown';
+    const key = String(scoreStep.key || '').trim();
+    const outputs = scoreStep.outputs && typeof scoreStep.outputs === 'object' && !Array.isArray(scoreStep.outputs)
+      ? scoreStep.outputs as Record<string, unknown>
+      : {};
+    const expected = {
+      [`${key}_score`]: 'number',
+      [`${key}_breakdown`]: 'json',
+      [`${key}_reasoning`]: 'string',
+    };
+    const required = Object.entries(expected).flatMap(([name, type]) => {
+      const output = outputs[name];
+      if (!output || typeof output !== 'object' || Array.isArray(output)) {
+        return [`pipeline.${id} (score) must declare output "${name}".`];
+      }
+      if (String((output as Record<string, unknown>).type || '') === type) return [];
+      return [`pipeline.${id} (score) output "${name}" must have type "${type}".`];
+    });
+    const unexpected = Object.keys(outputs)
+      .filter((name) => !(name in expected))
+      .map((name) => `pipeline.${id} (score) declares unsupported output "${name}".`);
+    return [...required, ...unexpected];
+  })
+);
+
 const unknownConfigDiagnostic = (unknown: UnknownConfigKey): string => {
   const suggestion = unknown.suggestion
     ? ` Did you mean "${unknown.path.replace(/[^.]+$/, unknown.suggestion)}"?`
@@ -2389,12 +2447,14 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
     ? ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).']
     : [];
   const stageInputs = stageInputDiagnosticMessages(config, options);
+  const scoreStageErrors = scoreStageValidationMessages(config);
   const errors = [...new Set([
     ...graph.errors,
     ...router.errors,
     ...prohibitionErrors,
     ...optOutErrors,
     ...stageInputs.errors,
+    ...scoreStageErrors,
   ])];
 
   return {
