@@ -127,3 +127,82 @@ ai: { default_model: openai/gpt-4.1-mini }
     else process.env.AO_GLOBAL_ROOT = previousGlobalRoot;
   }
 });
+
+test('launchSend does not prefilter a LinkedIn-first record with email-only suppression', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-launch-linkedin-suppression-'));
+  const globalRoot = join(listDir, 'global-root');
+  mkdirSync(globalRoot, { recursive: true });
+  writeFileSync(join(globalRoot, 'models.json'), JSON.stringify({
+    schema_version: '1.0.0',
+    providers: { openai: { provider: 'openai', models: ['gpt-4.1-mini'], updated_at: '' } },
+  }));
+  writeFileSync(join(listDir, 'outbound.yaml'), `
+list: { name: Launch LinkedIn Suppression }
+business: { name: Test, description: Test, icp: Test, offer: Test }
+pipeline: []
+sequences:
+  default:
+    steps:
+      - kind: linkedin_connect
+        id: linkedin_1
+        config:
+          channel: linkedin
+          invite_message: Hello
+policy: { review_required_for: [linkedin_connect] }
+ai: { default_model: openai/gpt-4.1-mini }
+`);
+  writeFileSync(join(listDir, 'operator.md'), 'test');
+  writeFileSync(join(listDir, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const previousGlobalRoot = process.env.AO_GLOBAL_ROOT;
+  process.env.AO_GLOBAL_ROOT = globalRoot;
+  try {
+    const db = openListDb({ listDir, readonly: false });
+    const now = new Date().toISOString();
+    ensureRecordColumns({
+      db,
+      columns: ['contact_email', 'contact_linkedin_url', 'active_contact_id', 'account_sequence_state', 'lifecycle_stage', 'work_state', 'next_action_json'],
+    });
+    db.prepare(`
+      INSERT INTO records (
+        _row_id, business_name, sequence_name, sequence_status, contact_email, contact_linkedin_url,
+        active_contact_id, account_sequence_state, lifecycle_stage, work_state,
+        next_action_json, _created_at, _updated_at, created_at, updated_at
+      ) VALUES (?, 'LinkedIn Co', 'default', 'idle', ?, ?, 'c1', 'active', 'contacted',
+        'executing_external_action', ?, ?, ?, ?, ?)
+    `).run(
+      'launch_linkedin_1',
+      'email-only-suppressed@example.test',
+      'https://www.linkedin.com/in/linked-in-co',
+      JSON.stringify({
+        action_id: 'launch_linkedin_1', action_type: 'linkedin_connect', account_id: 'launch_linkedin_1',
+        contact_id: 'c1', lifecycle_stage: 'contacted', sequence_state: 'active',
+        work_state: 'executing_external_action', reason: 'test', on_success: 'continue',
+      }),
+      now, now, now, now,
+    );
+    const globalDb = openGlobalSuppressionDb({ readonly: false });
+    addSuppression({
+      db: globalDb,
+      entry: {
+        id: 'global_email_only_suppression', value: 'email-only-suppressed@example.test',
+        value_type: 'email', scope: 'global', reason: 'test',
+      },
+    });
+    globalDb.close();
+    db.close();
+
+    await assert.rejects(
+      launchSend({ listDir, limit: 1 }),
+      /Composio is not authenticated/,
+    );
+    const verify = openListDb({ listDir, readonly: true });
+    assert.notEqual(
+      verify.prepare('SELECT last_error FROM records WHERE _row_id = ?').get('launch_linkedin_1').last_error,
+      'gate_blocked: email_suppressed',
+    );
+    verify.close();
+  } finally {
+    if (previousGlobalRoot === undefined) delete process.env.AO_GLOBAL_ROOT;
+    else process.env.AO_GLOBAL_ROOT = previousGlobalRoot;
+  }
+});

@@ -6,6 +6,11 @@
  * lifecycle succession appends transition audits).
  */
 
+import {
+  missingRequiredReviewFields,
+  type ResolvedReviewPresentation,
+} from './review-presentation.js';
+
 export const TRANSITION_AUDIT_VERSION = 'tv-transition-audit-v1';
 export const STAGE_REVIEW_POLICY_VERSION = 'tv-stage-review-v1';
 /** Keep aligned with lifecycle.NEXT_ACTION_POLICY_VERSION. */
@@ -85,6 +90,8 @@ export type StageReviewAuthorization = {
   authorized_at?: string | null;
   notes?: string;
   policy_version?: string;
+  /** Immutable, resolved fields the reviewer was asked to judge. */
+  presentation?: ResolvedReviewPresentation | null;
   pending_action_snapshot?: Record<string, unknown> | null;
 };
 
@@ -186,6 +193,7 @@ export function pauseForStageReview(input: {
   lifecycle_stage?: LifecycleStage | string;
   reason?: string;
   review_id?: string;
+  presentation?: ResolvedReviewPresentation | null;
 }): {
   authorization: StageReviewAuthorization;
   patch: {
@@ -212,6 +220,7 @@ export function pauseForStageReview(input: {
     authorized_at: null,
     notes: input.reason,
     policy_version: STAGE_REVIEW_POLICY_VERSION,
+    presentation: input.presentation ?? null,
     pending_action_snapshot: input.pending_action
       ? (input.pending_action as Record<string, unknown>)
       : null,
@@ -332,6 +341,7 @@ export function authorizeStageReview(input: {
       authorized_at: input.existing?.authorized_at ?? null,
       notes: input.notes || `refused: review already ${prior}`,
       policy_version: STAGE_REVIEW_POLICY_VERSION,
+      presentation: input.existing?.presentation ?? null,
       pending_action_snapshot: input.existing?.pending_action_snapshot ?? null,
     };
     const audit = createTransitionAudit({
@@ -367,6 +377,7 @@ export function authorizeStageReview(input: {
       authorized_at: null,
       notes: input.notes || `asset_version mismatch expected=${boundVersion}`,
       policy_version: STAGE_REVIEW_POLICY_VERSION,
+      presentation: input.existing?.presentation ?? null,
       pending_action_snapshot: input.existing?.pending_action_snapshot ?? null,
     };
     const audit = createTransitionAudit({
@@ -408,6 +419,57 @@ export function authorizeStageReview(input: {
     };
   }
 
+  const wantsFullResult = Boolean(
+    input.account_id
+    || input.existing
+    || input.resume_action
+    || input.expected_asset_version
+    || input.skip_action
+    || input.lifecycle_stage,
+  );
+  const missingPresentationFields = input.decision === 'authorize'
+    ? missingRequiredReviewFields(input.existing?.presentation)
+    : [];
+  if (missingPresentationFields.length > 0) {
+    const field = missingPresentationFields[0];
+    const authorization: StageReviewAuthorization = {
+      review_id: input.review_id,
+      stage_id: input.stage_id,
+      asset_version: input.asset_version,
+      status: input.existing?.status === 'edited' ? 'edited' : 'pending',
+      account_id,
+      contact_id: input.contact_id ?? input.existing?.contact_id ?? null,
+      channel: input.existing?.channel ?? null,
+      action_type: input.existing?.action_type ?? null,
+      authorized_by: null,
+      authorized_at: null,
+      notes: input.notes || `Authorization blocked: required review field "${field}" is empty.`,
+      policy_version: STAGE_REVIEW_POLICY_VERSION,
+      presentation: input.existing?.presentation ?? null,
+      pending_action_snapshot: input.existing?.pending_action_snapshot ?? null,
+    };
+    if (!wantsFullResult) return authorization;
+    const audit = createTransitionAudit({
+      account_id,
+      kind: 'human_decision',
+      from_state: input.existing?.status || 'pending',
+      to_state: authorization.status,
+      reason: `authorization blocked: required review field "${field}" is empty`,
+      evidence_ids: [input.review_id, field],
+      actor: 'human',
+    });
+    return {
+      authorization,
+      allowed: false,
+      reason: `required review field "${field}" is empty`,
+      patch: {
+        stage_review_json: JSON.stringify(authorization),
+        related_review_id: input.review_id,
+      },
+      audit,
+    };
+  }
+
   const status = statusMap[input.decision] || 'pending';
   const now = new Date().toISOString();
   const authorization: StageReviewAuthorization = {
@@ -423,19 +485,12 @@ export function authorizeStageReview(input: {
     authorized_at: input.decision === 'authorize' ? now : null,
     notes: input.notes,
     policy_version: STAGE_REVIEW_POLICY_VERSION,
+    presentation: input.existing?.presentation ?? null,
     pending_action_snapshot: input.existing?.pending_action_snapshot ?? null,
   };
 
   // Legacy callers that only need the authorization object (no account_id / existing):
   // keep simple shape when no coupling fields provided.
-  const wantsFullResult = Boolean(
-    input.account_id
-    || input.existing
-    || input.resume_action
-    || input.expected_asset_version
-    || input.skip_action
-    || input.lifecycle_stage,
-  );
   if (!wantsFullResult) {
     return authorization;
   }
@@ -694,6 +749,8 @@ export function invalidateStageReviewIfAssetChanged(input: {
    * current_asset_version so the operator re-authorizes the new asset.
    */
   re_pause?: boolean;
+  /** Current resolved packet retained by the replacement review after material drift. */
+  presentation?: ResolvedReviewPresentation | null;
 }): {
   /** True when bound version differs from current (whether or not we invalidated). */
   changed: boolean;
@@ -811,6 +868,7 @@ export function invalidateStageReviewIfAssetChanged(input: {
       pending_action: existing.pending_action_snapshot,
       lifecycle_stage: lifecycle,
       reason: notes,
+      presentation: input.presentation ?? null,
     });
     patch = {
       ...patch,
@@ -986,6 +1044,7 @@ export type PendingStageReviewRow = {
   notes?: string;
   authorized_by?: string | null;
   authorized_at?: string | null;
+  presentation?: ResolvedReviewPresentation | null;
 };
 
 /**
@@ -1059,6 +1118,7 @@ export function listPendingStageReviews(input: {
       notes: review.notes,
       authorized_by: review.authorized_by ?? null,
       authorized_at: review.authorized_at ?? null,
+      presentation: review.presentation ?? null,
     });
   }
 

@@ -51,6 +51,7 @@ import {
   type LiveInteractionBudget,
 } from '../runtime/live-interaction-budget.js';
 import { evaluateTransmitterSuppression } from '../policy/transmitter-suppression.js';
+import { resolveReviewPresentation } from '../policy/review-presentation.js';
 
 const text = (value: unknown) => String(value || '').trim();
 
@@ -356,6 +357,9 @@ const assertMailStageReviewAuthorized = ({
     || row.postcard_body
     || row.preliminary_snapshot,
   );
+  const configuredStep = flattenPipelineSteps(config)
+    .find((step) => text(step.id) === stepId);
+  const reviewPresentation = resolveReviewPresentation({ step: configuredStep, record: row });
   const currentAssetVersion = resolveStageAssetVersion({
     accountId: String(row._row_id || row.id || recordId),
     activeContactId: text(row.active_contact_id) || null,
@@ -365,6 +369,7 @@ const assertMailStageReviewAuthorized = ({
     stageId: stepId,
     bodyText: mailBody || null,
     policyVersion: config?.policy?.version ?? null,
+    reviewPresentation,
   });
 
   const invalidation = invalidateStageReviewIfAssetChanged({
@@ -377,6 +382,7 @@ const assertMailStageReviewAuthorized = ({
     action_type: productType,
     lifecycle_stage: text(row.lifecycle_stage) || 'contacted',
     re_pause: true,
+    presentation: reviewPresentation,
   });
   if (invalidation.invalidated && invalidation.patch) {
     let auditJson = row.transition_audit_json;

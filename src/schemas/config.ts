@@ -975,6 +975,15 @@ const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
   ...PipelineWhenFields,
 });
 
+const ReviewPresentationSchema = z.object({
+  purpose: z.string().default(''),
+  present: z.array(z.object({
+    field: z.string().trim().min(1),
+    label: z.string().trim().min(1).optional(),
+  })).default([]),
+  require_non_empty: z.array(z.string().trim().min(1)).default([]),
+}).partial().optional();
+
 const PipelineExternalStepFields = {
   description: PipelineSequenceStepBaseSchema.shape.description,
   depends_on: PipelineSequenceStepBaseSchema.shape.depends_on,
@@ -987,6 +996,7 @@ const PipelineExternalStepFields = {
   variables: z.record(z.any()).default({}),
   uses_asset: z.string().optional(),
   draft_approval_required: z.boolean().optional(),
+  review: ReviewPresentationSchema,
   config: ExternalStepConfigSchema.default({}),
   ...PipelineWhenFields,
 };
@@ -1012,6 +1022,7 @@ const PipelineLinkedinConnectStepSchema = z.object({
 const PipelineManualTaskStepSchema = PipelineSequenceStepBaseSchema.extend({
   kind: z.literal('manual_task'),
   side_effecting: z.boolean().default(false),
+  review: ReviewPresentationSchema,
   config: ExternalStepConfigSchema.default({}),
   ...PipelineWhenFields,
 });
@@ -1090,6 +1101,7 @@ export const SequenceStepSchema = z.preprocess((value) => {
   return step;
 }, z.object({
   id: z.string().optional(),
+  kind: z.string().optional(),
   description: z.string().default(''),
   template: z.union([z.string(), z.array(z.string())]).optional(),
   template_version: z.coerce.number().int().min(1).optional(),
@@ -1099,7 +1111,13 @@ export const SequenceStepSchema = z.preprocess((value) => {
   day: z.coerce.number().int().min(0).max(365).default(0),
   condition: z.string().optional(),
   defer: z.string().optional(),
+  review: ReviewPresentationSchema,
   config: z.object({
+    channel: z.string().optional(),
+    action: z.string().optional(),
+    task_type: z.string().optional(),
+    taskType: z.string().optional(),
+    invite_message: z.string().optional(),
     tool: ToolSpecSchema.optional(),
     disposition_options: unsupportedSequenceStepConfig('disposition_options').optional(),
     model: unsupportedSequenceStepConfig('model').optional(),

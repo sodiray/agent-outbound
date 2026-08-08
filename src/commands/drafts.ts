@@ -17,6 +17,9 @@ import { resolveStageAssetVersion } from '../orchestrator/policy/stage-review-ga
 import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { resolveSendMailbox } from '../orchestrator/lib/mailboxes.js';
+import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
+import type { ResolvedReviewPresentation } from '../orchestrator/policy/review-presentation.js';
+import { resolveReviewPresentation } from '../orchestrator/policy/review-presentation.js';
 
 /**
  * Compose the same material asset_version send uses:
@@ -29,6 +32,7 @@ export const composeOutboundReviewVersion = (input: {
   policyVersion?: string | null;
   sender?: string | null;
   mailboxId?: string | null;
+  reviewPresentation?: ResolvedReviewPresentation | null;
 }): string => {
   const record = input.record || {};
   const draft = input.draft || {};
@@ -53,6 +57,7 @@ export const composeOutboundReviewVersion = (input: {
     recipient: String(record.contact_email || record.email || ''),
     sender,
     mailboxId,
+    reviewPresentation: input.reviewPresentation ?? null,
     stepId,
     stageId: stepId,
     draftId: String(draft.draft_id || ''),
@@ -73,9 +78,11 @@ export const composeOutboundReviewVersion = (input: {
 const planDraftApproval = ({
   record,
   draft,
+  reviewPresentation,
 }: {
   record: Record<string, unknown>;
   draft: Record<string, unknown>;
+  reviewPresentation?: ResolvedReviewPresentation | null;
 }): {
   authorized: boolean;
   reason: string;
@@ -91,6 +98,7 @@ const planDraftApproval = ({
     record,
     draft,
     stageId: stepId || existing?.stage_id,
+    reviewPresentation: reviewPresentation ?? null,
   });
 
   // A review that was REFUSED must not yield a sendable draft. This branch used
@@ -189,6 +197,20 @@ const planDraftApproval = ({
     },
     markReady: true,
   };
+};
+
+const reviewPresentationForDraft = ({
+  config,
+  draft,
+  record,
+}: {
+  config: Record<string, unknown>;
+  draft: Record<string, unknown>;
+  record: Record<string, unknown>;
+}) => {
+  const stepId = String(draft.step_id || '').trim();
+  const step = flattenPipelineSteps(config).find((candidate) => String(candidate.id || '').trim() === stepId);
+  return resolveReviewPresentation({ step, record });
 };
 
 const encodeCursor = (offset: number) => Buffer.from(JSON.stringify({ offset }), 'utf8').toString('base64url');
@@ -384,6 +406,11 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
       const plan = planDraftApproval({
         record,
         draft: existing,
+        reviewPresentation: reviewPresentationForDraft({
+          config: projectConfig,
+          draft: existing,
+          record,
+        }),
       });
 
       // Hard failures that must not mark ready (including stage_mismatch).

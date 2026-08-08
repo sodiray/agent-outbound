@@ -52,6 +52,8 @@ import {
   appendTransitionAudit,
   readinessChannelPermission,
   evaluateTransmitterSuppression,
+  resolveReviewPresentation,
+  type ResolvedReviewPresentation,
 } from '../policy/index.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import { reconcileSequenceReachability } from '../policy/sequence-reachability-reconcile.js';
@@ -88,6 +90,7 @@ const currentStageAssetVersion = ({
   bodyText,
   subjectText,
   activeContactId,
+  reviewPresentation,
 }: {
   record: Record<string, unknown>;
   stageId: string;
@@ -98,6 +101,7 @@ const currentStageAssetVersion = ({
   bodyText?: string | null;
   subjectText?: string | null;
   activeContactId?: string | null;
+  reviewPresentation?: ResolvedReviewPresentation | null;
 }): string => {
   const accountId = String(record._row_id || record.id || record.account_id || '');
   const contact = String(
@@ -127,6 +131,7 @@ const currentStageAssetVersion = ({
     policyVersion: policyVersion ?? null,
     bodyText: bodyText ?? null,
     subjectText: subjectText ?? null,
+    reviewPresentation: reviewPresentation ?? null,
   });
 };
 
@@ -143,6 +148,7 @@ const applyStageReviewPause = ({
   actionType,
   contactId,
   reason,
+  presentation,
 }: {
   db: any;
   record: Record<string, unknown>;
@@ -152,6 +158,7 @@ const applyStageReviewPause = ({
   actionType: string;
   contactId?: string | null;
   reason: string;
+  presentation?: ResolvedReviewPresentation | null;
 }) => {
   const accountId = String(record._row_id || record.id || record.account_id || '');
   const lifecycle = String(record.lifecycle_stage || 'contacted');
@@ -177,6 +184,7 @@ const applyStageReviewPause = ({
     },
     lifecycle_stage: lifecycle,
     reason,
+    presentation: presentation ?? null,
   });
   const next: Record<string, unknown> = {
     ...record,
@@ -208,6 +216,7 @@ const applyStageReviewMaterialInvalidation = ({
   channel,
   actionType,
   contactId,
+  presentation,
 }: {
   db: any;
   record: Record<string, unknown>;
@@ -216,6 +225,7 @@ const applyStageReviewMaterialInvalidation = ({
   channel?: string | null;
   actionType: string;
   contactId?: string | null;
+  presentation?: ResolvedReviewPresentation | null;
 }): { record: Record<string, unknown>; blocked: boolean; reason?: string } => {
   const result = invalidateStageReviewIfAssetChanged({
     record,
@@ -227,6 +237,7 @@ const applyStageReviewMaterialInvalidation = ({
     action_type: actionType,
     lifecycle_stage: String(record.lifecycle_stage || 'contacted'),
     re_pause: true,
+    presentation: presentation ?? null,
   });
   if (!result.invalidated || !result.patch) {
     return { record, blocked: false };
@@ -1125,6 +1136,7 @@ export const executeChannelStep = async ({
               || sequenceStepId.toLowerCase().includes('postcard')
               || sequenceStepId.toLowerCase().includes('golden_ticket'))
           ) {
+            const mailReviewPresentation = resolveReviewPresentation({ step, record: sendRecord });
             const mailBody = String(
               sendRecord.golden_ticket_copy
               || sendRecord.golden_ticket_body
@@ -1143,6 +1155,7 @@ export const executeChannelStep = async ({
               recipient: String(sendRecord.address || sendRecord.contact_email || ''),
               bodyText: mailBody,
               activeContactId,
+              reviewPresentation: mailReviewPresentation,
             });
             const mailInvalidated = applyStageReviewMaterialInvalidation({
               db,
@@ -1152,6 +1165,7 @@ export const executeChannelStep = async ({
               channel: 'mail',
               actionType: taskType || stepKind || 'manual_task',
               contactId: activeContactId || null,
+              presentation: mailReviewPresentation,
             });
             const mailRecord = mailInvalidated.record;
             const mailAuth = evaluateExternalActionAuthorization({
@@ -1173,6 +1187,7 @@ export const executeChannelStep = async ({
                 actionType: taskType || stepKind || 'manual_task',
                 contactId: activeContactId || null,
                 reason: `Stage review required before mail task ${taskType || sequenceStepId}`,
+                presentation: mailReviewPresentation,
               });
             }
           }
@@ -1226,6 +1241,7 @@ export const executeChannelStep = async ({
       // reviews bound to a different fingerprint are invalidated and re-paused (fail closed).
       if (!dryRun) {
         const liBody = linkedinBodyForReview({ record: sendRecord, step });
+        const linkedinReviewPresentation = resolveReviewPresentation({ step, record: sendRecord });
         const linkedinAssetVersion = currentStageAssetVersion({
           record: sendRecord,
           stageId: sequenceStepId,
@@ -1239,6 +1255,7 @@ export const executeChannelStep = async ({
           ),
           bodyText: liBody || null,
           activeContactId,
+          reviewPresentation: linkedinReviewPresentation,
         });
         const liInvalidated = applyStageReviewMaterialInvalidation({
           db,
@@ -1248,6 +1265,7 @@ export const executeChannelStep = async ({
           channel: 'linkedin',
           actionType: 'linkedin_connect',
           contactId: activeContactId || null,
+          presentation: linkedinReviewPresentation,
         });
         if (liInvalidated.blocked) {
           return {
@@ -1278,6 +1296,7 @@ export const executeChannelStep = async ({
               actionType: 'linkedin_connect',
               contactId: activeContactId || null,
               reason: `Stage review required before linkedin_connect (${sequenceStepId})`,
+              presentation: linkedinReviewPresentation,
             });
           }
           return {
@@ -1587,6 +1606,7 @@ export const executeChannelStep = async ({
       || String(channel || '').trim().toLowerCase() === 'email'
       || String(channelHint || '').trim().toLowerCase() === 'email';
     if (!dryRun && intent === 'send' && isEmailSendPath) {
+      const emailReviewPresentation = resolveReviewPresentation({ step, record: sendRecord });
       approvedDraft = db.prepare(`
         SELECT *
         FROM drafts
@@ -1715,6 +1735,7 @@ export const executeChannelStep = async ({
         policyVersion: projectConfig?.policy?.version,
         sender: envelopeFrom || null,
         mailboxId: envelopeMailbox || null,
+        reviewPresentation: emailReviewPresentation,
       });
 
       // Authorized envelope: prefer draft-persisted; else current resolved (no-draft path).
@@ -1743,6 +1764,7 @@ export const executeChannelStep = async ({
         channel: 'email',
         actionType: 'send_email',
         contactId: activeContactId || null,
+        presentation: emailReviewPresentation,
       });
       if (emailInvalidated.blocked) {
         return {
@@ -1774,6 +1796,7 @@ export const executeChannelStep = async ({
             actionType: 'send_email',
             contactId: activeContactId || null,
             reason: `Stage review or draft approval required before send_email (${sequenceStepId})`,
+            presentation: emailReviewPresentation,
           });
         }
         return {
@@ -2349,6 +2372,7 @@ export const executeChannelStep = async ({
           isReviewRequired(projectConfig, stepKind || 'send_email', taskType)
           || isReviewRequired(projectConfig, 'send_email', taskType)
         ) {
+          const draftReviewPresentation = resolveReviewPresentation({ step, record: sendRecord });
           const draftMailbox = resolveSendMailbox({
             listDir,
             config: projectConfig || readConfig(listDir).config,
@@ -2388,6 +2412,7 @@ export const executeChannelStep = async ({
             policyVersion: projectConfig?.policy?.version,
             sender: draftFrom || null,
             mailboxId: draftMailboxId || null,
+            reviewPresentation: draftReviewPresentation,
           });
           const draftAuth = evaluateExternalActionAuthorization({
             config: projectConfig,
@@ -2422,6 +2447,7 @@ export const executeChannelStep = async ({
               },
               lifecycle_stage: lifecycle,
               reason: `Draft pending approval + stage review for ${sequenceStepId}`,
+              presentation: draftReviewPresentation,
             });
             stageReviewPausePatch = {
               ...paused.patch,

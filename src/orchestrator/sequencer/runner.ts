@@ -382,6 +382,33 @@ const classifyStepIntent = async ({ db, listDir, step, cache, aiConfig = {}, mod
   }
 };
 
+const declaredLaunchChannel = (step: Record<string, unknown>): 'email' | 'linkedin' | 'mail' | 'sms' | 'call' | 'visit' | null => {
+  const kind = String(step.kind || '').trim().toLowerCase();
+  const config = step.config && typeof step.config === 'object' ? step.config as Record<string, unknown> : {};
+  const configuredChannel = String(config.channel || '').trim().toLowerCase();
+  if (kind === 'send_email' || configuredChannel === 'email') return 'email';
+  if (kind === 'linkedin_connect' || configuredChannel === 'linkedin') return 'linkedin';
+  if (configuredChannel === 'mail') return 'mail';
+  if (configuredChannel === 'sms') return 'sms';
+  if (configuredChannel === 'call' || configuredChannel === 'phone') return 'call';
+  if (configuredChannel === 'visit') return 'visit';
+  return null;
+};
+
+const resolveLaunchChannelHint = ({ step, intent }: {
+  step: Record<string, unknown>;
+  intent: Record<string, unknown>;
+}): string => {
+  const declared = declaredLaunchChannel(step);
+  if (declared) return declared;
+  if (intent.uses_email === true) return 'email';
+  if (intent.uses_mail === true) return 'mail';
+  if (intent.uses_sms === true) return 'sms';
+  if (intent.uses_call === true) return 'call';
+  if (intent.uses_visit === true) return 'visit';
+  return 'manual';
+};
+
 /**
  * Pick the next due sequence step.
  *
@@ -1324,11 +1351,7 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
         cache: new Map(),
         aiConfig: config?.ai || {},
       });
-      const launchChannelHint = launchIntent.uses_email
-        ? 'email'
-        : (launchIntent.uses_mail
-          ? 'mail'
-          : (launchIntent.uses_sms ? 'sms' : (launchIntent.uses_call ? 'call' : (launchIntent.uses_visit ? 'visit' : 'manual'))));
+      const launchChannelHint = resolveLaunchChannelHint({ step: firstStep, intent: launchIntent });
       const launchMode = launchIntent.uses_email ? 'draft' : 'send';
       for (const record of group.records) {
       const recordId = getRecordRowId(record);
@@ -1477,23 +1500,29 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
     const rows = filterRecordsForCanary(rawRows, canaryConfig)
       .slice(0, Math.max(0, Number(limit) || 50));
     const summary = { sent: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
-    const launchableRows = rows.filter((row) => {
-      const launchSuppression = evaluateTransmitterSuppression({ db, record: row, channel: 'email' });
-      if (launchSuppression.blocked) {
-        upsertRecord({ db, row: { ...row, last_error: `gate_blocked: ${launchSuppression.reason}` } });
-        summary.skipped += 1;
-        return false;
-      }
-      return true;
-    });
-    const partition = partitionRecordsBySequence({ config, records: launchableRows });
+    const partition = partitionRecordsBySequence({ config, records: rows });
     const groups = partition.groups;
     persistSequenceDataFailures({ db, failures: partition.invalid, summary });
-    if (groups.length === 0) return { ...summary, requested_limit: Number(limit) };
+    const launchableGroups = groups.map((group) => {
+      const firstStep = group.steps[0];
+      const channel = firstStep ? declaredLaunchChannel(firstStep) : null;
+      if (channel !== 'email' && channel !== 'linkedin' && channel !== 'mail') return group;
+      const records = group.records.filter((row) => {
+        const launchSuppression = evaluateTransmitterSuppression({ db, record: row, channel });
+        if (launchSuppression.blocked) {
+          upsertRecord({ db, row: { ...row, last_error: `gate_blocked: ${launchSuppression.reason}` } });
+          summary.skipped += 1;
+          return false;
+        }
+        return true;
+      });
+      return { ...group, records };
+    }).filter((group) => group.records.length > 0);
+    if (launchableGroups.length === 0) return { ...summary, requested_limit: Number(limit) };
     const mcp = await getMcpClient();
     const toolCatalog = readToolCatalog(listDir);
     const launchToday = toZonedIsoDate(new Date(), config?.operations?.timezone) || todayIsoDate();
-    for (const group of groups) {
+    for (const group of launchableGroups) {
       const activeSequenceName = group.name;
       const sequence = group.sequence;
       const firstStep = group.steps[0];
@@ -1508,13 +1537,29 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
         cache: new Map(),
         aiConfig: config?.ai || {},
       });
-      const launchChannelHint = launchIntent.uses_email
-        ? 'email'
-        : (launchIntent.uses_mail
-          ? 'mail'
-          : (launchIntent.uses_sms ? 'sms' : (launchIntent.uses_call ? 'call' : (launchIntent.uses_visit ? 'visit' : 'manual'))));
+      const launchChannelHint = resolveLaunchChannelHint({ step: firstStep, intent: launchIntent });
+      const launchSuppressionChannel: 'email' | 'linkedin' | 'mail' | null = (
+        launchChannelHint === 'email' || launchChannelHint === 'linkedin' || launchChannelHint === 'mail'
+          ? launchChannelHint
+          : null
+      );
+      const launchableRecords = launchSuppressionChannel
+        ? group.records.filter((row) => {
+          const launchSuppression = evaluateTransmitterSuppression({
+            db,
+            record: row,
+            channel: launchSuppressionChannel,
+          });
+          if (launchSuppression.blocked) {
+            upsertRecord({ db, row: { ...row, last_error: `gate_blocked: ${launchSuppression.reason}` } });
+            summary.skipped += 1;
+            return false;
+          }
+          return true;
+        })
+        : group.records;
 
-      for (const row of group.records) {
+      for (const row of launchableRecords) {
         try {
           const enrollment = reconcileSequenceReachability({ db, record: row });
           if (!enrollment.reachable) {

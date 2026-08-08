@@ -65,6 +65,12 @@ const configSteps = (value: unknown): Array<Record<string, unknown>> => (
     : []
 );
 
+const configRecord = (value: unknown): Record<string, unknown> => (
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+);
+
 const stringArray = (value: unknown) => Array.isArray(value)
   ? value.map((entry) => String(entry || '').trim()).filter(Boolean)
   : [];
@@ -668,6 +674,86 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
   if (hasLinkedinSource && resolutionGates.length === 0) {
     errors.push('source.linkedin_profile_search requires a field_check gate asserting company_resolution eq resolved.');
   }
+
+  const reviewRequiredTokens = new Set(stringArray(config?.policy?.review_required_for)
+    .map((token) => token.toLowerCase()));
+  const suppliedReviewFields = sourceSuppliedFields(config);
+  const reviewFieldProducers = producedFieldsByStep(config);
+  steps.forEach((step, index) => {
+    const id = stepId(step);
+    if (!id) return;
+    const kind = String(step?.kind || '').trim().toLowerCase();
+    const stepConfig = configRecord(step.config);
+    const taskType = String(stepConfig?.task_type || stepConfig?.taskType || '').trim().toLowerCase();
+    const reviewRequired = reviewRequiredTokens.has(kind)
+      || (taskType !== '' && reviewRequiredTokens.has(taskType));
+    if (!reviewRequired) return;
+
+    const review = step?.review && typeof step.review === 'object' && !Array.isArray(step.review)
+      ? step.review as Record<string, unknown>
+      : {};
+    const present = Array.isArray(review.present) ? review.present : [];
+    if (present.length === 0) {
+      warnings.push(`pipeline.${id} is review-gated but declares no review.present fields.`);
+      return;
+    }
+
+    const scope = stepSubpipelineName(step);
+    const fields = present
+      .map((entry) => String(configRecord(entry).field || '').trim())
+      .filter(Boolean);
+    const required = stringArray(review.require_non_empty);
+    required.filter((field) => !fields.includes(field)).forEach((field) => {
+      errors.push(`pipeline.${id} review.require_non_empty field "${field}" must also appear in review.present.`);
+    });
+    fields.forEach((field) => {
+      const hasUpstreamProducer = reviewFieldProducers.some((producer) => (
+        producer.field === field
+        && producer.index < index
+        && (
+          producer.subpipeline === scope
+          || (!producer.subpipeline && Boolean(scope))
+        )
+      ));
+      if (suppliedReviewFields.has(field) || hasUpstreamProducer) return;
+      errors.push(`pipeline.${id} review.present field "${field}" is unavailable: no record field or upstream step produces it.`);
+    });
+  });
+  const sequenceReviewSteps = Object.entries(configRecord(config?.sequences))
+    .flatMap(([name, sequence]) => configSteps(configRecord(sequence).steps)
+      .map((step, index) => ({ name, step, index })));
+  sequenceReviewSteps.forEach(({ name, step, index }) => {
+    const id = String(step?.id || `step_${index + 1}`).trim();
+    const kind = String(step?.kind || '').trim().toLowerCase();
+    const stepConfig = configRecord(step.config);
+    const taskType = String(stepConfig?.task_type || stepConfig?.taskType || '').trim().toLowerCase();
+    const reviewRequired = reviewRequiredTokens.has(kind)
+      || (taskType !== '' && reviewRequiredTokens.has(taskType));
+    if (!reviewRequired) return;
+
+    const review = step?.review && typeof step.review === 'object' && !Array.isArray(step.review)
+      ? step.review as Record<string, unknown>
+      : {};
+    const present = Array.isArray(review.present) ? review.present : [];
+    const nameWithStep = `sequences.${name}.${id}`;
+    if (present.length === 0) {
+      warnings.push(`${nameWithStep} is review-gated but declares no review.present fields.`);
+      return;
+    }
+
+    const fields = present
+      .map((entry) => String(configRecord(entry).field || '').trim())
+      .filter(Boolean);
+    const required = stringArray(review.require_non_empty);
+    required.filter((field) => !fields.includes(field)).forEach((field) => {
+      errors.push(`${nameWithStep} review.require_non_empty field "${field}" must also appear in review.present.`);
+    });
+    fields.forEach((field) => {
+      const hasPipelineProducer = reviewFieldProducers.some((producer) => producer.field === field);
+      if (suppliedReviewFields.has(field) || hasPipelineProducer) return;
+      errors.push(`${nameWithStep} review.present field "${field}" is unavailable: no record field or upstream step produces it.`);
+    });
+  });
 
   steps.forEach((step: any) => {
     const id = stepId(step);

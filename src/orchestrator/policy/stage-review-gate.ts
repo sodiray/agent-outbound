@@ -20,6 +20,7 @@ import {
   parseStageReviewJson,
   type StageReviewAuthorization,
 } from './transition-audit.js';
+import type { ResolvedReviewPresentation } from './review-presentation.js';
 
 export type PolicyConfigLike = {
   policy?: {
@@ -236,6 +237,8 @@ export function resolveStageAssetVersion(input: {
   bodyText?: string | null;
   subjectText?: string | null;
   templateHash?: string | null;
+  /** Resolved review fields are material so later changes invalidate authorization. */
+  reviewPresentation?: ResolvedReviewPresentation | null;
   stepId?: string | null;
 }): string {
   const step = String(input.stepId || input.stageId || '').trim();
@@ -275,6 +278,9 @@ export function resolveStageAssetVersion(input: {
   if (mailboxId) material.mailbox = mailboxId;
   if (step) material.step = step;
   if (content) material.content = content;
+  if (input.reviewPresentation) {
+    material.review_presentation = stableHash(input.reviewPresentation);
+  }
 
   if (Object.keys(material).length > 0) {
     return `srv1:${stableHash(material)}`;
