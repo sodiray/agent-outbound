@@ -47,6 +47,33 @@ test('Unipile refuses an unrecognised LinkedIn reference before sending an invit
   assert.equal(fetchCalls.length, 0);
 });
 
+test('Unipile never substitutes a record or step LinkedIn URL for an active contact without one', async () => {
+  const fetchCalls = [];
+  const result = await executeUnipileLinkedinConnect({
+    record: {
+      active_contact_id: 'contact_without_linkedin',
+      contact_linkedin_url: '',
+      linkedin_url: 'https://www.linkedin.com/in/stale-other-contact',
+    },
+    step: {
+      ...invitationStep(),
+      config: {
+        ...invitationStep().config,
+        linkedin_url: 'https://www.linkedin.com/in/static-step-target',
+      },
+    },
+    env: { UNIPILE_API_KEY: 'test-key', UNIPILE_DSN: 'https://api.unipile.test' },
+    fetchImpl: async (...args) => {
+      fetchCalls.push(args);
+      throw new Error('must not resolve or invite a substituted target');
+    },
+  });
+
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.reason, 'unipile_missing_active_contact_linkedin_url');
+  assert.equal(fetchCalls.length, 0);
+});
+
 test('Unipile resolves a LinkedIn public identifier and invites with its provider id', async () => {
   const capturedBodies = [];
   const requests = [];

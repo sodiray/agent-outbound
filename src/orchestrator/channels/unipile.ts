@@ -465,27 +465,27 @@ export async function executeUnipileLinkedinConnect(
 
   const apiKey = nonBlank(env.UNIPILE_API_KEY);
   const dsn = nonBlank(env.UNIPILE_DSN);
-  const linkedinReference = [
-    { field: 'contact_linkedin_url', value: nonBlank(input.record?.contact_linkedin_url) },
-    { field: 'linkedin_url', value: nonBlank(input.record?.linkedin_url) },
-    { field: 'step.config.linkedin_url', value: nonBlank(input.step?.config?.linkedin_url) },
-  ].find(({ value }) => Boolean(value));
+  const activeContactId = nonBlank(input.record?.active_contact_id || input.record?.contact_id);
+  const linkedinReference = nonBlank(input.record?.contact_linkedin_url)
+    || (activeContactId ? '' : nonBlank(input.record?.linkedin_url));
   const accountId = nonBlank(env.UNIPILE_ACCOUNT_ID || input.step?.config?.unipile_account_id);
   if (!linkedinReference) {
     return {
       status: 'skipped',
-      reason: 'unipile_missing_linkedin_url',
+      reason: activeContactId
+        ? 'unipile_missing_active_contact_linkedin_url'
+        : 'unipile_missing_linkedin_url',
       provider_id: '',
       target_provider_id: '',
       target_public_identifier: '',
       readiness,
     };
   }
-  const publicIdentifier = parseLinkedinPublicIdentifier(linkedinReference.value);
+  const publicIdentifier = parseLinkedinPublicIdentifier(linkedinReference);
   if (!publicIdentifier) {
     return {
       status: 'failed',
-      reason: `unipile_invalid_linkedin_reference: field ${linkedinReference.field} has ${linkedinReferenceShape(linkedinReference.value)}`,
+      reason: `unipile_invalid_linkedin_reference: field contact_linkedin_url has ${linkedinReferenceShape(linkedinReference)}`,
       provider_id: '',
       target_provider_id: '',
       target_public_identifier: '',

@@ -51,6 +51,7 @@ import {
   invalidateStageReviewIfAssetChanged,
   appendTransitionAudit,
   readinessChannelPermission,
+  evaluateTransmitterSuppression,
 } from '../policy/index.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import {
@@ -1245,6 +1246,20 @@ export const executeChannelStep = async ({
         };
       }
 
+      const linkedinSuppression = evaluateTransmitterSuppression({
+        db,
+        record: sendRecord,
+        channel: 'linkedin',
+      });
+      if (linkedinSuppression.blocked) {
+        return {
+          status: 'skipped',
+          reason: linkedinSuppression.reason,
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
+
       const linkedinContent = resolveLinkedinInvitationMessage({ record: sendRecord, step });
       if ('reason' in linkedinContent) {
         return {
@@ -1922,6 +1937,19 @@ export const executeChannelStep = async ({
         }
       }
       // Exclusive claim immediately before provider side-effect (after all gates).
+      const emailSuppression = evaluateTransmitterSuppression({
+        db,
+        record: sendRecord,
+        channel: 'email',
+      });
+      if (emailSuppression.blocked) {
+        return {
+          status: 'skipped',
+          reason: emailSuppression.reason,
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
       const emailClaim = reserveProviderInteraction({ providerChannel: 'email' });
       if (emailClaim.ok === false) return emailClaim.result as any;
 

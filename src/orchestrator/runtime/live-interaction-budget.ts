@@ -67,14 +67,16 @@ const liveInteractionCounts = (db: any) => {
  * check matched any `AO_*SINK*`/`AO_*FIXTURE*` variable, so simulating
  * physical mail (`AO_MAIL_SINK=1`) silently uncapped live email.
  *
- * Email    — `mailboxes.ts`  `process.env.AO_SMTP_SINK === '1'`
- * LinkedIn — `unipile.ts`    `AO_UNIPILE_FIXTURE` is `'1'` or `'true'`
+ * Email    — `mailboxes.ts`    `process.env.AO_SMTP_SINK === '1'`
+ * LinkedIn — `unipile.ts`      `AO_UNIPILE_FIXTURE` is `'1'` or `'true'`
+ * Mail     — `mail-provider.ts` `AO_MAIL_SINK === '1'`
  */
 export const isSinkOrFixtureMode = (
-  channel: 'email' | 'linkedin',
+  channel: 'email' | 'linkedin' | 'mail',
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
 ) => {
   if (channel === 'email') return trim(env.AO_SMTP_SINK) === '1';
+  if (channel === 'mail') return trim(env.AO_MAIL_SINK) === '1';
   const fixture = trim(env.AO_UNIPILE_FIXTURE).toLowerCase();
   return fixture === '1' || fixture === 'true';
 };

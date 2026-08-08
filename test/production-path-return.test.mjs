@@ -12,6 +12,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, readFileSync } from
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import Database from 'better-sqlite3';
 
 import { openListDb, insertDraft, ensureRecordColumns, upsertRecord } from '../dist/orchestrator/runtime/db.js';
@@ -31,6 +32,24 @@ import { reconcileOverrides, reconcileFieldOverrides } from '../dist/orchestrato
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const SMTP_SCRIPT = join(ROOT, 'scripts/smtp-send.mjs');
+
+test('smtp-send refuses every incomplete real-mode envelope without writing a sink message', () => {
+  const cases = [
+    { name: 'subject', args: ['send', '--to', 'recipient@example.test', '--from', 'sender@example.test', '--body', 'Body'] },
+    { name: 'body', args: ['send', '--to', 'recipient@example.test', '--from', 'sender@example.test', '--subject', 'Subject'] },
+    { name: 'sender', args: ['send', '--to', 'recipient@example.test', '--subject', 'Subject', '--body', 'Body'] },
+  ];
+  for (const item of cases) {
+    const sinkDir = mkdtempSync(join(tmpdir(), `ao-smtp-${item.name}-`));
+    const result = spawnSync(process.execPath, [SMTP_SCRIPT, ...item.args], {
+      env: { ...process.env, AO_SMTP_SINK: '1', AO_SMTP_SINK_DIR: sinkDir },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 2, `${item.name} must be rejected`);
+    assert.match(result.stderr, new RegExp(`--${item.name === 'sender' ? 'from' : item.name} is required`));
+    assert.equal(readdirSync(sinkDir).filter((file) => file.endsWith('.json')).length, 0);
+  }
+});
 
 const miniYaml = `
 list:

@@ -200,6 +200,7 @@ const createList = (recordOverrides = {}) => {
     observed_buyer_name: 'Pat Owner',
     buyer_affiliation_status: 'confirmed',
     buying_center_role: 'owner',
+    email_last_from: 'sender@channel-real-path.test',
     next_action_json: defaultNextActionJson('fixture_channel_1'),
     ...recordOverrides,
   };
@@ -210,6 +211,7 @@ const createList = (recordOverrides = {}) => {
       'treatment_tier', 'eligibility_outcome', 'preliminary_snapshot',
       'linkedin_url', 'linkedin_confidence', 'suppressed',
       'contact_email', 'contact_name', 'next_action_json', 'active_contact_id',
+      'email_last_from',
       'named_buyer_status', 'observed_buyer_name', 'buyer_affiliation_status', 'buying_center_role',
     ],
   });
@@ -220,8 +222,9 @@ const createList = (recordOverrides = {}) => {
       treatment_tier, eligibility_outcome, preliminary_snapshot,
       linkedin_url, linkedin_confidence, suppressed, next_action_json, active_contact_id,
       named_buyer_status, observed_buyer_name, buyer_affiliation_status, buying_center_role,
+      email_last_from,
       _created_at, _updated_at, created_at, updated_at
-    ) VALUES (?, ?, 'default', 'idle', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, 'default', 'idle', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     base._row_id,
     base.business_name,
@@ -243,6 +246,7 @@ const createList = (recordOverrides = {}) => {
     base.observed_buyer_name,
     base.buyer_affiliation_status,
     base.buying_center_role,
+    base.email_last_from,
     now,
     now,
     now,

@@ -273,20 +273,22 @@ const main = async () => {
     process.exit(2);
   }
 
-  let subject = String(values.subject || '').trim();
+  const subject = String(values.subject || '').trim();
   if (!subject) {
-    const tmpl = String(values['subject-template'] || 'Hello').trim();
-    const biz = String(values['business-name'] || '').trim();
-    subject = tmpl.replace(/\{\{\s*business_name\s*\}\}/g, biz || 'your business');
+    process.stderr.write('Error: --subject is required\n');
+    process.exit(2);
   }
-  let body = String(values.body || '').trim();
+  const body = String(values.body || '').trim();
   if (!body) {
-    const name = String(values['to-name'] || '').trim() || 'there';
-    const biz = String(values['business-name'] || '').trim() || 'your business';
-    body = `Hi ${name},\n\nQuick note regarding ${biz}.\n\n— Agent Outbound\n`;
+    process.stderr.write('Error: --body is required\n');
+    process.exit(2);
   }
 
-  const from = String(values.from || process.env.SMTP_FROM || process.env.SMTP_USER || 'outbound@localhost').trim();
+  const from = String(values.from || '').trim();
+  if (!from) {
+    process.stderr.write('Error: --from is required\n');
+    process.exit(2);
+  }
   const host = String(process.env.SMTP_HOST || '').trim();
   const useSink = process.env.AO_SMTP_SINK === '1' || !host;
 

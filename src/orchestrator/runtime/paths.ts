@@ -5,7 +5,11 @@ import { homedir } from 'node:os';
 export const INTERNAL_DIR_NAME = '.outbound';
 export const INTERNAL_DB_NAME = 'prospects.db';
 
-export const getGlobalRoot = () => join(homedir(), '.agent-outbound');
+export const getGlobalRoot = () => {
+  const configured = String(process.env.AO_GLOBAL_ROOT || '').trim();
+  if (configured) return isAbsolute(configured) ? configured : resolve(configured);
+  return join(homedir(), '.agent-outbound');
+};
 export const getGlobalEnvPath = () => join(getGlobalRoot(), 'env');
 export const getGlobalSuppressionDbPath = () => join(getGlobalRoot(), 'suppression.db');
 export const getGlobalSettingsPath = () => join(getGlobalRoot(), 'settings.yaml');

@@ -185,6 +185,7 @@ function createJourneyList() {
       'sequence_step', 'sequence_status', 'sequence_name',
       'preliminary_snapshot', 'treatment_tier', 'fit_score', 'identity_confidence',
       'email_confidence', 'suppressed', 'launched_at', 'next_action_date',
+      'email_last_from',
     ],
   });
   db.prepare(`
@@ -194,6 +195,7 @@ function createJourneyList() {
       account_sequence_state, lifecycle_stage, work_state, next_action_json,
       preliminary_snapshot, treatment_tier, fit_score,
       identity_confidence, email_confidence, suppressed,
+      email_last_from,
       _created_at, _updated_at, created_at, updated_at
     ) VALUES (
       ?, 'Journey HVAC', 'tier_a', 'active', 0,
@@ -201,6 +203,7 @@ function createJourneyList() {
       'active', 'contacted', 'executing_external_action', ?,
       'journey snapshot', 'A', 88,
       90, 85, 0,
+      'sender@journey.test',
       ?, ?, ?, ?
     )
   `).run(rid, campaignPlan(rid), nextAction(rid), now, now, now, now);

@@ -48,6 +48,7 @@ import {
 } from '../policy/canary-isolation.js';
 import { applyContactRotation } from '../policy/contact-campaign.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
+import { evaluateTransmitterSuppression } from '../policy/transmitter-suppression.js';
 
 const parseExtra = (value) => {
   try {
@@ -1451,9 +1452,18 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
     `).all(...scope.params);
     const rows = filterRecordsForCanary(rawRows, canaryConfig)
       .slice(0, Math.max(0, Number(limit) || 50));
-    const partition = partitionRecordsBySequence({ config, records: rows });
-    const groups = partition.groups;
     const summary = { sent: 0, scheduled: 0, skipped: 0, failed: 0, errors: [] };
+    const launchableRows = rows.filter((row) => {
+      const launchSuppression = evaluateTransmitterSuppression({ db, record: row, channel: 'email' });
+      if (launchSuppression.blocked) {
+        upsertRecord({ db, row: { ...row, last_error: `gate_blocked: ${launchSuppression.reason}` } });
+        summary.skipped += 1;
+        return false;
+      }
+      return true;
+    });
+    const partition = partitionRecordsBySequence({ config, records: launchableRows });
+    const groups = partition.groups;
     persistSequenceDataFailures({ db, failures: partition.invalid, summary });
     if (groups.length === 0) return { ...summary, requested_limit: Number(limit) };
     const mcp = await getMcpClient();

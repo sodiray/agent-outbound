@@ -239,7 +239,13 @@ export function denormalizedFieldsFromContact(
     out.email_verified_at = emailVerifiedAt;
   }
   if (phone) out.contact_phone = phone;
-  if (linkedin) out.contact_linkedin_url = linkedin;
+  // LinkedIn identity and its opt-out state are an inseparable targeting pair:
+  // a stale record URL must not outlive a suppressed active contact.
+  if (Object.hasOwn(contact, 'linkedin_url')) out.contact_linkedin_url = linkedin;
+  if (contact.linkedin_suppressed !== undefined) {
+    out.linkedin_suppressed = isAffirmativeFlag(contact.linkedin_suppressed, { failClosed: true }) ? '1' : '0';
+  }
+  if (contact.suppression_state !== undefined) out.suppression_state = String(contact.suppression_state || '').trim();
   return out;
 }
 

@@ -751,6 +751,53 @@ test('linkedin lifecycle: executeChannelStep honors invite_sent + sets lifecycle
   }
 });
 
+test('linkedin transmitter refuses a contact suppressed after record hydration', async () => {
+  const previousFixture = process.env.AO_UNIPILE_FIXTURE;
+  process.env.AO_UNIPILE_FIXTURE = '1';
+  try {
+    const { listDir, db } = createList({ _row_id: 'li_suppressed_after_hydration' });
+    upsertContact({
+      db,
+      contact: {
+        row_id: 'li_suppressed_after_hydration',
+        contact_id: 'c1',
+        name: 'Suppressed Person',
+        linkedin_url: 'https://www.linkedin.com/in/suppressed-person',
+        linkedin_suppressed: 1,
+      },
+    });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('li_suppressed_after_hydration');
+    const result = await executeChannelStep({
+      mcp: null,
+      listDir,
+      listName: 'Channel Completeness',
+      db,
+      record,
+      sequenceName: 'default',
+      stepNumber: 1,
+      step: {
+        kind: 'linkedin_connect',
+        id: 'linkedin_suppressed',
+        config: { channel: 'linkedin', invite_message: 'Hello — I would be glad to connect.' },
+      },
+      sequence: { steps: [] },
+      channelHint: 'linkedin',
+      intent: 'send',
+    });
+    assert.equal(result.status, 'skipped');
+    assert.equal(result.reason, 'linkedin_suppressed');
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM channel_events WHERE row_id = ? AND channel = 'linkedin'")
+        .get('li_suppressed_after_hydration').n,
+      0,
+    );
+    db.close();
+  } finally {
+    if (previousFixture === undefined) delete process.env.AO_UNIPILE_FIXTURE;
+    else process.env.AO_UNIPILE_FIXTURE = previousFixture;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 4. Mail provider path
 // ---------------------------------------------------------------------------
@@ -888,6 +935,99 @@ test('mail provider: missing template asset fails closed before submission', asy
     /mail_standard.*template_id/i,
   );
   assert.equal(calls.length, 0);
+  db.close();
+});
+
+test('manual mail transmitter refuses a suppressed recipient before provider submission', async () => {
+  const { db } = createList({ _row_id: 'mail_suppressed_1', mail_suppressed: 1 });
+  const now = new Date().toISOString();
+  const campaign = buildContactPlan({
+    account_id: 'mail_suppressed_1',
+    campaign_id: 'campaign_mail_suppressed_1',
+    treatment_tier: 'A',
+    mail_treatment: 'standard_postcard',
+    contacts: [{ contact_id: 'c1', outbound_disposition: 'eligible_target', outreach_rank: 1 }],
+  });
+  ensureRecordColumns({ db, columns: ['account_contact_plan_json', 'mail_treatment', 'mail_allocated', 'mail_suppressed'] });
+  db.prepare(`UPDATE records SET account_contact_plan_json = ?, mail_treatment = 'standard_postcard', mail_allocated = 0 WHERE _row_id = ?`)
+    .run(JSON.stringify(campaign), 'mail_suppressed_1');
+  db.prepare(`INSERT INTO pipeline_events (event_id, record_id, step_id, kind, passed, reason, occurred_at) VALUES ('mail_suppressed_park', ?, 'mail_standard', 'manual_task', 0, 'awaiting_manual', ?)`)
+    .run('mail_suppressed_1', now);
+  const calls = [];
+  const provider = {
+    name: 'lob_fixture',
+    submit: async (request) => {
+      calls.push(request);
+      return { ok: true, piece_id: 'must-not-submit', status: 'submitted', reason: 'accepted', provider: 'lob_fixture' };
+    },
+    getStatus: async () => ({ piece_id: '', status: 'unknown', reason: '', provider: 'lob_fixture' }),
+  };
+
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      recordId: 'mail_suppressed_1',
+      stepId: 'mail_standard',
+      config: { channels: { mail: { template_id: 'postcard_v1' } } },
+      mailProvider: provider,
+    }),
+    /mail_suppressed/i,
+  );
+  assert.equal(calls.length, 0);
+  db.close();
+});
+
+test('manual mail transmitter reserves live interaction budget and releases it on provider failure', async () => {
+  const { db } = createList({ _row_id: 'mail_budget_accepted', active_contact_id: 'mail_contact_accepted' });
+  const acceptedRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('mail_budget_accepted');
+  const budget = { max_accounts: 2, max_interactions: 2 };
+  const request = {
+    recordId: 'mail_budget_accepted',
+    treatment: 'standard_postcard',
+    to: { name: 'Recipient', address_line_1: '100 Main St', address_city: 'Boise', address_state: 'ID', address_zip: '83702' },
+    template_id: 'postcard_v1',
+    metadata: { step_id: 'mail_standard' },
+  };
+  const accepted = await submitMailWithIdempotency({
+    db,
+    provider: {
+      name: 'lob_fixture',
+      submit: async () => ({ ok: true, piece_id: 'mail_piece_accepted', status: 'submitted', reason: 'accepted', provider: 'lob_fixture' }),
+      getStatus: async () => ({ piece_id: '', status: 'unknown', reason: '', provider: 'lob_fixture' }),
+    },
+    request,
+    record: acceptedRecord,
+    stepId: 'mail_standard',
+    contentVersion: 'mail-budget-v1',
+    liveInteractionBudget: budget,
+  });
+  assert.equal(accepted.ok, true);
+  assert.equal(
+    db.prepare("SELECT status FROM live_interaction_ledger WHERE record_id = ? AND channel = 'mail'")
+      .get('mail_budget_accepted').status,
+    'accepted',
+  );
+
+  const failedRecord = { ...acceptedRecord, _row_id: 'mail_budget_failed', active_contact_id: 'mail_contact_failed' };
+  const failed = await submitMailWithIdempotency({
+    db,
+    provider: {
+      name: 'lob_fixture',
+      submit: async () => ({ ok: false, piece_id: '', status: 'failed', reason: 'provider_rejected', provider: 'lob_fixture' }),
+      getStatus: async () => ({ piece_id: '', status: 'unknown', reason: '', provider: 'lob_fixture' }),
+    },
+    request: { ...request, recordId: 'mail_budget_failed' },
+    record: failedRecord,
+    stepId: 'mail_standard',
+    contentVersion: 'mail-budget-v1',
+    liveInteractionBudget: budget,
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(
+    db.prepare("SELECT status FROM live_interaction_ledger WHERE record_id = ? AND channel = 'mail'")
+      .get('mail_budget_failed').status,
+    'released',
+  );
   db.close();
 });
 

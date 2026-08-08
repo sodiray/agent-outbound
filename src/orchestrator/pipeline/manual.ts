@@ -41,6 +41,16 @@ import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../policy/lifecycle.js';
 import { nowIso, stableHash } from '../lib/record.js';
 import { assertOutboundContent } from '../lib/outbound-content.js';
+import {
+  commitLiveInteraction,
+  isSinkOrFixtureMode,
+  recordSinkInteraction,
+  releaseLiveInteractionReservation,
+  reserveLiveInteraction,
+  resolveLiveInteractionBudget,
+  type LiveInteractionBudget,
+} from '../runtime/live-interaction-budget.js';
+import { evaluateTransmitterSuppression } from '../policy/transmitter-suppression.js';
 
 const text = (value: unknown) => String(value || '').trim();
 
@@ -113,6 +123,7 @@ export const submitMailWithIdempotency = async ({
   record,
   stepId,
   contentVersion,
+  liveInteractionBudget = null,
   nowMs = Date.parse(nowIso()),
 }: {
   db: any;
@@ -121,8 +132,13 @@ export const submitMailWithIdempotency = async ({
   record: Record<string, unknown>;
   stepId: string;
   contentVersion: string;
+  liveInteractionBudget?: LiveInteractionBudget | null;
   nowMs?: number;
 }): Promise<MailSubmitResult> => {
+  const suppression = evaluateTransmitterSuppression({ db, record, channel: 'mail' });
+  if (suppression.blocked) {
+    throw new Error(`Mail submit blocked for ${request.recordId} step ${stepId}: ${suppression.reason}`);
+  }
   ensureMailIdempotencyTable(db);
   const recipient = JSON.stringify(request.to || {});
   const idemKey = buildIdempotencyKey({
@@ -176,7 +192,41 @@ export const submitMailWithIdempotency = async ({
     );
   }
 
+  const contactId = text(record.active_contact_id || record.contact_id);
+  const interaction = (() => {
+    if (!liveInteractionBudget) return { mode: 'unlimited' as const };
+    if (isSinkOrFixtureMode('mail')) return { mode: 'sink' as const };
+    const reservation = reserveLiveInteraction({
+      db,
+      budget: liveInteractionBudget,
+      recordId: request.recordId,
+      contactId,
+      channel: 'mail',
+      stepId,
+      at: new Date(nowMs).toISOString(),
+    });
+    if (reservation.allowed) return { mode: 'live' as const };
+    failIdempotency({
+      db,
+      idemKey,
+      claimId: claim.claim_id,
+      payload: { ...claimPayload, error: reservation.reason },
+    });
+    throw new Error(`Mail submit blocked for ${request.recordId} step ${stepId}: ${reservation.reason}`);
+  })();
+  const releaseInteraction = () => {
+    if (interaction.mode !== 'live') return;
+    releaseLiveInteractionReservation({
+      db,
+      recordId: request.recordId,
+      contactId,
+      stepId,
+      at: new Date(nowMs).toISOString(),
+    });
+  };
+
   const submitResult = await provider.submit(request).catch((error: unknown) => {
+    releaseInteraction();
     failIdempotency({
       db,
       idemKey,
@@ -191,6 +241,7 @@ export const submitMailWithIdempotency = async ({
   });
 
   if (!submitResult?.ok || submitResult.status === 'failed') {
+    releaseInteraction();
     failIdempotency({
       db,
       idemKey,
@@ -201,6 +252,29 @@ export const submitMailWithIdempotency = async ({
       },
     });
     return submitResult;
+  }
+
+  if (interaction.mode === 'live') {
+    commitLiveInteraction({
+      db,
+      recordId: request.recordId,
+      contactId,
+      channel: 'mail',
+      stepId,
+      providerId: submitResult.piece_id,
+      at: new Date(nowMs).toISOString(),
+    });
+  }
+  if (interaction.mode === 'sink') {
+    recordSinkInteraction({
+      db,
+      recordId: request.recordId,
+      contactId,
+      channel: 'mail',
+      stepId,
+      providerId: submitResult.piece_id,
+      at: new Date(nowMs).toISOString(),
+    });
   }
 
   const completion = completeIdempotency({
@@ -744,6 +818,7 @@ export const completeManualTask = async ({
         record: row,
         stepId: sid,
         contentVersion,
+        liveInteractionBudget: resolveLiveInteractionBudget(config),
         nowMs: completeMs,
       });
       if (!submitResult?.ok) {
