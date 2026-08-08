@@ -3,6 +3,7 @@ import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
 import { getTargetColumnsForStepConfig } from '../orchestrator/lib/step-columns.js';
 import { flattenPipelineSteps, stepStatusColumn } from '../orchestrator/lib/subpipelines.js';
+import { resolvePipelineFitModel } from '../orchestrator/scoring/fit-model.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import {
   getAssetsForRow,
@@ -447,6 +448,7 @@ const parseJsonArray = (value: any) => {
 const configuredCriteria = (config: any) => flattenPipelineSteps(config)
   .filter((step: any) => String(step?.kind || '') === 'score')
   .flatMap((step: any) => (Array.isArray(step?.criteria) ? step.criteria : []));
+const configuredFitCriteria = (config: any) => resolvePipelineFitModel(config).fitModel?.criteria || [];
 const criterionKey = (id: string) => `criterion__${id}`;
 const criterionColumns = (config: any) => configuredCriteria(config).map((criterion: any) => {
   const id = String(criterion?.id || '');
@@ -534,7 +536,16 @@ const conditionSummary = (step: any) => {
   return `${shown.join('; ')}${suffix}`;
 };
 const mergeCriteriaBreakdown = (criteria: any[], rawBreakdown: any) => {
-  const breakdownById = new Map(parseJsonArray(rawBreakdown).map((item: any) => [String(item?.id || ''), item]));
+  const breakdown: any[] = (() => {
+    try {
+      const parsed = JSON.parse(String(rawBreakdown || '[]'));
+      if (Array.isArray(parsed)) return parsed;
+      return Array.isArray(parsed?.criteria) ? parsed.criteria : [];
+    } catch {
+      return [];
+    }
+  })();
+  const breakdownById = new Map(breakdown.map((item: any) => [String(item?.id || ''), item]));
   return (Array.isArray(criteria) ? criteria : []).map((criterion: any) => {
     const id = String(criterion?.id || '');
     const breakdown = breakdownById.get(id) || {};
@@ -1140,7 +1151,7 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
     const score = {
       value: rank,
       reasoning: record.score_reasoning || record.fit_reasoning || '',
-      criteria: mergeCriteriaBreakdown(config?.score?.criteria, record.score_breakdown),
+      criteria: mergeCriteriaBreakdown(configuredFitCriteria(config), record.fit_breakdown || record.score_breakdown),
       minimum,
       updated_at: record.score_updated_at || record.fit_score_updated_at || '',
       events: scoreEvents,

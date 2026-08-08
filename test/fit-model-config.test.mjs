@@ -28,8 +28,15 @@ test('an undeclared fit model produces no score instead of a silent zero', () =>
   assert.equal(calculated.fit_score, null);
   assert.equal(calculated.reason, 'fit_components_not_configured');
 
+  assert.throws(() => applyOutboundPolicy({
+    recomputeFitFromBreakdown: true,
+    treatmentStrategy: treasureValleyTreatmentStrategy,
+    record: { _row_id: 'fit_model_omitted' },
+  }), /policy_apply_fit_model_not_supplied/);
+
   const applied = applyOutboundPolicy({
     recomputeFitFromBreakdown: true,
+    fitModel: undefined,
     treatmentStrategy: treasureValleyTreatmentStrategy,
     record: {
       _row_id: 'no_fit_model',

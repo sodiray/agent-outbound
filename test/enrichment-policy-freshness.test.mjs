@@ -83,7 +83,13 @@ test('policy_apply re-tiers cached records and exposes a policy-triggered rerun 
     outputs: { treatment_tier: { type: 'string', description: 'Treatment tier.' } },
   };
   const baseConfig = {
-    score: { criteria: treasureValleyFitModel.criteria, treatment: treasureValleyTreatmentStrategy },
+    pipeline: [{
+      kind: 'score',
+      id: 'score_fit',
+      key: 'fit',
+      criteria: treasureValleyFitModel.criteria,
+    }],
+    score: { treatment: treasureValleyTreatmentStrategy },
     policy: { fit_rule_version: treasureValleyFitModel.modelVersion },
   };
   const first = await executeEnrichmentStepOnRecords({

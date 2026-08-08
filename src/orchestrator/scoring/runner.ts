@@ -23,6 +23,7 @@ import {
 } from '../policy/index.js';
 import { collectRetrievalSnapshots } from '../policy/evidence.js';
 import { runConfiguredScoreStages } from './stages.js';
+import { resolvePipelineFitModel } from './fit-model.js';
 
 const ScoreResultSchema = z.object({
   score: z.coerce.number().refine((value) => Number.isFinite(value), 'score must be a finite number').pipe(z.number().min(0).max(100)),
@@ -905,10 +906,7 @@ const retiredGlobalScoring = async ({ listDir, where = '', limit = 0, dryRun = f
         }
 
         // Pipeline-declared score criteria define the fit model; deterministic rules own only arithmetic.
-        const fitModel = {
-          criteria: scoreConfig?.criteria,
-          modelVersion: config?.policy?.fit_rule_version,
-        };
+        const { fitModel } = resolvePipelineFitModel(config);
         const scoreRaw = hasScoreOverride(record.score_override)
           ? {
               score: Number(record.score_override),

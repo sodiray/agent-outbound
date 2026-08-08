@@ -545,6 +545,7 @@ test('14 partial unknown fit components never yield Tier A / golden_ticket', asy
   }));
   const result = applyOutboundPolicy({
     treatmentStrategy: treasureValleyTreatmentStrategy,
+    fitModel: { criteria: fitIds.map((id) => ({ id, weight: 1 })) },
     record: {
       _row_id: 'acc_partial',
       fit_breakdown: JSON.stringify(breakdown),
@@ -589,6 +590,7 @@ test('15 all-unknown fit becomes enrichment_hold not Tier D', async () => {
   }));
   const result = applyOutboundPolicy({
     treatmentStrategy: treasureValleyTreatmentStrategy,
+    fitModel: { criteria: fitIds.map((id) => ({ id, weight: 1 })) },
     record: {
       _row_id: 'acc_unknown',
       fit_breakdown: JSON.stringify(breakdown),

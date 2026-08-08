@@ -32,6 +32,7 @@ import { authorConfigAction } from '../orchestrator/actions/author-config/index.
 import { runSourcing, runSourcingMore } from '../orchestrator/sourcing/runner.js';
 import { runPipelineDataflow } from '../orchestrator/pipeline/dataflow.js';
 import { runConfiguredScoreStages } from '../orchestrator/scoring/stages.js';
+import { resolvePipelineFitModel } from '../orchestrator/scoring/fit-model.js';
 import { runGeneration } from '../orchestrator/generate/runner.js';
 import {
   followupSend,
@@ -1253,6 +1254,7 @@ export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 
 export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun = false }) => {
   const listDir = resolveListDir(list);
   const { config } = readConfig(listDir);
+  const { fitModel } = resolvePipelineFitModel(config);
   const whereSql = String(where || '').trim();
   const whereCheck = validateWhereSql(whereSql);
   if (!whereCheck.ok) throw new Error(whereCheck.error || 'Invalid --where SQL fragment.');
@@ -1297,10 +1299,7 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       costLedger: costHydrate.ledger,
       enrichmentSpendUsd: costHydrate.enrichment_usd,
       minFitCoverage: config?.score?.min_coverage,
-      fitModel: {
-        criteria: config?.score?.criteria,
-        modelVersion: config?.policy?.fit_rule_version,
-      },
+      fitModel,
       treatmentBands: config?.score?.treatment_bands,
       treatmentStrategy: config?.score?.treatment,
       priority: config?.score?.priority,

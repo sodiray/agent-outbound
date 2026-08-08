@@ -38,6 +38,7 @@ import {
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
 import { loadVerticalTaxonomy } from '../policy/taxonomy.js';
 import type { FitModelConfigInput } from '../policy/scoring.js';
+import { resolvePipelineFitModel } from '../scoring/fit-model.js';
 import type { TreatmentBandLadders } from '../policy/treatment.js';
 import type {
   ActionConfidenceConfigInput,
@@ -318,11 +319,9 @@ export const materialEnrichConfig = (stepConfig: any): Record<string, any> => {
 // (no one-time re-enrichment storm on upgrade).
 export const enrichmentPolicyInputs = (config: Record<string, any> = {}) => {
   const score = config.score || {};
+  const { fitModel } = resolvePipelineFitModel(config);
   return {
-    fitModel: {
-      criteria: score.criteria,
-      modelVersion: config.policy?.fit_rule_version,
-    },
+    fitModel,
     treatmentBands: score.treatment_bands,
     treatmentStrategy: score.treatment,
     priority: score.priority,
@@ -655,11 +654,11 @@ const applyOutputsWithEvidence = ({
         step: { ...step, config: stepConfig },
         outputs,
       });
-  // Never overwrite good site_text (etc.) with empty success/failure outputs.
-  const patch = preservePriorNonBlankFields({
-    record,
-    patch: rawPatch,
-  });
+  const action = String(stepConfig.action || '').trim().toLowerCase();
+  const preservedPatch = preservePriorNonBlankFields({ record, patch: rawPatch });
+  const patch: Record<string, unknown> = action === 'policy_apply' && Object.hasOwn(rawPatch, 'fit_score')
+    ? { ...preservedPatch, fit_score: rawPatch.fit_score }
+    : preservedPatch;
   const evidencePatch = buildEnrichEvidencePatch({
     record,
     step_id: stepId,

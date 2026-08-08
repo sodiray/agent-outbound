@@ -343,6 +343,7 @@ test('graded scoring coverage guard sends thin fit evidence to enrichment_hold',
     const policy = applyOutboundPolicy({
       treatmentStrategy: treasureValleyTreatmentStrategy,
       recomputeFitFromBreakdown: true,
+      fitModel: { criteria: thinCriteria },
       record: {
         ...record,
         is_a_business: true,

@@ -62,7 +62,6 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
       }
     }
   }
-  addExplicitRef(refs, 'score.model', config?.score?.model, 'evaluation');
   for (const [sequenceName, sequence] of Object.entries(config?.sequences || {})) {
     addExplicitRef(refs, `sequences.${sequenceName}.reply_check.classifier.model`, (sequence as any)?.reply_check?.classifier?.model, 'evaluation');
   }

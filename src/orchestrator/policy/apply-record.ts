@@ -101,8 +101,12 @@ export type PolicyApplyInput = {
   asOf?: string;
   /** When true, recompute fit from score_breakdown grades using the pipeline fit model. */
   recomputeFitFromBreakdown?: boolean;
-  /** Pipeline-declared fit model from a fit score stage and policy.fit_rule_version. */
-  fitModel?: FitModelConfigInput;
+  /**
+   * Pipeline-declared fit model from a fit score stage and policy.fit_rule_version.
+   * Recompute callers must provide this key explicitly; undefined means no fit
+   * stage is declared for the pipeline.
+   */
+  fitModel: FitModelConfigInput | undefined;
   /**
    * When true, collapse observations to durable-preferring singletons (explicit
    * rebuild). Default is append history — prior observations_json is preserved.
@@ -434,6 +438,9 @@ export function buildEvidenceResolutionEnvelope(input: {
  * Apply full deterministic policy projection to one record.
  */
 export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult {
+  if (input.recomputeFitFromBreakdown === true && !Object.hasOwn(input, 'fitModel')) {
+    throw new Error('policy_apply_fit_model_not_supplied');
+  }
   const record = input.record || {};
   const asOf = input.asOf || nowIso();
   const contactPolicy = resolveContactPolicy(input.contactPolicy);
