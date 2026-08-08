@@ -28,11 +28,12 @@ import {
   dependencyValueForRecord,
   dependencyValuesForRecord,
   emptyOutputsFor,
-  enrichDepHash,
+  enrichDependencyHashes,
   enrichmentActionNeedsMcp,
   enrichmentStepConfig,
   enrichmentCeilingSkipPatch,
   executeEnrichmentAction,
+  executionConfigForEnrichmentStep,
   declaredOutputWritesFor,
   getDeclaredOutputs,
   isEnrichFresh,
@@ -406,9 +407,10 @@ export const runGenerateStep = async ({
     }
 
     const depValues = dependencyValuesFor({ stepConfig, record: currentRecord });
-    const depHash = enrichDepHash(stepConfig, depValues);
+    const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
+    const dependencyHashes = enrichDependencyHashes({ stepConfig, depValues, executionConfig });
     const cached = readStaleness({ db, recordId, stepId: id });
-    if (existing && isEnrichFresh({ cached, stepConfig, depValues, force })) {
+    if (existing && isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })) {
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({
         stepConfig,
         outputs: outputsFromAsset(existing),
@@ -520,7 +522,7 @@ export const runGenerateStep = async ({
           db,
           recordId,
           stepId: id,
-          depHash,
+          ...dependencyHashes,
           cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
           cacheTtl: String(stepConfig.cache || ''),
         });
@@ -579,7 +581,7 @@ export const runGenerateStep = async ({
         db,
         recordId,
         stepId: id,
-        depHash,
+        ...dependencyHashes,
         cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
         cacheTtl: String(stepConfig.cache || ''),
       });
@@ -609,7 +611,7 @@ export const runGenerateStep = async ({
           db,
           recordId,
           stepId: id,
-          depHash,
+          ...dependencyHashes,
           cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
           cacheTtl: String(stepConfig.cache || ''),
         });
