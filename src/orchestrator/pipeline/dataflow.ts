@@ -114,6 +114,15 @@ const stepBatchSize = (step: any) => Math.max(1, Math.floor(Number(step?.batch_s
 
 const PIPELINE_ACTION_KINDS = new Set(['send_email', 'send_sms', 'linkedin_connect', 'manual_task']);
 
+const canRepairReachability = (steps: DataflowStep[]): boolean => steps.some((step) => {
+  if (step.kind === 'contact_source') return true;
+  if (step.kind !== 'enrich') return false;
+  const config = step.step && typeof step.step === 'object'
+    ? step.step as Record<string, unknown>
+    : {};
+  return String(config.action || '').trim().toLowerCase() === 'decision_makers';
+});
+
 const stepBatchWindowMs = (step: any) => {
   const configured = Number(step?.batch_window_ms ?? step?.window_ms);
   if (Number.isFinite(configured) && configured >= 0) return Math.floor(configured);
@@ -168,7 +177,7 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
     executable: (() => {
       // generate is executable on the normal path when selected by selectDataflowSteps
       // (critical-path / AO_RUN_GENERATE / run_in_pipeline / fixture).
-      const base = ['filter', 'enrich', 'extract', 'compose', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate', 'score'];
+      const base = ['filter', 'enrich', 'extract', 'contact_source', 'compose', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate', 'score'];
       // Deterministic pipeline fixture mode also executes sourcing-like kinds via fixtures.
       if (String(process.env.AO_PIPELINE_FIXTURE || '').trim() === '1') {
         return [...base, 'geo_tiles', 'linkedin_profile_search', 'pipeline'].includes(kind);
@@ -846,16 +855,20 @@ export const runPipelineDataflow = async ({
     // Non-critical generate stays deferred unless AO_RUN_GENERATE=1 or run_in_pipeline.
     // Fixture mode still includes the full generate graph for deterministic dry runs.
     const steps = selectDataflowSteps(buildSteps({ db, steps: rawSteps }));
-    // Select canary-allowed in-play set FIRST. Reconciliation must not touch
-    // non-allowlisted production rows under canary/strict mode.
+    // Select canary-allowed in-play set FIRST. A declared contact writer must
+    // run before reachability reconciliation: an unreachable record can carry
+    // the field or provider result that repairs its delivery state.
     // Filter canary before limit so excluded production rows cannot starve allowlist.
     const rawInPlay = readInPlayRows({ db, where, limit: 0 });
     const canaryRows = filterRecordsForCanary(rawInPlay, canaryConfig);
-    const reconciledRows = canaryRows.flatMap((record) => {
-      if (dryRun || !pipelineNameForRecord({ config, record })) return [record];
-      const reconciled = reconcileSequenceReachability({ db, record });
-      return reconciled.reachable ? [reconciled.record] : [];
-    });
+    const reachesContacts = canRepairReachability(steps);
+    const reconciledRows = reachesContacts
+      ? canaryRows
+      : canaryRows.flatMap((record) => {
+        if (dryRun || !pipelineNameForRecord({ config, record })) return [record];
+        const reconciled = reconcileSequenceReachability({ db, record });
+        return reconciled.reachable ? [reconciled.record] : [];
+      });
     const selectedRows = selectedPipeline
       ? reconciledRows.filter((record) => pipelineNameForRecord({ config, record }) === selectedPipeline)
       : reconciledRows;
@@ -1249,6 +1262,23 @@ export const runPipelineDataflow = async ({
       await Promise.all(Array.from(loaders.values()).map((loader) => loader.flush()));
       await closeMcpClient();
     });
+
+    if (reachesContacts) {
+      // Reconcile only after all selected stages have had an opportunity to
+      // change delivery facts. This preserves the existing park/re-entry model
+      // without making an old unreachable snapshot a contact-writer veto.
+      rows.forEach((selected) => {
+        const recordId = getRecordRowId(selected);
+        const current = db.prepare(`
+          SELECT * FROM records
+          WHERE _row_id = ?
+            AND ${inPlayWhere()}
+            AND sequence_status != 'opted_out'
+        `).get(recordId);
+        if (!current) return;
+        reconcileSequenceReachability({ db, record: current });
+      });
+    }
 
     summary.survivors = Number(db.prepare(`SELECT COUNT(*) AS n FROM records WHERE ${inPlayWhere()}`).get()?.n || 0);
     summary.awaiting_review = countAwaitingReviewRecords({ db, config });

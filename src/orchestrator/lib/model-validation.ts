@@ -14,6 +14,8 @@ type ModelRef = {
   resolved: boolean;
 };
 
+const MODEL_FREE_PIPELINE_KINDS = new Set(['contact_source']);
+
 const asArray = (value: any) => (Array.isArray(value) ? value : []);
 
 const addExplicitRef = (refs: ModelRef[], path: string, model: any, role: ActionRole) => {
@@ -81,7 +83,7 @@ const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source'
   if (phase === 'pipeline') {
     for (const [index, step] of flattenPipelineSteps(config).entries()) {
       const kind = String(step?.kind || '');
-      if (kind !== 'assign') {
+      if (kind !== 'assign' && !MODEL_FREE_PIPELINE_KINDS.has(kind)) {
         addResolvedRef(refs, `pipeline[${index}]`, step?.model, kind === 'filter' ? 'evaluation' : 'research', aiConfig);
       }
       if (kind === 'assign') {

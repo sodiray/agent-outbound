@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
+import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { evaluateSequenceReachability } from '../dist/orchestrator/policy/sequence-reachability.js';
 import { ensureRecordColumns, openListDb, upsertContact, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
@@ -124,4 +125,56 @@ test('pipelines without a contact source still create no contacts', async () => 
   await withDb({ published_email: 'admin@acme.example' }, async ({ db }) => {
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM contacts').get().count, 0);
   });
+});
+
+test('pipeline admission lets an unreachable record reach a contact source and re-enter', async () => {
+  const root = listDir();
+  writeFileSync(join(root, 'outbound.yaml'), `
+list:
+  name: Contact Source Recovery
+pipeline:
+  - kind: contact_source
+    id: published_email_contact
+    field: published_email
+    role: secondary
+sequences:
+  default:
+    steps: []
+`);
+  writeFileSync(join(root, 'operator.md'), 'test');
+  const db = openListDb({ listDir: root });
+  const now = new Date().toISOString();
+  ensureRecordColumns({ db, columns: ['published_email', 'account_sequence_state', 'readiness_json'] });
+  upsertRecord({
+    db,
+    row: {
+      _row_id: 'unreachable_contact_source_record',
+      business_name: 'Acme',
+      published_email: 'admin@acme.example',
+      sequence_status: 'unreachable',
+      account_sequence_state: 'unreachable',
+      readiness_json: JSON.stringify({ permitted_channels: ['email'] }),
+      last_error: 'No reachable contact on a permitted channel.',
+      created_at: now,
+      updated_at: now,
+    },
+  });
+  db.close();
+
+  const summary = await runPipelineDataflow({ listDir: root });
+  const checked = openListDb({ listDir: root, readonly: true });
+  const record = checked.prepare('SELECT * FROM records WHERE _row_id = ?').get('unreachable_contact_source_record');
+  const contact = checked.prepare('SELECT * FROM contacts WHERE row_id = ?').get('unreachable_contact_source_record');
+  const event = checked.prepare(`
+    SELECT * FROM pipeline_events
+    WHERE record_id = ? AND step_id = ? AND passed = 1
+  `).get('unreachable_contact_source_record', 'published_email_contact');
+
+  assert.equal(summary.records_in, 1);
+  assert.equal(contact.email, 'admin@acme.example');
+  assert.equal(event.kind, 'contact_source');
+  assert.equal(record.sequence_status, 'active');
+  assert.equal(record.account_sequence_state, 'active');
+  assert.equal(record.last_error, '');
+  checked.close();
 });
