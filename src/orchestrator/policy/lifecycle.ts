@@ -20,6 +20,7 @@ import {
   type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
 import { isAffirmativeFlag } from './booleanish.js';
+import { nowIso } from '../lib/record.js';
 
 export const LIFECYCLE_STAGES = [
   'cold',
@@ -348,7 +349,7 @@ export const DEFAULT_WAIT_SUCCESSOR_DAYS = DEFAULT_CONTACT_POLICY.fallback_wait_
  */
 export function resolveWaitDueAt(
   record: Record<string, unknown> | null | undefined,
-  now: Date = new Date(),
+  now: Date = new Date(nowIso()),
   defaultWaitDays?: number,
   contactPolicy?: ContactPolicyConfigInput,
 ): string {
@@ -642,7 +643,7 @@ export function advanceAfterSuccessfulAction(
   } else {
     // Prefer progression next_action_date (executeChannelStep sets it before advance);
     // else now+2d so shouldExecuteSequenceOutbound gates on due_at first-class.
-    const due_at = resolveWaitDueAt(record, new Date(), undefined, input.contactPolicy);
+    const due_at = resolveWaitDueAt(record, new Date(nowIso()), undefined, input.contactPolicy);
     successor = buildWaitSuccessor({
       accountId,
       contactId: active_contact_id,
@@ -749,7 +750,7 @@ export function advanceAfterSuccessfulAction(
   let automated_actions_used = Number(record.automated_actions_used || 0) || 0;
   if (isAutomatedTouch) automated_actions_used += 1;
 
-  const nowIso = new Date().toISOString();
+  const rotationAt = nowIso();
   const patch: AdvanceAfterSuccessfulActionResult['patch'] = {
     lifecycle_stage: nextState.lifecycle_stage,
     account_sequence_state: nextState.sequence_state,
@@ -766,7 +767,7 @@ export function advanceAfterSuccessfulAction(
 
   // Quiet period origin + fresh per-contact allowance when a held contact is promoted.
   if (rotatedOntoHeld) {
-    patch.last_contact_rotation_at = nowIso;
+    patch.last_contact_rotation_at = rotationAt;
     patch.automated_actions_used = 0;
   }
 

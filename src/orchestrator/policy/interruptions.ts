@@ -5,6 +5,7 @@
 import { NEXT_ACTION_POLICY_VERSION, type LifecycleStage, type SequenceState, type WorkState } from './lifecycle.js';
 import { assertLifecycleTransition, canTransitionLifecycle } from './lifecycle.js';
 import { applyEmailBounce, type BounceType } from './bounce.js';
+import { nowIso } from '../lib/record.js';
 
 export type InterruptionKind =
   | 'became_customer'
@@ -86,7 +87,7 @@ export function applySequenceInterruption(input: ApplyInterruptionInput): ApplyI
 
   const kind = input.kind;
   const reason = String(input.reason || kind);
-  const asOf = String(input.asOf || new Date().toISOString());
+  const asOf = String(input.asOf || nowIso());
   let lifecycle_stage = String(record.lifecycle_stage || 'contacted').trim() as LifecycleStage;
   let account_sequence_state: SequenceState = 'active';
   let work_state: WorkState = 'idle';

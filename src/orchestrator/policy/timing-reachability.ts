@@ -8,6 +8,7 @@ import {
   type ReachabilityConfigInput,
 } from '../../schemas/config.js';
 import { isAffirmativeFlag } from './booleanish.js';
+import { nowIso } from '../lib/record.js';
 
 export const TIMING_RULE_VERSION = 'tv-timing-v1';
 export const REACHABILITY_RULE_VERSION = 'tv-reachability-v1';
@@ -82,7 +83,7 @@ function daysBetween(isoA: string, isoB: string): number {
 }
 
 /** Exponential decay: strength * 0.5^(age/half_life). */
-export function decayStrength(signal: TimingSignal, asOf: string = new Date().toISOString()): number {
+export function decayStrength(signal: TimingSignal, asOf: string = nowIso()): number {
   if (signal.expires_at && Date.parse(signal.expires_at) < Date.parse(asOf)) return 0;
   const half = signal.half_life_days > 0 ? signal.half_life_days : 30;
   const age = daysBetween(signal.observed_at, asOf);
@@ -92,7 +93,7 @@ export function decayStrength(signal: TimingSignal, asOf: string = new Date().to
 
 export function parseTimingSignals(record: Record<string, unknown>): TimingSignal[] {
   const signals: TimingSignal[] = [];
-  const now = new Date().toISOString();
+  const now = nowIso();
   try {
     const raw = record.timing_signals_json;
     const parsed = typeof raw === 'string' ? JSON.parse(raw || '[]') : raw;
@@ -137,7 +138,7 @@ export function parseTimingSignals(record: Record<string, unknown>): TimingSigna
 
 export function calculateTimingScore(
   record: Record<string, unknown>,
-  asOf: string = new Date().toISOString(),
+  asOf: string = nowIso(),
 ): TimingCalculation {
   const signals = parseTimingSignals(record);
   const decayed = signals.map((s) => ({ ...s, decayed_strength: decayStrength(s, asOf) }));
@@ -344,7 +345,7 @@ export function evaluateReachability(
   return {
     channels: [emailState(record, config), phoneState(record, config), linkedinState(record, config), mailState(record, config)],
     calculation_rule_version: REACHABILITY_RULE_VERSION,
-    generated_at: new Date().toISOString(),
+    generated_at: nowIso(),
   };
 }
 

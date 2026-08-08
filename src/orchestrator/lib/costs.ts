@@ -6,6 +6,7 @@ import {
   ensureRecordColumns,
 } from '../runtime/db.js';
 import { readConfig } from './config.js';
+import { nowIso } from './record.js';
 import { AgentOutboundError } from '../runtime/contract.js';
 import {
   parseCostLedger,
@@ -360,7 +361,7 @@ export const releaseAccountCostReservation = ({
 };
 
 const windowStartAndReset = (window: 'daily' | 'weekly' | 'monthly') => {
-  const now = new Date();
+  const now = new Date(nowIso());
   const start = new Date(now);
   const reset = new Date(now);
   if (window === 'daily') {

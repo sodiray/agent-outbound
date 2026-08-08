@@ -15,6 +15,7 @@
 import { randomUUID } from 'node:crypto';
 import { isAffirmativeFlag } from './booleanish.js';
 import { NEXT_ACTION_POLICY_VERSION } from './lifecycle.js';
+import { nowIso } from '../lib/record.js';
 
 export type BounceType = 'hard' | 'soft';
 export type BounceScope = 'contact' | 'account';
@@ -237,7 +238,7 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
   const recordId = String(record._row_id || record.id || '').trim();
   if (!recordId) throw new Error('applyEmailBounce: record id required');
 
-  const bounceAt = String(input.bounceAt || new Date().toISOString());
+  const bounceAt = String(input.bounceAt || nowIso());
   const messageId = String(input.messageId || `bounce_${randomUUID().slice(0, 12)}`).trim();
   const threadId = String(
     input.threadId || record.email_thread_id || record.email_last_thread_id || '',

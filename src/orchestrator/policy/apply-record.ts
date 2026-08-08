@@ -93,9 +93,12 @@ import {
   type ReachabilityConfigInput,
   type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
+import { nowIso } from '../lib/record.js';
 
 export type PolicyApplyInput = {
   record: Record<string, unknown>;
+  /** Evaluation instant for decision-time policy checks. */
+  asOf?: string;
   /** When true, recompute fit from score_breakdown grades using FIT_COMPONENT_WEIGHTS. */
   recomputeFitFromBreakdown?: boolean;
   /**
@@ -406,7 +409,7 @@ export function buildEvidenceResolutionEnvelope(input: {
     missing_inputs: Array.isArray(input.missing_inputs) ? input.missing_inputs : [],
     contradictions: Array.isArray(input.contradictions) ? input.contradictions : [],
     policy_versions: input.policy_versions || {},
-    generated_at: input.generated_at || new Date().toISOString(),
+    generated_at: input.generated_at || nowIso(),
   };
   if (input.source_observation_refs?.length) {
     envelope.source_observation_refs = input.source_observation_refs;
@@ -419,6 +422,7 @@ export function buildEvidenceResolutionEnvelope(input: {
  */
 export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult {
   const record = input.record || {};
+  const asOf = input.asOf || nowIso();
   const contactPolicy = resolveContactPolicy(input.contactPolicy);
   const minFitCoverage = Number.isFinite(Number(input.minFitCoverage))
     ? Number(input.minFitCoverage)
@@ -485,7 +489,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const identityConfidence = buildIdentityResolution(record, input.identityConfidence).identity_confidence ?? 0;
   const buyerConfidence = deriveBuyerConfidence(record, input.buyerConfidence);
   const classificationConfidence = num(record.classification_confidence, null) ?? 0;
-  const timingCalc = calculateTimingScore(record);
+  const timingCalc = calculateTimingScore(record, asOf);
   const timingScore = timingCalc.timing_score;
   const strongTimingSignalCount = countStrongTimingSignals(
     timingCalc.signals,
@@ -946,7 +950,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     campaign = mergeContactPlan({ fresh, existing });
     // Age origin: keep existing started_at; only brand-new plans use fresh stamp.
     if (campaign && !campaign.started_at) {
-      campaign = { ...campaign, started_at: fresh.started_at || new Date().toISOString() };
+      campaign = { ...campaign, started_at: fresh.started_at || asOf };
     }
   } else {
     // No contact rows provided: still preserve an existing plan if present.
@@ -977,6 +981,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       automated_actions_used: num(record.automated_actions_used, 0) ?? 0,
       last_rotation_at: record.last_contact_rotation_at != null ? String(record.last_contact_rotation_at) : null,
       campaigns_in_last_12_months: num(record.campaigns_in_last_12_months, 0) ?? 0,
+      asOf,
       contactPolicy,
     });
     campaignProcessBlockers = proc.blockers;
@@ -986,11 +991,12 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       treatment_tier: treatment.treatment_tier,
       automated_actions_used: num(record.automated_actions_used, 0) ?? 0,
       channel_needs_repair: Boolean(record.needs_repair || record.channel_needs_repair),
+      asOf,
       contactPolicy,
     });
     if (exhaustion.exhausted || exhaustion.next_action_type === 'channel_repair') {
       const due = exhaustion.recycle_wait_days > 0
-        ? new Date(Date.now() + exhaustion.recycle_wait_days * 86400000).toISOString()
+        ? new Date(Date.parse(asOf) + exhaustion.recycle_wait_days * 86400000).toISOString()
         : null;
       next_action = {
         action_id: `na_${exhaustion.next_action_type}_${rowId}`,
@@ -1211,7 +1217,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     });
   }
 
-  const generatedAt = new Date().toISOString();
+  const generatedAt = asOf;
   const policy_versions = {
     treatment: treatment.calculation_rule_version,
     priority: priority.calculation_rule_version,
@@ -1462,7 +1468,7 @@ export function readinessInputFromRecord(input: {
   const identityConfidence = num(record.identity_confidence, null) ?? 0;
   const buyerConfidence = deriveBuyerConfidence(record);
   const classificationConfidence = num(record.classification_confidence, null) ?? 0;
-  const timingCalc = calculateTimingScore(record);
+  const timingCalc = calculateTimingScore(record, nowIso());
   const timingScore = timingCalc.timing_score;
   const fitEvidence = num(record.fit_evidence_confidence, null) ?? 0;
   const reachability = evaluateReachability(record, input.reachability);

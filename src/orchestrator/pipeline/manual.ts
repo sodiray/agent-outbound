@@ -39,7 +39,7 @@ import {
 } from '../runtime/idempotency.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../policy/lifecycle.js';
-import { stableHash } from '../lib/record.js';
+import { nowIso, stableHash } from '../lib/record.js';
 import { assertOutboundContent } from '../lib/outbound-content.js';
 
 const text = (value: unknown) => String(value || '').trim();
@@ -113,7 +113,7 @@ export const submitMailWithIdempotency = async ({
   record,
   stepId,
   contentVersion,
-  nowMs = Date.now(),
+  nowMs = Date.parse(nowIso()),
 }: {
   db: any;
   provider: MailProvider;
@@ -482,7 +482,7 @@ export const completeManualTask = async ({
       : null;
   const effectiveNowMs = suppliedDate && !Number.isNaN(suppliedDate.getTime())
     ? suppliedDate.getTime()
-    : Date.now();
+    : Date.parse(nowIso());
 
   // Campaign pause / cancel / inbound: refuse outbound manual complete (mail allocate,
   // phone close-out). Residual RES-CAMPAIGN-ORCHESTRATION — sequencer + channel execute

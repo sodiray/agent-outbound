@@ -1777,10 +1777,10 @@ export const executeChannelStep = async ({
       // the compatibility guard for lists without a capped mailbox.
       const dailyCap = Number(sendMailbox?.mailbox.daily_cap ?? stepConfig.daily_cap ?? process.env.AO_EMAIL_DAILY_CAP ?? 2);
       if (Number.isFinite(dailyCap) && dailyCap >= 0 && preChannelHint === 'email') {
-        const dayStart = new Date();
+        const dayStart = new Date(now);
         dayStart.setUTCHours(0, 0, 0, 0);
         const sentToday = sendMailbox?.mailbox.daily_cap !== undefined
-          ? { n: countMailboxSendsToday(db, sendMailbox.id) }
+          ? { n: countMailboxSendsToday(db, sendMailbox.id, now) }
           : db.prepare(`
               SELECT COUNT(*) AS n
               FROM channel_events
@@ -1892,7 +1892,7 @@ export const executeChannelStep = async ({
                   content_binding: {
                     ...prevBind,
                     provider_envelope: null,
-                    envelope_invalidated_at: new Date().toISOString(),
+                    envelope_invalidated_at: now,
                     envelope_drift: drift.join(','),
                   },
                 },

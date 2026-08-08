@@ -14,6 +14,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { nowIso } from '../lib/record.js';
 
 export type MailProviderStatus = 'allocated' | 'submitted' | 'confirmed' | 'failed';
 
@@ -208,11 +209,11 @@ export function createMailProviderSink(opts: {
       const payload = {
         piece_id: pieceId,
         status: 'submitted',
-        submitted_at: new Date().toISOString(),
+        submitted_at: nowIso(),
         request: req,
       };
       writeFileSync(join(sinkDir, `${pieceId}.json`), JSON.stringify(payload, null, 2));
-      const expected = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+      const expected = new Date(Date.parse(nowIso()) + 3 * 86400000).toISOString().slice(0, 10);
       return {
         ok: true,
         piece_id: pieceId,
@@ -241,7 +242,7 @@ export function createMailProviderSink(opts: {
         status,
         reason: `mail_sink_${status}`,
         delivered_at: status === 'delivered' || status === 'confirmed'
-          ? new Date().toISOString()
+          ? nowIso()
           : undefined,
         provider: 'mail_sink',
         raw,

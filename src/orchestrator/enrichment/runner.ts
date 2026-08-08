@@ -3,11 +3,10 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { z } from 'zod';
 import { ensureRecordColumns, inPlayWhere, openListDb, storeRawContent, upsertContact, upsertRecord, nowTimestamp } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
-import { stableHash } from '../lib/record.js';
+import { getRecordRowId, nowIso, stableHash } from '../lib/record.js';
 import { executeStepAction } from '../actions/execute-step/index.js';
 import { emitActivity } from '../runtime/activity.js';
 import { recordCostEvent } from '../lib/costs.js';
-import { getRecordRowId } from '../lib/record.js';
 import { getMcpClient } from '../runtime/mcp.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
@@ -325,7 +324,7 @@ export const isEnrichFresh = ({ cached, stepConfig, depValues = {}, force = fals
   const ttl = Number(cached.cache_ttl_seconds || 0);
   if (ttl <= 0) return true; // no TTL configured = cache forever
   const updatedAt = new Date(String(cached.updated_at || 0)).getTime();
-  return (Date.now() - updatedAt) / 1000 <= ttl;
+  return (Date.parse(nowIso()) - updatedAt) / 1000 <= ttl;
 };
 
 const normalizeOutputType = (raw: any): 'string' | 'number' | 'integer' | 'boolean' => {

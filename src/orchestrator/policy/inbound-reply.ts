@@ -11,6 +11,7 @@ import { NEXT_ACTION_POLICY_VERSION, type LifecycleStage, type SequenceState, ty
 import { assertLifecycleTransition, canTransitionLifecycle } from './lifecycle.js';
 import { applyEmailBounce, resolveBounceType } from './bounce.js';
 import { isAffirmativeFlag } from './booleanish.js';
+import { nowIso } from '../lib/record.js';
 
 export type InboundReplyClassification =
   | 'objection'
@@ -106,7 +107,7 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
 
   const classification = String(input.classification || 'unknown').trim() || 'unknown';
   const explicitStop = Boolean(input.explicitStop);
-  const replyAt = String(input.replyAt || new Date().toISOString());
+  const replyAt = String(input.replyAt || nowIso());
   const sequence_status = sequenceStatusForReply(classification, explicitStop);
 
   let lifecycle_stage = coerceLifecycle(record.lifecycle_stage);

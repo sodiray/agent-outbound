@@ -924,7 +924,7 @@ export const runSequencer = async ({
 
       // Consume next_action_json + account_sequence_state so policy succession is honored.
       // Record-level: phone next_action keeps the account in play (mail independence).
-      const outboundGate = shouldExecuteSequenceOutbound(record, new Date().toISOString());
+      const outboundGate = shouldExecuteSequenceOutbound(record, logicalNow);
       if (!outboundGate.execute) {
         upsertRecord({
           db,
@@ -1647,11 +1647,11 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
       ...row,
       outcome: String(action || ''),
       disposition_latest: String(action || ''),
-      disposition_follow_up_at: followUpIn ? addDays(new Date().toISOString().slice(0, 10), parseWaitDays(followUpIn)) : String(row.disposition_follow_up_at || ''),
-      outcome_notes: [String(row.outcome_notes || ''), `[${new Date().toISOString().slice(0, 10)}] ${action}: ${note}`]
+      disposition_follow_up_at: followUpIn ? addDays(nowIso().slice(0, 10), parseWaitDays(followUpIn)) : String(row.disposition_follow_up_at || ''),
+      outcome_notes: [String(row.outcome_notes || ''), `[${nowIso().slice(0, 10)}] ${action}: ${note}`]
         .filter(Boolean)
         .join('\n'),
-      outcome_at: new Date().toISOString(),
+      outcome_at: nowIso(),
     };
 
     if (normalizedTransition === 'engaged') {
@@ -1661,12 +1661,12 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
       updated.sequence_status = 'opted_out';
       updated.suppressed = 1;
       updated.suppressed_reason = 'opt_out';
-      updated.suppressed_at = new Date().toISOString();
+      updated.suppressed_at = nowIso();
     } else if (normalizedTransition === 'bounced') {
       updated.sequence_status = 'bounced';
       updated.suppressed = 1;
       updated.suppressed_reason = 'hard_bounce';
-      updated.suppressed_at = new Date().toISOString();
+      updated.suppressed_at = nowIso();
     } else if (normalizedTransition === 'completed') {
       updated.sequence_status = 'completed';
       updated.next_action_date = '';
@@ -1710,7 +1710,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
             parkClosed,
             `call_board:${normalizedAction}`,
             activeContactId,
-            new Date().toISOString(),
+            nowIso(),
           );
           // Rotate after manual-tail completion when not opted out / engaged.
           if (!['engaged', 'opted_out'].includes(normalizedTransition)) {
@@ -1727,7 +1727,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
               updated.sequence_step = 0;
               updated.sequence_status = 'idle';
               // 3 business-day quiet period before successor contact outreach.
-              const quiet = addDays(new Date().toISOString().slice(0, 10), 3);
+              const quiet = addDays(nowIso().slice(0, 10), 3);
               updated.next_action_date = quiet;
               updated.next_action_json = JSON.stringify({
                 type: 'contact_rotation',
@@ -1768,7 +1768,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
           ...(parkClosed ? { park_closed: parkClosed } : {}),
           ...(rotationResult ? { rotation: rotationResult } : {}),
         },
-        occurred_at: new Date().toISOString(),
+        occurred_at: nowIso(),
       },
     });
 

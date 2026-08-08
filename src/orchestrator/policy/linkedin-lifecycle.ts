@@ -20,6 +20,7 @@ import {
   resolveContactPolicy,
   type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
+import { nowIso } from '../lib/record.js';
 
 export const LINKEDIN_LIFECYCLE_STATES = [
   'none',
@@ -76,7 +77,7 @@ export function evaluateLinkedinConnectGate(
   } = {},
 ): LinkedinConnectGate {
   const state = parseLinkedinLifecycleState(record);
-  const nowMs = opts.nowMs ?? Date.now();
+  const nowMs = opts.nowMs ?? Date.parse(nowIso());
   const configuredCooldown = resolveContactPolicy(opts.contactPolicy).linkedin.invite_cooldown_hours;
   const hours = Number.isFinite(Number(opts.cooldownHours)) && Number(opts.cooldownHours) >= 0
     ? Number(opts.cooldownHours)
@@ -178,7 +179,7 @@ export function applyLinkedinInviteSent(input: {
   providerId: string;
   at?: string;
 }): { patch: Record<string, unknown>; state: LinkedinLifecycleState } {
-  const at = String(input.at || new Date().toISOString());
+  const at = String(input.at || nowIso());
   const providerId = text(input.providerId);
   return {
     state: 'invite_sent',
@@ -198,7 +199,7 @@ export function applyLinkedinInviteAccepted(input: {
   at?: string;
   allowMessage?: boolean;
 }): { patch: Record<string, unknown>; state: LinkedinLifecycleState } {
-  const at = String(input.at || new Date().toISOString());
+  const at = String(input.at || nowIso());
   const allowMessage = input.allowMessage !== false;
   const state: LinkedinLifecycleState = allowMessage ? 'message_allowed' : 'accepted';
   return {
@@ -218,7 +219,7 @@ export function applyLinkedinInviteDeclined(input: {
   at?: string;
   reason?: string;
 }): { patch: Record<string, unknown>; state: LinkedinLifecycleState } {
-  const at = String(input.at || new Date().toISOString());
+  const at = String(input.at || nowIso());
   return {
     state: 'declined',
     patch: {

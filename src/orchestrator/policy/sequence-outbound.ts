@@ -11,6 +11,7 @@
 
 import { parseNextActionFromRecord, type SequenceState } from './lifecycle.js';
 import { isActionDueOnDate, toZonedIsoDate } from '../lib/working-days.js';
+import { nowIso } from '../lib/record.js';
 
 /** Sequence states that must never auto-execute outbound. */
 export const SEQUENCE_STATES_BLOCK_OUTBOUND = new Set<SequenceState | string>([
@@ -240,7 +241,7 @@ export function laterStepsDependOn(
  */
 export function shouldExecuteSequenceOutbound(
   record: Record<string, unknown> | null | undefined,
-  now: string | Date = new Date(),
+  now: string | Date = nowIso(),
   options?: SequenceOutboundOptions | null,
 ): SequenceOutboundDecision {
   const row = record || {};
@@ -376,7 +377,7 @@ export function shouldExecuteSequenceOutbound(
  */
 export function filterRecordsForSequenceOutbound<T extends Record<string, unknown>>(
   records: T[] | null | undefined,
-  now: string | Date = new Date(),
+  now: string | Date = nowIso(),
 ): T[] {
   return (records || []).filter((record) => shouldExecuteSequenceOutbound(record, now).execute);
 }

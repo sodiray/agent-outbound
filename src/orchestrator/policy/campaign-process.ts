@@ -9,6 +9,7 @@ import {
   type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
 import type { AccountCampaign } from './contact-campaign.js';
+import { nowIso } from '../lib/record.js';
 
 export const CAMPAIGN_PROCESS_VERSION = 'tv-campaign-process-v1';
 
@@ -57,7 +58,7 @@ export function checkCampaignAge(input: {
 }): CampaignProcessCheck {
   const blockers: string[] = [];
   const warnings: string[] = [];
-  const asOf = input.asOf || new Date().toISOString();
+  const asOf = input.asOf || nowIso();
   const tier = input.treatment_tier || 'D';
   const campaignPolicy = resolveContactPolicy(input.contactPolicy).campaign;
   const maxDays = campaignPolicy.max_age_business_days[tier]
@@ -104,7 +105,7 @@ export function checkQuietPeriod(input: {
   if (!input.last_rotation_at) {
     return { allowed: true, blockers, warnings: [], process_version: CAMPAIGN_PROCESS_VERSION };
   }
-  const asOf = input.asOf || new Date().toISOString();
+  const asOf = input.asOf || nowIso();
   const days = businessDaysBetween(String(input.last_rotation_at), asOf);
   if (days < quiet) {
     blockers.push(`inter_contact_quiet_period:${days}<${quiet}`);

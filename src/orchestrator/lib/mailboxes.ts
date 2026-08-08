@@ -5,6 +5,7 @@ import {
   resolveCredentials,
   type Credentials,
 } from './credentials.js';
+import { nowIso } from './record.js';
 
 export type MailboxCredentials = Credentials;
 
@@ -147,8 +148,8 @@ const eventMailboxId = (db: Db, rowId?: string) => {
   return nonBlank(row?.mailbox_id);
 };
 
-export const countMailboxSendsToday = (db: Db, mailboxId: string) => {
-  const dayStart = new Date();
+export const countMailboxSendsToday = (db: Db, mailboxId: string, asOf: string | Date = nowIso()) => {
+  const dayStart = new Date(asOf);
   dayStart.setUTCHours(0, 0, 0, 0);
   const row = db.prepare(`
     SELECT COUNT(*) AS n

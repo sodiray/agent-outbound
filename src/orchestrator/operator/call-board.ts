@@ -39,9 +39,12 @@ import {
   insertChannelEvent,
 } from '../runtime/db.js';
 import { randomUUID } from 'node:crypto';
+import { nowIso } from '../lib/record.js';
 
 /** Default claim lease duration (2 hours). */
 export const CALL_CLAIM_LEASE_MS = 2 * 60 * 60 * 1000;
+
+const clockMs = () => Date.parse(nowIso());
 
 export type CallBoardEntry = {
   record_id: string;
@@ -73,9 +76,9 @@ const TERMINAL_LIFECYCLE = new Set(['won', 'lost', 'disqualified']);
 const text = (value: unknown) => String(value ?? '').trim();
 
 /** ISO expiry timestamp for a new claim lease starting at `from` (default now). */
-export function callClaimExpiresAt(from: Date | string | number = Date.now()): string {
+export function callClaimExpiresAt(from: Date | string | number = clockMs()): string {
   const base = from instanceof Date ? from.getTime() : typeof from === 'number' ? from : Date.parse(String(from));
-  const ms = Number.isFinite(base) ? base : Date.now();
+  const ms = Number.isFinite(base) ? base : clockMs();
   return new Date(ms + CALL_CLAIM_LEASE_MS).toISOString();
 }
 
@@ -86,7 +89,7 @@ export function callClaimExpiresAt(from: Date | string | number = Date.now()): s
  */
 export function isClaimLeaseActive(
   row: Record<string, unknown> | null | undefined,
-  nowMs: number = Date.now(),
+  nowMs: number = clockMs(),
 ): boolean {
   if (!row) return false;
   const status = text(row.call_claim_status).toLowerCase();
@@ -118,7 +121,7 @@ export function isClaimLeaseActive(
  */
 export function resolveCallClaimPresentation(
   row: Record<string, unknown> | null | undefined,
-  nowMs: number = Date.now(),
+  nowMs: number = clockMs(),
 ): {
   claim_status: CallBoardEntry['claim_status'];
   claimed_by: string | null;
@@ -354,7 +357,7 @@ export function getCallBoard(input: {
   phonePolicy?: PhoneAttemptPolicyConfig;
 }): CallBoardResult {
   const capacity = Math.max(1, Number(input.capacity) || 25);
-  const asOfMs = input.nowMs ?? Date.now();
+  const asOfMs = input.nowMs ?? clockMs();
   const phoneOpts = {
     nowMs: asOfMs,
     phonePolicy: input.phonePolicy,
@@ -541,7 +544,7 @@ export function claimCallBoardEntry(input: {
   const rid = String(input.recordId || '').trim();
   const by = String(input.claimedBy || 'operator').trim() || 'operator';
   const now = nowTimestamp();
-  const nowMs = input.nowMs ?? Date.now();
+  const nowMs = input.nowMs ?? Date.parse(now);
   const expiresAt = callClaimExpiresAt(now);
   const row = input.db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rid) as
     | Record<string, unknown>
@@ -590,7 +593,7 @@ export function claimCallBoardEntry(input: {
   }
 
   // Refuse if another operator holds an unexpired lease. Same operator may refresh.
-  if (isClaimLeaseActive(row)) {
+  if (isClaimLeaseActive(row, nowMs)) {
     const holder = text(row.call_claimed_by);
     if (holder && holder !== by) {
       const until = text(row.call_claim_expires_at) || 'lease active';
@@ -704,7 +707,7 @@ export function expireCallBoardLeases(input: {
   nowMs?: number;
   limit?: number;
 }): { expired: number; record_ids: string[] } {
-  const nowMs = input.nowMs ?? Date.now();
+  const nowMs = input.nowMs ?? clockMs();
   const limit = Math.max(1, Number(input.limit) || 500);
   const recordIds: string[] = [];
 
@@ -758,7 +761,7 @@ export function expireCallBoardLeases(input: {
 export function isCallLeaseOwner(
   row: Record<string, unknown> | null | undefined,
   operator: string,
-  nowMs: number = Date.now(),
+  nowMs: number = clockMs(),
 ): boolean {
   if (!isClaimLeaseActive(row, nowMs)) return true;
   const holder = text(row?.call_claimed_by);

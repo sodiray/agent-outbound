@@ -18,8 +18,11 @@ import {
   type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
 import { isAffirmativeFlag } from './booleanish.js';
+import { nowIso } from '../lib/record.js';
 
 export const PHONE_ATTEMPT_POLICY_VERSION = 'phone-attempt-v1';
+
+const clockMs = () => Date.parse(nowIso());
 
 /** Inclusive local start hour, exclusive end hour (09:00 ≤ t < 17:00). */
 export const DEFAULT_ATTEMPT_WINDOW_START_HOUR = DEFAULT_CONTACT_POLICY.phone.attempt_window.start_hour;
@@ -149,7 +152,7 @@ const text = (value: unknown) => String(value ?? '').trim();
 
 /** Local wall-clock hour (0–23) in an IANA timezone. */
 export function getZonedHour(
-  now: Date | string | number = Date.now(),
+  now: Date | string | number = clockMs(),
   timeZone: string = DEFAULT_TIME_ZONE,
 ): number {
   const d = now instanceof Date ? now : new Date(now);
@@ -196,7 +199,7 @@ export function readCallAttemptCount(
  * Default: Mon–Fri 09:00–17:00 UTC when no pipeline policy is supplied.
  */
 export function isWithinPhoneAttemptWindow(
-  now: Date | string | number = Date.now(),
+  now: Date | string | number = clockMs(),
   config: PhoneAttemptPolicyConfig = {},
 ): boolean {
   const timeZone = config.timeZone || DEFAULT_TIME_ZONE;
@@ -268,7 +271,7 @@ export function readCallbackAt(
 /** True when a scheduled callback exists and is due at/before now. */
 export function isCallbackDue(
   record: Record<string, unknown> | null | undefined,
-  nowMs: number = Date.now(),
+  nowMs: number = clockMs(),
 ): boolean {
   const at = readCallbackAt(record);
   if (!at) return false;
@@ -279,7 +282,7 @@ export function isCallbackDue(
 /** True when a future callback is scheduled (blocks ordinary cold re-queue). */
 export function hasFutureCallback(
   record: Record<string, unknown> | null | undefined,
-  nowMs: number = Date.now(),
+  nowMs: number = clockMs(),
 ): boolean {
   const at = readCallbackAt(record);
   if (!at) return false;
@@ -292,7 +295,7 @@ export function hasFutureCallback(
  * Defaults to now + callbackDelayHours (24h).
  */
 export function scheduleCallbackAt(
-  from: Date | string | number = Date.now(),
+  from: Date | string | number = clockMs(),
   config: PhoneAttemptPolicyConfig = {},
 ): string {
   const base = from instanceof Date
@@ -300,7 +303,7 @@ export function scheduleCallbackAt(
     : typeof from === 'number'
       ? from
       : Date.parse(String(from));
-  const ms = Number.isFinite(base) ? base : Date.now();
+  const ms = Number.isFinite(base) ? base : clockMs();
   const hours = Number.isFinite(Number(config.callbackDelayHours))
     && Number(config.callbackDelayHours) >= 0
     ? Number(config.callbackDelayHours)
@@ -339,7 +342,7 @@ export function evaluatePhoneAttemptEligibility(
 ): PhoneAttemptEligibility {
   const blockers: string[] = [];
   const reasons: string[] = [];
-  const nowMs = opts.nowMs ?? Date.now();
+  const nowMs = opts.nowMs ?? clockMs();
   const config = opts.config || {};
   const enforceWindow = opts.enforceAttemptWindow !== false;
   const enforceCallback = opts.enforceCallbackDue !== false;
@@ -507,7 +510,7 @@ export function applyPhoneDisposition(input: {
   forceCapacityUnserved?: boolean;
 }): ApplyPhoneDispositionResult {
   const record = input.record;
-  const at = String(input.at || new Date().toISOString());
+  const at = String(input.at || nowIso());
   const config = input.config || {};
   const disposition = input.disposition;
   const accountId = text(record._row_id || record.account_id || 'unknown');
