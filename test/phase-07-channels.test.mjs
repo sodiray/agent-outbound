@@ -32,9 +32,9 @@ import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js
 import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
 import {
   assertWorkAllowed,
-  isForbiddenChannelKind,
-  isForbiddenTaskType,
-} from '../dist/orchestrator/policy/forbidden-channels.js';
+  isProhibitedChannel,
+  isProhibitedTaskType,
+} from '../dist/orchestrator/policy/pipeline-prohibitions.js';
 import {
   buildContactPlan,
   allocateMail,
@@ -101,7 +101,8 @@ sequences:
     steps: []
 policy:
   version: tv-pipeline-v1
-  forbidden_channels: [send_sms, visit, field_visit, automated_voice]
+  prohibited_channels: [sms, automated_voice]
+  prohibited_task_types: [visit, field_visit]
   enforce_readiness: true
 channels:
   email:
@@ -290,12 +291,13 @@ test('phase-07 email: draft_approval_required blocks send without ready draft', 
 // 2. SMS / visit forbidden
 // ---------------------------------------------------------------------------
 
-test('phase-07 forbidden: SMS and visit/field_visit cannot execute', async () => {
-  assert.equal(isForbiddenChannelKind('send_sms'), true);
-  assert.equal(isForbiddenChannelKind('field_visit'), true);
-  assert.equal(isForbiddenTaskType('visit'), true);
-  assert.throws(() => assertWorkAllowed({ kind: 'send_sms', channel: 'sms' }));
+test('phase-07 pipeline-declared policy blocks SMS and visit/field_visit', async () => {
+  const policy = { prohibited_channels: ['sms', 'automated_voice'], prohibited_task_types: ['visit', 'field_visit'] };
+  assert.equal(isProhibitedChannel('sms', policy), true);
+  assert.equal(isProhibitedTaskType('field_visit', policy), true);
+  assert.throws(() => assertWorkAllowed({ policy, kind: 'send_sms', channel: 'sms' }));
   assert.throws(() => assertWorkAllowed({
+    policy,
     kind: 'manual_task',
     taskType: 'field_visit',
     channel: 'visit',
@@ -328,10 +330,10 @@ test('phase-07 forbidden: SMS and visit/field_visit cannot execute', async () =>
     assert.match(String(out.reason), /forbidden|not permitted|sms|visit/i, String(out.reason));
   }
 
-  const ctx = { db, listDir, config: {}, aiConfig: {}, mcp: null, toolCatalog: null };
+  const ctx = { db, listDir, config: { policy }, aiConfig: {}, mcp: null, toolCatalog: null };
   const smsBatch = await executeStepBatch(ctx, { kind: 'send_sms', id: 'sms_x' }, 'sms_x', [record]);
   assert.equal(smsBatch.get('phase07_fixture_1').errored, true);
-  assert.match(smsBatch.get('phase07_fixture_1').reason, /forbidden/);
+  assert.match(smsBatch.get('phase07_fixture_1').reason, /prohibits channel/i);
 
   const visitBatch = await executeStepBatch(
     ctx,
@@ -348,7 +350,7 @@ test('phase-07 forbidden: SMS and visit/field_visit cannot execute', async () =>
 // ---------------------------------------------------------------------------
 
 test('phase-07 phone: human_phone parks as awaiting_manual (no auto-call)', async () => {
-  assert.equal(isForbiddenTaskType('human_phone'), false);
+  assert.equal(isProhibitedTaskType('human_phone'), false);
   assert.doesNotThrow(() => assertWorkAllowed({
     kind: 'manual_task',
     taskType: 'human_phone',
@@ -401,7 +403,7 @@ test('phase-07 mail: park + allocate once only + allocateMail on manual complete
   const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('phase07_fixture_1');
 
   for (const taskType of ['standard_postcard', 'golden_ticket']) {
-    assert.equal(isForbiddenTaskType(taskType), false);
+    assert.equal(isProhibitedTaskType(taskType), false);
     assert.doesNotThrow(() => assertWorkAllowed({
       kind: 'manual_task',
       taskType,
@@ -522,8 +524,8 @@ test('phase-07 mail: park + allocate once only + allocateMail on manual complete
 // ---------------------------------------------------------------------------
 
 test('phase-07 linkedin: not forbidden; live invite + fixture + failure isolation', async () => {
-  assert.equal(isForbiddenChannelKind('linkedin_connect'), false);
-  assert.equal(isForbiddenTaskType('linkedin_connect'), false);
+  assert.equal(isProhibitedChannel('linkedin_connect'), false);
+  assert.equal(isProhibitedTaskType('linkedin_connect'), false);
   assert.equal(isLinkedinConnectKind('linkedin_connect'), true);
   assert.doesNotThrow(() => assertWorkAllowed({ kind: 'linkedin_connect', channel: 'linkedin' }));
   assert.deepEqual(UNIPILE_ENV_KEYS.slice().sort(), ['UNIPILE_API_KEY', 'UNIPILE_DSN'].sort());

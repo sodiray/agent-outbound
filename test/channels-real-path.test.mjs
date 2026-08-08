@@ -28,9 +28,9 @@ import {
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
 import {
   assertWorkAllowed,
-  isForbiddenChannelKind,
-  isForbiddenTaskType,
-} from '../dist/orchestrator/policy/forbidden-channels.js';
+  isProhibitedChannel,
+  isProhibitedTaskType,
+} from '../dist/orchestrator/policy/pipeline-prohibitions.js';
 import {
   buildContactPlan,
   allocateMail,
@@ -109,7 +109,8 @@ sequences:
     steps: []
 policy:
   version: tv-pipeline-v1
-  forbidden_channels: [send_sms, visit, field_visit, automated_voice]
+  prohibited_channels: [sms]
+  prohibited_task_types: [visit, field_visit]
   enforce_readiness: true
 channels:
   email:
@@ -994,7 +995,7 @@ test('phone: human_phone parks as awaiting_manual; visit/field_visit/send_sms re
 
   const smsBatch = await executeStepBatch(ctx, { kind: 'send_sms', id: 'sms_x' }, 'sms_x', rows);
   assert.equal(smsBatch.get('fixture_channel_1').errored, true);
-  assert.match(smsBatch.get('fixture_channel_1').reason, /forbidden/);
+  assert.match(smsBatch.get('fixture_channel_1').reason, /prohibits channel/i);
 
   const visitBatch = await executeStepBatch(
     ctx,
@@ -1011,8 +1012,8 @@ test('phone: human_phone parks as awaiting_manual; visit/field_visit/send_sms re
 // ---------------------------------------------------------------------------
 
 test('linkedin: not forbidden; production path fails clearly without configured credentials', async () => {
-  assert.equal(isForbiddenChannelKind('linkedin_connect'), false);
-  assert.equal(isForbiddenTaskType('linkedin_connect'), false);
+  assert.equal(isProhibitedChannel('linkedin_connect'), false);
+  assert.equal(isProhibitedTaskType('linkedin_connect'), false);
   assert.equal(isLinkedinConnectKind('linkedin_connect'), true);
   assert.doesNotThrow(() => assertWorkAllowed({ kind: 'linkedin_connect', channel: 'linkedin' }));
 
@@ -1154,7 +1155,7 @@ test('mail: standard_postcard and golden_ticket manual tasks allowed; second all
   const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
 
   for (const taskType of ['standard_postcard', 'golden_ticket']) {
-    assert.equal(isForbiddenTaskType(taskType), false);
+    assert.equal(isProhibitedTaskType(taskType), false);
     assert.doesNotThrow(() => assertWorkAllowed({
       kind: 'manual_task',
       taskType,

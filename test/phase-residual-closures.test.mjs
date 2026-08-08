@@ -104,6 +104,7 @@ test('residual timing + reachability', () => {
 });
 
 test('residual campaign process: age/allowance/capacity', () => {
+  const contactPolicy = { campaign: { max_age_business_days: { B: 30 } } };
   const campaign = buildContactPlan({
     account_id: 'a1',
     campaign_id: 'c1',
@@ -113,21 +114,23 @@ test('residual campaign process: age/allowance/capacity', () => {
     ],
     treatment_tier: 'B',
     mail_treatment: 'standard_postcard',
+    contactPolicy,
   });
   campaign.started_at = '2020-01-01T00:00:00Z';
   const age = evaluateCampaignProcess({
     campaign,
     treatment_tier: 'B',
     automated_actions_used: 0,
+    contactPolicy,
   });
   assert.equal(age.allowed, false);
   assert.ok(age.blockers.some((b) => b.startsWith('campaign_age_exceeded')));
 
   const ranked = rankCallCapacity({
     candidates: [
-      { record_id: 'b1', treatment_tier: 'B', fit_score: 90 },
-      { record_id: 'a1', treatment_tier: 'A', fit_score: 50 },
-      { record_id: 'a2', treatment_tier: 'A', fit_score: 80 },
+      { record_id: 'b1', treatment_tier: 'B', fit_score: 90, priority_rank: 2 },
+      { record_id: 'a1', treatment_tier: 'A', fit_score: 50, priority_rank: 3 },
+      { record_id: 'a2', treatment_tier: 'A', fit_score: 80, priority_rank: 1 },
     ],
     capacity: 2,
   });
@@ -309,11 +312,12 @@ test('residual proof library covers all family categories', () => {
   }
 });
 
-test('residual phase-10: failure injection — forbidden work blocked', async () => {
-  const { assertWorkAllowed } = await import('../dist/orchestrator/policy/forbidden-channels.js');
-  assert.throws(() => assertWorkAllowed({ kind: 'send_sms' }));
-  assert.throws(() => assertWorkAllowed({ kind: 'field_visit' }));
-  assert.throws(() => assertWorkAllowed({ taskType: 'automated_voice' }));
+test('residual phase-10: pipeline-declared work blocked', async () => {
+  const { assertWorkAllowed } = await import('../dist/orchestrator/policy/pipeline-prohibitions.js');
+  const policy = { prohibited_channels: ['sms'], prohibited_task_types: ['field_visit', 'automated_voice'] };
+  assert.throws(() => assertWorkAllowed({ policy, kind: 'send_sms' }));
+  assert.throws(() => assertWorkAllowed({ policy, taskType: 'field_visit' }));
+  assert.throws(() => assertWorkAllowed({ policy, taskType: 'automated_voice' }));
 });
 
 test('residual phase-10: unipile webhook/event fixture shape + network failure path', async () => {

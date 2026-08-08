@@ -1,14 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import {
-  addSuppression,
   insertChannelEvent,
   upsertRecord,
 } from './db.js';
 import { executeComposioTool } from './tools.js';
-import { classifyReplyAction } from '../actions/classify-reply/index.js';
-import { applyInboundReplyClassification } from '../policy/inbound-reply.js';
-import { detectBounceFromText } from '../policy/bounce.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getRecordRowId, nowIso } from '../lib/record.js';
 import { emitActivity } from './activity.js';
@@ -75,6 +71,8 @@ export const runImapInboundPoll = async ({
           uid: message.uid,
           raw: message.source,
           receivedAt: message.internalDate ? message.internalDate.toISOString() : nowIso(),
+          config,
+          aiConfig: config?.ai || {},
         });
         if (!processed.processed) continue;
         summary.processed += 1;
@@ -89,15 +87,6 @@ export const runImapInboundPoll = async ({
     }
   }
   return summary;
-};
-
-const hasExplicitStopIntent = (text: string) => {
-  const normalized = String(text || '').toLowerCase();
-  if (!normalized.trim()) return false;
-  return normalized.includes(' stop ')
-    || normalized.includes('unsubscribe')
-    || normalized.includes('do not contact')
-    || normalized.includes('remove me');
 };
 
 const asArray = (value: any): any[] => {
@@ -253,48 +242,23 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
       // Do NOT classify inline here — that left accounts outbound-active during
       // model latency and was not canary-scoped as a single mutation path.
       const { processInboundReplyText } = await import('./inbound-reply-process.js');
-      let processed;
-      try {
-        processed = await processInboundReplyText({
+      const processed = await processInboundReplyText({
           db,
           recordId,
           replyText: snippet,
           messageId,
           threadId,
           replyAt,
-          model: String(replyCheck.model || ''),
+          classifier: replyCheck.classifier,
           aiConfig: config?.ai || {},
+          globalSuppressionDb,
         });
-      } catch (err) {
-        // Canary isolation / transient classifier errors — skip record, do not send.
-        continue;
-      }
       const classification = String(processed.classification || 'unknown');
-      const explicitStop = hasExplicitStopIntent(` ${snippet} `)
-        || classification === 'unsubscribe';
-
-      if (explicitStop) {
-        const email = String(record?.email_primary || record?.contact_email || '').trim().toLowerCase();
-        if (email) {
-          const entry = {
-            id: randomUUID(),
-            value: email,
-            value_type: 'email',
-            scope: 'global',
-            reason: 'opt_out',
-            source: 'reply_stop',
-            record_id: recordId,
-            created_at: nowIso(),
-          };
-          addSuppression({ db, entry });
-          addSuppression({ db: globalSuppressionDb, entry });
-        }
-      }
 
       const nextStatus = String(processed.sequence_status || '');
       summary.replied += 1;
       if (nextStatus === 'engaged') summary.engaged += 1;
-      if (nextStatus === 'opted_out' || explicitStop) summary.opted_out += 1;
+      if (nextStatus === 'opted_out') summary.opted_out += 1;
     } catch (error) {
       if (isBudgetExceededError(error)) throw error;
       summary.errors.push(String((error as any)?.message || error));

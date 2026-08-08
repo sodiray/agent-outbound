@@ -553,12 +553,14 @@ const executeAssignBatch = async (
   return outcomes;
 };
 
-const channelForPipelineKind = (kind: string) => ({
-  send_email: 'email',
-  send_sms: 'sms',
-  linkedin_connect: 'linkedin',
-  manual_task: 'manual',
-})[kind] || 'manual';
+const channelForPipelineStep = (step: PipelineStepLike) => {
+  const configuredChannel = textValue((step.config as Record<string, unknown> | undefined)?.channel);
+  if (configuredChannel) return configuredChannel;
+  const kind = textValue(step.kind);
+  if (kind.startsWith('send_')) return kind.slice('send_'.length);
+  if (kind === 'linkedin_connect') return 'linkedin';
+  return 'manual';
+};
 
 /**
  * Sibling steps for sequence advancement when a nested tier pipeline action runs.
@@ -693,7 +695,7 @@ const executeSequenceActionBatch = async (
         aiConfig: ctx.aiConfig || ctx.config?.ai || {},
         dryRun: false,
         intent: sequenceIntent,
-        channelHint: channelForPipelineKind(kind),
+        channelHint: channelForPipelineStep(step),
         now: ctx.now,
       });
       const status = textValue(result?.status);
@@ -727,7 +729,7 @@ const executeSequenceActionBatch = async (
       // not ready (`sequence_outbound_gated: non_outbound_action_enrichment_repair`),
       // the resulting error then blocked a dependent generate step — the step
       // that produces the content — so the gate could never clear itself.
-      // Forbidden work and provider failures still set errored explicitly at
+      // Prohibited work and provider failures still set errored explicitly at
       // their own return sites.
       // A readiness refusal is also a completed skip: its channel is not a
       // viable dependency for this record, so later independent channels must
@@ -799,12 +801,18 @@ const executeStepBatchUnchecked = async (
 
   if (kind === 'manual_task') {
     const taskType = textValue((step.config as any)?.task_type || (step.config as any)?.taskType);
-    // Reject forbidden work types (visit/SMS/voice) before parking.
-    const { isForbiddenTaskType, isForbiddenChannelKind } = await import('../policy/index.js');
-    if (isForbiddenTaskType(taskType) || isForbiddenChannelKind(kind) || isForbiddenTaskType(stepId)) {
+    const { assertWorkAllowed } = await import('../policy/index.js');
+    try {
+      assertWorkAllowed({
+        policy: (ctx.config as { policy?: unknown } | undefined)?.policy,
+        kind,
+        taskType,
+        channel: (step.config as Record<string, unknown> | undefined)?.channel,
+      });
+    } catch (error) {
       return new Map(rows.map((row) => [
         getRecordRowId(row),
-        { passed: false, reason: `forbidden_work:${taskType || stepId}`, errored: true },
+        { passed: false, reason: String((error as Error).message), errored: true },
       ]));
     }
     // Always park — never LLM-execute a human task.
@@ -814,14 +822,7 @@ const executeStepBatchUnchecked = async (
     ]));
   }
 
-  if (kind === 'send_sms') {
-    return new Map(rows.map((row) => [
-      getRecordRowId(row),
-      { passed: false, reason: 'forbidden_work:send_sms', errored: true },
-    ]));
-  }
-
-  if (['send_email', 'linkedin_connect'].includes(kind)) {
+  if (kind.startsWith('send_') || kind === 'linkedin_connect') {
     return executeSequenceActionBatch(ctx, step, stepId, rows);
   }
 

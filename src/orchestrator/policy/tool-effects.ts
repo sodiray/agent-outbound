@@ -1,4 +1,4 @@
-import { assertWorkAllowed } from './forbidden-channels.js';
+import { assertWorkAllowed } from './pipeline-prohibitions.js';
 
 export const TOOL_EFFECT_CLASSES = [
   'data_lookup',
@@ -25,10 +25,12 @@ export const assertToolCallEffectsAllowed = ({
   stepId,
   toolSpecs,
   externalSend = false,
+  policy,
 }: {
   stepId: string;
   toolSpecs: ToolSpecLike[];
   externalSend?: boolean;
+  policy?: { prohibited_channels?: unknown; prohibited_task_types?: unknown };
 }): void => {
   for (const toolSpec of toolSpecs) {
     const effect = toolSpec?.effect;
@@ -50,6 +52,6 @@ export const assertToolCallEffectsAllowed = ({
     if (!channel) {
       throw new Error(`tool_call:${stepId}: human-contact tool effects must declare a channel.`);
     }
-    assertWorkAllowed({ channel, stepId });
+    assertWorkAllowed({ policy, channel });
   }
 };

@@ -64,7 +64,6 @@ const coerceLifecycle = (raw: unknown): LifecycleStage => {
 /** Map classifier + stop intent to sequence_status (legacy polling contract). */
 export function sequenceStatusForReply(classification: string, explicitStop: boolean): string {
   if (explicitStop) return 'opted_out';
-  if (classification === 'unsubscribe') return 'opted_out';
   if (
     classification === 'booking_intent'
     || classification === 'positive_signal'
@@ -126,12 +125,12 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
   const reason = `inbound_reply:${classification}`;
 
   // Pause-first invariant: never auto-mark lost / meeting_booked from model
-  // classification before human review. Only explicit legal opt-out (unsubscribe
-  // / explicitStop) may terminate without review. Bounce stays structural.
+  // classification before human review. Only a pipeline-declared explicit
+  // opt-out may terminate without review. Bounce stays structural.
   // Proposed classification is stored for the reply queue; humans confirm terminal
   // outcomes via operator disposition.
 
-  if (explicitStop || classification === 'unsubscribe') {
+  if (explicitStop) {
     // Legal stop — required auto-suppress, still terminal.
     lifecycle_stage = transitionLifecycle(lifecycle_stage, 'lost', reason);
     account_sequence_state = 'completed';
@@ -273,12 +272,12 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
     reply_classification_latest: classification,
     // Proposed (not confirmed) classification for reply queue / human review.
     inbound_proposed_classification: (
-      explicitStop || classification === 'unsubscribe' || classification === 'bounce'
+      explicitStop || classification === 'bounce'
     )
       ? ''
       : classification,
     inbound_pending_human_review: (
-      explicitStop || classification === 'unsubscribe' || classification === 'bounce'
+      explicitStop || classification === 'bounce'
     )
       ? 0
       : 1,
@@ -315,7 +314,7 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
     payload: {
       snippet: String(input.snippet || ''),
       classification,
-      proposed_only: !(explicitStop || classification === 'unsubscribe'),
+      proposed_only: !explicitStop,
       explicit_stop: explicitStop,
       source: 'inbound_reply_handler',
       pause_first: true,

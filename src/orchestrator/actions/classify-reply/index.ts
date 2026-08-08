@@ -1,65 +1,62 @@
-import { readFileSync } from 'node:fs';
-import { ClassifyReplyResultSchema } from './schema.js';
+import { z } from 'zod';
 import { generateObjectWithTools } from '../../runtime/llm.js';
 import { renderPromptTemplate } from '../shared.js';
 
-const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
-
-const keywordFallback = (text) => {
-  const normalized = String(text || '').toLowerCase();
-  if (!normalized.trim()) return { classification: 'question', reason: 'Empty reply.' };
-  if (normalized.includes('mailer-daemon') || normalized.includes('delivery status notification') || normalized.includes('550 ') || normalized.includes('undeliverable')) {
-    return { classification: 'bounce', reason: 'Contains delivery-failure signals.' };
-  }
-  if (normalized.includes('unsubscribe') || normalized.includes('remove me') || normalized.includes('do not contact') || normalized.includes(' stop ')) {
-    return { classification: 'unsubscribe', reason: 'Contains explicit unsubscribe intent.' };
-  }
-  if (normalized.includes('not interested') || normalized.includes('no thanks') || normalized.includes('never')) {
-    return { classification: 'hard_no', reason: 'Contains negative intent.' };
-  }
-  if (normalized.includes('out of office') || normalized.includes('ooo')) {
-    return { classification: 'out_of_office', reason: 'Contains OOO language.' };
-  }
-  if (normalized.includes('auto-reply') || normalized.includes('automatic reply') || normalized.includes('automated message')) {
-    return { classification: 'out_of_office', reason: 'Contains autoresponder language.' };
-  }
-  if (normalized.includes('?')) {
-    return { classification: 'question', reason: 'Contains explicit question.' };
-  }
-  if (normalized.includes('too expensive') || normalized.includes('already use') || normalized.includes('not now')) {
-    return { classification: 'objection', reason: 'Contains objection language.' };
-  }
-  if (normalized.includes('interested') || normalized.includes('call me') || normalized.includes('let\'s talk') || normalized.includes('book')) {
-    return { classification: 'booking_intent', reason: 'Contains booking intent.' };
-  }
-  return { classification: 'positive_signal', reason: 'No strong intent cues found.' };
+type ReplyClassifier = {
+  model?: unknown;
+  prompt?: unknown;
+  output?: {
+    classifications?: unknown;
+    opt_out_classifications?: unknown;
+  };
 };
 
-export const classifyReplyAction = async ({ replyText, model = '', aiConfig = {} }) => {
-  const prompt = renderPromptTemplate({ template: promptTemplate, vars: { reply_text: String(replyText || '') } });
+const asClassifications = (classifier: ReplyClassifier): [string, ...string[]] => {
+  const values = Array.isArray(classifier?.output?.classifications)
+    ? classifier.output.classifications.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  const [first, ...rest] = values;
+  if (first) return [first, ...rest];
+  throw new Error('reply_check.classifier.output.classifications must declare at least one classification.');
+};
 
-  try {
-    const result = await generateObjectWithTools({
-      task: 'classify-reply',
-      model,
-      role: 'evaluation',
-      aiConfig,
-      schema: ClassifyReplyResultSchema,
-      prompt,
-      toolSpec: {},
-      maxSteps: 2,
-    });
+export const classifyReplyAction = async ({
+  replyText,
+  classifier,
+  aiConfig = {},
+  generate = generateObjectWithTools,
+}: {
+  replyText: unknown;
+  classifier?: ReplyClassifier;
+  aiConfig?: Record<string, unknown>;
+  generate?: typeof generateObjectWithTools;
+}) => {
+  const configuredClassifier = classifier || {};
+  const model = String(configuredClassifier.model || '').trim();
+  const template = String(configuredClassifier.prompt || '').trim();
+  if (!model) throw new Error('reply_check.classifier.model is required for inbound reply classification.');
+  if (!template.includes('{{reply_text}}')) throw new Error('reply_check.classifier.prompt must include {{reply_text}}.');
+  const schema = z.object({
+    classification: z.enum(asClassifications(configuredClassifier)),
+    reason: z.string().nullable().default(''),
+  });
+  const prompt = renderPromptTemplate({ template, vars: { reply_text: String(replyText || '') } });
 
-    return {
-      ...ClassifyReplyResultSchema.parse(result.object),
-      usage: result.usage,
-      model: result.model,
-      provider: result.provider,
-    };
-  } catch {
-    return {
-      ...keywordFallback(replyText),
-      usage: null,
-    };
-  }
+  const result = await generate({
+    task: 'classify-reply',
+    model,
+    role: 'evaluation',
+    aiConfig,
+    schema,
+    prompt,
+    toolSpec: {},
+    maxSteps: 2,
+  });
+
+  return {
+    ...schema.parse(result.object),
+    usage: result.usage,
+    model: result.model,
+    provider: result.provider,
+  };
 };

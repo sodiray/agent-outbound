@@ -90,10 +90,11 @@ export function buildContactPlan(input: {
     excluded_contact_ids: excluded,
     mail_allocated: false,
     mail_treatment: input.mail_treatment || 'none',
-    per_contact_action_allowance: contactPolicy.per_contact_allowances[input.treatment_tier] ?? 0,
+    per_contact_action_allowance: contactPolicy.per_contact_allowances[input.treatment_tier] ?? Number.MAX_SAFE_INTEGER,
     campaign_max_age_days:
       contactPolicy.campaign.max_age_business_days[input.treatment_tier]
-      ?? contactPolicy.campaign.max_age_business_days_unknown_tier,
+      ?? contactPolicy.campaign.max_age_business_days_unknown_tier
+      ?? Number.MAX_SAFE_INTEGER,
     // First build stamps campaign start so age enforcement has a real origin.
     started_at: new Date().toISOString(),
     selection_rule_version: CONTACT_CAMPAIGN_RULE_VERSION,

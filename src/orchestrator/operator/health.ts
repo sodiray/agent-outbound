@@ -10,7 +10,6 @@ import {
   type SequenceState,
 } from '../policy/lifecycle.js';
 import { parseAccountCampaignFromRecord } from '../policy/contact-campaign.js';
-import { OUTBOUND_ACTION_TYPES } from '../policy/sequence-outbound.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
 import { hydrateActiveContactOntoRecord } from '../policy/load-contacts.js';
 import { evaluateSequenceReachability } from '../policy/sequence-reachability.js';
@@ -98,7 +97,6 @@ export function runHealthChecks(input: {
     cost_events_without_ledger: 0,
     false_pipeline_health: 0,
     sourced_review_pileup: 0,
-    tier_d_with_outbound_next_action: 0,
     in_play_disqualified_contradiction: 0,
     active_without_reachable_contact: 0,
   };
@@ -334,42 +332,6 @@ export function runHealthChecks(input: {
     }
   }
 
-  // tier_d_with_outbound_next_action: Tier D (recycle/monitor) must not hold outbound next_action.
-  if (tableHasColumn(input.db, 'records', 'treatment_tier')
-    && tableHasColumn(input.db, 'records', 'next_action_json')) {
-    const tierDRows = safeAll(
-      input.db,
-      `SELECT _row_id, business_name, treatment_tier, next_action_json
-       FROM records
-       WHERE upper(COALESCE(treatment_tier, '')) = 'D'
-         AND COALESCE(next_action_json, '') != ''
-         AND COALESCE(disqualified_at, '') = ''
-       ORDER BY updated_at DESC
-       LIMIT ?`,
-      [Math.min(limit, 100)],
-    );
-    for (const r of tierDRows) {
-      let actionType = '';
-      try {
-        const na = typeof r.next_action_json === 'string'
-          ? JSON.parse(r.next_action_json)
-          : r.next_action_json;
-        actionType = String(na?.action_type || '').trim().toLowerCase();
-      } catch {
-        const m = String(r.next_action_json || '').match(/"action_type"\s*:\s*"([^"]+)"/i);
-        actionType = m ? m[1].toLowerCase() : '';
-      }
-      if (!actionType || !OUTBOUND_ACTION_TYPES.has(actionType)) continue;
-      counts.tier_d_with_outbound_next_action += 1;
-      issues.push({
-        code: 'tier_d_with_outbound_next_action',
-        severity: 'error',
-        record_id: String(r._row_id || ''),
-        detail: `treatment_tier=D with outbound next_action=${actionType} (${r.business_name || ''})`,
-      });
-    }
-  }
-
   // in_play + disqualified contradiction: disqualified_at set (or lifecycle disqualified)
   // while still treated as active/in-play sequence.
   {
@@ -521,28 +483,6 @@ export function runHealthChecks(input: {
       } catch {
         /* ignore */
       }
-    }
-
-    const na = String(nextRaw || '').toLowerCase();
-    if (na.includes('visit') || na.includes('field_visit') || na.includes('door')) {
-      counts.visit_path += 1;
-      issues.push({
-        code: 'legacy_visit_path',
-        severity: 'error',
-        record_id: rid,
-        detail: 'next_action references visit/door work',
-      });
-    }
-
-    const tier = String(row.treatment_tier || '');
-    if (tier && !['A', 'B', 'C', 'D', 'enrichment_hold'].includes(tier)) {
-      counts.impossible_treatment += 1;
-      issues.push({
-        code: 'impossible_treatment_tier',
-        severity: 'error',
-        record_id: rid,
-        detail: `Unknown treatment_tier=${tier}`,
-      });
     }
 
     // Duplicate active contact target check via campaign plan.

@@ -3,10 +3,12 @@
  */
 
 import { actionConfidenceAllows, type EvidenceConfidenceProfile } from './scoring.js';
-import { assertWorkAllowed } from './forbidden-channels.js';
+import { assertWorkAllowed } from './pipeline-prohibitions.js';
 import {
   DEFAULT_SCORE_ACTION_CONFIDENCE,
   type ActionConfidenceConfigInput,
+  type ContactPolicyConfigInput,
+  resolveContactPolicy,
 } from '../../schemas/config.js';
 
 export type ReadinessInput = {
@@ -20,33 +22,27 @@ export type ReadinessInput = {
    * never invent mail permission from address reachability alone.
    */
   mailTreatment?: string | null;
-  channels: {
-    email?: { ready: boolean; confidence?: number };
-    phone?: { ready: boolean; confidence?: number };
-    linkedin?: { ready: boolean; confidence?: number };
-    mail?: { ready: boolean; confidence?: number };
-  };
+  channels: Record<string, { ready: boolean; confidence?: number }>;
   contentReady?: boolean;
   withinBudget?: boolean;
   collision?: boolean;
   hasNextAction?: boolean;
   confidenceProfile?: EvidenceConfidenceProfile;
   actionConfidence?: ActionConfidenceConfigInput;
-  /**
-   * Named buyer for Tier A / GT readiness — never invent confirmed status.
-   * When treatmentTier is A, status confirmed|likely + non-empty name required.
-   */
+  policy?: {
+    prohibited_channels?: unknown;
+    prohibited_task_types?: unknown;
+  };
+  contactPolicy?: ContactPolicyConfigInput;
+  /** Named buyer evidence; a pipeline may require it for an opaque tier. */
   namedBuyerStatus?: string | null;
   namedBuyerName?: string | null;
-  /**
-   * Optional affiliation fields. If status is unresolved → hold.
-   * High tiers (A) also fail closed when affiliation/role missing.
-   */
+  /** Optional affiliation fields. An unresolved affiliation is always held. */
   buyerAffiliationStatus?: string | null;
   buyingCenterRole?: string | null;
   proposedAction?: {
     kind?: string;
-    channel?: 'email' | 'phone' | 'linkedin' | 'mail';
+    channel?: string;
     taskType?: string;
     stepId?: string;
   };
@@ -66,6 +62,10 @@ export type ReadinessResult = {
   warnings: string[];
   permitted_channels: string[];
 };
+
+const isConfidenceAction = (value: string): value is 'email' | 'phone' | 'linkedin' | 'mail' => (
+  ['email', 'phone', 'linkedin', 'mail'].includes(value)
+);
 
 export type ReadinessChannelPermission = {
   /** A valid persisted channel set is available and authoritative. */
@@ -131,11 +131,6 @@ export function evaluateOutboundReadiness(input: ReadinessInput): ReadinessResul
     blockers.push(`identity_confidence_below_${actionConfidence.identity}`);
   }
   if (input.materialContradiction) blockers.push('material_contradiction');
-  if (input.treatmentTier === 'enrichment_hold') blockers.push('enrichment_hold');
-  if (input.treatmentTier === 'D' && input.proposedAction?.channel) {
-    // Tier D: no proactive cold outreach
-    blockers.push('tier_d_no_proactive_outreach');
-  }
   if (input.withinBudget === false) blockers.push('budget_exceeded');
   if (input.collision) blockers.push('channel_or_contact_collision');
   // Fail closed: missing next_action must not readiness-pass.
@@ -161,30 +156,34 @@ export function evaluateOutboundReadiness(input: ReadinessInput): ReadinessResul
     blockers.push('buyer_affiliation_unresolved');
   }
 
-  if (input.treatmentTier === 'A') {
+  const tierRule = resolveContactPolicy(input.contactPolicy).tiers[input.treatmentTier] || {};
+  if (tierRule.requires_named_buyer === true) {
     if (!buyerStatus) blockers.push('named_buyer_status_missing');
     else if (!['confirmed', 'likely'].includes(buyerStatus)) {
       blockers.push('named_buyer_not_confirmed');
     }
     if (!buyerName) blockers.push('named_buyer_name_missing');
-    // High-tier fail closed: affiliation + buying-center role required.
+  }
+  if (tierRule.requires_buyer_affiliation === true) {
     if (!affStatus) blockers.push('buyer_affiliation_status_missing');
     else if (!affUnresolved.has(affStatus) && !['confirmed', 'likely'].includes(affStatus)) {
       blockers.push('buyer_affiliation_not_confirmed');
     }
+  }
+  if (tierRule.requires_buying_center_role === true) {
     if (!buyingRole) blockers.push('buying_center_role_missing');
   }
 
   if (input.proposedAction) {
     try {
       assertWorkAllowed({
+        policy: input.policy,
         kind: input.proposedAction.kind,
         channel: input.proposedAction.channel,
         taskType: input.proposedAction.taskType,
-        stepId: input.proposedAction.stepId,
       });
-    } catch (e) {
-      blockers.push(`forbidden_work:${(e as Error).message}`);
+    } catch (error) {
+      blockers.push(`prohibited_work:${String((error as Error).message || error)}`);
     }
   }
 
@@ -204,7 +203,9 @@ export function evaluateOutboundReadiness(input: ReadinessInput): ReadinessResul
 
   const permitted_channels: string[] = [];
   for (const [ch, state] of Object.entries(channels)) {
-    if (state?.ready) permitted_channels.push(ch);
+    if (state?.ready && (!tierRule.permitted_channels || tierRule.permitted_channels.includes(ch))) {
+      permitted_channels.push(ch);
+    }
   }
 
   // Baseline: no channel ready=true with confidence → fail closed even without proposedAction.
@@ -229,23 +230,23 @@ export function evaluateOutboundReadiness(input: ReadinessInput): ReadinessResul
     blockers.push('mail_not_ready');
   }
 
+  if (
+    input.proposedAction?.channel
+    && tierRule.permitted_channels
+    && !tierRule.permitted_channels.includes(input.proposedAction.channel)
+  ) {
+    blockers.push('tier_channel_not_permitted');
+  }
+
   // Fail closed: undefined/null content must not readiness-pass.
   if (input.contentReady !== true) blockers.push('content_not_ready');
-  if (input.confidenceProfile && input.proposedAction?.channel) {
+  if (input.confidenceProfile && input.proposedAction?.channel && isConfidenceAction(input.proposedAction.channel)) {
     const gate = actionConfidenceAllows({
       action: input.proposedAction.channel,
       profile: input.confidenceProfile,
       config: input.actionConfidence,
     });
     if (!gate.allowed) blockers.push(...gate.failing.map((f) => `confidence:${f}`));
-  }
-
-  // Tier C: no proactive cold calls or default mail
-  if (input.treatmentTier === 'C' && input.proposedAction?.channel === 'phone') {
-    blockers.push('tier_c_no_proactive_cold_calls');
-  }
-  if (input.treatmentTier === 'C' && input.proposedAction?.channel === 'mail') {
-    blockers.push('tier_c_no_default_mail');
   }
 
   return {

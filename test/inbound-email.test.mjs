@@ -54,6 +54,19 @@ const withClock = async (value, run) => {
   }
 };
 
+const replyClassifier = {
+  model: 'test/inbound-classifier',
+  prompt: 'Classify this reply: {{reply_text}}',
+  output: {
+    classifications: ['needs_review'],
+    opt_out_classifications: [],
+  },
+};
+
+const classifyForReview = async () => ({
+  object: { classification: 'needs_review', reason: 'Fixture classifier.' },
+});
+
 test('inbound correlation matches In-Reply-To and References headers', async () => {
   const { db } = createDb();
   try {
@@ -114,6 +127,8 @@ test('matched reply writes the injected receipt time as a record projection and 
       mailboxId: 'mailbox-a',
       uid: 10,
       raw: fixture('inbound-reply-in-reply-to.eml'),
+      classifier: replyClassifier,
+      generate: classifyForReview,
     }));
     const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('reply-evidence');
     const event = db.prepare(`
@@ -123,21 +138,20 @@ test('matched reply writes the injected receipt time as a record projection and 
     `).get('reply-evidence');
     const inbound = db.prepare('SELECT * FROM inbound_messages WHERE mailbox_id = ? AND imap_uid = ?').get('mailbox-a', 10);
     assert.equal(record.email_last_reply_at, '2026-08-07T22:15:00.000Z');
-    assert.equal(record.email_reply_classification, 'reply');
-    assert.equal(record.reply_classification_latest, 'reply');
+    assert.equal(record.email_reply_classification, 'needs_review');
+    assert.equal(record.reply_classification_latest, 'needs_review');
     assert.equal(event.contact_id, 'contact-alex');
     assert.equal(event.provider_message_id, 'reply-1@example.com');
-    assert.equal(event.disposition, 'reply');
+    assert.equal(event.disposition, 'needs_review');
     assert.equal(event.occurred_at, '2026-08-07T22:15:00.000Z');
     assert.deepEqual(JSON.parse(event.payload_json), {
-      direction: 'inbound',
-      sender_email: 'alex@example.com',
-      recipient_email: '',
-      subject: 'Re: Hello',
-      correlation_via: 'headers',
-      correlation_message_ids: ['outbound-1@example.com'],
-      classification: 'reply',
-      bounce_type: '',
+      snippet: 'Thanks, please tell me more.',
+      classification: 'needs_review',
+      proposed_only: true,
+      explicit_stop: false,
+      source: 'inbound_reply_handler',
+      pause_first: true,
+      classifier_reason: 'Fixture classifier.',
     });
     assert.equal(inbound.contact_id, 'contact-alex');
     assert.equal(inbound.received_at, '2026-08-07T22:15:00.000Z');
@@ -205,12 +219,16 @@ test('reprocessing an IMAP UID is idempotent and emits one interruption', async 
       mailboxId: 'mailbox-a',
       uid: 9,
       raw: fixture('inbound-reply-in-reply-to.eml'),
+      classifier: replyClassifier,
+      generate: classifyForReview,
     });
     const second = await processInboundEmail({
       db,
       mailboxId: 'mailbox-a',
       uid: 9,
       raw: fixture('inbound-reply-in-reply-to.eml'),
+      classifier: replyClassifier,
+      generate: classifyForReview,
     });
     const events = db.prepare(`
       SELECT COUNT(*) AS count FROM channel_events

@@ -46,7 +46,15 @@ const BOISE_BUSINESS_MS = Date.parse('2026-08-05T16:00:00.000Z');
 const BOISE_EVENING_MS = Date.parse('2026-08-05T02:00:00.000Z');
 /** Saturday 2026-08-08 16:00 UTC — weekend. */
 const BOISE_WEEKEND_MS = Date.parse('2026-08-08T16:00:00.000Z');
-const BOISE_PHONE_POLICY = { timeZone: 'America/Boise' };
+const BOISE_PHONE_POLICY = {
+  timeZone: 'America/Boise',
+  startHour: 9,
+  endHour: 17,
+  weekdaysOnly: true,
+  maxAttemptsByTier: { A: 4, B: 3, C: 0, D: 0 },
+  defaultMaxAttempts: 3,
+  callbackDelayHours: 24,
+};
 
 const phoneNextAction = JSON.stringify({
   action_id: 'na_call',
@@ -141,15 +149,16 @@ function insertPhoneRecord(db, row) {
 
 // ── Pure policy unit tests ──────────────────────────────────────────────────
 
-test('phone-attempt: window defaults and tier ceilings', () => {
-  assert.equal(DEFAULT_ATTEMPT_WINDOW_START_HOUR, 9);
-  assert.equal(DEFAULT_ATTEMPT_WINDOW_END_HOUR, 17);
-  assert.equal(DEFAULT_MAX_PHONE_ATTEMPTS, 3);
-  assert.equal(maxPhoneAttemptsForTier('A'), TIER_MAX_PHONE_ATTEMPTS.A);
-  assert.equal(maxPhoneAttemptsForTier('B'), 3);
-  assert.equal(maxPhoneAttemptsForTier('C'), 0);
-  assert.equal(maxPhoneAttemptsForTier('Z'), DEFAULT_MAX_PHONE_ATTEMPTS);
-  assert.equal(maxPhoneAttemptsForTier('A', 2), 2);
+test('phone-attempt: no default window or tier ceiling; declared policy controls them', () => {
+  assert.equal(DEFAULT_ATTEMPT_WINDOW_START_HOUR, 0);
+  assert.equal(DEFAULT_ATTEMPT_WINDOW_END_HOUR, 24);
+  assert.equal(DEFAULT_MAX_PHONE_ATTEMPTS, Number.MAX_SAFE_INTEGER);
+  assert.deepEqual(TIER_MAX_PHONE_ATTEMPTS, {});
+  assert.equal(maxPhoneAttemptsForTier('A', undefined, BOISE_PHONE_POLICY), 4);
+  assert.equal(maxPhoneAttemptsForTier('B', undefined, BOISE_PHONE_POLICY), 3);
+  assert.equal(maxPhoneAttemptsForTier('C', undefined, BOISE_PHONE_POLICY), 0);
+  assert.equal(maxPhoneAttemptsForTier('Z', undefined, BOISE_PHONE_POLICY), 3);
+  assert.equal(maxPhoneAttemptsForTier('A', 2, BOISE_PHONE_POLICY), 2);
 });
 
 test('phone-attempt: attempt window Boise business hours + weekdays', () => {
@@ -171,7 +180,7 @@ test('phone-attempt: attempt window Boise business hours + weekdays', () => {
 test('phone-attempt: configured timezone controls wall-clock day and hours', () => {
   const instant = '2026-08-05T14:00:00.000Z'; // 08:00 Boise, 10:00 New York.
   assert.equal(isWithinPhoneAttemptWindow(instant, BOISE_PHONE_POLICY), false);
-  assert.equal(isWithinPhoneAttemptWindow(instant, { timeZone: 'America/New_York' }), true);
+  assert.equal(isWithinPhoneAttemptWindow(instant, { ...BOISE_PHONE_POLICY, timeZone: 'America/New_York' }), true);
   assert.equal(toZonedIsoDate('2026-08-05T05:00:00.000Z', 'America/Boise'), '2026-08-04');
   assert.equal(toZonedIsoDate('2026-08-05T05:00:00.000Z', 'America/New_York'), '2026-08-05');
 });
@@ -195,18 +204,18 @@ test('phone-attempt: pipeline timezone accepts IANA zones and phone overrides op
 });
 
 test('phone-attempt: ceiling reached', () => {
-  assert.equal(isPhoneAttemptCeilingReached(baseRecord({ call_attempt_count: 0 })), false);
-  assert.equal(isPhoneAttemptCeilingReached(baseRecord({ call_attempt_count: 3 })), true);
+  assert.equal(isPhoneAttemptCeilingReached(baseRecord({ call_attempt_count: 0 }), BOISE_PHONE_POLICY), false);
+  assert.equal(isPhoneAttemptCeilingReached(baseRecord({ call_attempt_count: 3 }), BOISE_PHONE_POLICY), true);
   assert.equal(
-    isPhoneAttemptCeilingReached(baseRecord({ treatment_tier: 'A', call_attempt_count: 3 })),
+    isPhoneAttemptCeilingReached(baseRecord({ treatment_tier: 'A', call_attempt_count: 3 }), BOISE_PHONE_POLICY),
     false,
   );
   assert.equal(
-    isPhoneAttemptCeilingReached(baseRecord({ treatment_tier: 'A', call_attempt_count: 4 })),
+    isPhoneAttemptCeilingReached(baseRecord({ treatment_tier: 'A', call_attempt_count: 4 }), BOISE_PHONE_POLICY),
     true,
   );
   assert.equal(
-    isPhoneAttemptCeilingReached(baseRecord({ treatment_tier: 'C', call_attempt_count: 0 })),
+    isPhoneAttemptCeilingReached(baseRecord({ treatment_tier: 'C', call_attempt_count: 0 }), BOISE_PHONE_POLICY),
     true,
   );
 });
@@ -266,6 +275,7 @@ test('phone-attempt: no_answer under ceiling re-opens; at ceiling → capacity_u
   const under = applyPhoneDisposition({
     record: baseRecord({ call_attempt_count: 1, treatment_tier: 'B' }),
     disposition: 'no_answer',
+    config: BOISE_PHONE_POLICY,
   });
   assert.equal(under.call_claim_status, 'open');
   assert.equal(under.capacity_unserved, false);
@@ -275,6 +285,7 @@ test('phone-attempt: no_answer under ceiling re-opens; at ceiling → capacity_u
   const atCeiling = applyPhoneDisposition({
     record: baseRecord({ call_attempt_count: 2, treatment_tier: 'B' }),
     disposition: 'no_answer',
+    config: BOISE_PHONE_POLICY,
   });
   assert.equal(atCeiling.call_attempt_count, 3);
   assert.equal(atCeiling.capacity_unserved, true);

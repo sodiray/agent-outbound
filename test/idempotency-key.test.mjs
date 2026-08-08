@@ -218,7 +218,8 @@ sequences:
         day: 3
 policy:
   version: tv-pipeline-v1
-  forbidden_channels: [send_sms, visit, field_visit]
+  prohibited_channels: [sms]
+  prohibited_task_types: [visit, field_visit]
   enforce_readiness: false
 channels:
   email:

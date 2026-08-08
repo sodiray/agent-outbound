@@ -1,6 +1,6 @@
 /**
  * Campaign process enforcement: age, per-contact allowances, quiet period,
- * call capacity ranking (Tier A-first / B spillover), annual limits, exhaustion.
+ * call capacity ranking, annual limits, exhaustion.
  */
 
 import {
@@ -59,13 +59,11 @@ export function checkCampaignAge(input: {
   const blockers: string[] = [];
   const warnings: string[] = [];
   const asOf = input.asOf || nowIso();
-  const tier = input.treatment_tier || 'D';
+  const tier = input.treatment_tier || '';
   const campaignPolicy = resolveContactPolicy(input.contactPolicy).campaign;
   const maxDays = campaignPolicy.max_age_business_days[tier]
     ?? campaignPolicy.max_age_business_days_unknown_tier;
-  if (maxDays <= 0) {
-    return { allowed: tier === 'D' || tier === 'enrichment_hold', blockers: tier === 'D' ? ['tier_d_no_campaign_age'] : [], warnings, process_version: CAMPAIGN_PROCESS_VERSION };
-  }
+  if (maxDays === undefined) return { allowed: true, blockers, warnings, process_version: CAMPAIGN_PROCESS_VERSION };
   const started = input.campaign.started_at || asOf;
   const age = businessDaysBetween(String(started), asOf);
   if (age > maxDays) {
@@ -80,8 +78,11 @@ export function checkContactAllowance(input: {
   contactPolicy?: ContactPolicyConfigInput;
 }): CampaignProcessCheck {
   const blockers: string[] = [];
-  const tier = input.treatment_tier || 'D';
-  const max = resolveContactPolicy(input.contactPolicy).per_contact_allowances[tier] ?? 0;
+  const tier = input.treatment_tier || '';
+  const max = resolveContactPolicy(input.contactPolicy).per_contact_allowances[tier];
+  if (max === undefined) {
+    return { allowed: true, blockers, warnings: [], process_version: CAMPAIGN_PROCESS_VERSION };
+  }
   if (input.automated_actions_used >= max) {
     blockers.push(`per_contact_allowance_exceeded:${input.automated_actions_used}>=${max}`);
   }
@@ -102,6 +103,9 @@ export function checkQuietPeriod(input: {
   const blockers: string[] = [];
   const quiet = input.quiet_days
     ?? resolveContactPolicy(input.contactPolicy).campaign.quiet_period_business_days;
+  if (quiet === undefined) {
+    return { allowed: true, blockers, warnings: [], process_version: CAMPAIGN_PROCESS_VERSION };
+  }
   if (!input.last_rotation_at) {
     return { allowed: true, blockers, warnings: [], process_version: CAMPAIGN_PROCESS_VERSION };
   }
@@ -119,6 +123,9 @@ export function checkAnnualCampaignLimit(input: {
 }): CampaignProcessCheck {
   const blockers: string[] = [];
   const annualCampaignLimit = resolveContactPolicy(input.contactPolicy).campaign.annual_campaign_limit;
+  if (annualCampaignLimit === undefined) {
+    return { allowed: true, blockers, warnings: [], process_version: CAMPAIGN_PROCESS_VERSION };
+  }
   if (input.campaigns_in_last_12_months >= annualCampaignLimit) {
     blockers.push(`annual_campaign_limit:${input.campaigns_in_last_12_months}>=${annualCampaignLimit}`);
   }
@@ -126,8 +133,8 @@ export function checkAnnualCampaignLimit(input: {
 }
 
 /**
- * Rank call candidates: Tier A first, then Tier B spillover.
- * Higher fit_score within tier ranks higher; capacity truncates.
+ * Rank call candidates by pipeline-produced priority, then fit score. The
+ * engine does not assign meaning to tier labels.
  */
 export function rankCallCapacity(input: {
   candidates: Array<{
@@ -140,18 +147,17 @@ export function rankCallCapacity(input: {
   capacity: number;
 }): Array<{ record_id: string; treatment_tier: string; rank: number; spillover: boolean }> {
   const capacity = Math.max(0, Number(input.capacity) || 0);
-  const a = input.candidates
-    .filter((c) => c.treatment_tier === 'A')
-    .sort((x, y) => (y.fit_score || 0) - (x.fit_score || 0) || (x.priority_rank || 999) - (y.priority_rank || 999));
-  const b = input.candidates
-    .filter((c) => c.treatment_tier === 'B')
-    .sort((x, y) => (y.fit_score || 0) - (x.fit_score || 0) || (x.priority_rank || 999) - (y.priority_rank || 999));
-  const ordered = [...a.map((c) => ({ ...c, spillover: false })), ...b.map((c) => ({ ...c, spillover: true }))];
+  const ordered = [...input.candidates]
+    .sort((left, right) => (
+      (left.priority_rank || Number.MAX_SAFE_INTEGER) - (right.priority_rank || Number.MAX_SAFE_INTEGER)
+      || (right.fit_score || 0) - (left.fit_score || 0)
+      || left.record_id.localeCompare(right.record_id)
+    ));
   return ordered.slice(0, capacity).map((c, i) => ({
     record_id: c.record_id,
     treatment_tier: c.treatment_tier,
     rank: i + 1,
-    spillover: c.spillover,
+    spillover: false,
   }));
 }
 
@@ -225,10 +231,11 @@ export function evaluateCampaignExhaustion(input: {
   channel_needs_repair?: boolean;
   contactPolicy?: ContactPolicyConfigInput;
 }): ExhaustionDecision {
-  const tier = input.treatment_tier || 'D';
+  const tier = input.treatment_tier || '';
   const campaignPolicy = resolveContactPolicy(input.contactPolicy).campaign;
   const wait = campaignPolicy.recycle_wait_days[tier]
-    ?? campaignPolicy.recycle_wait_days_unknown_tier;
+    ?? campaignPolicy.recycle_wait_days_unknown_tier
+    ?? 0;
   if (input.channel_needs_repair) {
     return {
       exhausted: false,
@@ -283,9 +290,10 @@ export function evaluateReentry(input: {
   const reasons: string[] = [];
   if (input.suppressed) reasons.push('still_suppressed');
   if (input.still_eligible === false) reasons.push('no_longer_eligible');
+  const annualCampaignLimit = resolveContactPolicy(input.contactPolicy).campaign.annual_campaign_limit;
   if (
-    (input.campaigns_in_last_12_months ?? 0)
-    >= resolveContactPolicy(input.contactPolicy).campaign.annual_campaign_limit
+    annualCampaignLimit !== undefined
+    && (input.campaigns_in_last_12_months ?? 0) >= annualCampaignLimit
   ) {
     reasons.push('annual_campaign_limit');
   }

@@ -7,6 +7,7 @@ import {
 } from '../orchestrator/lib/working-days.js';
 import { validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib/pipeline-graph.js';
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
+import { findProhibitedSteps } from '../orchestrator/policy/pipeline-prohibitions.js';
 
 export const DEFAULT_SCORE_MIN_COVERAGE = 0.5;
 export const DEFAULT_SCORE_TREATMENT_BANDS = {
@@ -88,80 +89,54 @@ export const DEFAULT_SCORE_ENRICHMENT_BUDGET = {
 } as const;
 
 export const DEFAULT_CONTACT_POLICY = {
-  per_contact_allowances: {
-    A: 3,
-    B: 2,
-    C: 1,
-    D: 0,
-    enrichment_hold: 0,
-  },
+  per_contact_allowances: {},
   campaign: {
-    max_age_business_days: {
-      A: 40,
-      B: 30,
-      C: 20,
-      D: 0,
-      enrichment_hold: 14,
-    },
-    max_age_business_days_unknown_tier: 30,
-    quiet_period_business_days: 3,
-    annual_campaign_limit: 2,
-    recycle_wait_days: {
-      A: 90,
-      B: 60,
-      C: 45,
-      D: 30,
-      enrichment_hold: 14,
-    },
-    recycle_wait_days_unknown_tier: 60,
+    max_age_business_days: {},
+    max_age_business_days_unknown_tier: undefined,
+    quiet_period_business_days: undefined,
+    annual_campaign_limit: undefined,
+    recycle_wait_days: {},
+    recycle_wait_days_unknown_tier: undefined,
   },
   phone: {
-    attempt_window: {
-      start_hour: 9,
-      end_hour: 17,
-      weekdays_only: true,
-    },
-    max_attempts: {
-      default: 3,
-      A: 4,
-      B: 3,
-      C: 0,
-      D: 0,
-      enrichment_hold: 0,
-    },
-    callback_delay_hours: 24,
+    attempt_window: {},
+    max_attempts: {},
+    callback_delay_hours: undefined,
   },
-  linkedin: {
-    invite_cooldown_hours: 24,
-  },
-  fallback_wait_days: 2,
+  linkedin: {},
+  tiers: {},
+  fallback_wait_days: undefined,
 } as const;
 
-type ContactPolicyTier = 'A' | 'B' | 'C' | 'D' | 'enrichment_hold';
-
 export type ContactPolicyConfig = {
-  per_contact_allowances: Record<ContactPolicyTier, number>;
+  per_contact_allowances: Record<string, number>;
   campaign: {
-    max_age_business_days: Record<ContactPolicyTier, number>;
-    max_age_business_days_unknown_tier: number;
-    quiet_period_business_days: number;
-    annual_campaign_limit: number;
-    recycle_wait_days: Record<ContactPolicyTier, number>;
-    recycle_wait_days_unknown_tier: number;
+    max_age_business_days: Record<string, number>;
+    max_age_business_days_unknown_tier?: number;
+    quiet_period_business_days?: number;
+    annual_campaign_limit?: number;
+    recycle_wait_days: Record<string, number>;
+    recycle_wait_days_unknown_tier?: number;
   };
   phone: {
     attempt_window: {
-      start_hour: number;
-      end_hour: number;
-      weekdays_only: boolean;
+      start_hour?: number;
+      end_hour?: number;
+      weekdays_only?: boolean;
     };
-    max_attempts: Record<'default' | ContactPolicyTier, number>;
-    callback_delay_hours: number;
+    max_attempts: Record<string, number>;
+    callback_delay_hours?: number;
   };
   linkedin: {
-    invite_cooldown_hours: number;
+    invite_cooldown_hours?: number;
   };
-  fallback_wait_days: number;
+  tiers: Record<string, {
+    permitted_channels?: string[];
+    requires_named_buyer?: boolean;
+    requires_buyer_affiliation?: boolean;
+    requires_buying_center_role?: boolean;
+  }>;
+  fallback_wait_days?: number;
 };
 
 export type ContactPolicyConfigInput = {
@@ -180,6 +155,7 @@ export type ContactPolicyConfigInput = {
     callback_delay_hours?: number;
   };
   linkedin?: Partial<ContactPolicyConfig['linkedin']>;
+  tiers?: ContactPolicyConfig['tiers'];
   fallback_wait_days?: number;
 };
 
@@ -195,22 +171,14 @@ export const resolveContactPolicy = (
       ...DEFAULT_CONTACT_POLICY.campaign.max_age_business_days,
       ...(input?.campaign?.max_age_business_days || {}),
     },
-    max_age_business_days_unknown_tier:
-      input?.campaign?.max_age_business_days_unknown_tier
-      ?? DEFAULT_CONTACT_POLICY.campaign.max_age_business_days_unknown_tier,
-    quiet_period_business_days:
-      input?.campaign?.quiet_period_business_days
-      ?? DEFAULT_CONTACT_POLICY.campaign.quiet_period_business_days,
-    annual_campaign_limit:
-      input?.campaign?.annual_campaign_limit
-      ?? DEFAULT_CONTACT_POLICY.campaign.annual_campaign_limit,
+    max_age_business_days_unknown_tier: input?.campaign?.max_age_business_days_unknown_tier,
+    quiet_period_business_days: input?.campaign?.quiet_period_business_days,
+    annual_campaign_limit: input?.campaign?.annual_campaign_limit,
     recycle_wait_days: {
       ...DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days,
       ...(input?.campaign?.recycle_wait_days || {}),
     },
-    recycle_wait_days_unknown_tier:
-      input?.campaign?.recycle_wait_days_unknown_tier
-      ?? DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days_unknown_tier,
+    recycle_wait_days_unknown_tier: input?.campaign?.recycle_wait_days_unknown_tier,
   },
   phone: {
     attempt_window: {
@@ -221,15 +189,14 @@ export const resolveContactPolicy = (
       ...DEFAULT_CONTACT_POLICY.phone.max_attempts,
       ...(input?.phone?.max_attempts || {}),
     },
-    callback_delay_hours:
-      input?.phone?.callback_delay_hours
-      ?? DEFAULT_CONTACT_POLICY.phone.callback_delay_hours,
+    callback_delay_hours: input?.phone?.callback_delay_hours,
   },
   linkedin: {
     ...DEFAULT_CONTACT_POLICY.linkedin,
     ...(input?.linkedin || {}),
   },
-  fallback_wait_days: input?.fallback_wait_days ?? DEFAULT_CONTACT_POLICY.fallback_wait_days,
+  tiers: { ...(input?.tiers || {}) },
+  fallback_wait_days: input?.fallback_wait_days,
 });
 
 export type GoldenTicketConfigInput = {
@@ -525,11 +492,38 @@ const ExternalStepConfigSchema = StepConfigSchema.removeDefault().pick({
   idempotency: true,
 }).strict();
 
+const ReplyClassifierSchema = z.object({
+  model: ProviderModelSchema,
+  prompt: z.string().trim().min(1),
+  output: z.object({
+    classifications: z.array(z.string().trim().min(1)).min(1),
+    opt_out_classifications: z.array(z.string().trim().min(1)).default([]),
+  }).superRefine((output, ctx) => {
+    const declared = new Set(output.classifications);
+    for (const [index, classification] of output.opt_out_classifications.entries()) {
+      if (declared.has(classification)) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `opt_out_classifications includes undeclared classification "${classification}".`,
+        path: ['opt_out_classifications', index],
+      });
+    }
+  }),
+}).superRefine((classifier, ctx) => {
+  if (classifier.prompt.includes('{{reply_text}}')) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'Reply classifier prompt must include {{reply_text}}.',
+    path: ['prompt'],
+  });
+});
+
 const ReplyCheckConfigSchema = StepConfigSchema.removeDefault().pick({
-  model: true,
   tool: true,
   lookback_minutes: true,
   max_results: true,
+}).extend({
+  classifier: ReplyClassifierSchema,
 }).strict();
 
 const SourceMaxResultsSchema = z.coerce.number().int().min(1).max(5000).default(100);
@@ -1194,85 +1188,50 @@ const ConfidenceMinimumSchema = z.coerce.number().min(0).max(100);
 const NonNegativePolicyValueSchema = z.coerce.number().nonnegative();
 const NonNegativeWholePolicyValueSchema = z.coerce.number().int().nonnegative();
 
-const ContactPolicyTierValuesSchema = <T extends Record<ContactPolicyTier, number>>(defaults: T) => z.object({
-  A: NonNegativeWholePolicyValueSchema.default(defaults.A),
-  B: NonNegativeWholePolicyValueSchema.default(defaults.B),
-  C: NonNegativeWholePolicyValueSchema.default(defaults.C),
-  D: NonNegativeWholePolicyValueSchema.default(defaults.D),
-  enrichment_hold: NonNegativeWholePolicyValueSchema.default(defaults.enrichment_hold),
-}).default(() => ({ ...defaults }));
-
 const ContactPolicyPhoneAttemptWindowSchema = z.object({
-  start_hour: z.coerce.number().int().min(0).max(23)
-    .default(DEFAULT_CONTACT_POLICY.phone.attempt_window.start_hour),
-  end_hour: z.coerce.number().int().min(1).max(24)
-    .default(DEFAULT_CONTACT_POLICY.phone.attempt_window.end_hour),
-  weekdays_only: z.boolean().default(DEFAULT_CONTACT_POLICY.phone.attempt_window.weekdays_only),
+  start_hour: z.coerce.number().int().min(0).max(23).optional(),
+  end_hour: z.coerce.number().int().min(1).max(24).optional(),
+  weekdays_only: z.boolean().optional(),
 }).superRefine((window, ctx) => {
+  if (window.start_hour === undefined || window.end_hour === undefined) return;
   if (window.end_hour > window.start_hour) return;
   ctx.addIssue({
     code: z.ZodIssueCode.custom,
     message: 'contact_policy.phone.attempt_window.end_hour must be after start_hour.',
     path: ['end_hour'],
   });
-}).default(() => ({ ...DEFAULT_CONTACT_POLICY.phone.attempt_window }));
+}).default({});
 
-const ContactPolicyPhoneMaxAttemptsSchema = z.object({
-  default: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.default),
-  A: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.A),
-  B: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.B),
-  C: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.C),
-  D: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.phone.max_attempts.D),
-  enrichment_hold: NonNegativeWholePolicyValueSchema.default(
-    DEFAULT_CONTACT_POLICY.phone.max_attempts.enrichment_hold,
-  ),
-}).default(() => ({ ...DEFAULT_CONTACT_POLICY.phone.max_attempts }));
+const ContactPolicyPhoneMaxAttemptsSchema = z.record(NonNegativeWholePolicyValueSchema).default({});
+
+const ContactPolicyTierRuleSchema = z.object({
+  permitted_channels: z.array(z.string().trim().min(1)).optional(),
+  requires_named_buyer: z.boolean().optional(),
+  requires_buyer_affiliation: z.boolean().optional(),
+  requires_buying_center_role: z.boolean().optional(),
+}).strict();
 
 const ContactPolicySchema = z.object({
-  per_contact_allowances: ContactPolicyTierValuesSchema(DEFAULT_CONTACT_POLICY.per_contact_allowances),
+  per_contact_allowances: z.record(NonNegativeWholePolicyValueSchema).default({}),
   campaign: z.object({
-    max_age_business_days: ContactPolicyTierValuesSchema(
-      DEFAULT_CONTACT_POLICY.campaign.max_age_business_days,
-    ),
-    max_age_business_days_unknown_tier: NonNegativeWholePolicyValueSchema.default(
-      DEFAULT_CONTACT_POLICY.campaign.max_age_business_days_unknown_tier,
-    ),
-    quiet_period_business_days: NonNegativeWholePolicyValueSchema.default(
-      DEFAULT_CONTACT_POLICY.campaign.quiet_period_business_days,
-    ),
-    annual_campaign_limit: NonNegativeWholePolicyValueSchema.default(
-      DEFAULT_CONTACT_POLICY.campaign.annual_campaign_limit,
-    ),
-    recycle_wait_days: ContactPolicyTierValuesSchema(DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days),
-    recycle_wait_days_unknown_tier: NonNegativeWholePolicyValueSchema.default(
-      DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days_unknown_tier,
-    ),
-  }).default(() => ({
-    max_age_business_days: { ...DEFAULT_CONTACT_POLICY.campaign.max_age_business_days },
-    max_age_business_days_unknown_tier: DEFAULT_CONTACT_POLICY.campaign.max_age_business_days_unknown_tier,
-    quiet_period_business_days: DEFAULT_CONTACT_POLICY.campaign.quiet_period_business_days,
-    annual_campaign_limit: DEFAULT_CONTACT_POLICY.campaign.annual_campaign_limit,
-    recycle_wait_days: { ...DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days },
-    recycle_wait_days_unknown_tier: DEFAULT_CONTACT_POLICY.campaign.recycle_wait_days_unknown_tier,
-  })),
+    max_age_business_days: z.record(NonNegativeWholePolicyValueSchema).default({}),
+    max_age_business_days_unknown_tier: NonNegativeWholePolicyValueSchema.optional(),
+    quiet_period_business_days: NonNegativeWholePolicyValueSchema.optional(),
+    annual_campaign_limit: NonNegativeWholePolicyValueSchema.optional(),
+    recycle_wait_days: z.record(NonNegativeWholePolicyValueSchema).default({}),
+    recycle_wait_days_unknown_tier: NonNegativeWholePolicyValueSchema.optional(),
+  }).default({}),
   phone: z.object({
     attempt_window: ContactPolicyPhoneAttemptWindowSchema,
     max_attempts: ContactPolicyPhoneMaxAttemptsSchema,
-    callback_delay_hours: NonNegativePolicyValueSchema.default(
-      DEFAULT_CONTACT_POLICY.phone.callback_delay_hours,
-    ),
-  }).default(() => ({
-    attempt_window: { ...DEFAULT_CONTACT_POLICY.phone.attempt_window },
-    max_attempts: { ...DEFAULT_CONTACT_POLICY.phone.max_attempts },
-    callback_delay_hours: DEFAULT_CONTACT_POLICY.phone.callback_delay_hours,
-  })),
+    callback_delay_hours: NonNegativePolicyValueSchema.optional(),
+  }).default({}),
   linkedin: z.object({
-    invite_cooldown_hours: NonNegativePolicyValueSchema.default(
-      DEFAULT_CONTACT_POLICY.linkedin.invite_cooldown_hours,
-    ),
-  }).default(() => ({ ...DEFAULT_CONTACT_POLICY.linkedin })),
-  fallback_wait_days: NonNegativeWholePolicyValueSchema.default(DEFAULT_CONTACT_POLICY.fallback_wait_days),
-}).default(() => resolveContactPolicy());
+    invite_cooldown_hours: NonNegativePolicyValueSchema.optional(),
+  }).default({}),
+  tiers: z.record(ContactPolicyTierRuleSchema).default({}),
+  fallback_wait_days: NonNegativeWholePolicyValueSchema.optional(),
+}).default({});
 
 const GoldenTicketConfigSchema = z.object({
   minimums: z.object({
@@ -1780,10 +1739,11 @@ const WatchSchema = z.object({
   poll_delivery_minutes: z.coerce.number().int().min(1).default(15),
 }).partial().default({});
 
-/** Project-level outbound policy (forbidden channels, hard readiness, versions). */
+/** Project-level outbound policy (pipeline-declared prohibitions, hard readiness, versions). */
 const PolicySchema = z.object({
   version: z.string().trim().default(''),
-  forbidden_channels: z.array(z.string()).default([]),
+  prohibited_channels: z.array(z.string().trim().min(1)).default([]),
+  prohibited_task_types: z.array(z.string().trim().min(1)).default([]),
   /** When true, channel execute hard-blocks non-ready external sends (send_email, linkedin_connect). */
   enforce_readiness: z.boolean().default(false),
   fit_rule_version: z.string().trim().default(''),
@@ -1845,7 +1805,7 @@ export const ConfigSchema = z.object({
   mailboxes: MailboxesConfigSchema.optional(),
   suppression: SuppressionSchema.default({}),
   crm: CrmSchema.optional(),
-  /** Deterministic outbound policy gates (TV and similar projects). */
+  /** Deterministic outbound policy gates. */
   policy: PolicySchema,
   live_interaction_budget: LiveInteractionBudgetSchema.optional(),
   operations: OperationsSchema,
@@ -1885,11 +1845,6 @@ const coerceLegacyContactPolicy = (raw: unknown) => {
       ? undefined
       : {
         default: legacyMaxAttempts,
-        A: legacyMaxAttempts,
-        B: legacyMaxAttempts,
-        C: legacyMaxAttempts,
-        D: legacyMaxAttempts,
-        enrichment_hold: legacyMaxAttempts,
       };
 
   return {
@@ -2200,7 +2155,24 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
     };
   const graph = validatePipelineGraph(config, options);
   const router = validateRouterConfig(parsed.data);
-  const errors = [...new Set([...graph.errors, ...router.errors])];
+  const configuredSteps = [
+    ...(Array.isArray(config.pipeline) ? config.pipeline : []),
+    ...Object.values(config.sequences || {}).flatMap((sequence: any) => (
+      Array.isArray(sequence?.steps) ? sequence.steps : []
+    )),
+  ];
+  const prohibitionErrors = findProhibitedSteps(configuredSteps, config.policy)
+    .map((step) => step.reason);
+  const inboundCapable = Boolean(config.mailboxes)
+    || Object.values(config.sequences || {}).some((sequence: any) => Boolean(sequence?.reply_check));
+  const classifiers = Object.values(config.sequences || {})
+    .map((sequence: any) => sequence?.reply_check?.classifier)
+    .filter(Boolean);
+  const optOutConfigured = classifiers.length > 0;
+  const optOutErrors = inboundCapable && !optOutConfigured
+    ? ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).']
+    : [];
+  const errors = [...new Set([...graph.errors, ...router.errors, ...prohibitionErrors, ...optOutErrors])];
 
   return {
     error: errors.join('\n'),

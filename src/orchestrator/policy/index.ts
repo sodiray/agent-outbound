@@ -1,9 +1,9 @@
 /**
  * Reusable deterministic policy modules for account campaigns, scoring,
- * treatment, lifecycle, readiness, and forbidden channels.
+ * treatment, lifecycle, readiness, and pipeline-declared prohibitions.
  */
 
-export * from './forbidden-channels.js';
+export * from './pipeline-prohibitions.js';
 export * from './tool-effects.js';
 export * from './treatment.js';
 export * from './scoring.js';

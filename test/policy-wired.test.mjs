@@ -37,8 +37,10 @@ pipeline:
     outputs:
       treatment_tier:
         type: string
+        description: treatment tier
       priority_rank:
         type: number
+        description: priority rank
   - kind: pipeline
     id: tier_b
     steps:
@@ -53,7 +55,8 @@ sequences:
     steps: []
 policy:
   version: tv-pipeline-v1
-  forbidden_channels: [send_sms, visit, field_visit]
+  prohibited_channels: [sms]
+  prohibited_task_types: [visit, field_visit]
   enforce_readiness: true
 score:
   grading: graded
@@ -240,7 +243,7 @@ test('pipeline step batch rejects send_sms and visit task types', async () => {
   const smsMap = await executeStepBatch(ctx, { kind: 'send_sms', id: 'sms_x' }, 'sms_x', rows);
   const smsOut = smsMap.get('fixture_hvac_1');
   assert.equal(smsOut.errored, true);
-  assert.match(smsOut.reason, /forbidden/);
+  assert.match(smsOut.reason, /prohibits channel/i);
 
   const visitMap = await executeStepBatch(
     ctx,

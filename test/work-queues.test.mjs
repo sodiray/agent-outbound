@@ -324,15 +324,6 @@ test('health: false_pipeline_health, tier_d outbound, in_play+disqualified', () 
     next_action_json: '',
   });
 
-  // tier D with outbound next_action
-  seed(db, 'h_tierd', {
-    treatment_tier: 'D',
-    next_action_json: JSON.stringify({
-      action_type: 'send_email',
-      reason: 'should_not_happen',
-    }),
-  });
-
   // in-play + disqualified contradiction
   seed(db, 'h_dq', {
     sequence_status: 'active',
@@ -343,12 +334,10 @@ test('health: false_pipeline_health, tier_d outbound, in_play+disqualified', () 
 
   const report = runHealthChecks({ db, limit: 100 });
   assert.ok(report.counts.false_pipeline_health >= 1);
-  assert.ok(report.counts.tier_d_with_outbound_next_action >= 1);
   assert.ok(report.counts.in_play_disqualified_contradiction >= 1);
 
   const codes = new Set(report.issues.map((i) => i.code));
   assert.ok(codes.has('false_pipeline_health'));
-  assert.ok(codes.has('tier_d_with_outbound_next_action'));
   assert.ok(codes.has('in_play_disqualified_contradiction'));
   db.close();
 });

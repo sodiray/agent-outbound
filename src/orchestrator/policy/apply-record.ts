@@ -35,7 +35,7 @@ import {
   type AccountCampaign,
 } from './contact-campaign.js';
 import { classifyEligibility, evaluateOutboundReadiness } from './readiness.js';
-import { assertWorkAllowed } from './forbidden-channels.js';
+import { assertWorkAllowed } from './pipeline-prohibitions.js';
 import { isAffirmativeFlag } from './booleanish.js';
 import {
   buildIdentityResolution,
@@ -136,6 +136,10 @@ export type PolicyApplyInput = {
   postcard?: PostcardConfigInput;
   enrichmentRepair?: EnrichmentRepairConfigInput;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
+  policy?: {
+    prohibited_channels?: unknown;
+    prohibited_task_types?: unknown;
+  };
   /** Configured cadence limits that govern prospect contact frequency. */
   contactPolicy?: ContactPolicyConfigInput;
 };
@@ -788,11 +792,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
    * `reapply_policy_after_repair` is written twice and read nowhere, and no
    * code path ever produces an action_type containing `reprocess`.
    *
-   * Observed on all six Treasure Valley accounts: one was tier B, fit 66,
-   * `readiness.ready: true` with zero blockers, while its next_action still
-   * read `treatment_enrichment_hold; fit_band=below50; weak_fit` — a state the
-   * record had long left. The sequencer gates outbound on the action type, so
-   * that stale field alone prevented every send.
+   * A record can become ready while retaining an old enrichment-hold action.
+   * The sequencer gates outbound on the action type, so that stale field alone
+   * can prevent every send.
    */
   /**
    * A holding action the record has outgrown must be recomputed.
@@ -964,7 +966,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
           ?? existing.per_contact_action_allowance,
         campaign_max_age_days:
           contactPolicy.campaign.max_age_business_days[treatment.treatment_tier]
-          ?? contactPolicy.campaign.max_age_business_days_unknown_tier,
+          ?? contactPolicy.campaign.max_age_business_days_unknown_tier
+          ?? existing.campaign_max_age_days,
       };
     }
   }
@@ -1122,6 +1125,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     hasNextAction: Boolean(next_action),
     confidenceProfile,
     actionConfidence: input.actionConfidence,
+    policy: input.policy,
+    contactPolicy,
     namedBuyerStatus: buyer.status,
     namedBuyerName: buyer.name,
     buyerAffiliationStatus: buyer.affiliationStatus,
@@ -1414,7 +1419,7 @@ function proposedChannelForStep(input: {
   stepKind?: string;
   taskType?: string;
   channel?: string;
-}): 'email' | 'phone' | 'linkedin' | 'mail' | undefined {
+}): string | undefined {
   const kind = String(input.stepKind || '').toLowerCase();
   const task = String(input.taskType || '').toLowerCase();
   const channel = String(input.channel || '').toLowerCase();
@@ -1422,7 +1427,8 @@ function proposedChannelForStep(input: {
   if (kind === 'linkedin_connect' || channel === 'linkedin') return 'linkedin';
   if (channel === 'phone' || task === 'human_phone' || kind === 'human_phone') return 'phone';
   if (channel === 'mail' || task === 'standard_postcard' || task === 'golden_ticket') return 'mail';
-  if (channel === 'sms') return undefined;
+  if (channel) return channel;
+  if (kind.startsWith('send_')) return kind.slice('send_'.length) || undefined;
   return undefined;
 }
 
@@ -1461,6 +1467,11 @@ export function readinessInputFromRecord(input: {
   actionConfidence?: ActionConfidenceConfigInput;
   reachability?: ReachabilityConfigInput;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
+  contactPolicy?: ContactPolicyConfigInput;
+  policy?: {
+    prohibited_channels?: unknown;
+    prohibited_task_types?: unknown;
+  };
 }): Parameters<typeof evaluateOutboundReadiness>[0] {
   const record = input.record || {};
   const rowId = String(record._row_id || record.id || 'unknown');
@@ -1589,6 +1600,7 @@ export function readinessInputFromRecord(input: {
     hasNextAction: hasNext,
     confidenceProfile,
     actionConfidence: input.actionConfidence,
+    contactPolicy: input.contactPolicy,
     namedBuyerStatus: buyer.status,
     namedBuyerName: buyer.name,
     buyerAffiliationStatus: buyer.affiliationStatus,
@@ -1606,7 +1618,7 @@ export function readinessInputFromRecord(input: {
 
 /**
  * Guard an outbound step using project policy.
- * Always hard-blocks forbidden work. When config.policy.enforce_readiness === true,
+ * Always hard-blocks pipeline-declared prohibited work. When config.policy.enforce_readiness === true,
  * also hard-blocks automated external sends (send_email intent=send, linkedin_connect)
  * when evaluateOutboundReadiness is not ready — unless dryRun or intent=draft.
  * Does not hard-block human_phone / manual_task parks (awaiting_manual is correct).
@@ -1623,26 +1635,16 @@ export function guardChannelExecution(input: {
 }): { allowed: boolean; reason?: string; blockers?: string[] } {
   try {
     assertWorkAllowed({
+      policy: input.config?.policy,
       kind: input.stepKind,
       taskType: input.taskType,
       channel: input.channel,
-      stepId: input.stepId,
     });
   } catch (e) {
     return { allowed: false, reason: (e as Error).message };
   }
 
   const policy = input.config?.policy;
-  if (policy) {
-    const forbidden = new Set(
-      (Array.isArray(policy.forbidden_channels) ? policy.forbidden_channels : []).map((x: string) => String(x).toLowerCase()),
-    );
-    const kind = String(input.stepKind || '').toLowerCase();
-    const task = String(input.taskType || '').toLowerCase();
-    if (forbidden.has(kind) || forbidden.has(task) || forbidden.has(String(input.channel || '').toLowerCase())) {
-      return { allowed: false, reason: `project policy forbids ${kind || task || input.channel}` };
-    }
-  }
 
   // Campaign process (age / allowance / quiet / annual) always gates automated external sends —
   // independent of soft readiness — so tier ceilings cannot be bypassed when enforce_readiness is off.
@@ -1697,6 +1699,8 @@ export function guardChannelExecution(input: {
     actionConfidence: input.config?.score?.action_confidence,
     reachability: input.config?.score?.reachability,
     enrichmentBudget: input.config?.score?.enrichment_budget,
+    policy: input.config?.policy,
+    contactPolicy: input.config?.contact_policy,
   }));
 
   if (!readiness.ready) {

@@ -119,7 +119,10 @@ test('TV yaml: diagnostic_content_pack run_in_pipeline survives normalizeConfig'
   const normalized = normalizeConfig(raw, {
     listDir: '/Users/rayepps/projects/mission/.outbound/treasure-valley',
   });
-  assert.equal((normalized.errors || []).length, 0, String(normalized.errors));
+  assert.deepEqual(
+    normalized.errors || [],
+    ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).'],
+  );
   const diag = (normalized.config.pipeline || []).find((s) => s?.id === 'diagnostic_content_pack');
   assert.ok(diag, 'diagnostic_content_pack present after normalize');
   assert.equal(

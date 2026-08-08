@@ -508,7 +508,7 @@ test('phase-05 readiness: enforce_readiness hard-blocks non-ready send_email', (
   assert.equal(dry.allowed, true);
 });
 
-test('phase-05 readiness: hard path allows ready tier-A email; blocks enrichment_hold outreach', () => {
+test('phase-05 readiness: declared tier channel policy is enforced', () => {
   const readyRecord = {
     _row_id: 'ready_ok',
     identity_confidence: 90,
@@ -528,7 +528,10 @@ test('phase-05 readiness: hard path allows ready tier-A email; blocks enrichment
     claim_audit_passed: 1,
   };
   const ok = guardChannelExecution({
-    config: { policy: { enforce_readiness: true, forbidden_channels: [] } },
+    config: {
+      policy: { enforce_readiness: true },
+      contact_policy: { tiers: { A: { permitted_channels: ['email'] } } },
+    },
     record: readyRecord,
     stepKind: 'send_email',
     intent: 'send',
@@ -536,13 +539,16 @@ test('phase-05 readiness: hard path allows ready tier-A email; blocks enrichment
   assert.equal(ok.allowed, true, `expected allow, got ${JSON.stringify(ok)}`);
 
   const hold = guardChannelExecution({
-    config: { policy: { enforce_readiness: true, forbidden_channels: [] } },
+    config: {
+      policy: { enforce_readiness: true },
+      contact_policy: { tiers: { enrichment_hold: { permitted_channels: [] } } },
+    },
     record: { ...readyRecord, treatment_tier: 'enrichment_hold' },
     stepKind: 'send_email',
     intent: 'send',
   });
   assert.equal(hold.allowed, false);
-  assert.ok((hold.blockers || []).includes('enrichment_hold'));
+  assert.ok((hold.blockers || []).includes('tier_channel_not_permitted'));
 });
 
 test('phase-05 readiness: evaluateOutboundReadiness blocks weak identity and tier-C cold calls', () => {
@@ -573,6 +579,7 @@ test('phase-05 readiness: evaluateOutboundReadiness blocks weak identity and tie
     claimAuditPassed: true,
     withinBudget: true,
     hasNextAction: true,
+    contactPolicy: { tiers: { C: { permitted_channels: [] } } },
     confidenceProfile: {
       identity_confidence: 90,
       classification_confidence: 80,
@@ -584,7 +591,7 @@ test('phase-05 readiness: evaluateOutboundReadiness blocks weak identity and tie
     proposedAction: { channel: 'phone', kind: 'manual_task' },
   });
   assert.equal(tierCPhone.ready, false);
-  assert.ok(tierCPhone.blockers.some((b) => b.includes('tier_c_no_proactive_cold_calls')));
+  assert.ok(tierCPhone.blockers.includes('tier_channel_not_permitted'));
 });
 
 // ---------------------------------------------------------------------------

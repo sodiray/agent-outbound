@@ -32,7 +32,7 @@ export const LINKEDIN_LIFECYCLE_STATES = [
 
 export type LinkedinLifecycleState = (typeof LINKEDIN_LIFECYCLE_STATES)[number];
 
-export const LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT = DEFAULT_CONTACT_POLICY.linkedin.invite_cooldown_hours;
+export const LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT = 0;
 
 const text = (value: unknown) => String(value ?? '').trim();
 
@@ -81,7 +81,7 @@ export function evaluateLinkedinConnectGate(
   const configuredCooldown = resolveContactPolicy(opts.contactPolicy).linkedin.invite_cooldown_hours;
   const hours = Number.isFinite(Number(opts.cooldownHours)) && Number(opts.cooldownHours) >= 0
     ? Number(opts.cooldownHours)
-    : configuredCooldown;
+    : (configuredCooldown ?? LINKEDIN_CONNECT_COOLDOWN_HOURS_DEFAULT);
 
   if (state === 'declined') {
     return {

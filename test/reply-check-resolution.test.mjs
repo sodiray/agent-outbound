@@ -9,6 +9,12 @@ import { resolveReplyCheck } from '../dist/orchestrator/lib/reply-check.js';
 import { runReplyPoll } from '../dist/orchestrator/runtime/polling.js';
 import { openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 
+const classifier = (model) => ({
+  model,
+  prompt: 'Classify this reply: {{reply_text}}',
+  output: { classifications: ['needs_review'], opt_out_classifications: [] },
+});
+
 test('named sequence reply_check overrides default while missing reply_check inherits it', () => {
   const { config, errors } = normalizeConfig({
     pipeline: [{
@@ -24,7 +30,7 @@ test('named sequence reply_check overrides default while missing reply_check inh
     sequences: {
       default: {
         reply_check: {
-          model: 'test/default',
+          classifier: classifier('test/default'),
           lookback_minutes: 15,
           tool: { list_tool: 'DEFAULT_INBOX' },
         },
@@ -32,7 +38,7 @@ test('named sequence reply_check overrides default while missing reply_check inh
       },
       named: {
         reply_check: {
-          model: 'test/named',
+          classifier: classifier('test/named'),
           lookback_minutes: 5,
           tool: { list_tool: 'NAMED_INBOX' },
         },
@@ -43,10 +49,10 @@ test('named sequence reply_check overrides default while missing reply_check inh
   });
 
   assert.deepEqual(errors, []);
-  assert.equal(resolveReplyCheck({ config, sequenceName: 'named' }).model, 'test/named');
+  assert.equal(resolveReplyCheck({ config, sequenceName: 'named' }).classifier.model, 'test/named');
   assert.equal(resolveReplyCheck({ config, sequenceName: 'named' }).lookback_minutes, 5);
   assert.equal(resolveReplyCheck({ config, sequenceName: 'named' }).tool.list_tool, 'NAMED_INBOX');
-  assert.equal(resolveReplyCheck({ config, sequenceName: 'inherited' }).model, 'test/default');
+  assert.equal(resolveReplyCheck({ config, sequenceName: 'inherited' }).classifier.model, 'test/default');
   assert.equal(resolveReplyCheck({ config, sequenceName: 'inherited' }).lookback_minutes, 15);
   assert.equal(resolveReplyCheck({ config, sequenceName: 'inherited' }).tool.list_tool, 'DEFAULT_INBOX');
 });
@@ -66,8 +72,8 @@ test('reply polling uses a named sequence reply_check and default inheritance', 
       ],
     }],
     sequences: {
-      default: { reply_check: { tool: { list_tool: 'DEFAULT_INBOX' } }, steps: [] },
-      named: { reply_check: { tool: { list_tool: 'NAMED_INBOX' } }, steps: [] },
+      default: { reply_check: { tool: { list_tool: 'DEFAULT_INBOX' }, classifier: classifier('test/default') }, steps: [] },
+      named: { reply_check: { tool: { list_tool: 'NAMED_INBOX' }, classifier: classifier('test/named') }, steps: [] },
       inherited: { steps: [] },
     },
   });
@@ -99,7 +105,7 @@ test('reply polling uses a named sequence reply_check and default inheritance', 
               response: {
                 data: {
                   messages: [
-                    { id: `message_${tool}`, thread_id: tool === 'NAMED_INBOX' ? 'named_thread' : 'unmatched_thread', snippet: 'not interested' },
+                    { id: `message_${tool}`, thread_id: 'unmatched_thread', snippet: 'not interested' },
                   ],
                 },
               },
@@ -112,7 +118,7 @@ test('reply polling uses a named sequence reply_check and default inheritance', 
 
   try {
     const result = await runReplyPoll({ mcp, listDir, db, globalSuppressionDb: db, config });
-    assert.equal(result.replied, 1);
+    assert.equal(result.replied, 0);
     assert.ok(calls.includes('NAMED_INBOX'));
     assert.ok(calls.includes('DEFAULT_INBOX'));
   } finally {

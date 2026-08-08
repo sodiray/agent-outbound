@@ -433,6 +433,7 @@ test('bounce: domain-level failure closes the account email channel', () => {
 });
 
 test('bounce: rotation preserves quiet period and per-contact allowance gates', () => {
+  const contactPolicy = { per_contact_allowances: { A: 3 }, campaign: { quiet_period_business_days: 3 } };
   const plan = buildContactPlan({
     account_id: 'bounce_cadence',
     campaign_id: 'bounce_cadence_campaign',
@@ -441,6 +442,7 @@ test('bounce: rotation preserves quiet period and per-contact allowance gates', 
       { contact_id: 'c_first', outbound_disposition: 'eligible_target', outreach_rank: 1 },
       { contact_id: 'c_next', outbound_disposition: 'eligible_target', outreach_rank: 2 },
     ],
+    contactPolicy,
   });
   const bouncedAt = '2026-08-07T16:00:00.000Z';
   const { db } = createList({
@@ -468,6 +470,7 @@ test('bounce: rotation preserves quiet period and per-contact allowance gates', 
     automated_actions_used: Number(applied.record.automated_actions_used),
     last_rotation_at: String(applied.record.last_contact_rotation_at),
     asOf: bouncedAt,
+    contactPolicy,
   });
   const afterQuietPeriodAtAllowance = evaluateCampaignProcess({
     campaign,
@@ -475,6 +478,7 @@ test('bounce: rotation preserves quiet period and per-contact allowance gates', 
     automated_actions_used: 999,
     last_rotation_at: String(applied.record.last_contact_rotation_at),
     asOf: '2026-08-12T16:00:00.000Z',
+    contactPolicy,
   });
 
   assert.equal(Number(applied.record.automated_actions_used), 0);

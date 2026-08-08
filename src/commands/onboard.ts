@@ -162,8 +162,8 @@ Use natural language to set up sourcing, enrichment, and scoring in one shot:
 npx agent-outbound config author <list> --request "<describe what to search for, what data to enrich with, and how to score them>"
 \`\`\`
 
-Example request for a dental office list:
-"Search Google Maps for dental offices within 25 miles of Boise ID. Filter out large chains (10+ locations). Enrich with website scrape focusing on about page, team size, and services offered. Look up primary email via Hunter. Score fit based on independent practice with 3-15 employees. Score trigger based on hiring activity, recent website updates, or expansion signals."
+Example request for a local-services list:
+"Search Google Maps for independent local service businesses within a chosen radius. Enrich with website scrape focusing on about page, team size, and services offered. Look up a primary email via Hunter. Score fit based on independently operated businesses with the desired team size. Score trigger based on hiring activity, recent website updates, or expansion signals."
 
 You can iterate on config with additional requests:
 \`\`\`

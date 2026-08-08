@@ -247,7 +247,7 @@ test('phase-04: thin evidence / unscored fit → treatment_tier enrichment_hold'
   assert.equal(full.golden_ticket_eligible, false);
 });
 
-test('phase-04: enrichment_hold blocks outbound readiness', () => {
+test('phase-04: a pipeline may restrict an enrichment tier from outbound readiness', () => {
   const readiness = evaluateOutboundReadiness({
     eligible: true,
     suppressed: false,
@@ -259,6 +259,7 @@ test('phase-04: enrichment_hold blocks outbound readiness', () => {
     claimAuditPassed: true,
     withinBudget: true,
     hasNextAction: true,
+    contactPolicy: { tiers: { enrichment_hold: { permitted_channels: [] } } },
     confidenceProfile: {
       identity_confidence: 90,
       classification_confidence: 40,
@@ -271,8 +272,8 @@ test('phase-04: enrichment_hold blocks outbound readiness', () => {
   });
   assert.equal(readiness.ready, false);
   assert.ok(
-    (readiness.blockers || []).some((b) => String(b).includes('enrichment_hold')),
-    `expected enrichment_hold blocker, got ${JSON.stringify(readiness.blockers)}`,
+    (readiness.blockers || []).includes('tier_channel_not_permitted'),
+    `expected declared tier-channel blocker, got ${JSON.stringify(readiness.blockers)}`,
   );
 });
 

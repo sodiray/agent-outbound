@@ -341,7 +341,7 @@ const isOutboundChannel = (channel: string, stepKind: string): boolean => {
 };
 
 /** Default wait when no next_action_date / progression date is available on the record. */
-export const DEFAULT_WAIT_SUCCESSOR_DAYS = DEFAULT_CONTACT_POLICY.fallback_wait_days;
+export const DEFAULT_WAIT_SUCCESSOR_DAYS = 0;
 
 /**
  * Resolve due_at for a wait (or waiting_time_or_event) next_action successor.
@@ -358,7 +358,7 @@ export function resolveWaitDueAt(
   if (fromRecord) return fromRecord;
 
   const d = new Date(now.getTime());
-  const waitDays = defaultWaitDays ?? resolveContactPolicy(contactPolicy).fallback_wait_days;
+  const waitDays = defaultWaitDays ?? resolveContactPolicy(contactPolicy).fallback_wait_days ?? DEFAULT_WAIT_SUCCESSOR_DAYS;
   d.setUTCDate(d.getUTCDate() + waitDays);
   return d.toISOString().slice(0, 10);
 }

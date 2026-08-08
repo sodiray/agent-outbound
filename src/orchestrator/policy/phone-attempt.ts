@@ -2,12 +2,8 @@
  * Phone attempt policy: windows, ceilings, callbacks, wrong-number invalidation,
  * and capacity_unserved outcomes.
  *
- * Design source: human-phone-call-channel-and-attempt-windows.md
- * - Attempt window: local business hours (09:00–17:00, weekdays)
- * - Max attempts per contact/account (Tier A=4, B=3, default 3; C/D=0)
- * - callback disposition → schedule callback_at (overrides ordinary cadence)
- * - wrong_number → suppress phone on contact (dne_phone), not full account DNC
- * - capacity_unserved when attempts exhausted or capacity never selected the candidate
+ * The pipeline supplies any attempt window and ceiling; the engine records
+ * dispositions and enforces those declared values.
  */
 
 import { NEXT_ACTION_POLICY_VERSION } from './lifecycle.js';
@@ -24,27 +20,18 @@ export const PHONE_ATTEMPT_POLICY_VERSION = 'phone-attempt-v1';
 
 const clockMs = () => Date.parse(nowIso());
 
-/** Inclusive local start hour, exclusive end hour (09:00 ≤ t < 17:00). */
-export const DEFAULT_ATTEMPT_WINDOW_START_HOUR = DEFAULT_CONTACT_POLICY.phone.attempt_window.start_hour;
-export const DEFAULT_ATTEMPT_WINDOW_END_HOUR = DEFAULT_CONTACT_POLICY.phone.attempt_window.end_hour;
+/** Inclusive neutral fallback, used only when no window is declared. */
+export const DEFAULT_ATTEMPT_WINDOW_START_HOUR = 0;
+export const DEFAULT_ATTEMPT_WINDOW_END_HOUR = 24;
 
-/** Fallback ceiling when tier is unknown. */
-export const DEFAULT_MAX_PHONE_ATTEMPTS = DEFAULT_CONTACT_POLICY.phone.max_attempts.default;
+/** Neutral fallback ceiling when no limit is declared. */
+export const DEFAULT_MAX_PHONE_ATTEMPTS = Number.MAX_SAFE_INTEGER;
 
 /** Default delay for disposition=callback when no explicit callback_at. */
-export const DEFAULT_CALLBACK_DELAY_HOURS = DEFAULT_CONTACT_POLICY.phone.callback_delay_hours;
+export const DEFAULT_CALLBACK_DELAY_HOURS = 0;
 
-/**
- * Treatment ceilings (hard calibration params — ceilings, not quotas).
- * Tier C/D: no proactive cold attempts.
- */
-export const TIER_MAX_PHONE_ATTEMPTS: Record<string, number> = {
-  A: DEFAULT_CONTACT_POLICY.phone.max_attempts.A,
-  B: DEFAULT_CONTACT_POLICY.phone.max_attempts.B,
-  C: DEFAULT_CONTACT_POLICY.phone.max_attempts.C,
-  D: DEFAULT_CONTACT_POLICY.phone.max_attempts.D,
-  enrichment_hold: DEFAULT_CONTACT_POLICY.phone.max_attempts.enrichment_hold,
-};
+/** Pipeline-declared treatment ceilings. */
+export const TIER_MAX_PHONE_ATTEMPTS: Record<string, number> = {};
 
 export type PhoneCallDisposition =
   | 'completed'
@@ -176,12 +163,9 @@ export function maxPhoneAttemptsForTier(
   if (Number.isFinite(Number(override)) && Number(override) >= 0) {
     return Math.floor(Number(override));
   }
-  const tier = text(treatmentTier) || 'B';
+  const tier = text(treatmentTier);
   const configured = optionalNumber(config.maxAttemptsByTier?.[tier]);
   if (configured !== undefined && configured >= 0) return Math.floor(configured);
-  if (tier in TIER_MAX_PHONE_ATTEMPTS) {
-    return TIER_MAX_PHONE_ATTEMPTS[tier];
-  }
   const defaultMaxAttempts = optionalNumber(config.defaultMaxAttempts);
   return defaultMaxAttempts !== undefined && defaultMaxAttempts >= 0
     ? Math.floor(defaultMaxAttempts)
@@ -196,7 +180,7 @@ export function readCallAttemptCount(
 
 /**
  * True when local wall clock is inside the attempt window.
- * Default: Mon–Fri 09:00–17:00 UTC when no pipeline policy is supplied.
+ * Without a declared window, every valid timestamp is within the window.
  */
 export function isWithinPhoneAttemptWindow(
   now: Date | string | number = clockMs(),
@@ -209,7 +193,7 @@ export function isWithinPhoneAttemptWindow(
   const endHour = Number.isFinite(Number(config.endHour))
     ? Number(config.endHour)
     : DEFAULT_ATTEMPT_WINDOW_END_HOUR;
-  const weekdaysOnly = config.weekdaysOnly !== false;
+  const weekdaysOnly = config.weekdaysOnly === true;
 
   const d = now instanceof Date ? now : new Date(now);
   if (Number.isNaN(d.getTime())) return false;
@@ -350,6 +334,7 @@ export function evaluatePhoneAttemptEligibility(
   const maxAttempts = maxPhoneAttemptsForTier(
     text(record?.treatment_tier),
     config.maxAttempts,
+    config,
   );
   const attemptCount = readCallAttemptCount(record);
   const within = isWithinPhoneAttemptWindow(nowMs, config);
@@ -522,7 +507,7 @@ export function applyPhoneDisposition(input: {
 
   const priorAttempts = readCallAttemptCount(record);
   const nextAttempts = bumpAttempt(disposition) ? priorAttempts + 1 : priorAttempts;
-  const maxAttempts = maxPhoneAttemptsForTier(text(record.treatment_tier), config.maxAttempts);
+  const maxAttempts = maxPhoneAttemptsForTier(text(record.treatment_tier), config.maxAttempts, config);
   const ceilingHit = nextAttempts >= maxAttempts || maxAttempts <= 0;
 
   let call_window_status: CallWindowStatus = 'candidate';

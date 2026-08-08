@@ -62,7 +62,7 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
   }
   addExplicitRef(refs, 'score.model', config?.score?.model, 'evaluation');
   for (const [sequenceName, sequence] of Object.entries(config?.sequences || {})) {
-    addExplicitRef(refs, `sequences.${sequenceName}.reply_check.model`, (sequence as any)?.reply_check?.model, 'evaluation');
+    addExplicitRef(refs, `sequences.${sequenceName}.reply_check.classifier.model`, (sequence as any)?.reply_check?.classifier?.model, 'evaluation');
   }
   addExplicitRef(refs, 'crm.model', config?.crm?.model, 'research');
   return refs;
@@ -99,7 +99,7 @@ const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source'
   }
   if (phase === 'sequence') {
     for (const [sequenceName, sequence] of Object.entries(config?.sequences || {})) {
-      addResolvedRef(refs, `sequences.${sequenceName}.reply_check`, (sequence as any)?.reply_check?.model, 'evaluation', aiConfig);
+      addResolvedRef(refs, `sequences.${sequenceName}.reply_check.classifier`, (sequence as any)?.reply_check?.classifier?.model, 'evaluation', aiConfig);
     }
     addResolvedRef(refs, 'sequence.condition_eval', '', 'evaluation', aiConfig);
     addResolvedRef(refs, 'sequence.plan_route', '', 'research', aiConfig);

@@ -29,7 +29,7 @@ import {
   evaluateOutboundReadiness,
   classifyEligibility,
 } from '../dist/orchestrator/policy/readiness.js';
-import { findForbiddenSteps } from '../dist/orchestrator/policy/forbidden-channels.js';
+import { findProhibitedSteps } from '../dist/orchestrator/policy/pipeline-prohibitions.js';
 
 const TV_YAML = '/Users/rayepps/projects/mission/.outbound/treasure-valley/outbound.yaml';
 const TAXONOMY = '/Users/rayepps/projects/mission/.outbound/treasure-valley/build/registries/vertical-taxonomy.json';
@@ -102,7 +102,7 @@ test('TV config has no forbidden visit/sms/voice paths', () => {
   for (const seq of Object.values(cfg.sequences || {})) {
     collectSteps(seq.steps, all);
   }
-  const forbidden = findForbiddenSteps(all);
+  const forbidden = findProhibitedSteps(all, cfg.policy);
   assert.deepEqual(
     forbidden,
     [],

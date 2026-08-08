@@ -41,6 +41,10 @@ const campaignRecord = (plan) => ({
   work_state: 'content_generation',
   last_contact_rotation_at: '2026-08-07T03:22:38.000Z',
 });
+const contactPolicy = {
+  per_contact_allowances: { B: 3 },
+  campaign: { quiet_period_business_days: 3 },
+};
 
 test('injected clock drives quiet-period decisions through the policy entry point', () => {
   const plan = {
@@ -49,22 +53,23 @@ test('injected clock drives quiet-period decisions through the policy entry poin
       campaign_id: 'clock_campaign',
       contacts: [{ contact_id: 'clock_contact', outbound_disposition: 'eligible_target' }],
       treatment_tier: 'B',
+      contactPolicy,
     }),
     started_at: '2026-08-01T00:00:00.000Z',
   };
 
   const inside = withClock('2026-08-08T16:00:00.000Z', () => {
     assert.equal(nowIso(), '2026-08-08T16:00:00.000Z');
-    const direct = checkQuietPeriod({ last_rotation_at: '2026-08-07T03:22:38.000Z' });
-    const applied = applyOutboundPolicy({ record: campaignRecord(plan) });
+    const direct = checkQuietPeriod({ last_rotation_at: '2026-08-07T03:22:38.000Z', contactPolicy });
+    const applied = applyOutboundPolicy({ record: campaignRecord(plan), contactPolicy });
     return { direct, applied };
   });
   assert.deepEqual(inside.direct.blockers, ['inter_contact_quiet_period:1<3']);
   assert.ok(inside.applied.readiness?.blockers.includes('inter_contact_quiet_period:1<3'));
 
   const past = withClock('2026-08-21T16:00:00.000Z', () => {
-    const direct = checkQuietPeriod({ last_rotation_at: '2026-08-07T03:22:38.000Z' });
-    const applied = applyOutboundPolicy({ record: campaignRecord(plan) });
+    const direct = checkQuietPeriod({ last_rotation_at: '2026-08-07T03:22:38.000Z', contactPolicy });
+    const applied = applyOutboundPolicy({ record: campaignRecord(plan), contactPolicy });
     return { direct, applied };
   });
   assert.equal(past.direct.allowed, true);
@@ -86,7 +91,7 @@ test('other decision gates use the injected clock when no explicit instant is su
   assert.equal(timing.generated_at, '2026-08-11T16:00:00.000Z');
   assert.equal(timing.timing_score, 40);
 
-  const waitDue = withClock('2026-08-11T16:00:00.000Z', () => resolveWaitDueAt({}));
+  const waitDue = withClock('2026-08-11T16:00:00.000Z', () => resolveWaitDueAt({}, undefined, undefined, { fallback_wait_days: 2 }));
   assert.equal(waitDue, '2026-08-13');
 
   const sequenceGate = withClock('2026-08-11T16:00:00.000Z', () => shouldExecuteSequenceOutbound({

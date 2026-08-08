@@ -3,6 +3,7 @@ import { loadTools, type ToolSpec } from '../../runtime/tools.js';
 import { collectProviderToolUsage } from '../../runtime/providers/usage.js';
 import { isBudgetExceededError } from '../../runtime/contract.js';
 import { assertToolCallEffectsAllowed } from '../../policy/tool-effects.js';
+import { readConfig } from '../../lib/config.js';
 
 type ToolCallActionInput = {
   mcp?: Client | null;
@@ -232,9 +233,19 @@ export const executeToolCallAction = async ({
 }: ToolCallActionInput): Promise<ToolCallActionResult> => {
   const outputMap = (stepConfig?.output_map && typeof stepConfig.output_map === 'object' ? stepConfig.output_map : {}) as Record<string, string>;
   const declaredOutputs = (stepConfig?.outputs && typeof stepConfig.outputs === 'object' ? stepConfig.outputs : {}) as Record<string, unknown>;
+  const chain = resolveToolWaterfall(stepConfig);
+  const fixtureMode = String(process.env.AO_PIPELINE_FIXTURE || process.env.AO_STEP_FIXTURE || '').trim() === '1';
+  if (chain.length > 0 && !fixtureMode) {
+    assertToolCallEffectsAllowed({
+      stepId,
+      toolSpecs: chain,
+      externalSend: stepConfig.external_send === true,
+      policy: readConfig(listDir).config.policy,
+    });
+  }
 
   // Deterministic fixture: no live Monid/tool MCP. Preserve existing field values when present.
-  if (String(process.env.AO_PIPELINE_FIXTURE || process.env.AO_STEP_FIXTURE || '').trim() === '1') {
+  if (fixtureMode) {
     const outputs: Record<string, unknown> = {};
     const names = new Set<string>([
       ...Object.keys(outputMap),
@@ -248,7 +259,7 @@ export const executeToolCallAction = async ({
       }
       if (outputName === 'site_text' || outputName === 'markdown') {
         const name = String(record?.business_name || 'business').trim() || 'business';
-        outputs[outputName] = `Fixture site text for ${name}. Local HVAC service company serving the Treasure Valley.`;
+        outputs[outputName] = `Fixture site text for ${name}. Local service business.`;
       } else {
         outputs[outputName] = `fixture_${outputName}`;
       }
@@ -269,15 +280,9 @@ export const executeToolCallAction = async ({
     };
   }
 
-  const chain = resolveToolWaterfall(stepConfig);
   if (chain.length === 0) {
     throw new Error(`tool_call:${stepId}: no tool resolved — check the step's tool / waterfall / fallback_tools against connected servers/toolkits.`);
   }
-  assertToolCallEffectsAllowed({
-    stepId,
-    toolSpecs: chain,
-    externalSend: stepConfig.external_send === true,
-  });
 
   const staticArgs = (stepConfig?.args && typeof stepConfig.args === 'object' ? stepConfig.args : {}) as Record<string, unknown>;
   const argsMap = (stepConfig?.args_map && typeof stepConfig.args_map === 'object' ? stepConfig.args_map : {}) as Record<string, string>;

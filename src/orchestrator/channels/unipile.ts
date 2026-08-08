@@ -545,7 +545,7 @@ export async function executeUnipileLinkedinConnect(
   };
 }
 
-/** True when step kind is LinkedIn connect (not a forbidden channel). */
+/** True when step kind is LinkedIn connect. */
 export function isLinkedinConnectKind(kind: string | null | undefined): boolean {
   return String(kind || '').trim().toLowerCase() === 'linkedin_connect';
 }

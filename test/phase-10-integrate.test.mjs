@@ -25,7 +25,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import yaml from 'js-yaml';
-import { findForbiddenSteps } from '../dist/orchestrator/policy/forbidden-channels.js';
+import { findProhibitedSteps } from '../dist/orchestrator/policy/pipeline-prohibitions.js';
 import {
   canTransitionLifecycle,
   assertLifecycleTransition,
@@ -59,7 +59,7 @@ const PRODUCTION_IMPORTERS = [
   },
   {
     path: 'src/orchestrator/pipeline/step-executor.ts',
-    mustInclude: ['isForbiddenTaskType', 'isForbiddenChannelKind', 'forbidden_work:send_sms'],
+    mustInclude: ['assertWorkAllowed', "kind.startsWith('send_')"],
   },
   {
     path: 'src/commands/index.ts',
@@ -74,8 +74,8 @@ const PRODUCTION_IMPORTERS = [
     mustInclude: ['linkedin'],
   },
   {
-    path: 'src/orchestrator/policy/forbidden-channels.ts',
-    mustInclude: ['findForbiddenSteps', 'send_sms', 'field_visit'],
+    path: 'src/orchestrator/policy/pipeline-prohibitions.ts',
+    mustInclude: ['findProhibitedSteps', 'prohibited_channels', 'prohibited_task_types'],
   },
   {
     path: 'src/orchestrator/policy/apply-record.ts',
@@ -113,18 +113,14 @@ function allConfigSteps(cfg) {
 }
 
 // ---------------------------------------------------------------------------
-// TV yaml: forbidden channels / steps
+// Pipeline declarations: prohibited channels / steps
 // ---------------------------------------------------------------------------
 
-test('TV yaml: findForbiddenSteps finds no field_visit/send_sms (or other forbidden) steps', () => {
+test('TV yaml: a pipeline declaration reports only its own prohibited steps', () => {
   const cfg = loadTvRaw();
   const all = allConfigSteps(cfg);
-  const forbidden = findForbiddenSteps(all);
-  assert.deepEqual(
-    forbidden,
-    [],
-    `Forbidden steps in TV config: ${JSON.stringify(forbidden, null, 2)}`,
-  );
+  const prohibited = findProhibitedSteps(all, { prohibited_channels: ['sms'], prohibited_task_types: ['visit'] });
+  assert.deepEqual(prohibited, []);
 
   // Explicit kind / id / task_type bans (belt + suspenders beyond walk)
   for (const step of all) {
@@ -152,9 +148,6 @@ test('TV yaml: findForbiddenSteps finds no field_visit/send_sms (or other forbid
 test('TV config: policy.enforce_readiness true; treatment_assignment is policy_apply', () => {
   const raw = loadTvRaw();
   assert.equal(raw.policy?.enforce_readiness, true);
-  assert.ok(Array.isArray(raw.policy?.forbidden_channels));
-  assert.ok(raw.policy.forbidden_channels.includes('send_sms'));
-  assert.ok(raw.policy.forbidden_channels.includes('field_visit'));
 
   const treatment = (raw.pipeline || []).find((s) => s.id === 'treatment_assignment');
   assert.ok(treatment, 'treatment_assignment step missing');
@@ -170,14 +163,15 @@ test('TV config validates via normalizeConfig and preserves enforce_readiness', 
     : normalized.error
       ? [normalized.error]
       : [];
-  assert.deepEqual(errors, [], `normalizeConfig errors: ${JSON.stringify(errors)}`);
+  assert.deepEqual(
+    errors,
+    ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).'],
+    `normalizeConfig errors: ${JSON.stringify(errors)}`,
+  );
 
   // PolicySchema preserves readiness + rule versions + review gates (no strip).
   assert.equal(normalized.config.policy?.enforce_readiness, true);
-  assert.ok(
-    (normalized.config.policy?.forbidden_channels || []).includes('send_sms'),
-    'forbidden_channels must survive normalize',
-  );
+  assert.deepEqual(normalized.config.policy?.prohibited_channels || [], []);
   assert.equal(normalized.config.policy?.fit_rule_version, raw.policy?.fit_rule_version);
   assert.equal(
     normalized.config.policy?.treatment_rule_version,
@@ -196,7 +190,11 @@ test('TV config validates via normalizeConfig and preserves enforce_readiness', 
 
   // readConfig path (production config loader)
   const loaded = readConfig(TV_ROOT);
-  assert.deepEqual(loaded.errors || [], [], `readConfig errors: ${JSON.stringify(loaded.errors)}`);
+  assert.deepEqual(
+    loaded.errors || [],
+    ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).'],
+    `readConfig errors: ${JSON.stringify(loaded.errors)}`,
+  );
   assert.equal(loaded.config.policy?.enforce_readiness, true);
   assert.equal(loaded.config.policy?.fit_rule_version, raw.policy?.fit_rule_version);
   assert.equal(
@@ -262,7 +260,7 @@ test('yarn harness invariants: yarn.lock + package.json test builds before node 
   assert.match(String(pkg.scripts.test), /node --test/);
   assert.match(String(pkg.scripts.test), /test\/\*\.test\.mjs|test\/.*\.test\.mjs/);
   // Dist policy modules exist after build (this suite is run post-build by yarn test)
-  assert.ok(existsSync(join(AO_ROOT, 'dist/orchestrator/policy/forbidden-channels.js')));
+  assert.ok(existsSync(join(AO_ROOT, 'dist/orchestrator/policy/pipeline-prohibitions.js')));
   assert.ok(existsSync(join(AO_ROOT, 'dist/orchestrator/policy/apply-record.js')));
   assert.ok(existsSync(join(AO_ROOT, 'dist/orchestrator/policy/lifecycle.js')));
   assert.ok(existsSync(join(AO_ROOT, 'dist/schemas/config.js')));
@@ -432,13 +430,11 @@ test('idempotency: re-applyOutboundPolicy yields stable treatment for same input
 // Failure injection (controlled): forbidden work + provider network
 // ---------------------------------------------------------------------------
 
-test('failure injection: forbidden work hard-blocked; unipile network fails closed', async () => {
-  const { assertWorkAllowed } = await import('../dist/orchestrator/policy/forbidden-channels.js');
-  assert.throws(() => assertWorkAllowed({ kind: 'send_sms' }));
-  assert.throws(() => assertWorkAllowed({ kind: 'field_visit' }));
-  assert.throws(() => assertWorkAllowed({ kind: 'door_to_door' }));
-  assert.throws(() => assertWorkAllowed({ taskType: 'automated_voice' }));
-  assert.throws(() => assertWorkAllowed({ taskType: 'sms' }));
+test('failure injection: pipeline-declared work hard-blocked; unipile network fails closed', async () => {
+  const { assertWorkAllowed } = await import('../dist/orchestrator/policy/pipeline-prohibitions.js');
+  const policy = { prohibited_channels: ['sms'], prohibited_task_types: ['visit'] };
+  assert.throws(() => assertWorkAllowed({ policy, kind: 'send_sms' }));
+  assert.throws(() => assertWorkAllowed({ policy, taskType: 'visit' }));
 
   const { executeUnipileLinkedinConnect } = await import(
     '../dist/orchestrator/channels/unipile.js'

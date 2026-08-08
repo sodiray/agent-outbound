@@ -145,17 +145,11 @@ export const interactionRemoveCommand = ({ list, interactionId }: { list: string
 };
 
 export const followupsCommand = ({ list, dueBy = '' }: { list: string; dueBy?: string }) => {
-  // Note: visit/door-to-door follow-ups are filtered from operator noise (forbidden motion).
   const listDir = resolveListDir(list);
   const db = openListDb({ listDir, readonly: true });
   try {
     const today = new Date().toISOString().slice(0, 10);
-    const rows = listOpenFollowUps({ db, dueBy }).filter((row: any) => {
-      const kind = String(row.kind || row.channel || '').toLowerCase();
-      // Forbidden motion: never surface visit / door-to-door as operator follow-up work.
-      if (kind.includes('visit') || kind.includes('door') || kind.includes('field')) return false;
-      return true;
-    });
+    const rows = listOpenFollowUps({ db, dueBy });
     const followups = rows.map((row: any) => {
       const dueDate = String(row.follow_up_at || '').slice(0, 10);
       return {

@@ -37,12 +37,7 @@ import {
   evaluateOutboundReadiness,
   classifyEligibility,
 } from '../dist/orchestrator/policy/readiness.js';
-import {
-  findForbiddenSteps,
-  assertWorkAllowed,
-  isForbiddenChannelKind,
-  isForbiddenTaskType,
-} from '../dist/orchestrator/policy/forbidden-channels.js';
+import { findProhibitedSteps, assertWorkAllowed } from '../dist/orchestrator/policy/pipeline-prohibitions.js';
 
 test('fit score weights sum to 1 and exclude walk-in/HIPAA components', () => {
   const sum = Object.values(FIT_COMPONENT_WEIGHTS).reduce((a, b) => a + b, 0);
@@ -393,17 +388,16 @@ test('eligibility classification: category alone never disqualifies', () => {
   assert.ok(school.reasons.includes('non_smb_organization'));
 });
 
-test('readiness blocks forbidden visit/sms and tier C cold calls', () => {
-  assert.equal(isForbiddenChannelKind('send_sms'), true);
-  assert.equal(isForbiddenTaskType('field_visit'), true);
-  assert.throws(() => assertWorkAllowed({ kind: 'send_sms' }));
-  assert.throws(() => assertWorkAllowed({ taskType: 'visit' }));
+test('readiness observes pipeline-declared visit/sms policy and tier C cold calls', () => {
+  const policy = { prohibited_channels: ['sms'], prohibited_task_types: ['field_visit', 'visit'] };
+  assert.throws(() => assertWorkAllowed({ policy, kind: 'send_sms' }));
+  assert.throws(() => assertWorkAllowed({ policy, taskType: 'visit' }));
 
-  const forbidden = findForbiddenSteps([
+  const forbidden = findProhibitedSteps([
     { id: 'email_1', kind: 'send_email' },
     { id: 'field_visit', kind: 'manual_task', config: { task_type: 'visit' } },
     { id: 'sms_1', kind: 'send_sms' },
-  ]);
+  ], policy);
   assert.ok(forbidden.length >= 2);
 
   const r = evaluateOutboundReadiness({
@@ -417,10 +411,11 @@ test('readiness blocks forbidden visit/sms and tier C cold calls', () => {
     claimAuditPassed: true,
     withinBudget: true,
     hasNextAction: true,
+    contactPolicy: { tiers: { C: { permitted_channels: [] } } },
     proposedAction: { channel: 'phone', kind: 'manual_task' },
   });
   assert.equal(r.ready, false);
-  assert.ok(r.blockers.some((b) => b.includes('tier_c_no_proactive_cold_calls')));
+  assert.ok(r.blockers.includes('tier_channel_not_permitted'));
 });
 
 test('readiness allows prepared tier A email when gates pass', () => {

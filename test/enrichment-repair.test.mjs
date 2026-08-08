@@ -143,6 +143,15 @@ test('readiness: tier A requires named buyer + affiliation; unresolved blocks an
     claimAuditPassed: true,
     withinBudget: true,
     hasNextAction: true,
+    contactPolicy: {
+      tiers: {
+        A: {
+          requires_named_buyer: true,
+          requires_buyer_affiliation: true,
+          requires_buying_center_role: true,
+        },
+      },
+    },
   };
   const missingBuyer = evaluateOutboundReadiness({
     ...base,

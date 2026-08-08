@@ -1,10 +1,11 @@
-import { randomUUID } from 'node:crypto';
 import { simpleParser } from 'mailparser';
 import { detectBounceFromText, type BounceType } from '../policy/bounce.js';
 import { processSequenceInterruption } from './interruption-process.js';
 import { completeIdempotency, claimIdempotency, failIdempotency } from './idempotency.js';
-import { insertChannelEvent } from './db.js';
 import { nowIso } from '../lib/record.js';
+import { processInboundReplyText } from './inbound-reply-process.js';
+import { replyCheckSequenceForRecord, resolveReplyCheck } from '../lib/reply-check.js';
+import { generateObjectWithTools } from './llm.js';
 
 export type InboundEmailClassification = 'reply' | 'bounce' | 'auto_reply';
 export type InboundCorrelationStatus = 'matched' | 'unmatched' | 'ambiguous';
@@ -234,57 +235,26 @@ const insertInboundMessage = ({
   );
 };
 
-const recordMatchedEvent = ({
-  db,
-  parsed,
-  correlation,
-  receivedAt,
-}: {
-  db: Database;
-  parsed: ParsedInboundEmail;
-  correlation: InboundCorrelation;
-  receivedAt: string;
-}) => {
-  const recordId = trim(correlation.record?._row_id || correlation.record?.id);
-  if (!recordId) return;
-  insertChannelEvent({
-    db,
-    event: {
-      id: randomUUID(),
-      row_id: recordId,
-      contact_id: correlation.contactId,
-      channel: 'email',
-      event_type: parsed.classification === 'bounce' ? 'bounced' : 'reply_detected',
-      action: parsed.classification === 'bounce' ? 'bounce_detected' : 'reply_detected',
-      disposition: parsed.classification,
-      provider_message_id: parsed.messageId,
-      payload: {
-        direction: 'inbound',
-        sender_email: parsed.senderEmail,
-        recipient_email: parsed.recipientEmail,
-        subject: parsed.subject,
-        correlation_via: correlation.via,
-        correlation_message_ids: parsed.correlationMessageIds,
-        classification: parsed.classification,
-        bounce_type: parsed.bounceType || '',
-      },
-      occurred_at: receivedAt,
-    },
-  });
-};
-
 export const processInboundEmail = async ({
   db,
   mailboxId,
   uid,
   raw,
   receivedAt = nowIso(),
+  config,
+  aiConfig,
+  classifier,
+  generate,
 }: {
   db: Database;
   mailboxId: string;
   uid: number;
   raw: Buffer;
   receivedAt?: string;
+  config?: Record<string, unknown>;
+  aiConfig?: Record<string, unknown>;
+  classifier?: Record<string, unknown>;
+  generate?: typeof generateObjectWithTools;
 }) => {
   const parsed = await parseInboundEmail(raw);
   const idemKey = `${mailboxId}:${uid}`;
@@ -306,18 +276,6 @@ export const processInboundEmail = async ({
       });
       insertInboundMessage({ db, mailboxId, uid, parsed, correlation, receivedAt });
       const recordId = trim(correlation.record?._row_id || correlation.record?.id);
-      if (correlation.status === 'matched' && recordId && parsed.classification === 'reply') {
-        processSequenceInterruption({
-          db,
-          recordId,
-          kind: 'inbound_opportunity',
-          reason: 'imap_inbound_reply',
-          asOf: receivedAt,
-          replyClassification: 'reply',
-          contactId: correlation.contactId,
-        });
-        recordMatchedEvent({ db, parsed, correlation, receivedAt });
-      }
       if (correlation.status === 'matched' && recordId && parsed.classification === 'bounce') {
         processSequenceInterruption({
           db,
@@ -332,17 +290,42 @@ export const processInboundEmail = async ({
           snippet: parsed.snippet,
         });
       }
-      completeIdempotency({
-        db,
-        idemKey,
-        scope,
-        claimId: claimed.claim_id,
-        providerId: inboundMessageId(mailboxId, uid),
-        payload: { classification: parsed.classification, correlation_status: correlation.status },
-      });
-      return { processed: true as const, duplicate: false, classification: parsed.classification, correlation };
+      return { correlation, recordId };
     })();
-    return result;
+    const resolvedClassifier = classifier || (result.recordId
+      ? resolveReplyCheck({
+        config,
+        sequenceName: replyCheckSequenceForRecord({ config, record: result.correlation.record || {} }),
+      }).classifier as Record<string, unknown>
+      : undefined);
+    const replyResult = parsed.classification === 'reply' && result.correlation.status === 'matched' && result.recordId
+      ? await processInboundReplyText({
+        db,
+        recordId: result.recordId,
+        replyText: parsed.snippet,
+        messageId: parsed.messageId,
+        replyAt: receivedAt,
+        contactId: result.correlation.contactId,
+        classifier: resolvedClassifier,
+        aiConfig: aiConfig || {},
+        generate,
+      })
+      : null;
+    completeIdempotency({
+      db,
+      idemKey,
+      scope,
+      claimId: claimed.claim_id,
+      providerId: inboundMessageId(mailboxId, uid),
+      payload: { classification: parsed.classification, correlation_status: result.correlation.status },
+    });
+    return {
+      processed: true as const,
+      duplicate: false,
+      classification: parsed.classification,
+      correlation: result.correlation,
+      reply: replyResult,
+    };
   } catch (error) {
     failIdempotency({
       db,

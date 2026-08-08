@@ -33,15 +33,12 @@ const planFor = (contactPolicy) => buildContactPlan({
   contactPolicy,
 });
 
-test('contact frequency campaign defaults reproduce values, overrides apply, and malformed values reject', () => {
+test('contact frequency has no cadence defaults; declared policy values apply and malformed values reject', () => {
   const defaults = normalizeConfig({}).config.contact_policy;
-  assert.deepEqual(defaults.per_contact_allowances, { A: 3, B: 2, C: 1, D: 0, enrichment_hold: 0 });
-  assert.deepEqual(defaults.campaign.max_age_business_days, { A: 40, B: 30, C: 20, D: 0, enrichment_hold: 14 });
-  assert.equal(defaults.campaign.max_age_business_days_unknown_tier, 30);
-  assert.equal(defaults.campaign.quiet_period_business_days, 3);
-  assert.equal(defaults.campaign.annual_campaign_limit, 2);
-  assert.deepEqual(defaults.campaign.recycle_wait_days, { A: 90, B: 60, C: 45, D: 30, enrichment_hold: 14 });
-  assert.equal(defaults.campaign.recycle_wait_days_unknown_tier, 60);
+  assert.deepEqual(defaults.per_contact_allowances, {});
+  assert.deepEqual(defaults.campaign.max_age_business_days, {});
+  assert.equal(defaults.campaign.quiet_period_business_days, undefined);
+  assert.equal(defaults.campaign.annual_campaign_limit, undefined);
 
   const contactPolicy = normalizeConfig({
     contact_policy: {
@@ -78,15 +75,15 @@ test('contact frequency campaign defaults reproduce values, overrides apply, and
   }).errors.length > 0);
 });
 
-test('contact frequency phone defaults reproduce values, overrides apply, and malformed values reject', () => {
+test('contact frequency phone limits are declared rather than inherited, and malformed values reject', () => {
   const defaults = normalizeConfig({}).config;
   const defaultPhone = resolvePhoneAttemptPolicyConfig(defaults);
-  assert.equal(defaultPhone.startHour, 9);
-  assert.equal(defaultPhone.endHour, 17);
-  assert.equal(defaultPhone.weekdaysOnly, true);
-  assert.equal(defaultPhone.defaultMaxAttempts, 3);
-  assert.deepEqual(defaultPhone.maxAttemptsByTier, { default: 3, A: 4, B: 3, C: 0, D: 0, enrichment_hold: 0 });
-  assert.equal(defaultPhone.callbackDelayHours, 24);
+  assert.equal(defaultPhone.startHour, undefined);
+  assert.equal(defaultPhone.endHour, undefined);
+  assert.equal(defaultPhone.weekdaysOnly, undefined);
+  assert.equal(defaultPhone.defaultMaxAttempts, undefined);
+  assert.deepEqual(defaultPhone.maxAttemptsByTier, {});
+  assert.equal(defaultPhone.callbackDelayHours, undefined);
 
   const config = normalizeConfig({
     contact_policy: {
@@ -110,9 +107,9 @@ test('contact frequency phone defaults reproduce values, overrides apply, and ma
   }).errors.length > 0);
 });
 
-test('contact frequency LinkedIn defaults reproduce values, overrides apply, and malformed values reject', () => {
+test('contact frequency LinkedIn cooldown is declared rather than inherited, and malformed values reject', () => {
   const defaultPolicy = normalizeConfig({}).config.contact_policy;
-  assert.equal(defaultPolicy.linkedin.invite_cooldown_hours, 24);
+  assert.equal(defaultPolicy.linkedin.invite_cooldown_hours, undefined);
   const record = {
     linkedin_lifecycle_state: 'none',
     linkedin_last_connect_at: '2026-08-05T16:00:00.000Z',
@@ -120,7 +117,7 @@ test('contact frequency LinkedIn defaults reproduce values, overrides apply, and
   assert.equal(evaluateLinkedinConnectGate(record, {
     contactPolicy: defaultPolicy,
     nowMs: Date.parse('2026-08-05T18:00:00.000Z'),
-  }).reason, 'cooldown');
+  }).allowed, true);
 
   const contactPolicy = normalizeConfig({
     contact_policy: { linkedin: { invite_cooldown_hours: 1 } },
@@ -134,9 +131,9 @@ test('contact frequency LinkedIn defaults reproduce values, overrides apply, and
   }).errors.length > 0);
 });
 
-test('contact frequency fallback wait defaults reproduce values, overrides apply, and malformed values reject', () => {
+test('contact frequency fallback wait is declared rather than inherited, and malformed values reject', () => {
   const from = new Date('2026-08-05T16:00:00.000Z');
-  assert.equal(resolveWaitDueAt({}, from), '2026-08-07');
+  assert.equal(resolveWaitDueAt({}, from), '2026-08-05');
   const contactPolicy = normalizeConfig({
     contact_policy: { fallback_wait_days: 5 },
   }).config.contact_policy;
@@ -146,7 +143,7 @@ test('contact frequency fallback wait defaults reproduce values, overrides apply
   }).errors.length > 0);
 });
 
-test('contact frequency allowance remains fail-closed when contact_policy is absent', () => {
+test('contact frequency allowance is unbounded when contact_policy is absent', () => {
   const campaign = planFor(undefined);
   const result = guardChannelExecution({
     record: {
@@ -157,6 +154,5 @@ test('contact frequency allowance remains fail-closed when contact_policy is abs
     stepKind: 'send_email',
     intent: 'send',
   });
-  assert.equal(result.allowed, false);
-  assert.match(result.reason || '', /per_contact_allowance_exceeded:3>=3/);
+  assert.equal(result.allowed, true);
 });

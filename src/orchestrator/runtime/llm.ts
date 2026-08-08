@@ -396,11 +396,9 @@ export const generateObjectWithTools = async ({
 
   // Grading and extraction are MEASUREMENTS: the same record must yield the
   // same answer, or a score means nothing and cannot be compared across runs.
-  // Sampling was never pinned, and it showed: one unchanged Treasure Valley
-  // record scored 41.9, 53.0 and 57.6 on three identical runs — straddling the
-  // 50-point Tier C/D boundary, so whether a real business got contacted at all
-  // depended on which run happened to execute. Copywriting keeps the provider
-  // default; variety is the point there.
+  // Sampling was never pinned, and one unchanged record scored differently on
+  // identical runs — enough to cross a configured contact threshold. Copywriting
+  // keeps the provider default; variety is the point there.
   const deterministicRole = role === 'evaluation' || role === 'research';
   // OpenRouter reasoning models reject temperature; grading determinism comes
   // from median-of-N sampling (score.samples), not temperature.

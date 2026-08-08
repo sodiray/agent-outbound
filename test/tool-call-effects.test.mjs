@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { executeToolCallAction } from '../dist/orchestrator/enrichment/actions/tool-call.js';
@@ -9,28 +12,45 @@ const lookupTool = {
   tools: ['ARBITRARY_LOOKUP'],
 };
 
-const execute = (effect) => executeToolCallAction({
-  listDir: '/tmp',
-  stepId: 'benign_label',
+const listFor = (policy = {}) => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-tool-effect-policy-'));
+  writeFileSync(join(listDir, 'outbound.yaml'), JSON.stringify({ policy }));
+  return listDir;
+};
+
+const execute = ({ listDir, effect, externalSend = false }) => executeToolCallAction({
+  listDir,
+  stepId: 'configured_contact',
   stepConfig: {
     tool: { ...lookupTool, ...(effect ? { effect } : {}) },
+    external_send: externalSend,
     output_map: { value: 'value' },
     __tryTool: async () => ({ result: { value: 'retrieved' }, provider: 'test-provider' }),
   },
   record: {},
 });
 
-test('tool_call refuses a prohibited human-contact channel before invoking the tool', async () => {
+test('a pipeline-prohibited human-contact channel fails config validation and runtime before the tool runs', async () => {
+  const config = {
+    policy: { prohibited_channels: ['sms'] },
+    pipeline: [{
+      kind: 'enrich',
+      id: 'configured_sms',
+      action: 'tool_call',
+      tool: { ...lookupTool, effect: { class: 'human_contact', channel: 'sms' } },
+    }],
+  };
+  const normalized = normalizeConfig(config);
+  assert.match(normalized.errors.join('\n'), /prohibited channel "sms"/i);
+
   let invoked = false;
   await assert.rejects(
     () => executeToolCallAction({
-      listDir: '/tmp',
-      stepId: 'innocuous_enrichment',
+      listDir: listFor(config.policy),
+      stepId: 'configured_sms',
       stepConfig: {
-        tool: {
-          ...lookupTool,
-          effect: { class: 'human_contact', channel: 'sms' },
-        },
+        tool: { ...lookupTool, effect: { class: 'human_contact', channel: 'sms' } },
+        external_send: true,
         __tryTool: async () => {
           invoked = true;
           return { result: {}, provider: 'test-provider' };
@@ -38,52 +58,57 @@ test('tool_call refuses a prohibited human-contact channel before invoking the t
       },
       record: {},
     }),
-    /forbidden channel|outbound tool/i,
+    /prohibits channel "sms"/i,
   );
   assert.equal(invoked, false);
 });
 
-test('tool_call fails closed when the tool effect is undeclared or unrecognised', async () => {
-  await assert.rejects(() => execute(), /effect.*required|undeclared/i);
-  await assert.rejects(() => execute({ class: 'unclassified' }), /unrecognised|unrecognized/i);
-});
-
-test('tool_call continues to execute declared enrichment tools', async () => {
-  const result = await execute({ class: 'data_lookup' });
-  assert.equal(result.outputs.value, 'retrieved');
-});
-
-test('a configuration cannot opt into a prohibited channel through a human-contact effect', async () => {
-  const normalized = normalizeConfig({
+test('a pipeline declaring no prohibited channels may run an SMS human-contact tool', async () => {
+  const configured = normalizeConfig({
     pipeline: [{
-      kind: 'enrich',
-      id: 'configured_sms',
-      action: 'tool_call',
-      tool: {
-        ...lookupTool,
-        effect: { class: 'human_contact', channel: 'automated_voice' },
+      kind: 'send_sms',
+      id: 'sms_step',
+      side_effecting: true,
+      config: {
+        action: 'tool_call',
+        channel: 'sms',
+        tool: { ...lookupTool, effect: { class: 'human_contact', channel: 'sms' } },
       },
     }],
   });
-  assert.deepEqual(normalized.errors, []);
-  await assert.rejects(
-    () => executeToolCallAction({
-      listDir: '/tmp',
-      stepId: 'configured_sms',
-      stepConfig: {
-        ...normalized.config.pipeline[0],
-        external_send: true,
-        __tryTool: async () => ({ result: {}, provider: 'test-provider' }),
-      },
-      record: {},
-    }),
-    /forbidden channel/i,
-  );
+  assert.deepEqual(configured.errors, []);
+  const result = await execute({
+    listDir: listFor(),
+    externalSend: true,
+    effect: { class: 'human_contact', channel: 'sms' },
+  });
+  assert.equal(result.outputs.value, 'retrieved');
 });
 
-test('the declared-channel guard continues to reject SMS, voice, and visits', async () => {
-  const { assertWorkAllowed } = await import('../dist/orchestrator/policy/forbidden-channels.js');
-  for (const channel of ['sms', 'automated_voice', 'door_to_door']) {
-    assert.throws(() => assertWorkAllowed({ channel }));
-  }
+test('a pipeline cannot opt an individual step out of its prohibited channel', () => {
+  const normalized = normalizeConfig({
+    policy: { prohibited_channels: ['sms'] },
+    pipeline: [{
+      kind: 'send_sms',
+      id: 'sms_step',
+      side_effecting: true,
+      config: {
+        action: 'tool_call',
+        channel: 'sms',
+        opt_out_of_policy: true,
+        tool: { ...lookupTool, effect: { class: 'human_contact', channel: 'sms' } },
+      },
+    }],
+  });
+  assert.ok(normalized.errors.length > 0);
+  assert.match(normalized.errors.join('\n'), /opt_out_of_policy|unrecognized/i);
+});
+
+test('tool_call fails closed when its effect is undeclared or unrecognised', async () => {
+  const listDir = listFor();
+  await assert.rejects(() => execute({ listDir }), /effect.*required|undeclared/i);
+  await assert.rejects(
+    () => execute({ listDir, effect: { class: 'unclassified' } }),
+    /unrecognised|unrecognized/i,
+  );
 });

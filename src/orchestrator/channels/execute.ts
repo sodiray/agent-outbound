@@ -854,7 +854,7 @@ export const executeChannelStep = async ({
     const taskType = taskTypeEarly;
     const channel = channelEarly;
 
-    // Project policy (review_required_for, enforce_readiness, forbidden_channels).
+    // Project policy (review_required_for, enforce_readiness, prohibited channels).
     // Loaded once for all gates below so removing a review_required_for token changes behavior.
     // External sends fail closed when config cannot be loaded — never send without policy.
     let projectConfig: any;
@@ -991,7 +991,7 @@ export const executeChannelStep = async ({
       });
     };
 
-    // Forbidden channels/work (SMS, automated voice, visits) cannot be created.
+    // Pipeline-declared prohibited channels/work cannot be created.
     // When policy.enforce_readiness === true, also hard-blocks non-ready external sends
     // (send_email intent=send, linkedin_connect) — not drafts, dryRun, or manual parks.
     // Hydrate real production spend into the record so enrichment ceilings are live.
@@ -1028,7 +1028,7 @@ export const executeChannelStep = async ({
       };
     }
     try {
-      assertWorkAllowed({ kind: stepKind, taskType, channel, stepId: sequenceStepId });
+      assertWorkAllowed({ policy: projectConfig?.policy, kind: stepKind, taskType, channel });
     } catch (err) {
       return {
         status: 'skipped',
@@ -1817,9 +1817,9 @@ export const executeChannelStep = async ({
       channelHint,
     });
     const stepConfig = (step?.config && typeof step.config === 'object') ? step.config as Record<string, unknown> : {};
-    // Prefer explicit action. If a tool is pinned on a send_email step with no
-    // action, treat it as deterministic tool_call so a stripped/legacy config
-    // cannot silently fall through to the LLM path.
+    // Prefer explicit action. A pinned tool on any send_<channel> step is a
+    // deterministic channel boundary; the configured tool owns that channel's
+    // provider-specific work.
     const rawAction = String(stepConfig.action || '').trim().toLowerCase();
     const hasPinnedTool = Boolean(
       stepConfig.tool
@@ -1830,7 +1830,7 @@ export const executeChannelStep = async ({
       ),
     );
     const actionName = rawAction
-      || (intent === 'send' && (stepKind === 'send_email' || channelHint === 'email') && hasPinnedTool
+      || (intent === 'send' && stepKind.startsWith('send_') && hasPinnedTool
         ? 'tool_call'
         : '');
     const llmRole = (intent === 'draft' || preChannelHint === 'email') ? 'copywriting' : 'research';
@@ -1943,21 +1943,23 @@ export const executeChannelStep = async ({
       const preSendTo = String(baseArgs.to || '').trim().toLowerCase();
       const preSendSubject = String(baseArgs.subject || '');
       const preSendBody = String(baseArgs.body || '');
-      const emailContent = assertOutboundContent({
-        channel: 'email',
-        stepId: sequenceStepId,
-        required: {
-          subject: preSendSubject,
-          body: preSendBody,
-        },
-      });
-      if ('reason' in emailContent) {
-        return {
-          status: 'failed',
-          reason: emailContent.reason,
-          provider_id: '',
-          auto_skipped_steps: [],
-        };
+      if (preChannelHint === 'email') {
+        const emailContent = assertOutboundContent({
+          channel: 'email',
+          stepId: sequenceStepId,
+          required: {
+            subject: preSendSubject,
+            body: preSendBody,
+          },
+        });
+        if ('reason' in emailContent) {
+          return {
+            status: 'failed',
+            reason: emailContent.reason,
+            provider_id: '',
+            auto_skipped_steps: [],
+          };
+        }
       }
       const authEnv = (sendRecord as any).__authorized_provider_envelope as
         | { mailbox_id?: string; from?: string; recipient?: string; subject?: string; body?: string }

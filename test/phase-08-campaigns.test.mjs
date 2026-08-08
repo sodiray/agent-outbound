@@ -39,7 +39,7 @@ import {
   applyOutboundPolicy,
   guardChannelExecution,
 } from '../dist/orchestrator/policy/apply-record.js';
-import { findForbiddenSteps } from '../dist/orchestrator/policy/forbidden-channels.js';
+import { findProhibitedSteps } from '../dist/orchestrator/policy/pipeline-prohibitions.js';
 import {
   evaluateCampaignProcess,
   checkCampaignAge,
@@ -64,6 +64,15 @@ const TV_YAML = join(TV_ROOT, 'outbound.yaml');
 const TIER_PIPELINE_IDS = ['tier_a', 'tier_b', 'tier_c', 'tier_d'];
 const VISIT_LIKE =
   /^(visit|field_visit|door_to_door|office_visit|walk_in)$/i;
+const contactPolicy = {
+  per_contact_allowances: { A: 3, B: 2, C: 1, D: 0 },
+  campaign: {
+    max_age_business_days: { A: 40, B: 30, C: 20, D: 0 },
+    quiet_period_business_days: 3,
+    annual_campaign_limit: 2,
+    recycle_wait_days: { A: 90, B: 60, C: 45, D: 30 },
+  },
+};
 
 function loadTvRaw() {
   assert.ok(existsSync(TV_YAML), `TV outbound.yaml missing at ${TV_YAML}`);
@@ -203,7 +212,7 @@ test('TV: tier_a/b/c/d pipelines exist without field_visit / visit steps', () =>
   assert.equal(dPipe.manual, true);
 
   // No visit-like steps anywhere in tier pipelines
-  const forbidden = findForbiddenSteps(tierSteps);
+  const forbidden = findProhibitedSteps(tierSteps, cfg.policy);
   assert.deepEqual(forbidden, [], `Forbidden steps in tier pipelines: ${JSON.stringify(forbidden)}`);
 
   for (const step of tierSteps) {
@@ -217,8 +226,6 @@ test('TV: tier_a/b/c/d pipelines exist without field_visit / visit steps', () =>
     assert.equal(VISIT_LIKE.test(id), false);
   }
 
-  // Policy ban list still names field_visit (config intent)
-  assert.ok((cfg.policy?.forbidden_channels || []).includes('field_visit'));
 });
 
 // ---------------------------------------------------------------------------
@@ -233,13 +240,14 @@ test('mergeContactPlan: preserves active rotation and mail_allocated across re-r
     contacts,
     treatment_tier: 'A',
     mail_treatment: 'golden_ticket',
+    contactPolicy,
   });
 
   assert.equal(plan.active_contact_id, 'c_owner');
   assert.deepEqual(plan.held_contact_ids, ['c_ops', 'c_sales']);
   assert.equal(plan.mail_allocated, false);
-  assert.equal(plan.per_contact_action_allowance, PER_CONTACT_ALLOWANCES.A);
-  assert.equal(plan.campaign_max_age_days, CAMPAIGN_MAX_AGE_DAYS.A);
+  assert.equal(plan.per_contact_action_allowance, 3);
+  assert.equal(plan.campaign_max_age_days, 40);
 
   plan = rotateContact({ campaign: plan, reason: 'owner_exhausted' }).campaign;
   plan = allocateMail({ campaign: plan, mail_treatment: 'golden_ticket' });
@@ -253,6 +261,7 @@ test('mergeContactPlan: preserves active rotation and mail_allocated across re-r
     contacts,
     treatment_tier: 'A',
     mail_treatment: 'golden_ticket',
+    contactPolicy,
   });
   assert.equal(fresh.active_contact_id, 'c_owner');
   assert.equal(fresh.mail_allocated, false);
@@ -274,6 +283,7 @@ test('mergeContactPlan via applyOutboundPolicy preserves rotation + mail on re-a
     contacts,
     treatment_tier: 'B',
     mail_treatment: 'standard_postcard',
+    contactPolicy,
   });
   const afterRotate = rotateContact({ campaign: base, reason: 'exhaust' }).campaign;
   const afterMail = allocateMail({
@@ -326,11 +336,12 @@ test('rotateContact: atomic handoff through queue; false when exhausted', () => 
     campaign_id: 'camp_rot',
     contacts: contactsFixture(),
     treatment_tier: 'C',
+    contactPolicy,
   });
 
   assert.equal(plan.active_contact_id, 'c_owner');
   assert.deepEqual(plan.held_contact_ids, ['c_ops', 'c_sales']);
-  assert.equal(plan.per_contact_action_allowance, PER_CONTACT_ALLOWANCES.C);
+  assert.equal(plan.per_contact_action_allowance, 1);
 
   const r1 = rotateContact({ campaign: plan, reason: 'window_closed' });
   assert.equal(r1.rotated, true);
@@ -511,43 +522,42 @@ test('campaign-process: age / allowance / quiet / annual block over-limit work',
     contacts: contactsFixture(),
     treatment_tier: 'B',
     mail_treatment: 'standard_postcard',
+    contactPolicy,
   });
   assert.ok(plan.started_at, 'new plans stamp started_at');
-  assert.equal(plan.per_contact_action_allowance, PER_CONTACT_ALLOWANCES.B);
-  assert.equal(plan.per_contact_action_allowance, PER_CONTACT_AUTOMATED_ALLOWANCES.B);
-  assert.equal(CAMPAIGN_MAX_AGE_DAYS.B, CAMPAIGN_MAX_AGE_BUSINESS_DAYS.B);
+  assert.equal(plan.per_contact_action_allowance, 2);
 
   // Age: backdate start far past Tier B max (30 business days)
   const aged = { ...plan, started_at: '2020-01-01T00:00:00.000Z' };
-  const age = checkCampaignAge({ campaign: aged, treatment_tier: 'B', asOf: '2026-08-04T12:00:00.000Z' });
+  const age = checkCampaignAge({ campaign: aged, treatment_tier: 'B', asOf: '2026-08-04T12:00:00.000Z', contactPolicy });
   assert.equal(age.allowed, false);
   assert.ok(age.blockers.some((b) => b.startsWith('campaign_age_exceeded')));
 
   // Allowance: Tier B max 2 automated actions
-  const allowOk = checkContactAllowance({ treatment_tier: 'B', automated_actions_used: 1 });
+  const allowOk = checkContactAllowance({ treatment_tier: 'B', automated_actions_used: 1, contactPolicy });
   assert.equal(allowOk.allowed, true);
-  const allowBlock = checkContactAllowance({ treatment_tier: 'B', automated_actions_used: 2 });
+  const allowBlock = checkContactAllowance({ treatment_tier: 'B', automated_actions_used: 2, contactPolicy });
   assert.equal(allowBlock.allowed, false);
   assert.ok(allowBlock.blockers.some((b) => b.startsWith('per_contact_allowance_exceeded')));
 
   // Quiet: less than INTER_CONTACT_QUIET_BUSINESS_DAYS after rotation
-  assert.equal(INTER_CONTACT_QUIET_BUSINESS_DAYS, 3);
   const quietBlock = checkQuietPeriod({
     last_rotation_at: '2026-08-03T12:00:00.000Z',
     asOf: '2026-08-04T12:00:00.000Z',
+    contactPolicy,
   });
   assert.equal(quietBlock.allowed, false);
   const quietOk = checkQuietPeriod({
     last_rotation_at: '2026-07-20T12:00:00.000Z',
     asOf: '2026-08-04T12:00:00.000Z',
+    contactPolicy,
   });
   assert.equal(quietOk.allowed, true);
-  assert.equal(checkQuietPeriod({ last_rotation_at: null }).allowed, true);
+  assert.equal(checkQuietPeriod({ last_rotation_at: null, contactPolicy }).allowed, true);
 
   // Annual: ≤2 campaigns / 12 months
-  assert.equal(ANNUAL_CAMPAIGN_LIMIT, 2);
-  assert.equal(checkAnnualCampaignLimit({ campaigns_in_last_12_months: 1 }).allowed, true);
-  assert.equal(checkAnnualCampaignLimit({ campaigns_in_last_12_months: 2 }).allowed, false);
+  assert.equal(checkAnnualCampaignLimit({ campaigns_in_last_12_months: 1, contactPolicy }).allowed, true);
+  assert.equal(checkAnnualCampaignLimit({ campaigns_in_last_12_months: 2, contactPolicy }).allowed, false);
 
   // Composite evaluate
   const evalBlocked = evaluateCampaignProcess({
@@ -557,18 +567,19 @@ test('campaign-process: age / allowance / quiet / annual block over-limit work',
     last_rotation_at: '2026-08-03T12:00:00.000Z',
     campaigns_in_last_12_months: 2,
     asOf: '2026-08-04T12:00:00.000Z',
+    contactPolicy,
   });
   assert.equal(evalBlocked.allowed, false);
   assert.ok(evalBlocked.blockers.length >= 3);
 });
 
-test('campaign-process: rankCallCapacity is Tier A-first with B spillover', () => {
+test('campaign-process: rankCallCapacity uses pipeline priority without tier assumptions', () => {
   const ranked = rankCallCapacity({
     candidates: [
-      { record_id: 'b_hi', treatment_tier: 'B', fit_score: 99 },
-      { record_id: 'a_lo', treatment_tier: 'A', fit_score: 40 },
-      { record_id: 'a_hi', treatment_tier: 'A', fit_score: 85 },
-      { record_id: 'c1', treatment_tier: 'C', fit_score: 90 },
+      { record_id: 'b_hi', treatment_tier: 'B', fit_score: 99, priority_rank: 3 },
+      { record_id: 'a_lo', treatment_tier: 'A', fit_score: 40, priority_rank: 2 },
+      { record_id: 'a_hi', treatment_tier: 'A', fit_score: 85, priority_rank: 1 },
+      { record_id: 'custom', treatment_tier: 'priority_customer', fit_score: 90, priority_rank: 4 },
     ],
     capacity: 3,
   });
@@ -578,9 +589,8 @@ test('campaign-process: rankCallCapacity is Tier A-first with B spillover', () =
   );
   assert.equal(ranked[0].spillover, false);
   assert.equal(ranked[1].spillover, false);
-  assert.equal(ranked[2].spillover, true);
-  // Tier C never on call board ranking
-  assert.equal(ranked.some((r) => r.record_id === 'c1'), false);
+  assert.equal(ranked[2].spillover, false);
+  assert.equal(ranked.some((r) => r.record_id === 'custom'), false);
 });
 
 test('applyOutboundPolicy: process blockers land in readiness; new plan increments annual count', () => {
@@ -596,6 +606,7 @@ test('applyOutboundPolicy: process blockers land in readiness; new plan incremen
     },
     contacts,
     campaignId: 'camp_annual_1',
+    contactPolicy,
   });
   assert.equal(first.patch.treatment_tier, 'B');
   assert.equal(first.patch.campaigns_in_last_12_months, 1);
@@ -619,6 +630,7 @@ test('applyOutboundPolicy: process blockers land in readiness; new plan incremen
       automated_actions_used: 0,
     },
     contacts,
+    contactPolicy,
   });
   assert.equal(blocked.readiness?.ready, false);
   assert.ok(
@@ -634,10 +646,11 @@ test('guardChannelExecution hard-blocks automated send when allowance exceeded',
     campaign_id: 'camp_g',
     contacts: contactsFixture(),
     treatment_tier: 'C',
+    contactPolicy,
   });
   // Tier C allowance = 1; already used 1 → next send blocked
   const guard = guardChannelExecution({
-    config: { policy: { enforce_readiness: false, forbidden_channels: ['field_visit'] } },
+    config: { policy: { enforce_readiness: false, prohibited_task_types: ['field_visit'] }, contact_policy: contactPolicy },
     record: {
       _row_id: 'guard_1',
       treatment_tier: 'C',
