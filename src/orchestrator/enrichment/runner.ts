@@ -47,8 +47,10 @@ import type {
   MailConfidenceConfigInput,
   PhoneConfidenceConfigInput,
   PostcardConfigInput,
+  PriorityConfigInput,
   ReachabilityConfigInput,
   ContactPolicyConfigInput,
+  TreatmentStrategyConfigInput,
 } from '../../schemas/config.js';
 
 const zeroUsage = () => ({
@@ -701,6 +703,8 @@ export const executeEnrichmentAction = async ({
   aiConfig,
   context,
   treatmentBands,
+  treatmentStrategy,
+  priority,
   identityConfidence,
   phoneConfidence,
   buyerConfidence,
@@ -726,6 +730,8 @@ export const executeEnrichmentAction = async ({
   aiConfig: Record<string, unknown>;
   context: Record<string, unknown>;
   treatmentBands?: TreatmentBandLadders;
+  treatmentStrategy?: TreatmentStrategyConfigInput;
+  priority?: PriorityConfigInput;
   identityConfidence?: IdentityConfidenceConfigInput;
   phoneConfidence?: PhoneConfidenceConfigInput;
   buyerConfidence?: BuyerConfidenceConfigInput;
@@ -860,6 +866,8 @@ export const executeEnrichmentAction = async ({
       enrichmentSpendUsd: costHydrate?.enrichment_usd,
       minFitCoverage: Number(context?.min_fit_coverage),
       treatmentBands,
+      treatmentStrategy,
+      priority,
       identityConfidence,
       phoneConfidence,
       buyerConfidence,
@@ -1069,6 +1077,8 @@ export const executeEnrichmentStepOnRecords = async ({
           linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
         },
         treatmentBands: config?.score?.treatment_bands,
+        treatmentStrategy: config?.score?.treatment,
+        priority: config?.score?.priority,
         identityConfidence: config?.score?.identity_confidence,
         phoneConfidence: config?.score?.phone_confidence,
         buyerConfidence: config?.score?.buyer_confidence,
@@ -1543,6 +1553,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
               },
               treatmentBands: config?.score?.treatment_bands,
+              treatmentStrategy: config?.score?.treatment,
+              priority: config?.score?.priority,
               identityConfidence: config?.score?.identity_confidence,
               phoneConfidence: config?.score?.phone_confidence,
               buyerConfidence: config?.score?.buyer_confidence,

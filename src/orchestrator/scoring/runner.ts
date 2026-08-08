@@ -1007,6 +1007,8 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
           enrichmentSpendUsd: costHydrate.enrichment_usd,
           minFitCoverage: minimumCoverage,
           treatmentBands: scoreConfig?.treatment_bands,
+          treatmentStrategy: scoreConfig?.treatment,
+          priority: scoreConfig?.priority,
           identityConfidence: scoreConfig?.identity_confidence,
           phoneConfidence: scoreConfig?.phone_confidence,
           buyerConfidence: scoreConfig?.buyer_confidence,

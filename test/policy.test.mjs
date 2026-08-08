@@ -155,6 +155,38 @@ test('configured treatment bands use their configured fit cut and reject malform
   }
 });
 
+test('declared treatment strategy applies opaque tier keys and routes', () => {
+  const strategy = {
+    bands: {
+      fit: [0, 25, 50, 75, 100],
+      fit_evidence_confidence: [0, 25, 50, 75, 100],
+    },
+    matrix: [
+      ['cold', 'cold', 'cold', 'cold'],
+      ['cold', 'warm', 'warm', 'warm'],
+      ['hold', 'warm', 'platinum', 'platinum'],
+      ['hold', 'platinum', 'platinum', 'platinum'],
+    ],
+    unscored_tier: 'hold',
+    tiers: {
+      cold: { route: 'recycle_monitoring' },
+      warm: { route: 'outbound' },
+      platinum: { route: 'outbound', standard_postcard: true, golden_ticket: true },
+      hold: { route: 'enrichment' },
+    },
+  };
+  const normalized = normalizeConfig({ score: { treatment: strategy } });
+  assert.deepEqual(normalized.errors, []);
+  assert.equal(
+    assignTreatmentTier({ fitScore: 90, fitEvidenceConfidence: 90, treatmentStrategy: normalized.config.score.treatment }).tier,
+    'platinum',
+  );
+  assert.equal(
+    calculatePriority({ treatmentTier: 'cold', config: { tier_lanes: { cold: 'recycle_monitoring' } } }).priority_lane,
+    'recycle_monitoring',
+  );
+});
+
 test('mail treatment is independent; golden ticket is tier-A overlay', () => {
   const full = assignTreatmentAndMail({
     fitScore: 90,

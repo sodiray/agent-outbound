@@ -15,6 +15,7 @@ import {
 import {
   assignTreatmentAndMail,
   countStrongTimingSignals,
+  LEGACY_TREATMENT_STRATEGY,
   type TreatmentBandLadders,
   type TreatmentTier,
 } from './treatment.js';
@@ -89,8 +90,10 @@ import {
   type IdentityConfidenceConfigInput,
   type MailConfidenceConfigInput,
   type PostcardConfigInput,
+  type PriorityConfigInput,
   type PhoneConfidenceConfigInput,
   type ReachabilityConfigInput,
+  type TreatmentStrategyConfigInput,
   type ContactPolicyConfigInput,
 } from '../../schemas/config.js';
 import { nowIso } from '../lib/record.js';
@@ -121,6 +124,9 @@ export type PolicyApplyInput = {
   minFitCoverage?: number;
   /** Configured fit and evidence-confidence ladders for treatment assignment. */
   treatmentBands?: TreatmentBandLadders;
+  /** Pipeline-owned treatment matrix and per-tier routing/mail declarations. */
+  treatmentStrategy?: TreatmentStrategyConfigInput;
+  priority?: PriorityConfigInput;
   /** Configured literal-support identity weights and deductions. */
   identityConfidence?: IdentityConfidenceConfigInput;
   /** Configured phone evidence weights and unstructured-source maximum. */
@@ -572,10 +578,18 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     },
     cumulativeEnrichmentCostUsd: enrichmentUsd,
     treatmentBands: input.treatmentBands,
+    treatmentStrategy: input.treatmentStrategy,
     goldenTicket: input.goldenTicket,
     postcard: input.postcard,
     enrichmentBudget: input.enrichmentBudget,
   });
+  const treatmentStrategy = input.treatmentStrategy ?? LEGACY_TREATMENT_STRATEGY;
+  const configuredHoldTier = treatmentStrategy.unscored_tier;
+  const tierRoute = (tier: string) => treatmentStrategy.tiers[tier]?.route;
+  const tierPermitsOutreach = (tier: string) => tierRoute(tier) === 'outbound';
+  const tierNeedsEnrichment = (tier: string) => tierRoute(tier) === 'enrichment';
+  const tierNeedsRecycleMonitoring = (tier: string) => tierRoute(tier) === 'recycle_monitoring';
+  const tierAllowsGoldenTicket = (tier: string) => treatmentStrategy.tiers[tier]?.golden_ticket === true;
 
   const taxonomyResolutionFailed = taxonomy.reasons.includes('taxonomy_not_loaded')
     || taxonomy.reasons.includes('taxonomy_version_missing')
@@ -589,7 +603,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     )) || 'taxonomy_unresolved';
     treatment = {
       ...treatment,
-      treatment_tier: 'enrichment_hold',
+      treatment_tier: configuredHoldTier,
       mail_treatment: 'none',
       golden_ticket_eligible: false,
       reasons: [...treatment.reasons, taxonomyReason, 'taxonomy_resolution_forced_hold'],
@@ -626,10 +640,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const thinEvidence = thinEvidenceByConf || thinEvidenceByIds || thinEvidenceDerivedZero || allUnknownComponents;
   if (
     thinEvidence
-    && (treatment.treatment_tier === 'A'
-      || treatment.treatment_tier === 'B'
-      || treatment.treatment_tier === 'C'
-      || treatment.treatment_tier === 'D')
+    && treatment.treatment_tier !== configuredHoldTier
   ) {
     const thinReasons = [
       ...(thinEvidenceByConf ? ['thin_evidence_confidence_below_40'] : []),
@@ -640,7 +651,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     ];
     treatment = {
       ...treatment,
-      treatment_tier: 'enrichment_hold',
+      treatment_tier: configuredHoldTier,
       mail_treatment: 'none',
       golden_ticket_eligible: false,
       reasons: [...treatment.reasons, ...thinReasons],
@@ -657,7 +668,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     const coverageReason = `fit_assessable_weight_below_${minFitCoverage}`;
     treatment = {
       ...treatment,
-      treatment_tier: 'enrichment_hold',
+      treatment_tier: configuredHoldTier,
       mail_treatment: 'none',
       golden_ticket_eligible: false,
       reasons: [...treatment.reasons, coverageReason],
@@ -668,11 +679,11 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   if (
     anyMissingComponent
     && !allUnknownComponents
-    && (treatment.treatment_tier === 'A' || treatment.mail_treatment === 'golden_ticket')
+    && (tierAllowsGoldenTicket(treatment.treatment_tier) || treatment.mail_treatment === 'golden_ticket')
   ) {
     treatment = {
       ...treatment,
-      treatment_tier: treatment.treatment_tier === 'A' ? 'B' : treatment.treatment_tier,
+      treatment_tier: treatment.treatment_tier,
       mail_treatment: treatment.mail_treatment === 'golden_ticket' ? 'none' : treatment.mail_treatment,
       golden_ticket_eligible: false,
       reasons: [...treatment.reasons, 'partial_unknown_blocks_tier_a'],
@@ -687,15 +698,16 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     namedBuyerName: buyer.name,
     affiliation: { status: buyer.affiliationStatus, role: buyer.role },
     goldenTicketPath: treatment.golden_ticket_eligible || treatment.mail_treatment === 'golden_ticket',
+    highTier: tierAllowsGoldenTicket(treatment.treatment_tier),
   });
   // Unresolved affiliation holds any non-D tier; high-tier missing gates hold A.
   const forceHoldFromBuyer =
     buyerHoldReasons.includes('buyer_affiliation_unresolved')
-    || (treatment.treatment_tier === 'A' && buyerHoldReasons.length > 0);
-  if (forceHoldFromBuyer && treatment.treatment_tier !== 'D' && treatment.treatment_tier !== 'enrichment_hold') {
+    || (tierAllowsGoldenTicket(treatment.treatment_tier) && buyerHoldReasons.length > 0);
+  if (forceHoldFromBuyer && !tierNeedsRecycleMonitoring(treatment.treatment_tier) && !tierNeedsEnrichment(treatment.treatment_tier)) {
     treatment = {
       ...treatment,
-      treatment_tier: 'enrichment_hold',
+      treatment_tier: configuredHoldTier,
       mail_treatment: 'none',
       golden_ticket_eligible: false,
       reasons: [...treatment.reasons, ...buyerHoldReasons, 'buyer_resolution_forced_hold'],
@@ -715,8 +727,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     hasReplyOrInterest: Boolean(record.email_last_reply_at || record.has_reply),
     hasPromisedOrOverdueFollowup: Boolean(record.disposition_follow_up_at),
     hasBlockingRepair: Boolean(record.needs_repair),
-    needsEnrichment: treatment.treatment_tier === 'enrichment_hold',
-    isRecycleOrMonitor: treatment.treatment_tier === 'D',
+    needsEnrichment: tierNeedsEnrichment(treatment.treatment_tier),
+    isRecycleOrMonitor: tierNeedsRecycleMonitoring(treatment.treatment_tier),
+    config: input.priority,
   });
 
   // Prefer durable observations / retrieval snapshots over inventing from blank mutable fields.
@@ -779,7 +792,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   /** True when policy must install enrichment_repair (hold path). */
   const needsEnrichmentRepairAction = () =>
-    treatment.treatment_tier === 'enrichment_hold'
+    tierNeedsEnrichment(treatment.treatment_tier)
     || eligibility.outcome === 'enrichment_hold';
 
   /**
@@ -822,8 +835,6 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     'pending_human_review',
   ];
 
-  const tierPermitsOutreach = () => ['A', 'B', 'C'].includes(String(treatment.treatment_tier || ''));
-
   /**
    * `pending_human_review` is legitimate only while a review is actually
    * pending. Once the review is gone — rejected, withdrawn, or cleared — the
@@ -840,7 +851,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     if (!OUTGROWABLE_HOLDING_ACTIONS.includes(actionType)) return false;
     if (['enrichment_repair', 'enrichment_hold'].includes(actionType)) return !needsEnrichmentRepairAction();
     if (actionType === 'pending_human_review') return !awaitsLiveHumanReview();
-    return tierPermitsOutreach();
+    return tierPermitsOutreach(treatment.treatment_tier);
   };
 
   if (!next_action || String(next_action.action_type || '').includes('reprocess') || !next_action.action_id
@@ -859,7 +870,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       };
       lifecycle_stage = eligibility.outcome === 'disqualified' ? 'disqualified' : lifecycle_stage;
       work_state = 'terminal_recordkeeping';
-    } else if (treatment.treatment_tier === 'D') {
+    } else if (tierNeedsRecycleMonitoring(treatment.treatment_tier)) {
       const cold = createInitialColdState(rowId);
       next_action = {
         ...cold.next_action,
@@ -1142,7 +1153,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const readinessForcesRepair =
     readiness.blockers.includes('enrichment_hold')
     || readiness.blockers.includes('buyer_affiliation_unresolved')
-    || (treatment.treatment_tier === 'enrichment_hold');
+    || tierNeedsEnrichment(treatment.treatment_tier);
 
   const enrichment_hold_reasons = collectEnrichmentHoldReasons({
     treatmentTier: treatment.treatment_tier,
@@ -1155,7 +1166,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   });
 
   let enrichment_repair_plan: EnrichmentRepairPlan | null = null;
-  if (readinessForcesRepair || enrichment_hold_reasons.length > 0 && treatment.treatment_tier === 'enrichment_hold') {
+  if (readinessForcesRepair || enrichment_hold_reasons.length > 0 && tierNeedsEnrichment(treatment.treatment_tier)) {
     enrichment_repair_plan = planEnrichmentRepair({
       record: {
         ...record,
@@ -1175,7 +1186,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     if (
       eligibility.outcome !== 'disqualified'
       && eligibility.outcome !== 'suppressed'
-      && treatment.treatment_tier !== 'D'
+      && !tierNeedsRecycleMonitoring(treatment.treatment_tier)
     ) {
       next_action = {
         action_id: `na_enrichment_repair_${rowId}`,
@@ -1260,13 +1271,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     actor: 'system',
   });
 
-  // Re-sync pipeline name after possible buyer-resolution hold override.
-  const pipelineNameFinal =
-    treatment.treatment_tier === 'A' ? 'tier_a'
-      : treatment.treatment_tier === 'B' ? 'tier_b'
-        : treatment.treatment_tier === 'C' ? 'tier_c'
-          : treatment.treatment_tier === 'D' ? 'tier_d'
-            : 'enrichment_hold';
+  const pipelineNameFinal = treatmentStrategy.tiers[treatment.treatment_tier]?.pipeline || '';
 
   const patch: Record<string, unknown> = {
     identity_confidence: observationStore.identity_resolution?.identity_confidence ?? 0,
@@ -1366,7 +1371,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   if (
     campaignNewlyStarted
     && campaign
-    && ['A', 'B', 'C'].includes(treatment.treatment_tier)
+    && tierPermitsOutreach(treatment.treatment_tier)
   ) {
     const prior = num(record.campaigns_in_last_12_months, 0) ?? 0;
     patch.campaigns_in_last_12_months = prior + 1;

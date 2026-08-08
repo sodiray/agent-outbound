@@ -1302,6 +1302,8 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       enrichmentSpendUsd: costHydrate.enrichment_usd,
       minFitCoverage: config?.score?.min_coverage,
       treatmentBands: config?.score?.treatment_bands,
+      treatmentStrategy: config?.score?.treatment,
+      priority: config?.score?.priority,
       identityConfidence: config?.score?.identity_confidence,
       phoneConfidence: config?.score?.phone_confidence,
       buyerConfidence: config?.score?.buyer_confidence,

@@ -165,7 +165,7 @@ test('TV config validates via normalizeConfig and preserves enforce_readiness', 
       : [];
   assert.deepEqual(
     errors,
-    ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).'],
+    [],
     `normalizeConfig errors: ${JSON.stringify(errors)}`,
   );
 
@@ -192,7 +192,7 @@ test('TV config validates via normalizeConfig and preserves enforce_readiness', 
   const loaded = readConfig(TV_ROOT);
   assert.deepEqual(
     loaded.errors || [],
-    ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).'],
+    [],
     `readConfig errors: ${JSON.stringify(loaded.errors)}`,
   );
   assert.equal(loaded.config.policy?.enforce_readiness, true);

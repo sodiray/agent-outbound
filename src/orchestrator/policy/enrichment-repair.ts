@@ -51,6 +51,7 @@ const num = (v: unknown): number | null => {
 
 const AFFILIATION_OK = new Set(['confirmed', 'likely']);
 const AFFILIATION_UNRESOLVED = new Set(['unresolved', 'unknown', 'not_found', 'ambiguous']);
+const LEGACY_HIGH_BUYER_GATE_TIERS = new Set(['A']);
 
 /**
  * Named-person current-affiliation + buying-center role.
@@ -76,10 +77,13 @@ export function collectBuyerResolutionHoldReasons(input: {
   affiliation: BuyerAffiliationResolution;
   /** When true, treat as high-tier (GT eligible path) for missing affiliation. */
   goldenTicketPath?: boolean;
+  /** Pipeline-declared tier requires the high-confidence buyer gates. */
+  highTier?: boolean;
 }): string[] {
   const reasons: string[] = [];
-  const tier = String(input.treatmentTier || '');
-  const highTier = tier === 'A' || input.goldenTicketPath === true;
+  const highTier = input.highTier === true
+    || input.goldenTicketPath === true
+    || LEGACY_HIGH_BUYER_GATE_TIERS.has(String(input.treatmentTier || ''));
   const aff = input.affiliation;
 
   if (aff.status && AFFILIATION_UNRESOLVED.has(aff.status)) {

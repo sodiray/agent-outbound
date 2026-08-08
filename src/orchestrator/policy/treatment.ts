@@ -11,12 +11,33 @@ import {
   type EnrichmentBudgetConfigInput,
   type GoldenTicketConfigInput,
   type PostcardConfigInput,
+  type TreatmentStrategyConfigInput,
 } from '../../schemas/config.js';
 
 export const CALCULATION_RULE_VERSION = 'tv-treatment-v1';
 
-export type TreatmentTier = 'A' | 'B' | 'C' | 'D' | 'enrichment_hold';
+export type TreatmentTier = string;
 export type MailTreatment = 'none' | 'standard_postcard' | 'golden_ticket';
+export const LEGACY_TREATMENT_STRATEGY: Required<TreatmentStrategyConfigInput> = {
+  bands: {
+    fit: [...DEFAULT_SCORE_TREATMENT_BANDS.fit],
+    fit_evidence_confidence: [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
+  },
+  matrix: [
+    ['D', 'D', 'D', 'D'],
+    ['D', 'D', 'C', 'C'],
+    ['enrichment_hold', 'C', 'B', 'B'],
+    ['enrichment_hold', 'B', 'B', 'A'],
+  ],
+  unscored_tier: 'enrichment_hold',
+  tiers: {
+    A: { route: 'outbound', pipeline: 'tier_a', standard_postcard: true, golden_ticket: true },
+    B: { route: 'outbound', pipeline: 'tier_b', standard_postcard: true, postcard_exception: true },
+    C: { route: 'outbound', pipeline: 'tier_c' },
+    D: { route: 'recycle_monitoring', pipeline: 'tier_d' },
+    enrichment_hold: { route: 'enrichment', pipeline: 'enrichment_hold' },
+  },
+};
 /** @deprecated Use score.enrichment_budget; retained for compatibility with policy consumers. */
 export const ENRICHMENT_COST_CEILINGS = DEFAULT_SCORE_ENRICHMENT_BUDGET.ceilings;
 /** @deprecated Use score.golden_ticket.minimums; retained for compatibility with policy consumers. */
@@ -74,6 +95,7 @@ export type TreatmentInput = {
   cumulativeEnrichmentCostUsd?: number;
   goldenTicketBudgetCeilingUsd?: number;
   treatmentBands?: TreatmentBandLadders;
+  treatmentStrategy?: TreatmentStrategyConfigInput;
   goldenTicket?: GoldenTicketConfigInput;
   postcard?: PostcardConfigInput;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
@@ -137,9 +159,16 @@ export function assignTreatmentTier(input: {
   fitScore: number | null;
   fitEvidenceConfidence: number | null;
   treatmentBands?: TreatmentBandLadders;
+  treatmentStrategy?: TreatmentStrategyConfigInput;
 }): { tier: TreatmentTier; reasons: string[] } {
-  const fitBoundaries = input.treatmentBands?.fit || DEFAULT_SCORE_TREATMENT_BANDS.fit;
-  const confidenceBoundaries = input.treatmentBands?.fit_evidence_confidence
+  const strategy = input.treatmentStrategy ?? LEGACY_TREATMENT_STRATEGY;
+  const fitBoundaries = input.treatmentStrategy?.bands?.fit
+    || input.treatmentBands?.fit
+    || strategy.bands.fit
+    || DEFAULT_SCORE_TREATMENT_BANDS.fit;
+  const confidenceBoundaries = input.treatmentStrategy?.bands?.fit_evidence_confidence
+    || input.treatmentBands?.fit_evidence_confidence
+    || strategy.bands.fit_evidence_confidence
     || DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence;
   const fit = band(input.fitScore, fitBoundaries);
   const conf = band(input.fitEvidenceConfidence, confidenceBoundaries);
@@ -149,25 +178,15 @@ export function assignTreatmentTier(input: {
   ];
 
   if (fit === 'unscored') {
-    return { tier: 'enrichment_hold', reasons: [...reasons, 'unscored_fit'] };
+    return { tier: strategy.unscored_tier, reasons: [...reasons, 'unscored_fit'] };
   }
-  if (fit.index === 0) {
-    return { tier: 'D', reasons: [...reasons, 'weak_fit'] };
+  if (conf === 'unscored') {
+    return { tier: strategy.unscored_tier, reasons: [...reasons, 'unscored_fit_evidence'] };
   }
-  if (fit.index === 3) {
-    if (conf !== 'unscored' && conf.index === 3) return { tier: 'A', reasons: [...reasons, 'strong_fit_strong_evidence'] };
-    if (conf !== 'unscored' && conf.index === 2) return { tier: 'B', reasons: [...reasons, 'strong_fit_usable_evidence'] };
-    if (conf !== 'unscored' && conf.index === 1) return { tier: 'B', reasons: [...reasons, 'high_fit_thin_evidence_postcard_exception_path'] };
-    return { tier: 'enrichment_hold', reasons: [...reasons, 'strong_fit_insufficient_evidence'] };
-  }
-  if (fit.index === 2) {
-    if (conf !== 'unscored' && (conf.index === 2 || conf.index === 3)) return { tier: 'B', reasons: [...reasons, 'good_fit_usable_evidence'] };
-    if (conf !== 'unscored' && conf.index === 1) return { tier: 'C', reasons: [...reasons, 'good_fit_low_evidence'] };
-    return { tier: 'enrichment_hold', reasons: [...reasons, 'good_fit_insufficient_evidence'] };
-  }
-  // Second fit band.
-  if (conf !== 'unscored' && (conf.index === 2 || conf.index === 3)) return { tier: 'C', reasons: [...reasons, 'plausible_fit_usable_evidence'] };
-  return { tier: 'D', reasons: [...reasons, 'plausible_fit_weak_evidence'] };
+  const tier = strategy.matrix[fit.index]?.[conf.index];
+  return tier
+    ? { tier, reasons: [...reasons, 'declared_treatment_matrix'] }
+    : { tier: strategy.unscored_tier, reasons: [...reasons, 'treatment_matrix_incomplete'] };
 }
 
 /**
@@ -180,6 +199,7 @@ export function evaluateStandardPostcard(input: {
   mailAddressReady: boolean;
   identityConfidence?: number | null;
   postcard?: PostcardConfigInput;
+  treatmentStrategy?: TreatmentStrategyConfigInput;
 }): { eligible: boolean; reasons: string[]; withheld: string[] } {
   const reasons: string[] = [];
   const withheld: string[] = [];
@@ -192,16 +212,16 @@ export function evaluateStandardPostcard(input: {
   }
   const fit = input.fitScore ?? 0;
   const conf = input.fitEvidenceConfidence ?? 0;
-  const tierOk = input.treatmentTier === 'A' || input.treatmentTier === 'B';
+  const tierRule = (input.treatmentStrategy ?? LEGACY_TREATMENT_STRATEGY).tiers[input.treatmentTier];
+  const tierOk = tierRule?.standard_postcard === true;
   const strongFitException = fit >= mins.strong_fit
     && conf >= mins.fit_evidence
-    && conf < mins.fit_evidence_exclusive_maximum;
+    && conf < mins.fit_evidence_exclusive_maximum
+    && tierRule?.postcard_exception === true;
   if (!tierOk && !strongFitException) {
     withheld.push('treatment_or_exception_not_met');
   }
-  if (input.treatmentTier === 'C' || input.treatmentTier === 'D' || input.treatmentTier === 'enrichment_hold') {
-    if (!strongFitException) withheld.push(`tier_${input.treatmentTier}_no_default_mail`);
-  }
+  if (!tierOk && !strongFitException) withheld.push(`tier_${input.treatmentTier}_no_declared_mail`);
   const eligible = withheld.length === 0 && (tierOk || strongFitException);
   if (eligible) reasons.push(tierOk ? 'tier_allows_standard_postcard' : 'strong_fit_postcard_exception');
   return { eligible, reasons, withheld };
@@ -262,12 +282,15 @@ export function evaluateGoldenTicket(input: {
   cumulativeEnrichmentCostUsd?: number;
   goldenTicketBudgetCeilingUsd?: number;
   goldenTicket?: GoldenTicketConfigInput;
+  treatmentStrategy?: TreatmentStrategyConfigInput;
 }): { eligible: boolean; reasons: string[]; withheld: string[] } {
   const reasons: string[] = [];
   const withheld: string[] = [];
   const mins = { ...DEFAULT_SCORE_GOLDEN_TICKET.minimums, ...input.goldenTicket?.minimums };
 
-  if (input.treatmentTier !== 'A') withheld.push('not_tier_a');
+  if ((input.treatmentStrategy ?? LEGACY_TREATMENT_STRATEGY).tiers[input.treatmentTier]?.golden_ticket !== true) {
+    withheld.push(input.treatmentStrategy ? 'tier_not_declared_for_golden_ticket' : 'not_tier_a');
+  }
 
   if (isMissingScore(input.fitScore)) withheld.push('fit_score_missing');
   else if ((input.fitScore as number) < mins.fit_score) {
@@ -390,6 +413,7 @@ export function assignTreatmentAndMail(input: TreatmentInput): TreatmentResult {
     fitScore: input.fitScore,
     fitEvidenceConfidence: input.fitEvidenceConfidence,
     treatmentBands: input.treatmentBands,
+    treatmentStrategy: input.treatmentStrategy,
   });
 
   const postcard = evaluateStandardPostcard({
@@ -399,6 +423,7 @@ export function assignTreatmentAndMail(input: TreatmentInput): TreatmentResult {
     mailAddressReady: Boolean(input.mailAddressReady),
     identityConfidence: input.identityConfidence,
     postcard: input.postcard,
+    treatmentStrategy: input.treatmentStrategy,
   });
 
   const assetReady = input.goldenTicketGates?.assetReady;
@@ -435,6 +460,7 @@ export function assignTreatmentAndMail(input: TreatmentInput): TreatmentResult {
     goldenTicketBudgetCeilingUsd:
       input.goldenTicketBudgetCeilingUsd ?? input.goldenTicket?.minimums?.enrichment_budget_usd,
     goldenTicket: input.goldenTicket,
+    treatmentStrategy: input.treatmentStrategy,
   });
 
   let mail_treatment: MailTreatment = 'none';

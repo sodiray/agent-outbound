@@ -215,6 +215,30 @@ export type CandidateTierConfigInput = {
   bands?: number[];
 };
 
+/**
+ * Pipeline-owned treatment decisions. Matrix rows are fit bands (low to high)
+ * and columns are fit-evidence bands (low to high).
+ */
+export type TreatmentStrategyConfigInput = {
+  bands?: {
+    fit?: number[];
+    fit_evidence_confidence?: number[];
+  };
+  matrix?: string[][];
+  unscored_tier?: string;
+  tiers?: Record<string, {
+    route?: 'outbound' | 'enrichment' | 'recycle_monitoring';
+    pipeline?: string;
+    standard_postcard?: boolean;
+    postcard_exception?: boolean;
+    golden_ticket?: boolean;
+  }>;
+};
+
+export type PriorityConfigInput = {
+  tier_lanes?: Record<string, 'reply_interest' | 'promised_followup' | 'blocking_repair' | 'enrichment' | 'outbound' | 'recycle_monitoring'>;
+};
+
 export type PostcardConfigInput = {
   minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_POSTCARD.minimums, number>>;
 };
@@ -1184,6 +1208,35 @@ const ScoreTreatmentBandsSchema = z.object({
   fit_evidence_confidence: [...DEFAULT_SCORE_TREATMENT_BANDS.fit_evidence_confidence],
 });
 
+const TreatmentStrategyTierSchema = z.object({
+  route: z.enum(['outbound', 'enrichment', 'recycle_monitoring']),
+  pipeline: z.string().trim().min(1).optional(),
+  standard_postcard: z.boolean().optional(),
+  postcard_exception: z.boolean().optional(),
+  golden_ticket: z.boolean().optional(),
+}).strict();
+
+const PriorityConfigSchema = z.object({
+  tier_lanes: z.record(z.enum([
+    'reply_interest',
+    'promised_followup',
+    'blocking_repair',
+    'enrichment',
+    'outbound',
+    'recycle_monitoring',
+  ])).default({}),
+}).strict();
+
+const TreatmentStrategyConfigSchema = z.object({
+  bands: z.object({
+    fit: ScoreTreatmentBandLadderSchema,
+    fit_evidence_confidence: ScoreTreatmentBandLadderSchema,
+  }).strict(),
+  matrix: z.array(z.array(z.string().trim().min(1)).length(4)).length(4),
+  unscored_tier: z.string().trim().min(1),
+  tiers: z.record(TreatmentStrategyTierSchema),
+}).strict();
+
 const ConfidenceMinimumSchema = z.coerce.number().min(0).max(100);
 const NonNegativePolicyValueSchema = z.coerce.number().nonnegative();
 const NonNegativeWholePolicyValueSchema = z.coerce.number().int().nonnegative();
@@ -1457,6 +1510,10 @@ const ScoreSchema = z.object({
   // Inclusive lower boundaries for the four treatment matrix bands. The final
   // 100 boundary closes the ladder so every score is in exactly one band.
   treatment_bands: ScoreTreatmentBandsSchema,
+  // Treatment tier names and all tier-specific routing/mail permissions are
+  // pipeline policy. Omission deliberately leaves treatment unconfigured.
+  treatment: TreatmentStrategyConfigSchema.optional(),
+  priority: PriorityConfigSchema.optional(),
   // Confidence evidence weights total no more than 100; penalties deduct from that evidence.
   identity_confidence: IdentityConfidenceConfigSchema,
   phone_confidence: PhoneConfidenceConfigSchema,

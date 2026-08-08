@@ -121,7 +121,7 @@ test('TV yaml: diagnostic_content_pack run_in_pipeline survives normalizeConfig'
   });
   assert.deepEqual(
     normalized.errors || [],
-    ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).'],
+    [],
   );
   const diag = (normalized.config.pipeline || []).find((s) => s?.id === 'diagnostic_content_pack');
   assert.ok(diag, 'diagnostic_content_pack present after normalize');

@@ -8,6 +8,7 @@ import {
   DEFAULT_SCORE_CANDIDATE_TIER,
   type ActionConfidenceConfigInput,
   type CandidateTierConfigInput,
+  type PriorityConfigInput,
 } from '../../schemas/config.js';
 
 export const FIT_RULE_VERSION = 'tv-fit-v1';
@@ -186,6 +187,7 @@ export type PriorityInput = {
   fitScore?: number | null;
   timingScore?: number | null;
   isRecycleOrMonitor?: boolean;
+  config?: PriorityConfigInput;
 };
 
 export type PriorityResult = {
@@ -214,10 +216,10 @@ export function calculatePriority(input: PriorityInput): PriorityResult {
   } else if (input.hasBlockingRepair) {
     lane = 'blocking_repair';
     reasons.push('blocking_repair');
-  } else if (input.needsEnrichment || input.treatmentTier === 'enrichment_hold') {
+  } else if (input.needsEnrichment || input.config?.tier_lanes?.[String(input.treatmentTier || '')] === 'enrichment') {
     lane = 'enrichment';
     reasons.push('enrichment_needed');
-  } else if (input.isRecycleOrMonitor || input.treatmentTier === 'D') {
+  } else if (input.isRecycleOrMonitor || input.config?.tier_lanes?.[String(input.treatmentTier || '')] === 'recycle_monitoring') {
     lane = 'recycle_monitoring';
     reasons.push('recycle_or_monitor');
   } else {
