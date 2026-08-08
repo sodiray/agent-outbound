@@ -11,10 +11,10 @@ import {
   type ResolvedReviewPresentation,
 } from './review-presentation.js';
 
-export const TRANSITION_AUDIT_VERSION = 'tv-transition-audit-v1';
-export const STAGE_REVIEW_POLICY_VERSION = 'tv-stage-review-v1';
+export const TRANSITION_AUDIT_VERSION = 'transition-audit-v1';
+export const STAGE_REVIEW_POLICY_VERSION = 'stage-review-v1';
 /** Keep aligned with lifecycle.NEXT_ACTION_POLICY_VERSION. */
-const NEXT_ACTION_POLICY_VERSION = 'tv-next-action-v1';
+const NEXT_ACTION_POLICY_VERSION = 'next-action-v1';
 
 type LifecycleStage = string;
 type SequenceState = string;

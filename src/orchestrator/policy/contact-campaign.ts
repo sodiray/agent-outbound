@@ -39,7 +39,7 @@ export type AccountCampaign = {
   selection_rule_version: string;
 };
 
-export const CONTACT_CAMPAIGN_RULE_VERSION = 'tv-contact-campaign-v1';
+export const CONTACT_CAMPAIGN_RULE_VERSION = 'contact-campaign-v1';
 
 /** Backward-compatible exports; pipeline defaults now live in contact_policy. */
 export const PER_CONTACT_ALLOWANCES: Record<string, number> = {

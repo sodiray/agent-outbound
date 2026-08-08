@@ -252,7 +252,7 @@ test('phase-05 treatment: matrix assigns A/B/C/D/enrichment_hold per design', ()
       `fit=${c.fit} conf=${c.conf} expected ${c.tier}, got ${r.tier} (${r.reasons.join(';')})`,
     );
   }
-  assert.equal(TREATMENT_RULE_VERSION, 'tv-treatment-v1');
+  assert.equal(TREATMENT_RULE_VERSION, 'treatment-calculation-v1');
 });
 
 /** Full production GT-passing input (all multi-domain gates). */
@@ -393,7 +393,7 @@ test('phase-05 priority: not a mirror of fit (lane + rank)', () => {
   );
   // Rank formula is timing*0.55 + fit*0.35 + 10 — never equal to fit alone
   assert.notEqual(highFitLowTiming.priority_rank, 90);
-  assert.equal(PRIORITY_RULE_VERSION, 'tv-priority-v1');
+  assert.equal(PRIORITY_RULE_VERSION, 'priority-arithmetic-v1');
 
   const enrich = calculatePriority({
     fitScore: 85,
@@ -1170,11 +1170,11 @@ test('phase-05 production path: same evidence bundle → explainable fit/priorit
   assert.ok(typeof policy.priority_rank === 'number');
 
   const treatment = JSON.parse(String(policy.patch.treatment_json));
-  assert.equal(treatment.calculation_rule_version, 'tv-treatment-v1');
+  assert.equal(treatment.calculation_rule_version, 'treatment-calculation-v1');
   assert.ok(Array.isArray(treatment.reasons) && treatment.reasons.length > 0);
 
   const priority = JSON.parse(String(policy.patch.priority_json));
-  assert.equal(priority.calculation_rule_version, 'tv-priority-v1');
+  assert.equal(priority.calculation_rule_version, 'priority-arithmetic-v1');
   assert.notEqual(priority.priority_rank, fitCalc.fit_score);
 
   const readiness = policy.readiness;
@@ -1275,7 +1275,7 @@ test('phase-05 timing: signal registry decays; apply writes timing_json (not sca
   });
   assert.ok(policy.patch.timing_json);
   const timing = JSON.parse(String(policy.patch.timing_json));
-  assert.equal(timing.calculation_rule_version, 'tv-timing-v1');
+  assert.equal(timing.calculation_rule_version, 'timing-v1');
   assert.ok(Array.isArray(timing.signals) && timing.signals.length >= 1);
   assert.equal(Number(policy.patch.timing_score), timing.timing_score);
   // Timing feeds priority rank (not fit alone)
@@ -1334,7 +1334,7 @@ test('phase-05 reachability: named channel states; apply writes reachability_jso
   });
   assert.ok(policy.patch.reachability_json);
   const reach = JSON.parse(String(policy.patch.reachability_json));
-  assert.equal(reach.calculation_rule_version, 'tv-reachability-v1');
+  assert.equal(reach.calculation_rule_version, 'reachability-v1');
   const email = reach.channels.find((c) => c.channel === 'email');
   assert.equal(email.state, 'named_validated');
   assert.equal(email.ready, true);
@@ -1537,10 +1537,10 @@ test('phase-05 complete-when: one evidence bundle → all eight outcomes; score 
   const fitCalc = JSON.parse(String(a.patch.fit_calculation_json));
 
   assert.equal(fitCalc.calculation_rule_version, FIT_ARITHMETIC_RULE_VERSION);
-  assert.equal(timing.calculation_rule_version, 'tv-timing-v1');
-  assert.equal(reach.calculation_rule_version, 'tv-reachability-v1');
-  assert.equal(treatment.calculation_rule_version, 'tv-treatment-v1');
-  assert.equal(priority.calculation_rule_version, 'tv-priority-v1');
+  assert.equal(timing.calculation_rule_version, 'timing-v1');
+  assert.equal(reach.calculation_rule_version, 'reachability-v1');
+  assert.equal(treatment.calculation_rule_version, 'treatment-calculation-v1');
+  assert.equal(priority.calculation_rule_version, 'priority-arithmetic-v1');
   assert.ok(Array.isArray(treatment.reasons) && treatment.reasons.length > 0);
   assert.ok(Array.isArray(readiness.blockers));
   assert.notEqual(priority.priority_rank, fitCalc.fit_score);

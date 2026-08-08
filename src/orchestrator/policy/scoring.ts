@@ -11,7 +11,7 @@ import {
 } from '../../schemas/config.js';
 
 export const FIT_ARITHMETIC_RULE_VERSION = 'fit-arithmetic-v1';
-export const PRIORITY_RULE_VERSION = 'tv-priority-v1';
+export const PRIORITY_RULE_VERSION = 'priority-arithmetic-v1';
 
 export type FitComponentId = string;
 

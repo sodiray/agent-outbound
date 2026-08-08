@@ -31,7 +31,7 @@ import {
 } from '../../schemas/config.js';
 import { isAffirmativeFlag } from './booleanish.js';
 
-export const EVIDENCE_CONTRACT_VERSION = 'tv-evidence-v1';
+export const EVIDENCE_CONTRACT_VERSION = 'evidence-contract-v1';
 
 /** Record JSON columns used for durable evidence (ensureRecordColumns TEXT). */
 export const EVIDENCE_RECORD_COLUMNS = [

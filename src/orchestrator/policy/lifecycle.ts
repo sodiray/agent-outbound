@@ -95,7 +95,7 @@ export type NextAction = {
   policy_version: string;
 };
 
-export const NEXT_ACTION_POLICY_VERSION = 'tv-next-action-v1';
+export const NEXT_ACTION_POLICY_VERSION = 'next-action-v1';
 
 const TERMINAL_LIFECYCLE = new Set<LifecycleStage>(['won', 'lost', 'disqualified']);
 

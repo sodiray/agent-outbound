@@ -10,7 +10,7 @@ import {
   type TreatmentStrategyConfigInput,
 } from '../../schemas/config.js';
 
-export const CALCULATION_RULE_VERSION = 'tv-treatment-v1';
+export const CALCULATION_RULE_VERSION = 'treatment-calculation-v1';
 
 export type TreatmentTier = string;
 export type MailTreatment = 'none' | 'standard_postcard' | 'golden_ticket';

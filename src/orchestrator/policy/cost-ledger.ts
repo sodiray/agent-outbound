@@ -6,7 +6,7 @@ import {
   type EnrichmentBudgetConfigInput,
 } from '../../schemas/config.js';
 
-export const COST_LEDGER_VERSION = 'tv-cost-ledger-v1';
+export const COST_LEDGER_VERSION = 'cost-ledger-v1';
 
 export type CostEntry = {
   entry_id: string;

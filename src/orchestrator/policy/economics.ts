@@ -21,7 +21,7 @@ export type EconomicScenarioResult = {
   calculation_rule_version: string;
 };
 
-export const ECONOMIC_RULE_VERSION = 'tv-economics-v1';
+export const ECONOMIC_RULE_VERSION = 'economics-v1';
 
 export const calculateEconomicScenario = (input: EconomicScenarioInput): EconomicScenarioResult => {
   const assumptions: string[] = [];

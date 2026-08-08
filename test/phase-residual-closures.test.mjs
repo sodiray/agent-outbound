@@ -92,7 +92,7 @@ test('residual timing + reachability', () => {
     ]),
   });
   assert.ok(t.timing_score > 0);
-  assert.equal(t.calculation_rule_version, 'tv-timing-v1');
+  assert.equal(t.calculation_rule_version, 'timing-v1');
   const r = evaluateReachability({
     contact_email: 'a@b.com',
     email_verification_status: 'verified',
@@ -165,7 +165,7 @@ test('residual transition audit', () => {
     reason: 'first_outbound',
   });
   assert.ok(a.audit_id);
-  assert.equal(a.policy_version, 'tv-transition-audit-v1');
+  assert.equal(a.policy_version, 'transition-audit-v1');
 });
 
 test('residual Unipile live HTTP via inject fetch', async () => {

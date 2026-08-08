@@ -10,8 +10,8 @@ import {
 import { isAffirmativeFlag } from './booleanish.js';
 import { nowIso } from '../lib/record.js';
 
-export const TIMING_RULE_VERSION = 'tv-timing-v1';
-export const REACHABILITY_RULE_VERSION = 'tv-reachability-v1';
+export const TIMING_RULE_VERSION = 'timing-v1';
+export const REACHABILITY_RULE_VERSION = 'reachability-v1';
 
 export type TimingSignalId =
   | 'hiring_spike'

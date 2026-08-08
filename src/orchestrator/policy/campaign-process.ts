@@ -11,7 +11,7 @@ import {
 import type { AccountCampaign } from './contact-campaign.js';
 import { nowIso } from '../lib/record.js';
 
-export const CAMPAIGN_PROCESS_VERSION = 'tv-campaign-process-v1';
+export const CAMPAIGN_PROCESS_VERSION = 'campaign-process-v1';
 
 /** Business-day oriented max ages (doc-aligned). */
 export const CAMPAIGN_MAX_AGE_BUSINESS_DAYS: Record<string, number> = {
