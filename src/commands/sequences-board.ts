@@ -1,5 +1,6 @@
-import { getSequenceBoard, listConfiguredSequences } from '../orchestrator/pipeline/sequences-board.js';
+import { getSequenceBoard } from '../orchestrator/pipeline/sequences-board.js';
 import { readConfig } from '../orchestrator/lib/config.js';
+import { listConfiguredSequences } from '../orchestrator/lib/sequence-resolution.js';
 import { openListDb } from '../orchestrator/runtime/db.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
 

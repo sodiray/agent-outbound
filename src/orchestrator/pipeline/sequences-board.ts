@@ -1,4 +1,5 @@
 import { flattenPipelineSteps, stepSubpipelineName } from '../lib/subpipelines.js';
+import { resolveConfiguredSequence } from '../lib/sequence-resolution.js';
 
 const text = (value: unknown) => String(value || '').trim();
 
@@ -48,6 +49,7 @@ export const getSequenceBoard = ({
   limitPerBucket?: number;
 }): SequenceBoard => {
   const name = text(sequence) || 'default';
+  resolveConfiguredSequence({ config, name });
   const steps = flattenPipelineSteps(config)
     .filter((step: any) => stepSubpipelineName(step) === name);
 
@@ -125,12 +127,4 @@ export const getSequenceBoard = ({
     completed,
     awaiting_manual: awaitingManual,
   };
-};
-
-export const listConfiguredSequences = ({ config }: { config: any }) => {
-  const fromPipeline = flattenPipelineSteps(config)
-    .map((step: any) => stepSubpipelineName(step))
-    .filter(Boolean);
-  const fromSequences = Object.keys(config?.sequences || {});
-  return [...new Set([...fromPipeline, ...fromSequences])].filter(Boolean).sort();
 };

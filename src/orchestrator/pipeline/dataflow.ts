@@ -18,6 +18,10 @@ import {
   holdingSubpipelineNames,
   stepSubpipelineName,
 } from '../lib/subpipelines.js';
+import {
+  pipelineNameForRecord,
+  resolveConfiguredSequence,
+} from '../lib/sequence-resolution.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
 import { isSkippedWhenOutcome } from '../lib/step-when.js';
@@ -685,7 +689,7 @@ const makeApplicable = ({ db, listDir, config, force }: { db: any; listDir: stri
       subpipeline
       && (
         holdingPipelines.has(subpipeline)
-        || String(recordState.record?.pipeline_name || 'default').trim() !== subpipeline
+        || pipelineNameForRecord({ config, record: recordState.record }) !== subpipeline
       )
     ) {
       return false;
@@ -767,6 +771,7 @@ export const runPipelineDataflow = async ({
   listDir,
   where = '',
   limit = 0,
+  pipelineName = '',
   dryRun = false,
   force = false,
   reapply = false,
@@ -776,6 +781,7 @@ export const runPipelineDataflow = async ({
   listDir: string;
   where?: string;
   limit?: number;
+  pipelineName?: string;
   dryRun?: boolean;
   force?: boolean;
   reapply?: boolean;
@@ -789,6 +795,13 @@ export const runPipelineDataflow = async ({
 
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
+  const selectedPipeline = String(pipelineName || '').trim();
+  if (selectedPipeline) {
+    const resolved = resolveConfiguredSequence({ config, name: selectedPipeline });
+    if (resolved.kind !== 'pipeline') {
+      throw new Error(`Sequence "${selectedPipeline}" is not a pipeline.`);
+    }
+  }
   prepareFieldCheckValueFiles({ config, listDir });
   assertPhaseModelReferences({
     config: {
@@ -814,7 +827,10 @@ export const runPipelineDataflow = async ({
     // Filter canary before limit so excluded production rows cannot starve allowlist.
     const rawInPlay = readInPlayRows({ db, where, limit: 0 });
     const canaryRows = filterRecordsForCanary(rawInPlay, canaryConfig);
-    const rows = Number(limit || 0) > 0 ? canaryRows.slice(0, Number(limit)) : canaryRows;
+    const selectedRows = selectedPipeline
+      ? canaryRows.filter((record) => pipelineNameForRecord({ config, record }) === selectedPipeline)
+      : canaryRows;
+    const rows = Number(limit || 0) > 0 ? selectedRows.slice(0, Number(limit)) : selectedRows;
     // Honor human decision overrides only for the canary-scoped set.
     if (!dryRun) {
       reconcileOverrides({
@@ -826,7 +842,15 @@ export const runPipelineDataflow = async ({
         recordIds: rows.map((r) => getRecordRowId(r)).filter(Boolean),
       });
     }
-    if (dryRun) return simulatePipeline({ db, listDir, steps: steps.map((entry) => ({ ...entry.step, id: entry.id })), baseRows: rows, force, reapply });
+    if (dryRun) return simulatePipeline({
+      db,
+      listDir,
+      config,
+      steps: steps.map((entry) => ({ ...entry.step, id: entry.id })),
+      baseRows: rows,
+      force,
+      reapply,
+    });
     const overridesByRecord = overridesByRecordMap({ db });
 
     const largestBatch = largestBatchSize(steps);

@@ -34,6 +34,10 @@ import {
   toIsoDate,
   toZonedIsoDate,
 } from '../lib/working-days.js';
+import {
+  recordUsesPipelineSequence,
+  resolveSequencerSequence,
+} from '../lib/sequence-resolution.js';
 import { evaluateStructuredCondition } from '../lib/sequence-conditions.js';
 import { resolveStepTemplate } from '../lib/templates.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
@@ -125,13 +129,7 @@ const parseTimeoutPolicy = (rawText) => {
 };
 
 export const getSequence = (config, name = 'default') => {
-  const sequences = config?.sequences || {};
-  if (!Object.prototype.hasOwnProperty.call(sequences, name)) {
-    throw new Error(`Unknown sequence "${name}".`);
-  }
-  const sequence = sequences[name];
-  if (!sequence) throw new Error(`Unknown sequence "${name}".`);
-  return sequence;
+  return resolveSequencerSequence({ config, name });
 };
 
 const recordSequenceName = (record) => String(record?.sequence_name || 'default').trim() || 'default';
@@ -297,6 +295,7 @@ export const collectDueRecords = ({
   now = new Date(),
   today,
   timeZone,
+  config,
   listDir = '',
   canaryConfig,
 }: {
@@ -309,6 +308,8 @@ export const collectDueRecords = ({
   today?: string;
   /** Pipeline timezone for date-only waits when today is omitted. */
   timeZone?: string;
+  /** Filters nested pipeline records from the sequencer executor. */
+  config?: Record<string, unknown>;
   /** When set, canary isolation filters due records to the allowlist. */
   listDir?: string;
   canaryConfig?: import('../policy/canary-isolation.js').CanaryIsolationConfig;
@@ -340,9 +341,12 @@ export const collectDueRecords = ({
     }
     return shouldExecuteSequenceOutbound(record, now, { today, timeZone }).execute;
   });
+  const sequencerDue = config
+    ? due.filter((record) => !recordUsesPipelineSequence({ config, record }))
+    : due;
   const isolation = canaryConfig
     || (listDir ? loadCanaryConfig({ listDir }) : null);
-  const scoped = isolation ? filterRecordsForCanary(due, isolation) : due;
+  const scoped = isolation ? filterRecordsForCanary(sequencerDue, isolation) : sequencerDue;
   return capped > 0 ? scoped.slice(0, capped) : scoped;
 };
 
@@ -815,6 +819,7 @@ export const runSequencer = async ({
         now: logicalNow,
         today,
         timeZone: config?.operations?.timezone,
+        config,
         listDir,
         canaryConfig,
       });
@@ -827,10 +832,13 @@ export const runSequencer = async ({
             WHERE ${inPlayWhere()}
               ${scope.sql}
             ORDER BY updated_at DESC
-          `).all(...scope.params).filter((r) => shouldExecuteSequenceOutbound(r, logicalNow, {
-            today,
-            timeZone: config?.operations?.timezone,
-          }).execute),
+          `).all(...scope.params).filter((r) => (
+            !recordUsesPipelineSequence({ config, record: r })
+            && shouldExecuteSequenceOutbound(r, logicalNow, {
+              today,
+              timeZone: config?.operations?.timezone,
+            }).execute
+          )),
           canaryConfig,
         );
       const finalRecords = sampleLimit > 0 ? records : allScoped;
@@ -942,6 +950,7 @@ export const runSequencer = async ({
       now: logicalNow,
       today,
       timeZone: config?.operations?.timezone,
+      config,
       listDir,
       canaryConfig,
     });

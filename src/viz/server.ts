@@ -28,7 +28,8 @@ import { readConfig } from '../orchestrator/lib/config.js';
 import { flattenPipelineSteps, stepSubpipelineName } from '../orchestrator/lib/subpipelines.js';
 import { openListDb } from '../orchestrator/runtime/db.js';
 import { completeManualTask, listAwaitingManualTasks } from '../orchestrator/pipeline/manual.js';
-import { getSequenceBoard, listConfiguredSequences } from '../orchestrator/pipeline/sequences-board.js';
+import { getSequenceBoard } from '../orchestrator/pipeline/sequences-board.js';
+import { listConfiguredSequences } from '../orchestrator/lib/sequence-resolution.js';
 
 const moduleDir = fileURLToPath(new URL('.', import.meta.url));
 const uiDistDir = resolve(moduleDir, 'ui/dist');

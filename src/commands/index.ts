@@ -63,6 +63,10 @@ import { planRouteAction } from '../orchestrator/actions/plan-route/index.js';
 import { getRecordRowId } from '../orchestrator/lib/record.js';
 import { diffUsageSnapshot, readUsageSnapshot, scaleUsageProjection } from '../orchestrator/lib/usage-projection.js';
 import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
+import {
+  listConfiguredSequences,
+  resolveConfiguredSequence,
+} from '../orchestrator/lib/sequence-resolution.js';
 import { snapshotCreateCommand } from './safety.js';
 import { assertConfigModelReferences, assertPhaseModelReferences } from '../orchestrator/lib/model-validation.js';
 import {
@@ -797,7 +801,7 @@ export const removeCommand = ({ list, row = '', where = '', keepTop = 0, sortBy 
   }
 };
 
-export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = false, sample = 0, force = false, reapply = false, concurrency = 0 }) => {
+export const pipelineCommand = async ({ list, where = '', limit = 0, pipelineName = '', dryRun = false, sample = 0, force = false, reapply = false, concurrency = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'pipeline' });
@@ -824,6 +828,7 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
       listDir,
       where: whereSql,
       limit: Number(limit || 0),
+      pipelineName,
       dryRun: true,
       force,
       reapply,
@@ -847,6 +852,7 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
           listDir,
           where: whereSql,
           limit: sampleN,
+          pipelineName,
           concurrency: Number(concurrency || 0) || undefined,
         });
         return {
@@ -865,6 +871,7 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, dryRun = fa
     listDir,
     where: whereSql,
     limit: Number(limit || 0),
+    pipelineName,
     force,
     reapply,
     concurrency: Number(concurrency || 0) || undefined,
@@ -1379,22 +1386,66 @@ export const generateCommand = async ({ list, where = '', step = '', force = fal
 };
 
 export const sequenceRunCommand = async ({ list, allLists = false, sequenceName = '', dryRun = false, sample = 0 }) => {
+  const selectedName = String(sequenceName || '').trim();
+  const runSelectedPipeline = async ({ listDir, name }: { listDir: string; name: string }) => (
+    pipelineCommand({
+      list: listDir,
+      pipelineName: name,
+      dryRun,
+      sample,
+    })
+  );
+  const configuredPipelines = ({ config }: { config: Record<string, unknown> }) => listConfiguredSequences({ config })
+    .map((name) => resolveConfiguredSequence({ config, name }))
+    .filter((sequence) => sequence.kind === 'pipeline');
+
   if (allLists) {
     const dirs = listDirsFromCwd();
     const runs = [];
     for (const dir of dirs) {
       const loaded = readConfig(dir);
+      if (selectedName) {
+        const selected = resolveConfiguredSequence({ config: loaded.config, name: selectedName });
+        const result = selected.kind === 'pipeline'
+          ? await runSelectedPipeline({ listDir: dir, name: selected.name })
+          : await runSequencer({ listDir: dir, sequenceName: selected.name, dryRun, sample });
+        runs.push({ list: dir, result });
+        continue;
+      }
       assertPhaseModelReferences({ config: loaded.config, phase: 'sequence' });
-      runs.push({ list: dir, result: await runSequencer({ listDir: dir, sequenceName, dryRun, sample }) });
+      const sequencer = await runSequencer({ listDir: dir, dryRun, sample });
+      const pipelines = [];
+      for (const pipeline of configuredPipelines({ config: loaded.config })) {
+        pipelines.push({
+          sequence: pipeline.name,
+          result: await runSelectedPipeline({ listDir: dir, name: pipeline.name }),
+        });
+      }
+      runs.push({ list: dir, result: { ...sequencer, pipeline_runs: pipelines } });
     }
     return { runs };
   }
 
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
+  if (selectedName) {
+    const selected = resolveConfiguredSequence({ config: loaded.config, name: selectedName });
+    if (selected.kind === 'pipeline') {
+      return runSelectedPipeline({ listDir, name: selected.name });
+    }
+  }
   assertPhaseModelReferences({ config: loaded.config, phase: 'sequence' });
   if (dryRun) {
-    return runSequencer({ listDir, sequenceName, dryRun: true, sample });
+    const sequencer = await runSequencer({ listDir, sequenceName: selectedName, dryRun: true, sample });
+    if (selectedName) return sequencer;
+    const pipelines = [];
+    for (const pipeline of configuredPipelines({ config: loaded.config })) {
+      pipelines.push({
+        sequence: pipeline.name,
+        result: await runSelectedPipeline({ listDir, name: pipeline.name }),
+      });
+    }
+    return { ...sequencer, pipeline_runs: pipelines };
   }
   const sampleN = Math.max(0, Number(sample || 0));
   if (sampleN > 0) {
@@ -1405,7 +1456,7 @@ export const sequenceRunCommand = async ({ list, allLists = false, sequenceName 
       listDir,
       sampledCount: sampleN,
       totalCount: Math.max(Number(total?.count || 0), sampleN),
-      run: () => runSequencer({ listDir, sequenceName, dryRun: false, sample: sampleN }),
+      run: () => runSequencer({ listDir, sequenceName: selectedName, dryRun: false, sample: sampleN }),
     });
   }
   const db = openListDb({ listDir, readonly: true });
@@ -1416,8 +1467,16 @@ export const sequenceRunCommand = async ({ list, allLists = false, sequenceName 
   const autoSnapshot = Number(total?.count || 0) >= threshold
     ? snapshotCreateCommand({ list: listDir, label: `auto-before-sequence-run-${new Date().toISOString()}` })
     : null;
-  const result = await runSequencer({ listDir, sequenceName, dryRun: false, sample: 0 });
-  return { ...result, auto_snapshot: autoSnapshot };
+  const result = await runSequencer({ listDir, sequenceName: selectedName, dryRun: false, sample: 0 });
+  if (selectedName) return { ...result, auto_snapshot: autoSnapshot };
+  const pipelines = [];
+  for (const pipeline of configuredPipelines({ config: loaded.config })) {
+    pipelines.push({
+      sequence: pipeline.name,
+      result: await runSelectedPipeline({ listDir, name: pipeline.name }),
+    });
+  }
+  return { ...result, auto_snapshot: autoSnapshot, pipeline_runs: pipelines };
 };
 
 export const sequenceStatusCommand = ({ list }) => {

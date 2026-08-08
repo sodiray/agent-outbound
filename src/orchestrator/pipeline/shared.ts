@@ -9,6 +9,7 @@ import {
   PIPELINE_ROUTE_TARGET,
   stepSubpipelineName,
 } from '../lib/subpipelines.js';
+import { pipelineNameForRecord } from '../lib/sequence-resolution.js';
 
 const MATERIAL_FILTER_FIELDS = ['type', 'match', 'condition', 'conditions', 'value', 'operator', 'field', 'on_fail', 'model'] as const;
 
@@ -96,7 +97,7 @@ export const writeFilterFailure = ({ db, record, stepId, reason, drop }: { db: a
   return softDrop ? 'review_flagged' : (drop ? 'dropped' : 'flagged');
 };
 
-export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply }: { db: any; listDir: string; steps: any[]; baseRows: any[]; force: boolean; reapply: boolean }) => {
+export const simulatePipeline = ({ db, listDir, config, steps, baseRows, force, reapply }: { db: any; listDir: string; config: unknown; steps: any[]; baseRows: any[]; force: boolean; reapply: boolean }) => {
   const holdingPipelines = new Set(
     steps
       .filter((step) => (
@@ -111,7 +112,7 @@ export const simulatePipeline = ({ db, listDir, steps, baseRows, force, reapply 
     parked: new Set<string>(),
     selectedPipelines: new Map(baseRows.map((record) => [
       getRecordRowId(record),
-      String(record?.pipeline_name || 'default').trim() || 'default',
+      pipelineNameForRecord({ config, record }) || 'default',
     ])),
     estTotalCostUsd: 0,
     stepReports: [] as any[],
