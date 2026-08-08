@@ -173,16 +173,18 @@ export const mergedRecordForEnrichment = ({ db, record }) => {
   return merged;
 };
 
-export const writeStaleness = ({ db, recordId, stepId, depHash, cacheTtlSeconds, cacheTtl }) => {
+export const writeStaleness = ({ db, recordId, stepId, depHash, inputHash = '', policyHash = '', cacheTtlSeconds, cacheTtl }) => {
   db.prepare(`
-    INSERT INTO staleness (id, record_id, step_id, dep_hash, cache_ttl, cache_ttl_seconds, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO staleness (id, record_id, step_id, dep_hash, input_hash, policy_hash, cache_ttl, cache_ttl_seconds, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(record_id, step_id) DO UPDATE SET
       dep_hash = excluded.dep_hash,
+      input_hash = excluded.input_hash,
+      policy_hash = excluded.policy_hash,
       cache_ttl = excluded.cache_ttl,
       cache_ttl_seconds = excluded.cache_ttl_seconds,
       updated_at = excluded.updated_at
-  `).run(randomUUID(), recordId, stepId, depHash, String(cacheTtl || ''), cacheTtlSeconds, nowTimestamp());
+  `).run(randomUUID(), recordId, stepId, depHash, inputHash, policyHash, String(cacheTtl || ''), cacheTtlSeconds, nowTimestamp());
 };
 
 export const readStaleness = ({ db, recordId, stepId }) =>
@@ -312,8 +314,63 @@ export const materialEnrichConfig = (stepConfig: any): Record<string, any> => {
 // The material staleness hash actually written/compared, plus the legacy
 // whole-config hash so caches written before material-hashing remain valid
 // (no one-time re-enrichment storm on upgrade).
-export const enrichDepHash = (stepConfig: any, depValues: Record<string, any> = {}) =>
-  stableHash({ depValues, config: materialEnrichConfig(stepConfig) });
+export const enrichmentPolicyInputs = (config: Record<string, any> = {}) => {
+  const score = config.score || {};
+  return {
+    fitModel: {
+      criteria: score.criteria,
+      modelVersion: config.policy?.fit_rule_version,
+    },
+    treatmentBands: score.treatment_bands,
+    treatmentStrategy: score.treatment,
+    priority: score.priority,
+    identityConfidence: score.identity_confidence,
+    phoneConfidence: score.phone_confidence,
+    buyerConfidence: score.buyer_confidence,
+    mailConfidence: score.mail_confidence,
+    actionConfidence: score.action_confidence,
+    reachability: score.reachability,
+    candidateTier: score.candidate_tier,
+    enrichmentRepair: score.enrichment_repair,
+    enrichmentBudget: score.enrichment_budget,
+    contactPolicy: config.contact_policy,
+  };
+};
+
+export const executionConfigForEnrichmentStep = ({
+  stepConfig,
+  config,
+}: {
+  stepConfig: Record<string, unknown>;
+  config: Record<string, any>;
+}): Record<string, unknown> | undefined => (
+  String(stepConfig.action || '').trim().toLowerCase() === 'policy_apply'
+    ? enrichmentPolicyInputs(config)
+    : undefined
+);
+
+export const enrichDependencyHashes = ({
+  stepConfig,
+  depValues = {},
+  executionConfig,
+}: {
+  stepConfig: any;
+  depValues?: Record<string, any>;
+  executionConfig?: Record<string, unknown>;
+}) => {
+  const inputHash = stableHash({ depValues, config: materialEnrichConfig(stepConfig) });
+  const policyHash = executionConfig === undefined ? '' : stableHash(executionConfig);
+  return {
+    inputHash,
+    policyHash,
+    depHash: stableHash({ inputHash, policyHash }),
+  };
+};
+
+export const enrichDepHash = (stepConfig: any, depValues: Record<string, any> = {}, executionConfig?: Record<string, unknown>) =>
+  executionConfig === undefined
+    ? stableHash({ depValues, config: materialEnrichConfig(stepConfig) })
+    : enrichDependencyHashes({ stepConfig, depValues, executionConfig }).depHash;
 const legacyEnrichDepHash = (stepConfig: any, depValues: Record<string, any> = {}) =>
   stableHash({ depValues, config: stepConfig || {} });
 
@@ -321,16 +378,39 @@ const legacyEnrichDepHash = (stepConfig: any, depValues: Record<string, any> = {
 // its hash matches the material (or legacy) hash, AND it is within TTL. A step
 // with NO configured TTL (cache_ttl_seconds <= 0) caches FOREVER — so an
 // unchanged step is never redundantly re-run. TTL is opt-in periodic refresh.
-export const isEnrichFresh = ({ cached, stepConfig, depValues = {}, force = false }: { cached: any; stepConfig: any; depValues?: Record<string, any>; force?: boolean }): boolean => {
+export const isEnrichFresh = ({ cached, stepConfig, depValues = {}, executionConfig, force = false }: { cached: any; stepConfig: any; depValues?: Record<string, any>; executionConfig?: Record<string, unknown>; force?: boolean }): boolean => {
   if (force || !cached) return false;
-  const material = enrichDepHash(stepConfig, depValues);
+  const material = enrichDepHash(stepConfig, depValues, executionConfig);
   const legacy = legacyEnrichDepHash(stepConfig, depValues);
-  const matched = String(cached.dep_hash || '') === material || String(cached.dep_hash || '') === legacy;
+  const matched = String(cached.dep_hash || '') === material
+    || (executionConfig === undefined && String(cached.dep_hash || '') === legacy);
   if (!matched) return false;
   const ttl = Number(cached.cache_ttl_seconds || 0);
   if (ttl <= 0) return true; // no TTL configured = cache forever
   const updatedAt = new Date(String(cached.updated_at || 0)).getTime();
   return (Date.parse(nowIso()) - updatedAt) / 1000 <= ttl;
+};
+
+export const enrichRerunReason = ({
+  cached,
+  stepConfig,
+  depValues = {},
+  executionConfig,
+}: {
+  cached: any;
+  stepConfig: any;
+  depValues?: Record<string, any>;
+  executionConfig?: Record<string, unknown>;
+}): string => {
+  if (!cached || executionConfig === undefined) return '';
+  const hashes = enrichDependencyHashes({ stepConfig, depValues, executionConfig });
+  const previousInputHash = String(cached.input_hash || '');
+  const previousPolicyHash = String(cached.policy_hash || '');
+  if (
+    (previousInputHash === hashes.inputHash && previousPolicyHash !== hashes.policyHash)
+    || String(cached.dep_hash || '') === hashes.inputHash
+  ) return 'rerun_policy_changed';
+  return '';
 };
 
 const normalizeOutputType = (raw: any): 'string' | 'number' | 'integer' | 'boolean' => {
@@ -668,9 +748,10 @@ const resolveStepId = (step: any, index: number) => {
 // how many would actually re-run vs be skipped (fresh cache or `when` mismatch).
 // Mirrors the per-record staleness logic in executeEnrichmentStepOnRecords so the
 // dry-run impact preview is accurate.
-export const countEnrichWorkForStep = ({ db, listDir = '', step, stepId = '', rows = [], force = false }: { db: any; listDir?: string; step: any; stepId?: string; rows?: any[]; force?: boolean }) => {
+export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, stepId = '', rows = [], force = false }: { db: any; listDir?: string; config?: Record<string, any>; step: any; stepId?: string; rows?: any[]; force?: boolean }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
+  const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config });
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
   const legacyColumns = getLegacyColumns(stepConfig || {});
   const expectedOutputs = Object.keys(declaredOutputs).length > 0
@@ -683,7 +764,7 @@ export const countEnrichWorkForStep = ({ db, listDir = '', step, stepId = '', ro
     if (!whenOutcome.passed) { result.skip_when += 1; continue; }
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
     if (
-      isEnrichFresh({ cached, stepConfig, depValues: dependencyValuesForRecord({ stepConfig, record }), force })
+      isEnrichFresh({ cached, stepConfig, depValues: dependencyValuesForRecord({ stepConfig, record }), executionConfig, force })
       && declaredOutputsHaveAnyValue({ record, expectedOutputs })
     ) { result.skip_fresh += 1; continue; }
     result.would_enrich += 1;
@@ -985,6 +1066,7 @@ export const executeEnrichmentStepOnRecords = async ({
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
+  const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config });
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
   const legacyColumns = getLegacyColumns(stepConfig || {});
   const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
@@ -1039,14 +1121,14 @@ export const executeEnrichmentStepOnRecords = async ({
     }
 
     const depValues = dependencyValuesForRecord({ stepConfig, record: currentRecord });
-    const depHash = enrichDepHash(stepConfig, depValues);
+    const dependencyHashes = enrichDependencyHashes({ stepConfig, depValues, executionConfig });
     const cached = readStaleness({ db, recordId, stepId: id });
 
     const expectedOutputs = Object.keys(declaredOutputs).length > 0
       ? declaredOutputs
       : legacyColumns;
     if (
-      isEnrichFresh({ cached, stepConfig, depValues, force })
+      isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
       && declaredOutputsHaveAnyValue({ record: currentRecord, expectedOutputs })
     ) {
       summary.skipped_fresh += 1;
@@ -1072,23 +1154,7 @@ export const executeEnrichmentStepOnRecords = async ({
           min_fit_coverage: config?.score?.min_coverage,
           linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
         },
-        fitModel: {
-          criteria: config?.score?.criteria,
-          modelVersion: config?.policy?.fit_rule_version,
-        },
-        treatmentBands: config?.score?.treatment_bands,
-        treatmentStrategy: config?.score?.treatment,
-        priority: config?.score?.priority,
-        identityConfidence: config?.score?.identity_confidence,
-        phoneConfidence: config?.score?.phone_confidence,
-        buyerConfidence: config?.score?.buyer_confidence,
-        mailConfidence: config?.score?.mail_confidence,
-        actionConfidence: config?.score?.action_confidence,
-        reachability: config?.score?.reachability,
-        candidateTier: config?.score?.candidate_tier,
-        enrichmentRepair: config?.score?.enrichment_repair,
-        enrichmentBudget: config?.score?.enrichment_budget,
-        contactPolicy: config?.contact_policy,
+        ...enrichmentPolicyInputs(config || {}),
         outputSchema: outputZod,
         toolCatalog,
       });
@@ -1174,12 +1240,14 @@ export const executeEnrichmentStepOnRecords = async ({
         db,
         recordId,
         stepId: id,
-        depHash,
+        ...dependencyHashes,
         cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
         cacheTtl: String(stepConfig?.cache || ''),
       });
       summary.processed += 1;
       summary.record_ids.push(recordId);
+      const rerunReason = enrichRerunReason({ cached, stepConfig, depValues, executionConfig });
+      if (rerunReason) summary.non_execution_reasons[recordId] = rerunReason;
       emitActivity({ event: 'row_complete', phase: 'pipeline', step: id, row: rowLabel, outcome });
       return { outcome, attempt };
     };
@@ -1483,6 +1551,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           rowLabel: string;
           patch: Record<string, any>;
           depHash: string;
+          inputHash: string;
+          policyHash: string;
           cacheTtlSeconds: number;
           cacheTtl: string;
           skippedWhen?: boolean;
@@ -1491,6 +1561,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         }> = [];
         const failures: Array<{ recordId: string; rowLabel: string; error: string }> = [];
         const snapshot = [...recordState.values()];
+        const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config });
 
         await mapWithConcurrency(snapshot, async (record) => {
           const recordId = getRecordRowId(record);
@@ -1509,6 +1580,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               rowLabel,
               patch: { [statusColumn]: 'skipped' },
               depHash: '',
+              inputHash: '',
+              policyHash: '',
               cacheTtlSeconds: 0,
               cacheTtl: '',
               skippedWhen: true,
@@ -1518,14 +1591,14 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           }
 
           const depValues = dependencyValuesForRecord({ stepConfig, record });
-          const depHash = enrichDepHash(stepConfig, depValues);
+          const dependencyHashes = enrichDependencyHashes({ stepConfig, depValues, executionConfig });
           const cached = readStaleness({ db, recordId, stepId: id });
 
           const expectedOutputs = Object.keys(declaredOutputs).length > 0
             ? declaredOutputs
             : legacyColumns;
           if (
-            isEnrichFresh({ cached, stepConfig, depValues, force })
+            isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
             && declaredOutputsHaveAnyValue({ record, expectedOutputs })
           ) {
             summary.skipped_fresh += 1;
@@ -1550,23 +1623,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 min_fit_coverage: config?.score?.min_coverage,
                 linked_duplicates: db.prepare('SELECT _row_id, business_name FROM records WHERE duplicate_of = ?').all(recordId),
               },
-              fitModel: {
-                criteria: config?.score?.criteria,
-                modelVersion: config?.policy?.fit_rule_version,
-              },
-              treatmentBands: config?.score?.treatment_bands,
-              treatmentStrategy: config?.score?.treatment,
-              priority: config?.score?.priority,
-              identityConfidence: config?.score?.identity_confidence,
-              phoneConfidence: config?.score?.phone_confidence,
-              buyerConfidence: config?.score?.buyer_confidence,
-              mailConfidence: config?.score?.mail_confidence,
-              actionConfidence: config?.score?.action_confidence,
-              reachability: config?.score?.reachability,
-              candidateTier: config?.score?.candidate_tier,
-              enrichmentRepair: config?.score?.enrichment_repair,
-              enrichmentBudget: config?.score?.enrichment_budget,
-              contactPolicy: config?.contact_policy,
+              ...enrichmentPolicyInputs(config || {}),
               outputSchema: outputZod,
               toolCatalog,
             });
@@ -1585,6 +1642,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 rowLabel,
                 patch,
                 depHash: '',
+                inputHash: '',
+                policyHash: '',
                 cacheTtlSeconds: 0,
                 cacheTtl: '',
                 skippedCeiling: true,
@@ -1646,7 +1705,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               recordId,
               rowLabel,
               patch,
-              depHash,
+              ...dependencyHashes,
               cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
               cacheTtl: String(stepConfig.cache || ''),
               skippedWhen: false,
@@ -1684,7 +1743,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 recordId,
                 rowLabel,
                 patch,
-                depHash,
+                ...dependencyHashes,
                 cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
                 cacheTtl: String(stepConfig.cache || ''),
                 skippedWhen: false,
@@ -1736,6 +1795,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 recordId: item.recordId,
                 stepId: result.id,
                 depHash: item.depHash,
+                inputHash: item.inputHash,
+                policyHash: item.policyHash,
                 cacheTtlSeconds: item.cacheTtlSeconds,
                 cacheTtl: item.cacheTtl,
               });

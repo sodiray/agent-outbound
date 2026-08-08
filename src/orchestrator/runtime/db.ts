@@ -509,6 +509,8 @@ const SCHEMA_SQL = `
     record_id TEXT NOT NULL,
     step_id TEXT NOT NULL,
     dep_hash TEXT NOT NULL,
+    input_hash TEXT DEFAULT '',
+    policy_hash TEXT DEFAULT '',
     cache_ttl TEXT DEFAULT '',
     cache_ttl_seconds INTEGER DEFAULT 0,
     updated_at TEXT NOT NULL,
@@ -1108,6 +1110,11 @@ const ensurePipelineEventCompatibility = (db) => {
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_pipeline_events_contact ON pipeline_events(record_id, contact_id, step_id)'); } catch {}
 };
 
+const ensureStalenessCompatibility = (db) => {
+  try { db.exec("ALTER TABLE staleness ADD COLUMN input_hash TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE staleness ADD COLUMN policy_hash TEXT DEFAULT ''"); } catch {}
+};
+
 const ensureScoreEventCompatibility = (db) => {
   try { db.exec("ALTER TABLE score_events ADD COLUMN stage_id TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE score_events ADD COLUMN breakdown_json TEXT DEFAULT ''"); } catch {}
@@ -1411,6 +1418,7 @@ const openDb = ({ dbPath, readonly = false }) => {
     ensureRecordCompatibility(db);
     migrateScoreStageData({ db });
     ensurePipelineEventCompatibility(db);
+    ensureStalenessCompatibility(db);
     ensureScoreEventCompatibility(db);
     ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);
@@ -1469,6 +1477,7 @@ export const openListDb = ({ listDir, readonly = false }) => {
     ensureRecordCompatibility(db);
     migrateScoreStageData({ db });
     ensurePipelineEventCompatibility(db);
+    ensureStalenessCompatibility(db);
     ensureScoreEventCompatibility(db);
     ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);

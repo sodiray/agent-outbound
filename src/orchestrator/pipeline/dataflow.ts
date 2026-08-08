@@ -601,8 +601,8 @@ const makeTimeReadiness = ({
   return new Date(wakeAt).getTime() <= new Date(now).getTime();
 };
 
-const enrichWork = ({ db, listDir, step, stepId, record, force }: { db: any; listDir: string; step: any; stepId: string; record: DataflowRecord; force: boolean }) => (
-  countEnrichWorkForStep({ db, listDir, step, stepId, rows: [record], force })
+const enrichWork = ({ db, listDir, config, step, stepId, record, force }: { db: any; listDir: string; config: Record<string, unknown>; step: any; stepId: string; record: DataflowRecord; force: boolean }) => (
+  countEnrichWorkForStep({ db, listDir, config, step, stepId, rows: [record], force })
 );
 
 const hasAwaitingReviewEvent = ({ db, recordId, stepId }: { db: any; recordId: string; stepId: string }) => Boolean(db.prepare(`
@@ -629,6 +629,7 @@ type KeepDirective = { keepAll: boolean; keepSteps: Set<string> };
 const initializeResolved = ({
   db,
   listDir,
+  config,
   rows,
   steps,
   force,
@@ -637,6 +638,7 @@ const initializeResolved = ({
 }: {
   db: any;
   listDir: string;
+  config: Record<string, unknown>;
   rows: DataflowRecord[];
   steps: DataflowStep[];
   force: boolean;
@@ -653,7 +655,8 @@ const initializeResolved = ({
       // existence of a prior event. Let the stage compare that exact hash on
       // every pass so unchanged inputs are visibly skipped.
       if (step.kind === 'score') return false;
-      if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose') return !force;
+      if (step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose') return !force;
+      if (step.kind === 'enrich') return false;
       if (step.kind === 'contact_source') return false;
       if (step.kind === 'review') {
         if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
@@ -706,7 +709,7 @@ const initializeResolved = ({
     steps
       .filter((entry) => entry.kind === 'enrich' && !initial.has(entry.id))
       .forEach((entry) => {
-        const work = enrichWork({ db, listDir, step: entry.step, stepId: entry.id, record: row, force });
+        const work = enrichWork({ db, listDir, config, step: entry.step, stepId: entry.id, record: row, force });
         if (Number(work.would_enrich || 0) === 0) initial.add(entry.id);
       });
     return [recordId, initial] as [string, Set<string>];
@@ -752,7 +755,7 @@ const makeApplicable = ({ db, listDir, config, force }: { db: any; listDir: stri
       return completed;
     }
     if (step.kind !== 'enrich') return true;
-    const work = enrichWork({ db, listDir, step: step.step, stepId: step.id, record: recordState.record, force });
+    const work = enrichWork({ db, listDir, config: config as Record<string, unknown>, step: step.step, stepId: step.id, record: recordState.record, force });
     return Number(work.would_enrich || 0) > 0;
   };
 };
@@ -916,7 +919,7 @@ export const runPipelineDataflow = async ({
       skipped_passed: 0,
       errors: unsupportedStepErrors(steps) as any[],
     };
-    const resolvedByRecord = initializeResolved({ db, listDir, rows, steps, force, reapply, overridesByRecord });
+    const resolvedByRecord = initializeResolved({ db, listDir, config, rows, steps, force, reapply, overridesByRecord });
     summary.skipped_passed = rows.reduce((total, row) => total + steps.filter((step) => (
       (step.kind === 'filter' || step.kind === 'exit')
       && resolvedByRecord.get(getRecordRowId(row))?.has(step.id)
