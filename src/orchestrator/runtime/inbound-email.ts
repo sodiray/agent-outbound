@@ -4,6 +4,7 @@ import { detectBounceFromText, type BounceType } from '../policy/bounce.js';
 import { processSequenceInterruption } from './interruption-process.js';
 import { completeIdempotency, claimIdempotency, failIdempotency } from './idempotency.js';
 import { insertChannelEvent } from './db.js';
+import { nowIso } from '../lib/record.js';
 
 export type InboundEmailClassification = 'reply' | 'bounce' | 'auto_reply';
 export type InboundCorrelationStatus = 'matched' | 'unmatched' | 'ambiguous';
@@ -21,6 +22,7 @@ export type ParsedInboundEmail = {
   messageId: string;
   correlationMessageIds: string[];
   senderEmail: string;
+  recipientEmail: string;
   subject: string;
   snippet: string;
   classification: InboundEmailClassification;
@@ -65,6 +67,11 @@ const headerText = (headers: Map<string, unknown>, key: string) => {
 const senderFromParsed = (parsed: { from?: { value?: Array<{ address?: string }> } }) =>
   lower(parsed.from?.value?.[0]?.address);
 
+const recipientFromDsn = (raw: Buffer) => {
+  const match = raw.toString('utf8').match(/^final-recipient:\s*(?:[^;]+;\s*)?([^\s\r\n]+)/im);
+  return lower(match?.[1]);
+};
+
 export const parseInboundEmail = async (raw: Buffer): Promise<ParsedInboundEmail> => {
   const parsed = await simpleParser(raw);
   const headers = parsed.headers as Map<string, unknown>;
@@ -93,6 +100,7 @@ export const parseInboundEmail = async (raw: Buffer): Promise<ParsedInboundEmail
     messageId: normalizeMessageId(headerText(headers, 'message-id')),
     correlationMessageIds,
     senderEmail,
+    recipientEmail: recipientFromDsn(raw),
     subject: trim(parsed.subject),
     snippet,
     classification,
@@ -128,10 +136,12 @@ export const correlateInboundEmail = ({
   db,
   correlationMessageIds,
   senderEmail,
+  recipientEmail,
 }: {
   db: Database;
   correlationMessageIds: string[];
   senderEmail: string;
+  recipientEmail?: string;
 }): InboundCorrelation => {
   const messageIds = [...new Set(correlationMessageIds.map(normalizeMessageId).filter(Boolean))];
   if (messageIds.length > 0) {
@@ -145,7 +155,11 @@ export const correlateInboundEmail = ({
       return {
         status: 'matched',
         record,
-        contactId: contactForRecord(db, trim(record._row_id || record.id), lower(senderEmail)),
+        contactId: contactForRecord(
+          db,
+          trim(record._row_id || record.id),
+          lower(recipientEmail || senderEmail),
+        ),
         via: 'headers',
       };
     }
@@ -169,7 +183,11 @@ export const correlateInboundEmail = ({
   return {
     status: 'matched',
     record,
-    contactId: trim(record.inbound_contact_id) || contactForRecord(db, trim(record._row_id || record.id), lower(senderEmail)),
+    contactId: trim(record.inbound_contact_id) || contactForRecord(
+      db,
+      trim(record._row_id || record.id),
+      lower(recipientEmail || senderEmail),
+    ),
     via: 'sender',
   };
 };
@@ -191,7 +209,7 @@ const insertInboundMessage = ({
   correlation: InboundCorrelation;
   receivedAt: string;
 }) => {
-  const now = new Date().toISOString();
+  const now = nowIso();
   db.prepare(`
     INSERT OR IGNORE INTO inbound_messages (
       inbound_message_id, mailbox_id, imap_uid, rfc_message_id, classification,
@@ -243,6 +261,8 @@ const recordMatchedEvent = ({
       payload: {
         direction: 'inbound',
         sender_email: parsed.senderEmail,
+        recipient_email: parsed.recipientEmail,
+        subject: parsed.subject,
         correlation_via: correlation.via,
         correlation_message_ids: parsed.correlationMessageIds,
         classification: parsed.classification,
@@ -258,7 +278,7 @@ export const processInboundEmail = async ({
   mailboxId,
   uid,
   raw,
-  receivedAt = new Date().toISOString(),
+  receivedAt = nowIso(),
 }: {
   db: Database;
   mailboxId: string;
@@ -282,6 +302,7 @@ export const processInboundEmail = async ({
         db,
         correlationMessageIds: parsed.correlationMessageIds,
         senderEmail: parsed.senderEmail,
+        recipientEmail: parsed.recipientEmail,
       });
       insertInboundMessage({ db, mailboxId, uid, parsed, correlation, receivedAt });
       const recordId = trim(correlation.record?._row_id || correlation.record?.id);
@@ -291,6 +312,9 @@ export const processInboundEmail = async ({
           recordId,
           kind: 'inbound_opportunity',
           reason: 'imap_inbound_reply',
+          asOf: receivedAt,
+          replyClassification: 'reply',
+          contactId: correlation.contactId,
         });
         recordMatchedEvent({ db, parsed, correlation, receivedAt });
       }
@@ -300,13 +324,13 @@ export const processInboundEmail = async ({
           recordId,
           kind: 'email_bounce',
           reason: 'imap_inbound_bounce',
+          asOf: receivedAt,
           bounceType: parsed.bounceType,
           messageId: parsed.messageId || inboundMessageId(mailboxId, uid),
           email: emailForContact(db, recordId, correlation.contactId, correlation.record),
           contactId: correlation.contactId,
           snippet: parsed.snippet,
         });
-        recordMatchedEvent({ db, parsed, correlation, receivedAt });
       }
       completeIdempotency({
         db,

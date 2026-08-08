@@ -11,6 +11,8 @@ export function processSequenceInterruption(input: {
   recordId: string;
   kind: InterruptionKind;
   reason?: string;
+  asOf?: string;
+  replyClassification?: string;
   bounceType?: BounceType;
   messageId?: string;
   threadId?: string;
@@ -38,6 +40,7 @@ export function processSequenceInterruption(input: {
       email: input.email,
       contactId: input.contactId,
       snippet: input.snippet,
+      bounceAt: input.asOf,
     });
     return {
       record: bounced.record,
@@ -51,6 +54,8 @@ export function processSequenceInterruption(input: {
     record,
     kind: input.kind,
     reason: input.reason,
+    asOf: input.asOf,
+    replyClassification: input.replyClassification,
     bounceType: input.bounceType,
     messageId: input.messageId,
     threadId: input.threadId,

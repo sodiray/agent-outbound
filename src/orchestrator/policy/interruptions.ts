@@ -20,6 +20,7 @@ export type ApplyInterruptionInput = {
   kind: InterruptionKind;
   reason?: string;
   asOf?: string;
+  replyClassification?: string;
   bounceType?: BounceType;
   messageId?: string;
   threadId?: string;
@@ -205,6 +206,13 @@ export function applySequenceInterruption(input: ApplyInterruptionInput): ApplyI
     next_action_json,
     interrupted_at: asOf,
     interruption_kind: kind,
+    ...(kind === 'inbound_opportunity' || kind === 'referral' ? {
+      // This is a compatibility projection for record-level recency queries.
+      // The canonical inbound evidence remains the contact-keyed channel event.
+      email_last_reply_at: asOf,
+      email_reply_classification: String(input.replyClassification || 'reply'),
+      reply_classification_latest: String(input.replyClassification || 'reply'),
+    } : {}),
   };
 
   return {

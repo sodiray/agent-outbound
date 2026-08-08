@@ -67,6 +67,9 @@ export const inboundResolveCommand = ({
           recordId: trim(recordId),
           kind: 'inbound_opportunity',
           reason: 'operator_matched_imap_inbound_reply',
+          asOf: trim(message.received_at),
+          replyClassification: 'reply',
+          contactId: trim(contact?.contact_id),
         });
       }
       if (classification === 'bounce') {
@@ -75,6 +78,7 @@ export const inboundResolveCommand = ({
           recordId: trim(recordId),
           kind: 'email_bounce',
           reason: 'operator_matched_imap_inbound_bounce',
+          asOf: trim(message.received_at),
           messageId: trim(message.rfc_message_id) || trim(message.inbound_message_id),
           email: trim(contact?.email || record.contact_email || record.email_primary),
           contactId: trim(contact?.contact_id),

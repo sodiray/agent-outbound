@@ -10,7 +10,7 @@ import { classifyReplyAction } from '../actions/classify-reply/index.js';
 import { applyInboundReplyClassification } from '../policy/inbound-reply.js';
 import { detectBounceFromText } from '../policy/bounce.js';
 import { recordCostEvent } from '../lib/costs.js';
-import { getRecordRowId } from '../lib/record.js';
+import { getRecordRowId, nowIso } from '../lib/record.js';
 import { emitActivity } from './activity.js';
 import { isBudgetExceededError } from './contract.js';
 import { processBounceEvent } from './bounce-process.js';
@@ -69,7 +69,7 @@ export const runImapInboundPoll = async ({
           mailboxId: mailbox.id,
           uid: message.uid,
           raw: message.source,
-          receivedAt: (message.internalDate || new Date()).toISOString(),
+          receivedAt: message.internalDate ? message.internalDate.toISOString() : nowIso(),
         });
         if (!processed.processed) continue;
         summary.processed += 1;
@@ -133,7 +133,7 @@ const extractOccurredAt = (message: any): string => {
   }
   const parsed = Date.parse(String(raw || ''));
   if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
-  return new Date().toISOString();
+  return nowIso();
 };
 
 const determineSince = (db: any, lookbackMinutes: number): Date => {
@@ -245,6 +245,7 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
           replyText: snippet,
           messageId,
           threadId,
+          replyAt,
           model: config?.sequences?.default?.reply_check?.model || '',
           aiConfig: config?.ai || {},
         });
@@ -267,7 +268,7 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
             reason: 'opt_out',
             source: 'reply_stop',
             record_id: recordId,
-            created_at: new Date().toISOString(),
+            created_at: nowIso(),
           };
           addSuppression({ db, entry });
           addSuppression({ db: globalSuppressionDb, entry });

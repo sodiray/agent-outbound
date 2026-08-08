@@ -33,6 +33,7 @@ export type ApplyInboundReplyInput = {
   snippet?: string;
   messageId?: string;
   threadId?: string;
+  contactId?: string;
 };
 
 export type ApplyInboundReplyResult = {
@@ -40,6 +41,7 @@ export type ApplyInboundReplyResult = {
   channel_event: {
     id: string;
     row_id: string;
+    contact_id: string;
     channel: 'email';
     event_type: 'reply_detected' | 'bounced';
     action: 'reply_detected' | 'bounce_detected';
@@ -207,6 +209,7 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
       bounceAt: replyAt,
       messageId: input.messageId,
       threadId: input.threadId,
+      contactId: input.contactId,
       snippet: input.snippet,
     });
     // Merge commercial reply cursor fields onto bounce patch.
@@ -226,6 +229,7 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
       channel_event: {
         id: bounce.channel_event.id,
         row_id: bounce.channel_event.row_id,
+        contact_id: bounce.channel_event.contact_id,
         channel: 'email' as const,
         event_type: 'bounced' as const,
         action: 'bounce_detected' as const,
@@ -301,6 +305,7 @@ export function applyInboundReplyClassification(input: ApplyInboundReplyInput): 
   const channel_event = {
     id: randomUUID(),
     row_id: recordId,
+    contact_id: String(input.contactId || '').trim(),
     channel: 'email' as const,
     event_type: 'reply_detected' as const,
     action: 'reply_detected' as const,

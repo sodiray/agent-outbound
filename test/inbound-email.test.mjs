@@ -36,6 +36,24 @@ const insertRecord = (db, { id, messageId, email = 'alex@example.com' }) => {
   });
 };
 
+const insertContact = (db, { recordId, contactId, email = 'alex@example.com' }) => {
+  db.prepare(`
+    INSERT INTO contacts (contact_id, id, row_id, email, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(contactId, contactId, recordId, email, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+};
+
+const withClock = async (value, run) => {
+  const previous = process.env.AO_NOW;
+  process.env.AO_NOW = value;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env.AO_NOW;
+    else process.env.AO_NOW = previous;
+  }
+};
+
 test('inbound correlation matches In-Reply-To and References headers', async () => {
   const { db } = createDb();
   try {
@@ -79,7 +97,82 @@ test('auto-reply is persisted distinctly and does not interrupt the sequence', a
     const inbound = db.prepare('SELECT * FROM inbound_messages WHERE mailbox_id = ? AND imap_uid = ?').get('mailbox-a', 7);
     assert.equal(result.classification, 'auto_reply');
     assert.equal(record.sequence_status, 'active');
+    assert.notEqual(record.account_sequence_state, 'paused_inbound');
     assert.equal(inbound.classification, 'auto_reply');
+  } finally {
+    db.close();
+  }
+});
+
+test('matched reply writes the injected receipt time as a record projection and contact-keyed evidence', async () => {
+  const { db } = createDb();
+  try {
+    insertRecord(db, { id: 'reply-evidence', messageId: '<outbound-1@example.com>' });
+    insertContact(db, { recordId: 'reply-evidence', contactId: 'contact-alex' });
+    await withClock('2026-08-07T22:15:00.000Z', () => processInboundEmail({
+      db,
+      mailboxId: 'mailbox-a',
+      uid: 10,
+      raw: fixture('inbound-reply-in-reply-to.eml'),
+    }));
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('reply-evidence');
+    const event = db.prepare(`
+      SELECT contact_id, provider_message_id, disposition, payload_json, occurred_at
+      FROM channel_events
+      WHERE row_id = ? AND action = 'reply_detected'
+    `).get('reply-evidence');
+    const inbound = db.prepare('SELECT * FROM inbound_messages WHERE mailbox_id = ? AND imap_uid = ?').get('mailbox-a', 10);
+    assert.equal(record.email_last_reply_at, '2026-08-07T22:15:00.000Z');
+    assert.equal(record.email_reply_classification, 'reply');
+    assert.equal(record.reply_classification_latest, 'reply');
+    assert.equal(event.contact_id, 'contact-alex');
+    assert.equal(event.provider_message_id, 'reply-1@example.com');
+    assert.equal(event.disposition, 'reply');
+    assert.equal(event.occurred_at, '2026-08-07T22:15:00.000Z');
+    assert.deepEqual(JSON.parse(event.payload_json), {
+      direction: 'inbound',
+      sender_email: 'alex@example.com',
+      recipient_email: '',
+      subject: 'Re: Hello',
+      correlation_via: 'headers',
+      correlation_message_ids: ['outbound-1@example.com'],
+      classification: 'reply',
+      bounce_type: '',
+    });
+    assert.equal(inbound.contact_id, 'contact-alex');
+    assert.equal(inbound.received_at, '2026-08-07T22:15:00.000Z');
+  } finally {
+    db.close();
+  }
+});
+
+test('matched bounce suppresses only the delivery-failed contact', async () => {
+  const { db } = createDb();
+  try {
+    insertRecord(db, { id: 'bounce-contact', messageId: '<outbound-bounce@example.com>' });
+    insertContact(db, { recordId: 'bounce-contact', contactId: 'contact-alex' });
+    const result = await processInboundEmail({
+      db,
+      mailboxId: 'mailbox-a',
+      uid: 11,
+      raw: fixture('inbound-bounce.eml'),
+      receivedAt: '2026-08-07T23:00:00.000Z',
+    });
+    const contact = db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('contact-alex');
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('bounce-contact');
+    const events = db.prepare(`
+      SELECT contact_id, provider_message_id, occurred_at
+      FROM channel_events
+      WHERE row_id = ? AND action = 'bounce_detected'
+    `).all('bounce-contact');
+    assert.equal(result.classification, 'bounce');
+    assert.equal(Number(contact.dne_email), 1);
+    assert.equal(record.account_sequence_state, 'active');
+    assert.deepEqual(events, [{
+      contact_id: 'contact-alex',
+      provider_message_id: 'dsn-1@example.net',
+      occurred_at: '2026-08-07T23:00:00.000Z',
+    }]);
   } finally {
     db.close();
   }

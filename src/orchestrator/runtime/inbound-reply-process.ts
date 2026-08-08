@@ -10,6 +10,7 @@ import { applyInboundReplyClassification } from '../policy/inbound-reply.js';
 import { detectBounceFromText } from '../policy/bounce.js';
 import { ensureRecordColumns, insertChannelEvent, upsertRecord } from './db.js';
 import { processBounceEvent } from './bounce-process.js';
+import { nowIso } from '../lib/record.js';
 
 const hasExplicitStopIntent = (text: string) => {
   const normalized = String(text || '').toLowerCase();
@@ -26,6 +27,8 @@ export async function processInboundReplyText(input: {
   replyText: string;
   messageId?: string;
   threadId?: string;
+  replyAt?: string;
+  contactId?: string;
   model?: string;
   aiConfig?: Record<string, unknown>;
 }): Promise<{
@@ -52,6 +55,8 @@ export async function processInboundReplyText(input: {
       bounceType: dsnType,
       source: 'dsn',
       snippet: replyText,
+      contactId: input.contactId,
+      bounceAt: input.replyAt || nowIso(),
     });
     return {
       classification: 'bounce',
@@ -64,7 +69,7 @@ export async function processInboundReplyText(input: {
 
   // Pause-first: persist outbound stop BEFORE model classification latency so
   // another worker cannot send while the classifier is running.
-  const pauseAt = new Date().toISOString();
+  const pauseAt = String(input.replyAt || nowIso());
   const prePause = {
     ...record,
     account_sequence_state: 'paused_inbound',
@@ -101,6 +106,8 @@ export async function processInboundReplyText(input: {
       threadId: input.threadId,
       source: 'classifier',
       snippet: replyText,
+      contactId: input.contactId,
+      bounceAt: pauseAt,
     });
     return {
       classification,
@@ -121,6 +128,7 @@ export async function processInboundReplyText(input: {
     snippet: replyText,
     messageId: input.messageId,
     threadId: input.threadId,
+    contactId: input.contactId,
   });
   applied.channel_event.payload = {
     ...applied.channel_event.payload,
