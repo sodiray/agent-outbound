@@ -929,6 +929,64 @@ test('mail provider: sink allocate → submit → confirm', async () => {
   db.close();
 });
 
+test('mail provider: undeclared product prices are never inferred', async () => {
+  const recordId = 'mail_undeclared_price';
+  const { db } = createList({ _row_id: recordId });
+  const now = new Date().toISOString();
+  const campaign = buildContactPlan({
+    account_id: recordId,
+    campaign_id: 'campaign_mail_undeclared_price',
+    contacts: [{ contact_id: 'c1', outbound_disposition: 'eligible_target', outreach_rank: 1 }],
+    treatment_tier: 'A',
+    mail_treatment: 'standard_postcard',
+  });
+  ensureRecordColumns({
+    db,
+    columns: ['account_contact_plan_json', 'mail_treatment', 'mail_allocated'],
+  });
+  db.prepare(`
+    UPDATE records SET account_contact_plan_json = ?, mail_treatment = 'standard_postcard', mail_allocated = 0
+    WHERE _row_id = ?
+  `).run(JSON.stringify(campaign), recordId);
+  db.prepare(`
+    INSERT INTO pipeline_events (event_id, record_id, step_id, kind, passed, reason, occurred_at)
+    VALUES ('mail_undeclared_price_park', ?, 'mail_standard', 'manual_task', 0, 'awaiting_manual', ?)
+  `).run(recordId, now);
+  const requests = [];
+  const provider = {
+    name: 'mail_fixture',
+    submit: async (request) => {
+      requests.push(request);
+      return {
+        ok: true,
+        piece_id: 'mail_undeclared_price_piece',
+        status: 'submitted',
+        reason: 'accepted',
+        cost_cents: 987,
+        provider: 'mail_fixture',
+      };
+    },
+    getStatus: async () => ({
+      piece_id: '',
+      status: 'unknown',
+      reason: '',
+      provider: 'mail_fixture',
+    }),
+  };
+
+  await completeManualTask({
+    db,
+    recordId,
+    stepId: 'mail_standard',
+    config: { channels: { mail: { template_id: 'postcard_v1' } } },
+    mailProvider: provider,
+  });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].expected_cost_cents, undefined);
+  db.close();
+});
+
 test('mail provider: missing template asset fails closed before submission', async () => {
   const { db } = createList({ _row_id: 'mail_missing_template' });
   const calls = [];

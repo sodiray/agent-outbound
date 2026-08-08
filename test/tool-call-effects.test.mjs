@@ -18,14 +18,17 @@ const listFor = (policy = {}) => {
   return listDir;
 };
 
-const execute = ({ listDir, effect, externalSend = false }) => executeToolCallAction({
+const execute = ({ listDir, effect, externalSend = false, onInvoke }) => executeToolCallAction({
   listDir,
   stepId: 'configured_contact',
   stepConfig: {
     tool: { ...lookupTool, ...(effect ? { effect } : {}) },
     external_send: externalSend,
     output_map: { value: 'value' },
-    __tryTool: async () => ({ result: { value: 'retrieved' }, provider: 'test-provider' }),
+    __tryTool: async () => {
+      onInvoke?.();
+      return { result: { value: 'retrieved' }, provider: 'test-provider' };
+    },
   },
   record: {},
 });
@@ -106,9 +109,23 @@ test('a pipeline cannot opt an individual step out of its prohibited channel', (
 
 test('tool_call fails closed when its effect is undeclared or unrecognised', async () => {
   const listDir = listFor();
-  await assert.rejects(() => execute({ listDir }), /effect.*required|undeclared/i);
+  const missingEffectInvocation = { called: false };
   await assert.rejects(
-    () => execute({ listDir, effect: { class: 'unclassified' } }),
+    () => execute({
+      listDir,
+      onInvoke: () => { missingEffectInvocation.called = true; },
+    }),
+    /effect.*required|undeclared/i,
+  );
+  assert.equal(missingEffectInvocation.called, false);
+  const unrecognisedEffectInvocation = { called: false };
+  await assert.rejects(
+    () => execute({
+      listDir,
+      effect: { class: 'unclassified' },
+      onInvoke: () => { unrecognisedEffectInvocation.called = true; },
+    }),
     /unrecognised|unrecognized/i,
   );
+  assert.equal(unrecognisedEffectInvocation.called, false);
 });

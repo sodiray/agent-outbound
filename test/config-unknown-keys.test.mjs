@@ -51,6 +51,38 @@ test('a misspelled contact-policy restriction is also refused', () => {
   assert.ok(result.errors.some((error) => error.includes('contact_policy.per_contact_allowances')));
 });
 
+test('unknown keys in every safety-bearing block are errors with their complete paths', () => {
+  const cases = [
+    { path: 'policy.forbidden_channels', config: { policy: { forbidden_channels: ['sms'] } } },
+    { path: 'contact_policy.per_contact_allowence', config: { contact_policy: { per_contact_allowence: { A: 1 } } } },
+    { path: 'suppression.global_lsit', config: { suppression: { global_lsit: 'do-not-contact' } } },
+    {
+      path: 'live_interaction_budget.max_interacionz',
+      config: {
+        live_interaction_budget: {
+          max_accounts: 1,
+          max_interactions: 1,
+          max_interacionz: 0,
+        },
+      },
+    },
+    { path: 'budgets.llm.dailyy', config: { budgets: { llm: { dailyy: 1 } } } },
+    { path: 'score.treatmen', config: { score: { treatmen: {} } } },
+    {
+      path: 'sequences.default.reply_chek',
+      config: { sequences: { default: { reply_chek: {} } } },
+    },
+  ];
+
+  for (const entry of cases) {
+    const result = normalizeConfig(entry.config);
+    assert.ok(
+      result.errors.some((error) => error.includes(entry.path)),
+      `expected an error for ${entry.path}: ${JSON.stringify(result)}`,
+    );
+  }
+});
+
 test('explicit extension surfaces preserve extra provider and channel fields', () => {
   const result = normalizeConfig({
     channels: {

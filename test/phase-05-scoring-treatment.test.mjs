@@ -535,6 +535,25 @@ test('phase-05 readiness: enforce_readiness hard-blocks non-ready send_email', (
   assert.equal(dry.allowed, true);
 });
 
+test('phase-05 safety: empty treatment tier blocks external sends when readiness enforcement is off', () => {
+  const config = { policy: { enforce_readiness: false } };
+  for (const { stepKind, channel } of [
+    { stepKind: 'send_email', channel: 'email' },
+    { stepKind: 'linkedin_connect', channel: 'linkedin' },
+  ]) {
+    const guard = guardChannelExecution({
+      config,
+      record: { _row_id: `empty-tier-${stepKind}`, treatment_tier: '' },
+      stepKind,
+      channel,
+      intent: 'send',
+    });
+    assert.equal(guard.allowed, false, stepKind);
+    assert.equal(guard.reason, 'treatment_not_configured', stepKind);
+    assert.deepEqual(guard.blockers, ['treatment_not_configured'], stepKind);
+  }
+});
+
 test('phase-05 readiness: declared tier channel policy is enforced', () => {
   const readyRecord = {
     _row_id: 'ready_ok',

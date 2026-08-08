@@ -10,10 +10,6 @@ import test from 'node:test';
 
 import { openListDb, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
 import {
-  DEFAULT_ATTEMPT_WINDOW_END_HOUR,
-  DEFAULT_ATTEMPT_WINDOW_START_HOUR,
-  DEFAULT_MAX_PHONE_ATTEMPTS,
-  TIER_MAX_PHONE_ATTEMPTS,
   applyCapacityUnserved,
   applyPhoneDisposition,
   evaluatePhoneAttemptEligibility,
@@ -150,10 +146,13 @@ function insertPhoneRecord(db, row) {
 // ── Pure policy unit tests ──────────────────────────────────────────────────
 
 test('phone-attempt: no default window or tier ceiling; declared policy controls them', () => {
-  assert.equal(DEFAULT_ATTEMPT_WINDOW_START_HOUR, 0);
-  assert.equal(DEFAULT_ATTEMPT_WINDOW_END_HOUR, 24);
-  assert.equal(DEFAULT_MAX_PHONE_ATTEMPTS, Number.MAX_SAFE_INTEGER);
-  assert.deepEqual(TIER_MAX_PHONE_ATTEMPTS, {});
+  const neutralPolicy = resolvePhoneAttemptPolicyConfig({});
+  assert.equal(isWithinPhoneAttemptWindow(BOISE_EVENING_MS, neutralPolicy), true);
+  assert.equal(isWithinPhoneAttemptWindow(BOISE_WEEKEND_MS, neutralPolicy), true);
+  assert.equal(
+    isPhoneAttemptCeilingReached(baseRecord({ call_attempt_count: 999 }), neutralPolicy),
+    false,
+  );
   assert.equal(maxPhoneAttemptsForTier('A', undefined, BOISE_PHONE_POLICY), 4);
   assert.equal(maxPhoneAttemptsForTier('B', undefined, BOISE_PHONE_POLICY), 3);
   assert.equal(maxPhoneAttemptsForTier('C', undefined, BOISE_PHONE_POLICY), 0);

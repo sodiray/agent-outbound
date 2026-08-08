@@ -10,6 +10,7 @@ import { openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { checkAnnualCampaignLimit, checkContactAllowance } from '../dist/orchestrator/policy/campaign-process.js';
 import { evaluateOutboundReadiness } from '../dist/orchestrator/policy/readiness.js';
 import { isPhoneAttemptCeilingReached } from '../dist/orchestrator/policy/phone-attempt.js';
+import { shouldExecuteSequenceOutbound } from '../dist/orchestrator/policy/sequence-outbound.js';
 
 const classifier = {
   model: 'test/reply-classifier',
@@ -82,6 +83,12 @@ test('inbound classification failure is recorded and leaves outbound paused', as
     assert.equal(Number(record.inbound_pending_human_review), 1);
     assert.match(record.inbound_classification_error, /classifier unavailable/);
     assert.ok(event);
+    const outboundGate = shouldExecuteSequenceOutbound(record, '2026-08-08T00:00:00.000Z', {
+      channel: 'email',
+      stepKind: 'send_email',
+    });
+    assert.equal(outboundGate.execute, false);
+    assert.match(outboundGate.reason, /paused_inbound/);
   } finally {
     db.close();
   }

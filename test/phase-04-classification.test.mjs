@@ -46,8 +46,6 @@ const TV_YAML = join(TV_ROOT, 'outbound.yaml');
 const TAXONOMY = join(TV_ROOT, 'build/registries/vertical-taxonomy.json');
 
 const REQUIRED_ACCOUNT_INTELLIGENCE_OUTPUTS = [
-  'vertical',
-  'sub_vertical',
   'regulatory_context',
   'ownership_type',
   'owner_operated',
@@ -148,11 +146,18 @@ test('phase-04: vertical-taxonomy.json loads with version, fallbacks, and seed v
 
 // ── account_intelligence step contract ───────────────────────────────────────
 
-test('phase-04: account_intelligence generate step exists with required outputs', () => {
+test('phase-04: vertical_classify and account_intelligence expose their required outputs', () => {
   const cfg = loadTvConfig();
   const all = collectSteps(cfg.pipeline);
+  const verticalClassify = all.find((s) => s.id === 'vertical_classify');
   const ai = all.find((s) => s.id === 'account_intelligence');
 
+  assert.ok(verticalClassify, 'vertical_classify step missing from pipeline');
+  assert.equal(verticalClassify.kind, 'enrich');
+  for (const key of ['vertical', 'sub_vertical']) {
+    assert.ok(verticalClassify.outputs?.[key], `missing vertical_classify output: ${key}`);
+    assert.ok(verticalClassify.outputs[key].type, `output ${key} needs type`);
+  }
   assert.ok(ai, 'account_intelligence step missing from pipeline');
   assert.equal(ai.kind, 'generate');
   assert.ok(ai.model, 'account_intelligence must declare a model');
