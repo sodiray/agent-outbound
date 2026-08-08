@@ -30,6 +30,8 @@ export type MailSubmitRequest = {
   };
   from?: Record<string, string>;
   template_id?: string;
+  /** Pipeline-declared commercial cost; providers never infer it from a product name. */
+  expected_cost_cents?: number;
   merge_variables?: Record<string, string>;
   metadata?: Record<string, unknown>;
 };
@@ -221,7 +223,9 @@ export function createMailProviderSink(opts: {
         piece_id: pieceId,
         status: 'submitted',
         reason: 'mail_sink_submitted',
-        cost_cents: req.treatment === 'golden_ticket' ? 350 : 89,
+        cost_cents: Number.isFinite(req.expected_cost_cents)
+          ? Math.max(0, Number(req.expected_cost_cents))
+          : 0,
         expected_delivery_date: expected,
         provider: 'mail_sink',
         raw: payload,

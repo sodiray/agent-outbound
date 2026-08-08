@@ -812,6 +812,12 @@ export const completeManualTask = async ({
           address_zip: text(row.zip || row.postal_code),
         },
         template_id: mailTemplateId,
+        expected_cost_cents: (() => {
+          const products = config?.channels?.mail?.products as Record<string, unknown> | undefined;
+          const product = products?.[mail_treatment] as Record<string, unknown> | undefined;
+          const cost = Number(product?.cost_cents);
+          return Number.isFinite(cost) && cost >= 0 ? cost : undefined;
+        })(),
         metadata: { step_id: sid },
       };
       const contentVersion = stableHash({

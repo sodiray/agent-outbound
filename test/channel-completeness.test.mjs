@@ -871,7 +871,14 @@ test('mail provider: sink allocate → submit → confirm', async () => {
   const completed = await completeManualTask({
     db,
     listDir,
-    config: { channels: { mail: { template_id: 'postcard_v1' } } },
+    config: {
+      channels: {
+        mail: {
+          template_id: 'postcard_v1',
+          products: { standard_postcard: { cost_cents: 123 } },
+        },
+      },
+    },
     recordId: 'mail_1',
     stepId: 'mail_standard',
     note: 'mailed via sink',
@@ -892,6 +899,8 @@ test('mail provider: sink allocate → submit → confirm', async () => {
   const sinkPiece = listMailSinkPieces(join(listDir, 'mail-sink'))[0];
   const submittedPayload = JSON.parse(readFileSync(join(listDir, 'mail-sink', sinkPiece), 'utf8'));
   assert.equal(submittedPayload.request.template_id, 'postcard_v1');
+  assert.equal(submittedPayload.request.expected_cost_cents, 123);
+  assert.equal(Number(row.mail_last_cost_cents), 123);
 
   const status = await sink.getStatus(String(row.mail_last_piece_id));
   const confirmed = applyMailConfirmed({ record: row, statusResult: status });
