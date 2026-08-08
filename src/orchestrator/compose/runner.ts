@@ -22,7 +22,7 @@ type ComposeStep = {
   concurrency?: number;
 };
 
-type ComposeGenerator = (input: {
+export type ComposeGenerator = (input: {
   task: string;
   model: string;
   role: 'copywriting';

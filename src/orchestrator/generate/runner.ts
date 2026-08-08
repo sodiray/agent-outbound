@@ -49,6 +49,7 @@ import {
   whenPredicateForStep,
   writeStaleness,
 } from '../enrichment/runner.js';
+import { skippedWhenOutcome } from '../lib/step-when.js';
 
 type DbStatement = {
   get: (...params: unknown[]) => unknown;
@@ -350,6 +351,7 @@ export const runGenerateStep = async ({
     errors: [] as Array<{ record_id: string; error: string }>,
     record_ids: [] as string[],
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
+    non_execution_reasons: {} as Record<string, string>,
   };
 
   await mapWithConcurrency<GenerateRecord, void>(rows || [], async (record) => {
@@ -363,6 +365,7 @@ export const runGenerateStep = async ({
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
       summary.skipped_when += 1;
       summary.record_ids.push(recordId);
+      summary.non_execution_reasons[recordId] = skippedWhenOutcome(whenOutcome).reason;
       emit({ logger, event: { event: 'row_skipped', phase: 'generate', step: id, row: rowLabel, reason: String(whenOutcome.reason || 'when_not_matched') } });
       return;
     }

@@ -14,7 +14,12 @@ import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
 import { stepStatusColumn } from '../lib/subpipelines.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
-import { evaluateFieldCheckGroup } from '../lib/conditions.js';
+import {
+  skippedWhenOutcome,
+  shouldRunForRecord,
+  stepConfigForWhen,
+  whenPredicateForStep,
+} from '../lib/step-when.js';
 import { nullableBoolean, nullableNumber, nullableString } from '../actions/schema-helpers.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
@@ -449,39 +454,14 @@ export const enrichmentActionNeedsMcp = (stepConfig: unknown) => {
   return decisionMakerProviderNeedsMcp({ provider: String(config.provider || '') });
 };
 
-export const enrichmentStepConfig = (step: unknown): Record<string, unknown> => {
-  const record = step && typeof step === 'object' ? step as Record<string, unknown> : {};
-  const nested = record.config && typeof record.config === 'object'
-    ? record.config as Record<string, unknown>
-    : {};
-  return {
-    ...record,
-    ...nested,
-  };
-};
+export const enrichmentStepConfig = stepConfigForWhen;
 
 export const enrichmentStepNeedsMcp = (step: unknown, options: { listDir?: string } = {}) => {
   const stepConfig = enrichmentStepConfig(step);
   return enrichmentActionNeedsMcp(stepConfig) || toolSpecNeedsMcp(stepConfig.tool as ToolSpec | undefined, options);
 };
 
-export const whenPredicateForStep = ({ step, stepConfig }: { step: any; stepConfig: any }) => (
-  stepConfig?.when && typeof stepConfig.when === 'object'
-    ? stepConfig.when
-    : step?.when && typeof step.when === 'object'
-      ? step.when
-      : null
-);
-
-export const shouldRunForRecord = ({ record, predicate, listDir = '' }: { record: any; predicate: any; listDir?: string }) => {
-  if (!predicate) return { passed: true, reason: '' };
-  return evaluateFieldCheckGroup({
-    row: record,
-    conditions: Array.isArray(predicate?.conditions) ? predicate.conditions : [],
-    match: predicate?.match || 'all',
-    listDir,
-  });
-};
+export { shouldRunForRecord, whenPredicateForStep } from '../lib/step-when.js';
 
 const applyOutputs = ({ step, outputs }) => {
   const patch: Record<string, any> = {};
@@ -1049,7 +1029,7 @@ export const executeEnrichmentStepOnRecords = async ({
       });
       summary.skipped_when += 1;
       summary.record_ids.push(recordId);
-      summary.non_execution_reasons[recordId] = `skipped:${String(whenOutcome.reason || 'when_not_matched')}`;
+      summary.non_execution_reasons[recordId] = skippedWhenOutcome(whenOutcome).reason;
       emitActivity({ event: 'row_skipped', phase: 'pipeline', step: id, row: rowLabel, reason: String(whenOutcome.reason || 'when_not_matched') });
       return;
     }

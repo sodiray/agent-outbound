@@ -291,8 +291,7 @@ export const inferPipelineEdges = (config: any, options: PipelineGraphOptions = 
     if (!id) return [id, deps] as [string, Set<string>];
 
     const structuralFields = [
-      ...(String(step?.kind || '') === 'enrich' ? conditionFields(step?.when) : []),
-      ...(String(step?.kind || '') === 'review' ? conditionFields(step?.when) : []),
+      ...conditionFields(step?.when),
       ...(String(step?.kind || '') === 'filter' ? conditionFields(step) : []),
       ...(String(step?.kind || '') === 'assign'
         ? (Array.isArray(step?.rules) ? step.rules.flatMap((rule: any) => conditionFields(rule)) : [])

@@ -1,5 +1,6 @@
 import { executeEnrichmentStepOnRecords } from '../enrichment/runner.js';
 import { executeExtractStepOnRecords } from '../extract/runner.js';
+import type { ComposeGenerator } from '../compose/runner.js';
 import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/conditions.js';
 import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 import { getRecordRowId } from '../lib/record.js';
@@ -11,6 +12,12 @@ import {
   SUBPIPELINE_STEP_INDEX_FIELD,
 } from '../lib/subpipelines.js';
 import { isReviewRequired } from '../policy/stage-review-gate.js';
+import {
+  shouldRunForRecord,
+  skippedWhenOutcome,
+  stepConfigForWhen,
+  whenPredicateForStep,
+} from '../lib/step-when.js';
 import { executePipelineSequenceAction } from './sequence-step-runtime.js';
 
 export type StepExecutionOutcome = {
@@ -29,6 +36,7 @@ export type StepExecutionContext = {
   aiConfig?: unknown;
   force?: boolean;
   now?: string;
+  composeGenerateObject?: ComposeGenerator;
 };
 
 type PipelineStepLike = Record<string, unknown> & {
@@ -157,6 +165,17 @@ export const declaredOutputWriteFailures = ({
 };
 
 const NON_EXECUTION_REASONS = /^(channel_not_permitted:|sequence_outbound_gated|skipped)/i;
+
+const WHEN_GATED_STEP_KINDS = new Set([
+  'compose',
+  'extract',
+  'assign',
+  'review',
+  'wait',
+  'send_email',
+  'linkedin_connect',
+  'manual_task',
+]);
 
 export const shouldGuardDeclaredOutputWrites = (outcome: StepExecutionOutcome): boolean => (
   outcome.passed && !outcome.errored && !NON_EXECUTION_REASONS.test(String(outcome.reason || ''))
@@ -334,13 +353,20 @@ const executeGenerateBatch = async (
   const declaredOutputWrites = result.declared_output_writes && typeof result.declared_output_writes === 'object'
     ? result.declared_output_writes as Record<string, Record<string, { provided: boolean; value: unknown }>>
     : {};
+  const nonExecutionReasons = result.non_execution_reasons && typeof result.non_execution_reasons === 'object'
+    ? result.non_execution_reasons as Record<string, string>
+    : {};
   const outcomes = new Map<string, StepExecutionOutcome>();
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     const failure = failures.get(recordId);
     outcomes.set(recordId, failure
       ? { passed: false, reason: failure, errored: true }
-      : { passed: true, reason: '', declaredOutputWrites: declaredOutputWrites[recordId] });
+      : {
+        passed: true,
+        reason: nonExecutionReasons[recordId] || '',
+        declaredOutputWrites: declaredOutputWrites[recordId],
+      });
   });
   return outcomes;
 };
@@ -359,6 +385,7 @@ const executeComposeBatch = async (
     step,
     rows,
     stepId,
+    generateObject: ctx.composeGenerateObject,
   });
   const failures = new Map(result.errors.map((error) => [error.record_id, error.error]));
   const outcomes = new Map<string, StepExecutionOutcome>();
@@ -378,17 +405,7 @@ const executeReviewBatch = async (
   stepId: string,
   rows: Array<Record<string, unknown>>,
 ) => {
-  const matchingRows = rows.filter((row) => {
-    if (!step.when || typeof step.when !== 'object') return true;
-    const predicate = step.when as Record<string, unknown>;
-    return evaluateFieldCheckGroup({
-      row,
-      conditions: Array.isArray(predicate.conditions) ? predicate.conditions : [],
-      match: String(predicate.match || 'all'),
-      listDir: ctx.listDir,
-    }).passed;
-  });
-  const recordIds = matchingRows.map((row) => getRecordRowId(row));
+  const recordIds = rows.map((row) => getRecordRowId(row));
   const placeholders = recordIds.map(() => '?').join(', ');
   const verdictRows = recordIds.length === 0
     ? []
@@ -409,10 +426,8 @@ const executeReviewBatch = async (
     map.set(recordId, kind === 'drop' || existing === 'drop' ? 'drop' : 'pass');
     return map;
   }, new Map<string, 'pass' | 'drop'>());
-  const matchingIds = new Set(recordIds);
   return new Map(rows.map((row) => {
     const recordId = getRecordRowId(row);
-    if (!matchingIds.has(recordId)) return [recordId, { passed: true, reason: '' }];
     const verdict = verdicts.get(recordId);
     if (verdict === 'pass') return [recordId, { passed: true, reason: '' }];
     if (verdict === 'drop') return [recordId, { passed: false, reason: 'review: dropped' }];
@@ -931,6 +946,35 @@ export const executeStepBatch = async (
   step: PipelineStepLike,
   stepId: string,
   rows: Array<Record<string, unknown>>,
-): Promise<Map<string, StepExecutionOutcome>> => (
-  guardDeclaredOutputWrites(ctx, step, await executeStepBatchUnchecked(ctx, step, stepId, rows))
-);
+): Promise<Map<string, StepExecutionOutcome>> => {
+  const kind = textValue(step.kind);
+  if (!WHEN_GATED_STEP_KINDS.has(kind)) {
+    return guardDeclaredOutputWrites(ctx, step, await executeStepBatchUnchecked(ctx, step, stepId, rows));
+  }
+  const predicate = whenPredicateForStep({ step, stepConfig: stepConfigForWhen(step) });
+  if (!predicate) {
+    return guardDeclaredOutputWrites(ctx, step, await executeStepBatchUnchecked(ctx, step, stepId, rows));
+  }
+  const matchingRows: Array<Record<string, unknown>> = [];
+  const skippedOutcomes = new Map<string, StepExecutionOutcome>();
+  rows.forEach((row) => {
+    const whenOutcome = shouldRunForRecord({ record: row, predicate, listDir: ctx.listDir });
+    if (whenOutcome.passed) {
+      matchingRows.push(row);
+      return;
+    }
+    skippedOutcomes.set(getRecordRowId(row), skippedWhenOutcome(whenOutcome));
+  });
+  const executed = matchingRows.length > 0
+    ? await executeStepBatchUnchecked(ctx, step, stepId, matchingRows)
+    : new Map<string, StepExecutionOutcome>();
+  const outcomes = new Map(rows.map((row) => {
+    const recordId = getRecordRowId(row);
+    return [recordId, skippedOutcomes.get(recordId) || executed.get(recordId) || {
+      passed: false,
+      errored: true,
+      reason: 'step_outcome_missing',
+    }];
+  }));
+  return guardDeclaredOutputWrites(ctx, step, outcomes);
+};

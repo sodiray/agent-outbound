@@ -28,7 +28,10 @@ const ruleInputFields = (rule: AssignmentRule): string[] => {
 };
 
 export const assignmentInputFields = (step: Record<string, unknown>): string[] => (
-  [...new Set(assignmentRules(step).flatMap(ruleInputFields))]
+  [...new Set([
+    ...assignmentRules(step).flatMap(ruleInputFields),
+    ...ruleInputFields(asRecord(step.when)),
+  ])]
 );
 
 const materialRule = ({ rule, listDir }: { rule: AssignmentRule; listDir: string }): Record<string, unknown> => {
@@ -55,6 +58,7 @@ const materialAssignmentConfig = ({ step, listDir }: { step: Record<string, unkn
   fallback: String(step.fallback || ''),
   depends_on: stringArray(step.depends_on),
   runs_after: stringArray(step.runs_after),
+  when: asRecord(step.when),
   rules: assignmentRules(step).map((rule) => materialRule({ rule, listDir })),
 });
 

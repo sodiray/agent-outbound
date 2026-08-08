@@ -20,6 +20,7 @@ import {
 } from '../lib/subpipelines.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
+import { isSkippedWhenOutcome } from '../lib/step-when.js';
 import { computeWaitWakeAt } from './sequence-step-runtime.js';
 import { countAwaitingReviewRecords } from './review.js';
 import {
@@ -999,7 +1000,7 @@ export const runPipelineDataflow = async ({
                 step_id: step.id,
                 kind: step.kind,
                 passed: true,
-                reason: '',
+                reason: String(outcome.reason || ''),
                 occurred_at: now,
               },
             });
@@ -1049,7 +1050,10 @@ export const runPipelineDataflow = async ({
           return { record: refreshRecord({ db, record: recordState.record }), resolved: false };
         }
 
-        if (step.kind === 'manual_task' || String(outcome.reason || '') === 'awaiting_manual') {
+        if (
+          (step.kind === 'manual_task' && !isSkippedWhenOutcome(outcome))
+          || String(outcome.reason || '') === 'awaiting_manual'
+        ) {
           const alreadyAwaiting = Boolean(db.prepare(`
             SELECT 1 AS ok
             FROM pipeline_events

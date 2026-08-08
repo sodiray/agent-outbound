@@ -658,6 +658,10 @@ const FieldCheckPredicateSchema = z.object({
   conditions: z.array(FieldCheckConditionSchema).default([]),
 }).partial({ match: true, conditions: true });
 
+const PipelineWhenFields = {
+  when: FieldCheckPredicateSchema.strict().optional(),
+};
+
 // Deterministic pre-insert exclusion: a sourced row matching ANY rule is never
 // persisted — no record, no embedding, no dedup spend. For things that are not
 // businesses at all (ATMs, restrooms, parks). Real-but-off-ICP businesses belong
@@ -734,6 +738,7 @@ const PipelineAssignStepSchema = z.object({
   fallback: z.string().min(1),
   rules: z.array(PipelineAssignRuleSchema).default([]),
   batch_size: z.coerce.number().int().min(1).max(200).default(10),
+  ...PipelineWhenFields,
 }).partial({ description: true, depends_on: true, runs_after: true, rules: true, batch_size: true });
 
 const PipelineReviewStepSchema = z.object({
@@ -744,7 +749,7 @@ const PipelineReviewStepSchema = z.object({
   runs_after: PipelineFilterStepSchema.shape.runs_after,
   label: z.string().default(''),
   fields: z.array(z.string()).default([]),
-  when: FieldCheckPredicateSchema.optional(),
+  ...PipelineWhenFields,
 });
 
 const PipelineEnrichmentStepSchema = z.object({
@@ -781,7 +786,7 @@ const PipelineEnrichmentStepSchema = z.object({
   columns: z.record(z.string()).optional(),
   inputs: z.array(z.string()).default([]),
   on_error: z.enum(['fail', 'empty']).default('fail'),
-  when: FieldCheckPredicateSchema.optional(),
+  ...PipelineWhenFields,
   prompt_file: z.string().default(''),
   prompt_args: z.record(z.any()).default({}),
   idempotency: IdempotencySchema.optional(),
@@ -833,6 +838,7 @@ const PipelineExtractStepSchema = z.object({
   // never a user-supplied regular expression.
   exclude: z.array(z.string().min(1)).default([]),
   outputs: z.record(ExtractOutputDefSchema),
+  ...PipelineWhenFields,
 }).strict();
 
 const PipelineGenerateStepSchema = z.object({
@@ -855,7 +861,7 @@ const PipelineGenerateStepSchema = z.object({
   fixture_outputs: z.record(z.unknown()).default({}),
   inputs: PipelineEnrichmentStepSchema.shape.inputs,
   on_error: z.enum(['fail', 'empty']).default('empty'),
-  when: PipelineEnrichmentStepSchema.shape.when,
+  ...PipelineWhenFields,
   prompt_file: PipelineEnrichmentStepSchema.shape.prompt_file,
   prompt_args: PipelineEnrichmentStepSchema.shape.prompt_args,
   context_projection: ModelContextProjectionSchema.optional(),
@@ -910,6 +916,7 @@ const PipelineComposeStepSchema = z.object({
     'compose outputs must not be empty.',
   ),
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
+  ...PipelineWhenFields,
 }).strict();
 
 const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
@@ -920,6 +927,7 @@ const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
     .refine((value) => Number(value.slice(0, -1)) > 0, 'wait.after must be greater than zero.'),
   working_days: WorkingDaysSchema.default([...SEQUENCE_WORKING_DAY_VALUES]),
   non_working_day_policy: z.enum(NON_WORKING_DAY_POLICY_VALUES).default('shift_forward'),
+  ...PipelineWhenFields,
 });
 
 const PipelineExternalStepFields = {
@@ -935,6 +943,7 @@ const PipelineExternalStepFields = {
   uses_asset: z.string().optional(),
   draft_approval_required: z.boolean().optional(),
   config: StepConfigSchema.default({}),
+  ...PipelineWhenFields,
 };
 
 const PipelineSendEmailStepSchema = z.object({
@@ -959,6 +968,7 @@ const PipelineManualTaskStepSchema = PipelineSequenceStepBaseSchema.extend({
   kind: z.literal('manual_task'),
   side_effecting: z.boolean().default(false),
   config: StepConfigSchema.default({}),
+  ...PipelineWhenFields,
 });
 
 const PipelineExitStepSchema = PipelineFilterStepSchema.omit({ kind: true }).extend({
