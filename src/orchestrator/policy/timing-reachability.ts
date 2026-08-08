@@ -65,6 +65,22 @@ export type ReachabilityVector = {
   generated_at: string;
 };
 
+export type ReachabilityDeliveryCandidates = {
+  account: Record<string, unknown>;
+  contacts: Array<Record<string, unknown>>;
+};
+
+export type ReachabilityChannelDefinition = {
+  channel: ChannelReachability['channel'];
+  evaluate: (
+    record: Record<string, unknown>,
+    config?: ReachabilityConfigInput,
+  ) => ChannelReachability;
+  deliveryCandidates: (
+    candidates: ReachabilityDeliveryCandidates,
+  ) => Array<Record<string, unknown>>;
+};
+
 const DEFAULT_HALF_LIFE: Record<string, number> = {
   hiring_spike: 45,
   expansion_signal: 60,
@@ -338,12 +354,35 @@ function mailState(record: Record<string, unknown>, config?: ReachabilityConfigI
   };
 }
 
+export const REACHABILITY_CHANNEL_DEFINITIONS: ReachabilityChannelDefinition[] = [
+  {
+    channel: 'email',
+    evaluate: emailState,
+    deliveryCandidates: ({ contacts }) => contacts,
+  },
+  {
+    channel: 'phone',
+    evaluate: phoneState,
+    deliveryCandidates: ({ contacts }) => contacts,
+  },
+  {
+    channel: 'linkedin',
+    evaluate: linkedinState,
+    deliveryCandidates: ({ contacts }) => contacts,
+  },
+  {
+    channel: 'mail',
+    evaluate: mailState,
+    deliveryCandidates: ({ account }) => [account],
+  },
+];
+
 export function evaluateReachability(
   record: Record<string, unknown>,
   config?: ReachabilityConfigInput,
 ): ReachabilityVector {
   return {
-    channels: [emailState(record, config), phoneState(record, config), linkedinState(record, config), mailState(record, config)],
+    channels: REACHABILITY_CHANNEL_DEFINITIONS.map(({ evaluate }) => evaluate(record, config)),
     calculation_rule_version: REACHABILITY_RULE_VERSION,
     generated_at: nowIso(),
   };

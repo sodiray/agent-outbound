@@ -1,5 +1,8 @@
 import { isAffirmativeFlag } from './booleanish.js';
-import { evaluateReachability } from './timing-reachability.js';
+import {
+  REACHABILITY_CHANNEL_DEFINITIONS,
+  type ReachabilityDeliveryCandidates,
+} from './timing-reachability.js';
 
 export type SequenceReachability = {
   /** False when a separate standing suppression rule owns the record. */
@@ -54,7 +57,7 @@ export const evaluateSequenceReachability = ({
     String(record.contact_email || '').trim()
     || String(record.contact_name || record.contact_name_primary || '').trim(),
   );
-  const candidateRecords = contacts === undefined || contacts.length === 0
+  const contactCandidates = contacts === undefined || contacts.length === 0
     ? (directIdentityPresent ? [record] : [])
     : contacts.map((contact) => ({
       ...record,
@@ -70,17 +73,24 @@ export const evaluateSequenceReachability = ({
       linkedin_suppressed: contact.linkedin_suppressed,
       suppression_state: contact.suppression_state,
     }));
-  const ready_channels = Array.from(new Set(candidateRecords.flatMap((candidate) => (
-    evaluateReachability(candidate).channels
-      .filter((channel) => (
-        channel.ready
-        || (
-          channel.state === 'unvalidated'
-          && channel.reason !== 'invalid_verification'
-        )
-      ))
-      .map((channel) => channel.channel)
-  ))));
+  const deliveryCandidates: ReachabilityDeliveryCandidates = {
+    account: record,
+    contacts: contactCandidates,
+  };
+  const ready_channels = Array.from(new Set(
+    REACHABILITY_CHANNEL_DEFINITIONS.flatMap(({ channel, deliveryCandidates: candidatesForChannel, evaluate }) => (
+      candidatesForChannel(deliveryCandidates)
+        .map((candidate) => evaluate(candidate))
+        .filter((state) => (
+          state.ready
+          || (
+            state.state === 'unvalidated'
+            && state.reason !== 'invalid_verification'
+          )
+        ))
+        .map(() => channel)
+    )),
+  ));
   const permitted_channels = permittedChannelsFromRecord(record);
   const reachable_channels = permitted_channels === null
     ? ready_channels

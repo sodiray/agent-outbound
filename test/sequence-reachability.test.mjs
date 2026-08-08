@@ -74,6 +74,7 @@ const seedList = ({
     columns: [
       'lifecycle_stage', 'account_sequence_state', 'work_state', 'next_action_json',
       'readiness_json', 'suppressed', 'active_contact_id', 'contact_name', 'phone', 'contact_phone', 'phone_confidence',
+      'mailing_address', 'mail_address_ready',
     ],
   });
   db.prepare(`
@@ -170,6 +171,52 @@ test('sequence enrollment refuses a record with no reachable contact', async () 
   assert.equal(parked.sequence_status, 'unreachable');
   assert.equal(parked.account_sequence_state, 'unreachable');
   assert.match(String(parked.last_error), /no reachable contact/i);
+  db.close();
+});
+
+test('a deliverable address keeps a mail-permitted record with no contacts out of unreachable parking', async () => {
+  const { db, listDir, rowId } = seedList({
+    rowId: 'mail_without_contact',
+    readinessJson: JSON.stringify({ permitted_channels: ['mail'] }),
+  });
+  db.prepare(`
+    UPDATE records
+    SET mailing_address = '6903 W Targee St, Boise, ID 83709', mail_address_ready = 1
+    WHERE _row_id = ?
+  `).run(rowId);
+
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const result = await execute({ db, listDir, record });
+  assert.equal(result.reason, 'channel_not_permitted:email');
+  const retained = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  assert.notEqual(retained.sequence_status, 'unreachable');
+  assert.notEqual(retained.account_sequence_state, 'unreachable');
+  assert.equal(Number(retained.suppressed), 0);
+  db.close();
+});
+
+test('contacts do not make an address-permitted record reachable without a deliverable address', async () => {
+  const { db, listDir, rowId } = seedList({
+    rowId: 'mail_without_address',
+    readinessJson: JSON.stringify({ permitted_channels: ['mail'] }),
+  });
+  upsertContact({
+    db,
+    contact: {
+      row_id: rowId,
+      contact_id: 'c1',
+      name: 'Pat Contact',
+      email: 'pat@example.test',
+    },
+  });
+
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const result = await execute({ db, listDir, record });
+  assert.equal(result.reason, 'sequence_unreachable:no_reachable_contact');
+  const parked = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  assert.equal(parked.sequence_status, 'unreachable');
+  assert.equal(parked.account_sequence_state, 'unreachable');
+  assert.equal(Number(parked.suppressed), 0);
   db.close();
 });
 
