@@ -171,7 +171,10 @@ test('TV config validates via normalizeConfig and preserves enforce_readiness', 
 
   // PolicySchema preserves readiness + rule versions + review gates (no strip).
   assert.equal(normalized.config.policy?.enforce_readiness, true);
-  assert.deepEqual(normalized.config.policy?.prohibited_channels || [], []);
+  assert.deepEqual(
+    normalized.config.policy?.prohibited_channels || [],
+    raw.policy?.prohibited_channels || [],
+  );
   assert.equal(normalized.config.policy?.fit_rule_version, raw.policy?.fit_rule_version);
   assert.equal(
     normalized.config.policy?.treatment_rule_version,

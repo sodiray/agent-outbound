@@ -404,7 +404,7 @@ export const ToolSpecSchema = z.object({
   list: z.string().default(''),
   search: z.string().default(''),
   limit: z.coerce.number().int().positive().max(200).default(25),
-}).partial().default({});
+}).partial().passthrough().default({});
 
 export const IdempotencySchema = z.object({
   key_source: z.array(z.string()).default([]),
@@ -1998,13 +1998,161 @@ const isSimpleRing = (ring: any[]) => {
   return true;
 };
 
+type UnknownConfigKey = {
+  path: string;
+  suggestion?: string;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+);
+
+const schemaDefinition = (schema: z.ZodTypeAny): Record<string, unknown> => (
+  schema._def as unknown as Record<string, unknown>
+);
+
+const schemaType = (schema: z.ZodTypeAny): string => String(schemaDefinition(schema).typeName || '');
+
+const schemaFrom = (value: unknown): z.ZodTypeAny | undefined => (
+  isRecord(value) && '_def' in value ? value as unknown as z.ZodTypeAny : undefined
+);
+
+const formatConfigPath = (segments: string[]): string => segments.reduce((path, segment) => (
+  /^\d+$/.test(segment) ? `${path}[${segment}]` : path ? `${path}.${segment}` : segment
+), '');
+
+const editDistance = (left: string, right: string): number => {
+  const rows = Array.from({ length: left.length + 1 }, (_, index) => index);
+  const result = right.split('').reduce((previous, rightCharacter, rightIndex) => {
+    const next = [rightIndex + 1];
+    for (const [leftIndex, leftCharacter] of left.split('').entries()) {
+      const replacement = previous[leftIndex] + Number(leftCharacter !== rightCharacter);
+      next.push(Math.min(next[leftIndex] + 1, previous[leftIndex + 1] + 1, replacement));
+    }
+    return next;
+  }, rows);
+  return result[result.length - 1];
+};
+
+const nearestConfigKey = (key: string, candidates: string[]): string | undefined => {
+  const ranked = candidates
+    .map((candidate) => ({ candidate, distance: editDistance(key, candidate) }))
+    .sort((left, right) => left.distance - right.distance || left.candidate.localeCompare(right.candidate));
+  const nearest = ranked[0];
+  if (!nearest) return undefined;
+  const sharesQualifiedSuffix = key.includes('_')
+    && nearest.candidate.includes('_')
+    && key.split('_').at(-1) === nearest.candidate.split('_').at(-1);
+  if (sharesQualifiedSuffix || nearest.distance <= Math.max(2, Math.floor(nearest.candidate.length / 2))) {
+    return nearest.candidate;
+  }
+  return undefined;
+};
+
+const unknownConfigKeys = (
+  value: unknown,
+  schema: z.ZodTypeAny,
+  path: string[] = [],
+): UnknownConfigKey[] => {
+  const definition = schemaDefinition(schema);
+  const type = schemaType(schema);
+
+  if (['ZodDefault', 'ZodOptional', 'ZodNullable', 'ZodCatch', 'ZodBranded', 'ZodReadonly'].includes(type)) {
+    const inner = schemaFrom(definition.innerType);
+    return inner ? unknownConfigKeys(value, inner, path) : [];
+  }
+
+  if (type === 'ZodEffects') {
+    const inner = schemaFrom(definition.schema);
+    return inner ? unknownConfigKeys(value, inner, path) : [];
+  }
+
+  if (type === 'ZodArray') {
+    const itemSchema = schemaFrom(definition.type);
+    if (!itemSchema || !Array.isArray(value)) return [];
+    return value.flatMap((item, index) => unknownConfigKeys(item, itemSchema, [...path, String(index)]));
+  }
+
+  if (type === 'ZodRecord') {
+    const valueSchema = schemaFrom(definition.valueType);
+    if (!valueSchema || !isRecord(value)) return [];
+    return Object.entries(value).flatMap(([key, item]) => unknownConfigKeys(item, valueSchema, [...path, key]));
+  }
+
+  if (type === 'ZodDiscriminatedUnion') {
+    if (!isRecord(value)) return [];
+    const discriminator = String(definition.discriminator || '');
+    const optionsMap = definition.optionsMap as Map<unknown, unknown> | undefined;
+    const selected = optionsMap?.get(value[discriminator]);
+    const selectedSchema = schemaFrom(selected);
+    return selectedSchema ? unknownConfigKeys(value, selectedSchema, path) : [];
+  }
+
+  if (type === 'ZodUnion') {
+    const options = Array.isArray(definition.options) ? definition.options : [];
+    const selectedSchema = options
+      .map(schemaFrom)
+      .find((option): option is z.ZodTypeAny => Boolean(option) && option.safeParse(value).success);
+    return selectedSchema ? unknownConfigKeys(value, selectedSchema, path) : [];
+  }
+
+  if (type !== 'ZodObject' || !isRecord(value)) return [];
+
+  const shapeValue = definition.shape;
+  const shape = isRecord(shapeValue)
+    ? shapeValue
+    : typeof shapeValue === 'function'
+      ? shapeValue() as Record<string, unknown>
+      : {};
+  const candidateKeys = Object.keys(shape);
+  const acceptsExtensions = schemaType(schemaFrom(definition.catchall) || z.never()) !== 'ZodNever'
+    || definition.unknownKeys === 'passthrough';
+  const unknown = acceptsExtensions
+    ? []
+    : Object.keys(value)
+      .filter((key) => !candidateKeys.includes(key))
+      .map((key) => ({
+        path: formatConfigPath([...path, key]),
+        suggestion: nearestConfigKey(key, candidateKeys),
+      }));
+  const nested = candidateKeys.flatMap((key) => {
+    if (!(key in value)) return [];
+    const childSchema = schemaFrom(shape[key]);
+    return childSchema ? unknownConfigKeys(value[key], childSchema, [...path, key]) : [];
+  });
+  return [...unknown, ...nested];
+};
+
+const isSafetyCriticalUnknownKey = ({ path, suggestion }: UnknownConfigKey): boolean => {
+  const [root] = path.split('.');
+  if (['policy', 'contact_policy', 'suppression', 'live_interaction_budget', 'budgets'].includes(root)) return true;
+  if (root === 'score' && suggestion === 'treatment') return true;
+  if (root === 'sequences' && suggestion === 'reply_check') return true;
+  return ['policy', 'contact_policy', 'suppression', 'live_interaction_budget', 'budgets'].includes(suggestion || '');
+};
+
+const unknownConfigDiagnostic = (unknown: UnknownConfigKey): string => {
+  const suggestion = unknown.suggestion
+    ? ` Did you mean "${unknown.path.replace(/[^.]+$/, unknown.suggestion)}"?`
+    : '';
+  return `Unknown config key "${unknown.path}" is not recognized.${suggestion}`;
+};
+
 export const normalizeConfig = (value, options: { listDir?: string; recordFields?: Iterable<string> } = {}) => {
-  const parsed = ConfigSchema.safeParse(coerceLegacyScore(coerceLegacyContactPolicy(value || {})));
+  const input = coerceLegacyScore(coerceLegacyContactPolicy(value || {}));
+  const unknownKeys = unknownConfigKeys(input, ConfigSchema);
+  const unknownErrors = unknownKeys
+    .filter(isSafetyCriticalUnknownKey)
+    .map(unknownConfigDiagnostic);
+  const unknownWarnings = unknownKeys
+    .filter((unknown) => !isSafetyCriticalUnknownKey(unknown))
+    .map(unknownConfigDiagnostic);
+  const parsed = ConfigSchema.safeParse(input);
   if (!parsed.success) {
     return {
       error: parsed.error.message,
-      errors: [parsed.error.message],
-      warnings: [],
+      errors: [...new Set([parsed.error.message, ...unknownErrors])],
+      warnings: [...new Set(unknownWarnings)],
       config: ConfigSchema.parse({}),
     };
   }
@@ -2182,9 +2330,9 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
   const errors = [...new Set([...graph.errors, ...router.errors, ...prohibitionErrors, ...optOutErrors])];
 
   return {
-    error: errors.join('\n'),
-    errors,
-    warnings: [...new Set([...graph.warnings, ...router.warnings, ...territoryWarnings])],
+    error: [...errors, ...unknownErrors].join('\n'),
+    errors: [...new Set([...errors, ...unknownErrors])],
+    warnings: [...new Set([...graph.warnings, ...router.warnings, ...territoryWarnings, ...unknownWarnings])],
     config,
   };
 };
