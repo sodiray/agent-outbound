@@ -181,6 +181,47 @@ export const commitLiveInteraction = ({
   if (Number(updated?.changes || 0) !== 1) throw new Error('Live interaction ledger reservation was not found.');
 };
 
+export const recordUnbudgetedLiveInteraction = ({
+  db,
+  recordId,
+  contactId,
+  channel,
+  stepId,
+  providerId,
+  at = nowTimestamp(),
+}: {
+  db: any;
+  recordId: string;
+  contactId: string;
+  channel: string;
+  stepId: string;
+  providerId: string;
+  at?: string;
+}) => {
+  const identityKey = liveInteractionIdentity({ recordId, stepId, contactId });
+  db.prepare(`
+    INSERT INTO live_interaction_ledger (
+      ledger_id, identity_key, record_id, contact_id, channel, step_id,
+      provider_id, provider_message_id, delivery_mode, status,
+      occurred_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', 'accepted', ?, ?, ?)
+    ON CONFLICT(identity_key) DO UPDATE SET
+      record_id = excluded.record_id,
+      contact_id = excluded.contact_id,
+      channel = excluded.channel,
+      step_id = excluded.step_id,
+      provider_id = excluded.provider_id,
+      provider_message_id = excluded.provider_message_id,
+      delivery_mode = 'live',
+      status = 'accepted',
+      occurred_at = excluded.occurred_at,
+      updated_at = excluded.updated_at
+  `).run(
+    randomUUID(), identityKey, recordId, contactId, channel, stepId,
+    providerId, providerId, at, at, at,
+  );
+};
+
 export const releaseLiveInteractionReservation = ({
   db,
   recordId,

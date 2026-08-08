@@ -35,6 +35,7 @@ export type InboundCorrelation = {
   record: Record<string, unknown> | null;
   contactId: string;
   via: 'headers' | 'sender' | 'none';
+  reason: string;
 };
 
 const trim = (value: unknown) => String(value ?? '').trim();
@@ -148,9 +149,17 @@ export const correlateInboundEmail = ({
   if (messageIds.length > 0) {
     const placeholders = messageIds.map(() => '?').join(', ');
     const rows = distinctRecords(db.prepare(`
+      SELECT r.*
+      FROM live_interaction_ledger l
+      JOIN records r ON r._row_id = l.record_id
+      WHERE l.channel = 'email'
+        AND l.delivery_mode = 'live'
+        AND l.status = 'accepted'
+        AND trim(lower(l.provider_message_id), '<> ') IN (${placeholders})
+      UNION ALL
       SELECT * FROM records
       WHERE trim(lower(email_last_message_id), '<> ') IN (${placeholders})
-    `).all(...messageIds));
+    `).all(...messageIds, ...messageIds));
     if (rows.length === 1) {
       const record = rows[0];
       return {
@@ -162,11 +171,28 @@ export const correlateInboundEmail = ({
           lower(recipientEmail || senderEmail),
         ),
         via: 'headers',
+        reason: '',
       };
     }
-    return { status: rows.length > 1 ? 'ambiguous' : 'unmatched', record: null, contactId: '', via: 'none' };
+    if (rows.length > 1) {
+      return {
+        status: 'ambiguous',
+        record: null,
+        contactId: '',
+        via: 'none',
+        reason: 'headers_ambiguous',
+      };
+    }
   }
-  if (!lower(senderEmail)) return { status: 'unmatched', record: null, contactId: '', via: 'none' };
+  if (!lower(senderEmail)) {
+    return {
+      status: 'unmatched',
+      record: null,
+      contactId: '',
+      via: 'none',
+      reason: messageIds.length > 0 ? 'headers_unmatched_sender_missing' : 'sender_missing',
+    };
+  }
   const rows = distinctRecords(db.prepare(`
     SELECT r.*, c.contact_id AS inbound_contact_id
     FROM contacts c
@@ -178,7 +204,15 @@ export const correlateInboundEmail = ({
     WHERE lower(trim(r.contact_email)) = ? OR lower(trim(r.email_primary)) = ?
   `).all(lower(senderEmail), lower(senderEmail), lower(senderEmail)));
   if (rows.length !== 1) {
-    return { status: rows.length > 1 ? 'ambiguous' : 'unmatched', record: null, contactId: '', via: 'none' };
+    return {
+      status: rows.length > 1 ? 'ambiguous' : 'unmatched',
+      record: null,
+      contactId: '',
+      via: 'none',
+      reason: rows.length > 1
+        ? 'sender_ambiguous'
+        : messageIds.length > 0 ? 'headers_unmatched_sender_unmatched' : 'sender_unmatched',
+    };
   }
   const record = rows[0];
   return {
@@ -190,6 +224,7 @@ export const correlateInboundEmail = ({
       lower(recipientEmail || senderEmail),
     ),
     via: 'sender',
+    reason: messageIds.length > 0 ? 'headers_unmatched_sender_matched' : '',
   };
 };
 
@@ -214,9 +249,9 @@ const insertInboundMessage = ({
   db.prepare(`
     INSERT OR IGNORE INTO inbound_messages (
       inbound_message_id, mailbox_id, imap_uid, rfc_message_id, classification,
-      correlation_status, record_id, contact_id, sender_email, subject, snippet,
+      correlation_status, correlation_reason, record_id, contact_id, sender_email, subject, snippet,
       references_json, received_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     inboundMessageId(mailboxId, uid),
     mailboxId,
@@ -224,6 +259,7 @@ const insertInboundMessage = ({
     parsed.messageId,
     parsed.classification,
     correlation.status,
+    correlation.reason,
     trim(correlation.record?._row_id || correlation.record?.id),
     correlation.contactId,
     parsed.senderEmail,

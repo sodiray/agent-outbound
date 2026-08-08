@@ -43,6 +43,27 @@ const insertContact = (db, { recordId, contactId, email = 'alex@example.com' }) 
   `).run(contactId, contactId, recordId, email, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
 };
 
+const insertLiveEmailHistory = (db, { recordId, messageId, stepId = 'email_1' }) => {
+  const now = '2026-01-01T00:00:00.000Z';
+  db.prepare(`
+    INSERT INTO live_interaction_ledger (
+      ledger_id, identity_key, record_id, contact_id, channel, step_id,
+      provider_id, provider_message_id, delivery_mode, status,
+      occurred_at, created_at, updated_at
+    ) VALUES (?, ?, ?, '', 'email', ?, ?, ?, 'live', 'accepted', ?, ?, ?)
+  `).run(
+    `ledger-${recordId}-${stepId}`,
+    `${recordId}|${stepId}|`,
+    recordId,
+    stepId,
+    messageId,
+    messageId,
+    now,
+    now,
+    now,
+  );
+};
+
 const withClock = async (value, run) => {
   const previous = process.env.AO_NOW;
   process.env.AO_NOW = value;
@@ -76,6 +97,54 @@ test('inbound correlation matches In-Reply-To and References headers', async () 
     const references = await parseInboundEmail(fixture('inbound-reply-references.eml'));
     assert.equal(correlateInboundEmail({ db, ...inReplyTo }).record._row_id, 'inreply');
     assert.equal(correlateInboundEmail({ db, ...references }).record._row_id, 'references');
+  } finally {
+    db.close();
+  }
+});
+
+test('inbound correlation matches an earlier live email in thread history', async () => {
+  const { db } = createDb();
+  try {
+    insertRecord(db, { id: 'older-send', messageId: '<outbound-2@example.com>' });
+    insertLiveEmailHistory(db, {
+      recordId: 'older-send',
+      messageId: '<outbound-1@example.com>',
+    });
+    const parsed = await parseInboundEmail(fixture('inbound-reply-in-reply-to.eml'));
+    const correlation = correlateInboundEmail({ db, ...parsed });
+    assert.equal(correlation.status, 'matched');
+    assert.equal(correlation.via, 'headers');
+    assert.equal(correlation.record._row_id, 'older-send');
+  } finally {
+    db.close();
+  }
+});
+
+test('unmatched headers fall through to a unique sender match', async () => {
+  const { db } = createDb();
+  try {
+    insertRecord(db, { id: 'sender-fallback', messageId: '<different-outbound@example.com>' });
+    const parsed = await parseInboundEmail(fixture('inbound-reply-header-unmatched.eml'));
+    const correlation = correlateInboundEmail({ db, ...parsed });
+    assert.equal(correlation.status, 'matched');
+    assert.equal(correlation.via, 'sender');
+    assert.equal(correlation.reason, 'headers_unmatched_sender_matched');
+    assert.equal(correlation.record._row_id, 'sender-fallback');
+  } finally {
+    db.close();
+  }
+});
+
+test('an unmatched header remains ambiguous when the sender identifies multiple records', async () => {
+  const { db } = createDb();
+  try {
+    insertRecord(db, { id: 'sender-ambiguous-a', messageId: '<different-outbound-a@example.com>' });
+    insertRecord(db, { id: 'sender-ambiguous-b', messageId: '<different-outbound-b@example.com>' });
+    const parsed = await parseInboundEmail(fixture('inbound-reply-header-unmatched.eml'));
+    const correlation = correlateInboundEmail({ db, ...parsed });
+    assert.equal(correlation.status, 'ambiguous');
+    assert.equal(correlation.reason, 'sender_ambiguous');
+    assert.equal(correlation.record, null);
   } finally {
     db.close();
   }
@@ -204,6 +273,8 @@ test('unmatched inbound sender fails closed and remains visible to operators', a
     const inbound = db.prepare('SELECT * FROM inbound_messages WHERE mailbox_id = ? AND imap_uid = ?').get('mailbox-a', 8);
     assert.equal(result.correlation.status, 'unmatched');
     assert.equal(inbound.correlation_status, 'unmatched');
+    assert.equal(inbound.correlation_reason, 'sender_unmatched');
+    assert.equal(inbound.sender_email, 'unknown@example.com');
     assert.equal(inbound.record_id, '');
   } finally {
     db.close();

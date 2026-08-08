@@ -30,6 +30,7 @@ import { countMailboxSendsToday, resolveSendMailbox, smtpCredentialEnv } from '.
 import {
   commitLiveInteraction,
   isSinkOrFixtureMode,
+  recordUnbudgetedLiveInteraction,
   recordSinkInteraction,
   releaseLiveInteractionReservation,
   reserveLiveInteraction,
@@ -376,7 +377,14 @@ const applyStepOutputs = ({ record, step, outputs }) => {
   return mapped;
 };
 
-const applyArtifactUpdates = ({ record, artifacts, outputs, intent }) => {
+const applyArtifactUpdates = ({
+  record,
+  artifacts,
+  outputs,
+  intent,
+  persistEmailMessageId = true,
+  existingEmailLastMessageId = '',
+}) => {
   const next = { ...(record || {}) };
   const data = { ...(artifacts || {}), ...(outputs || {}) };
 
@@ -389,8 +397,11 @@ const applyArtifactUpdates = ({ record, artifacts, outputs, intent }) => {
     next.email_last_draft_id = String(data.draft_id);
   }
   const messageId = String(data.message_id || data.provider_message_id || data.provider_id || '').trim();
-  if (intent !== 'draft' && messageId) {
+  if (intent !== 'draft' && messageId && persistEmailMessageId) {
     next.email_last_message_id = messageId;
+  }
+  if (!persistEmailMessageId) {
+    next.email_last_message_id = existingEmailLastMessageId;
   }
   if (data.piece_id) {
     next.mail_last_piece_id = String(data.piece_id);
@@ -508,6 +519,7 @@ export const executeChannelStep = async ({
     : nowTimestamp();
   const recordId = getRecordRowId(record);
   const sequenceStepId = String(step?.id || `step_${stepNumber}`);
+  const deliveryState: { emailMode: 'live' | 'sink' | 'unlimited' | null } = { emailMode: null };
 
   // Canary isolation FIRST — before idempotency, models, tools, or providers.
   // A later DB guard is insufficient: SMTP sink / Unipile can already have fired.
@@ -967,7 +979,18 @@ export const executeChannelStep = async ({
       providerChannel: 'email' | 'linkedin';
       providerId: string;
     }) => {
-      if (mode === 'unlimited') return;
+      if (mode === 'unlimited') {
+        recordUnbudgetedLiveInteraction({
+          db,
+          recordId,
+          contactId: activeContactId,
+          channel: providerChannel,
+          stepId: sequenceStepId,
+          providerId,
+          at: now,
+        });
+        return;
+      }
       if (mode === 'sink') {
         recordSinkInteraction({
           db,
@@ -2046,6 +2069,7 @@ export const executeChannelStep = async ({
       }
       const emailClaim = reserveProviderInteraction({ providerChannel: 'email' });
       if (emailClaim.ok === false) return emailClaim.result as any;
+      deliveryState.emailMode = emailClaim.mode;
 
       // Frozen args only — args_map already applied above; do not re-apply in tool-call.
       const toolResult = await executeToolCallAction({
@@ -2471,11 +2495,16 @@ export const executeChannelStep = async ({
       step,
       outputs: stepOutputs,
     });
+    const existingEmailLastMessageId = deliveryState.emailMode === 'sink'
+      ? String(db.prepare('SELECT email_last_message_id FROM records WHERE _row_id = ?').get(recordId)?.email_last_message_id || '')
+      : '';
     const artifactUpdatedRecord = applyArtifactUpdates({
       record: mappedRecord,
       artifacts: stepArtifacts,
       outputs: stepOutputs,
       intent,
+      persistEmailMessageId: deliveryState.emailMode !== 'sink',
+      existingEmailLastMessageId,
     });
 
     if (sendMailbox && intent === 'send' && eventChannel === 'email') {

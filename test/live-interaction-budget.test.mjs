@@ -13,6 +13,7 @@ import {
   getLiveInteractionBudgetStatus,
   reserveLiveInteraction,
 } from '../dist/orchestrator/runtime/live-interaction-budget.js';
+import { correlateInboundEmail } from '../dist/orchestrator/runtime/inbound-email.js';
 
 const budgetYaml = (budget) => `
 list:
@@ -114,7 +115,13 @@ const executeEmail = ({ db, listDir, record, step }) => executeChannelStep({
   intent: 'send',
 });
 
-const seedAcceptedLiveInteraction = ({ db, recordId, contactId, stepId = 'seed_step' }) => {
+const seedAcceptedLiveInteraction = ({
+  db,
+  recordId,
+  contactId,
+  stepId = 'seed_step',
+  providerId = `provider_${recordId}_${stepId}`,
+}) => {
   const budget = { max_accounts: 25, max_interactions: 25 };
   const reserved = reserveLiveInteraction({
     db,
@@ -131,7 +138,7 @@ const seedAcceptedLiveInteraction = ({ db, recordId, contactId, stepId = 'seed_s
     contactId,
     channel: 'email',
     stepId,
-    providerId: `provider_${recordId}_${stepId}`,
+    providerId,
   });
 };
 
@@ -191,6 +198,15 @@ test('live interaction budget: account cap blocks a new account and allows an al
 test('live interaction budget: sink mode is ledgered but does not consume the live budget', async () => {
   const { listDir, db } = createList({ budget: { max_accounts: 1, max_interactions: 1 } });
   const record = insertRecord({ db, recordId: 'acct_sink' });
+  seedAcceptedLiveInteraction({
+    db,
+    recordId: record._row_id,
+    contactId: record.active_contact_id,
+    stepId: 'email_live',
+    providerId: 'live-outbound@example.com',
+  });
+  db.prepare('UPDATE records SET email_last_message_id = ? WHERE _row_id = ?')
+    .run('live-outbound@example.com', record._row_id);
   const previous = process.env.AO_SMTP_SINK;
   process.env.AO_SMTP_SINK = '1';
   try {
@@ -208,8 +224,17 @@ test('live interaction budget: sink mode is ledgered but does not consume the li
       db,
       budget: { max_accounts: 1, max_interactions: 1 },
     });
-    assert.deepEqual(status.usage, { accounts: 0, interactions: 0 });
+    assert.deepEqual(status.usage, { accounts: 1, interactions: 1 });
     assert.equal(status.items[0].delivery_mode, 'sink');
+    const updated = db.prepare('SELECT email_last_message_id FROM records WHERE _row_id = ?').get(record._row_id);
+    assert.equal(updated.email_last_message_id, 'live-outbound@example.com');
+    const correlation = correlateInboundEmail({
+      db,
+      correlationMessageIds: ['live-outbound@example.com'],
+      senderEmail: `${record._row_id}@example.test`,
+    });
+    assert.equal(correlation.status, 'matched');
+    assert.equal(correlation.record._row_id, record._row_id);
   } finally {
     if (previous === undefined) delete process.env.AO_SMTP_SINK;
     else process.env.AO_SMTP_SINK = previous;
@@ -295,7 +320,7 @@ test('live interaction budget: no configured budget preserves unlimited send beh
   });
   assert.equal(out.status, 'sent');
   assert.equal(calls.value, 1);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM live_interaction_ledger').get().n, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM live_interaction_ledger').get().n, 1);
   db.close();
 });
 

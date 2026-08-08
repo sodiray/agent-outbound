@@ -251,6 +251,7 @@ const SCHEMA_SQL = `
     rfc_message_id TEXT DEFAULT '',
     classification TEXT NOT NULL,
     correlation_status TEXT NOT NULL,
+    correlation_reason TEXT DEFAULT '',
     record_id TEXT DEFAULT '',
     contact_id TEXT DEFAULT '',
     sender_email TEXT DEFAULT '',
@@ -967,6 +968,10 @@ const ensureSuppressionCompatibility = (db) => {
   try { db.exec("UPDATE suppression SET identifier_type = value_type WHERE (identifier_type IS NULL OR identifier_type = '') AND value_type IS NOT NULL AND value_type != ''"); } catch {}
 };
 
+const ensureInboundMessageCompatibility = (db) => {
+  try { db.exec("ALTER TABLE inbound_messages ADD COLUMN correlation_reason TEXT DEFAULT ''"); } catch {}
+};
+
 /**
  * Whole-corpus DML during open is only safe when canary isolation is off.
  * When active, scope updates to the allowlist (never mutate excluded records
@@ -1422,6 +1427,7 @@ const openDb = ({ dbPath, readonly = false }) => {
     ensureScoreEventCompatibility(db);
     ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);
+    ensureInboundMessageCompatibility(db);
     ensureTerritoryCompatibility(db);
     ensureDraftCompatibility(db);
     migrateContentAddressedEvidence({ db });
@@ -1481,6 +1487,7 @@ export const openListDb = ({ listDir, readonly = false }) => {
     ensureScoreEventCompatibility(db);
     ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);
+    ensureInboundMessageCompatibility(db);
     ensureTerritoryCompatibility(db);
     ensureDraftCompatibility(db);
     migrateContentAddressedEvidence({ db });
