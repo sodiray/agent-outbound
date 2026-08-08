@@ -251,10 +251,6 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
     errors.push(String((error as any)?.message || error));
   }
 
-  const scoreDescription = String(config?.score?.description || '').trim();
-  const scoreCriteria = Array.isArray(config?.score?.criteria) ? config.score.criteria : [];
-  if (!scoreDescription && scoreCriteria.length === 0) errors.push('score.description or score.criteria must be provided.');
-
   const db = openListDb({ listDir, readonly: true });
   try {
     warnings.push(...reviewStageFieldWarnings({ db, config }));

@@ -122,9 +122,22 @@ const stepBatchWindowMs = (step: any) => {
 
 const largestBatchSize = (steps: DataflowStep[]) => Math.max(1, ...steps.map((entry) => stepBatchSize(entry.step)));
 
+const priorScoreStageId = ({ steps, index, key }: { steps: any[]; index: number; key: string }): string => (
+  steps
+    .slice(0, index)
+    .reverse()
+    .find((candidate) => (
+      String(candidate?.kind || '').trim().toLowerCase() === 'score'
+      && String(candidate?.key || '').trim() === key
+    ))?.id || ''
+);
+
 const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] => steps.map((step, index) => {
   const id = pipelineStepId(step, index);
   const kind = String(step?.kind || '').trim().toLowerCase();
+  const earlierScore = kind === 'score'
+    ? priorScoreStageId({ steps, index, key: String(step?.key || '').trim() })
+    : '';
   const reviewDeps = steps
     .flatMap((candidate, candidateIndex) => (
       candidateIndex < index
@@ -146,7 +159,12 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
     dropGate: kind === 'review'
       || kind === 'exit'
       || (kind === 'filter' && String(step?.on_fail || 'drop').trim().toLowerCase() !== 'flag'),
-    deps: [...new Set([...stringArray(step?.depends_on), ...stringArray(step?.runs_after), ...reviewDeps])],
+    deps: [...new Set([
+      ...stringArray(step?.depends_on),
+      ...stringArray(step?.runs_after),
+      ...reviewDeps,
+      ...(earlierScore ? [earlierScore] : []),
+    ])],
     executable: (() => {
       // generate is executable on the normal path when selected by selectDataflowSteps
       // (critical-path / AO_RUN_GENERATE / run_in_pipeline / fixture).

@@ -444,7 +444,9 @@ const parseJsonArray = (value: any) => {
     return [];
   }
 };
-const configuredCriteria = (config: any) => (Array.isArray(config?.score?.criteria) ? config.score.criteria : []);
+const configuredCriteria = (config: any) => flattenPipelineSteps(config)
+  .filter((step: any) => String(step?.kind || '') === 'score')
+  .flatMap((step: any) => (Array.isArray(step?.criteria) ? step.criteria : []));
 const criterionKey = (id: string) => `criterion__${id}`;
 const criterionColumns = (config: any) => configuredCriteria(config).map((criterion: any) => {
   const id = String(criterion?.id || '');
@@ -598,7 +600,7 @@ const buildSteps = (config: any) => [
     id: 'score',
     kind: 'score',
     description: 'Score and prioritize records',
-    criteria: Array.isArray(config?.score?.criteria) ? config.score.criteria : [],
+    criteria: configuredCriteria(config),
     minimum: Number(config?.score?.minimum ?? 0),
   },
 ];

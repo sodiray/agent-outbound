@@ -2250,6 +2250,33 @@ const scoreStageValidationMessages = (config: Record<string, unknown>): string[]
   })
 );
 
+const repeatedScoreKeyWarnings = (config: Record<string, unknown>): string[] => {
+  const stagesByKey = flattenPipelineSteps(config).reduce((keys, step) => {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) return keys;
+    const scoreStep = step as Record<string, unknown>;
+    if (String(scoreStep.kind || '') !== 'score') return keys;
+    const key = String(scoreStep.key || '').trim();
+    const id = String(scoreStep.id || '').trim();
+    if (!key || !id) return keys;
+    keys.set(key, [...(keys.get(key) || []), id]);
+    return keys;
+  }, new Map<string, string[]>());
+  return [...stagesByKey.entries()].flatMap(([key, stages]) => (
+    stages.length < 2
+      ? []
+      : [`Score key "${key}" is written by multiple stages in pipeline order: ${stages.map((id) => `"${id}"`).join(' -> ')}. Later stages overwrite "${key}_score"; prior values remain in score_events.`]
+  ));
+};
+
+const retiredGlobalScoreCriteriaErrors = (config: Record<string, unknown>): string[] => {
+  const score = config.score && typeof config.score === 'object' && !Array.isArray(config.score)
+    ? config.score as Record<string, unknown>
+    : {};
+  const criteria = Array.isArray(score.criteria) ? score.criteria : [];
+  if (criteria.length === 0) return [];
+  return ['score.criteria is retired; move these criteria to a pipeline kind: score stage with key: fit.'];
+};
+
 const unknownConfigDiagnostic = (unknown: UnknownConfigKey): string => {
   const suggestion = unknown.suggestion
     ? ` Did you mean "${unknown.path.replace(/[^.]+$/, unknown.suggestion)}"?`
@@ -2455,6 +2482,7 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
     ...optOutErrors,
     ...stageInputs.errors,
     ...scoreStageErrors,
+    ...retiredGlobalScoreCriteriaErrors(config),
   ])];
 
   return {
@@ -2466,6 +2494,7 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
       ...territoryWarnings,
       ...unknownWarnings,
       ...stageInputs.warnings,
+      ...repeatedScoreKeyWarnings(config),
     ])],
     config,
   };

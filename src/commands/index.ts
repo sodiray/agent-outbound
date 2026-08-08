@@ -31,7 +31,7 @@ import { recordCostEvent } from '../orchestrator/lib/costs.js';
 import { authorConfigAction } from '../orchestrator/actions/author-config/index.js';
 import { runSourcing, runSourcingMore } from '../orchestrator/sourcing/runner.js';
 import { runPipelineDataflow } from '../orchestrator/pipeline/dataflow.js';
-import { runScoring, runScoringWithBriefs } from '../orchestrator/scoring/runner.js';
+import { runConfiguredScoreStages } from '../orchestrator/scoring/stages.js';
 import { runGeneration } from '../orchestrator/generate/runner.js';
 import {
   followupSend,
@@ -1188,10 +1188,6 @@ export const runCommand = async ({ list, more = 0 }) => {
     ? `_row_id IN (${allowIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ')})`
     : (canaryConfig.mode !== 'off' ? `_row_id IN ('__canary_none__')` : '');
 
-  const scoreResult = await runScoringWithBriefs({
-    listDir,
-    ...(canaryWhere ? { where: canaryWhere } : {}),
-  });
   const generateResult = await runGeneration({
     listDir,
     ...(canaryWhere ? { where: canaryWhere } : {}),
@@ -1200,7 +1196,7 @@ export const runCommand = async ({ list, more = 0 }) => {
   return {
     source: sourceResult,
     pipeline: pipelineResult,
-    score: scoreResult,
+    score: { handled_by: 'pipeline_score_stages' },
     generate: generateResult,
   };
 };
@@ -1225,7 +1221,7 @@ export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 
   const threshold = getBulkSnapshotThreshold(config || {});
 
   if (dryRun) {
-    return runScoring({
+    return runConfiguredScoreStages({
       listDir, where: whereSql, dryRun: true, force,
     });
   }
@@ -1235,7 +1231,7 @@ export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 
       listDir,
       sampledCount: sampleN,
       totalCount: Math.max(totalCount, sampleN),
-      run: () => runScoring({
+      run: () => runConfiguredScoreStages({
         listDir, where: whereSql, limit: sampleN, force,
       }),
     });
@@ -1243,7 +1239,7 @@ export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 
   const autoSnapshot = totalCount >= threshold
     ? snapshotCreateCommand({ list: listDir, label: `auto-before-score-${new Date().toISOString()}` })
     : null;
-  const scored = await runScoringWithBriefs({ listDir, where: whereSql, force });
+  const scored = await runConfiguredScoreStages({ listDir, where: whereSql, force });
   return {
     ...scored,
     auto_snapshot: autoSnapshot,

@@ -270,8 +270,10 @@ const SCHEMA_SQL = `
     event_id TEXT PRIMARY KEY,
     row_id TEXT NOT NULL,
     axis TEXT NOT NULL,
+    stage_id TEXT DEFAULT '',
     score INTEGER NOT NULL,
     reasoning TEXT NOT NULL,
+    breakdown_json TEXT DEFAULT '',
     computed_at TEXT NOT NULL,
     FOREIGN KEY(row_id) REFERENCES records(_row_id) ON DELETE CASCADE
   );
@@ -1071,12 +1073,45 @@ const ensureRecordCompatibility = (db) => {
   } catch {}
 };
 
+export const migrateScoreStageData = ({ db }: { db: { exec: (sql: string) => unknown; prepare: (sql: string) => { run: (...values: unknown[]) => { changes?: number }; all: () => Array<{ name?: unknown }> } } }): number => {
+  try { db.exec("ALTER TABLE records ADD COLUMN fit_breakdown TEXT DEFAULT ''"); } catch {}
+  const columns = new Set(
+    db.prepare('PRAGMA table_info(records)').all().map((row) => String(row.name || '')),
+  );
+  if (!columns.has('fit_score') || !columns.has('fit_breakdown')) return 0;
+  const emptyBreakdowns = ['fit_breakdown', 'score_breakdown']
+    .filter((column) => columns.has(column))
+    .map((column) => `TRIM(COALESCE(${column}, '')) IN ('', '[]', '{}')`);
+  const blankBreakdown = emptyBreakdowns.length > 0 ? emptyBreakdowns.join(' AND ') : '1 = 1';
+  const cleared = db.prepare(`
+    UPDATE records
+    SET fit_score = NULL,
+        fit_breakdown = ?,
+        fit_reasoning = ?
+    WHERE fit_score = 0 AND ${blankBreakdown}
+  `).run(
+    JSON.stringify({
+      criteria: [],
+      missing_inputs: [],
+      reason: 'legacy_fabricated_zero_cleared',
+    }),
+    'Legacy fabricated zero cleared: no graded breakdown was recorded.',
+  );
+  return Number(cleared.changes || 0);
+};
+
 const ensurePipelineEventCompatibility = (db) => {
   try { db.exec("ALTER TABLE pipeline_events ADD COLUMN wake_at TEXT DEFAULT ''"); } catch {}
   try { db.exec('ALTER TABLE pipeline_events ADD COLUMN side_effecting INTEGER DEFAULT 0'); } catch {}
   try { db.exec("ALTER TABLE pipeline_events ADD COLUMN contact_id TEXT DEFAULT ''"); } catch {}
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_pipeline_events_wake ON pipeline_events(record_id, wake_at)'); } catch {}
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_pipeline_events_contact ON pipeline_events(record_id, contact_id, step_id)'); } catch {}
+};
+
+const ensureScoreEventCompatibility = (db) => {
+  try { db.exec("ALTER TABLE score_events ADD COLUMN stage_id TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE score_events ADD COLUMN breakdown_json TEXT DEFAULT ''"); } catch {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_score_events_row_axis ON score_events(row_id, axis, computed_at DESC)'); } catch {}
 };
 
 const ensureDraftCompatibility = (db) => {
@@ -1374,7 +1409,9 @@ const openDb = ({ dbPath, readonly = false }) => {
     try { db.exec("ALTER TABLE notification_deliveries ADD COLUMN available_at TEXT NOT NULL DEFAULT ''"); } catch {}
     try { db.exec("UPDATE notification_deliveries SET available_at = created_at WHERE available_at = ''"); } catch {}
     ensureRecordCompatibility(db);
+    migrateScoreStageData({ db });
     ensurePipelineEventCompatibility(db);
+    ensureScoreEventCompatibility(db);
     ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);
     ensureTerritoryCompatibility(db);
@@ -1430,7 +1467,9 @@ export const openListDb = ({ listDir, readonly = false }) => {
     try { db.exec("ALTER TABLE notification_deliveries ADD COLUMN available_at TEXT NOT NULL DEFAULT ''"); } catch {}
     try { db.exec("UPDATE notification_deliveries SET available_at = created_at WHERE available_at = ''"); } catch {}
     ensureRecordCompatibility(db);
+    migrateScoreStageData({ db });
     ensurePipelineEventCompatibility(db);
+    ensureScoreEventCompatibility(db);
     ensureContactCompatibility(db);
     ensureSuppressionCompatibility(db);
     ensureTerritoryCompatibility(db);
@@ -1616,15 +1655,18 @@ const insertAccountTimelineEvent = ({ db, event }) => {
 };
 
 export const insertScoreEvent = ({ db, event }) => {
+  ensureScoreEventCompatibility(db);
   db.prepare(`
-    INSERT INTO score_events (event_id, row_id, axis, score, reasoning, computed_at)
-    VALUES (@event_id, @row_id, @axis, @score, @reasoning, @computed_at)
+    INSERT INTO score_events (event_id, row_id, axis, stage_id, score, reasoning, breakdown_json, computed_at)
+    VALUES (@event_id, @row_id, @axis, @stage_id, @score, @reasoning, @breakdown_json, @computed_at)
   `).run({
     event_id: event.event_id || event.id,
     row_id: event.row_id,
     axis: String(event.axis || ''),
+    stage_id: String(event.stage_id || event.step_id || ''),
     score: Number(event.score || 0),
     reasoning: String(event.reasoning || ''),
+    breakdown_json: safeJson(event.breakdown),
     computed_at: event.computed_at || nowIso(),
   });
   insertAccountTimelineEvent({
@@ -1635,7 +1677,11 @@ export const insertScoreEvent = ({ db, event }) => {
       event_family: 'score',
       event_type: `${String(event.axis || '').trim()}_score_updated`,
       notes: String(event.reasoning || ''),
-      payload: { axis: String(event.axis || ''), score: Number(event.score || 0) },
+      payload: {
+        axis: String(event.axis || ''),
+        stage_id: String(event.stage_id || event.step_id || ''),
+        score: Number(event.score || 0),
+      },
       occurred_at: event.computed_at || nowIso(),
     },
   });

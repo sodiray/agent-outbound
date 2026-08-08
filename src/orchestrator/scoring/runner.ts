@@ -22,6 +22,7 @@ import {
   hydrateRecordCostLedger,
 } from '../policy/index.js';
 import { collectRetrievalSnapshots } from '../policy/evidence.js';
+import { runConfiguredScoreStages } from './stages.js';
 
 const ScoreResultSchema = z.object({
   score: z.coerce.number().refine((value) => Number.isFinite(value), 'score must be a finite number').pipe(z.number().min(0).max(100)),
@@ -790,7 +791,7 @@ const applyOverride = ({ score, reasoning, override, overrideReason, axis }) => 
   };
 };
 
-export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = false, force = false }) => {
+const retiredGlobalScoring = async ({ listDir, where = '', limit = 0, dryRun = false, force = false }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) throw new Error(`Invalid config: ${errors.join('; ')}`);
   assertPhaseModelReferences({ config, phase: 'score' });
@@ -1144,6 +1145,10 @@ export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = fals
     db.close();
   }
 };
+
+export const runScoring = async ({ listDir, where = '', limit = 0, dryRun = false, force = false }) => (
+  runConfiguredScoreStages({ listDir, where, limit, dryRun, force })
+);
 
 // Generate briefs for freshly-qualified leads after a scoring pass when the
 // list opts in (brief.enabled + brief.auto). Brief failures never fail the

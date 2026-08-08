@@ -208,8 +208,10 @@ export const persistScoreStageResult = ({
         event_id: randomUUID(),
         row_id: getRecordRowId(record),
         axis: step.key,
+        stage_id: step.id,
         score: calculation.score,
         reasoning: calculation.reasoning,
+        breakdown: calculation.breakdown,
         computed_at: occurredAt,
       },
     });

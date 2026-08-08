@@ -101,7 +101,7 @@ export type PolicyApplyInput = {
   asOf?: string;
   /** When true, recompute fit from score_breakdown grades using the pipeline fit model. */
   recomputeFitFromBreakdown?: boolean;
-  /** Pipeline-declared fit model from score.criteria and policy.fit_rule_version. */
+  /** Pipeline-declared fit model from a fit score stage and policy.fit_rule_version. */
   fitModel?: FitModelConfigInput;
   /**
    * When true, collapse observations to durable-preferring singletons (explicit

@@ -94,7 +94,10 @@ const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source'
     return refs;
   }
   if (phase === 'score') {
-    addResolvedRef(refs, 'score', config?.score?.model, 'evaluation', aiConfig);
+    for (const [index, step] of flattenPipelineSteps(config).entries()) {
+      if (String(step?.kind || '') !== 'score') continue;
+      addResolvedRef(refs, `pipeline[${index}]`, step?.model, 'evaluation', aiConfig);
+    }
     return refs;
   }
   if (phase === 'sequence') {

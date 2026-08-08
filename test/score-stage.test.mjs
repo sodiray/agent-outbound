@@ -10,7 +10,7 @@ import {
   persistScoreStageResult,
   runScoreStage,
 } from '../dist/orchestrator/scoring/stage-runner.js';
-import { openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
+import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 
 const scoreStep = {
   kind: 'score',
@@ -57,6 +57,30 @@ test('score-stage config declares its key, criteria, model, inputs, and outputs'
   assert.ok(invalid.errors.includes('pipeline.score_fit_initial (score) must declare output "fit_reasoning".'));
 });
 
+test('global score criteria fail with an actionable score-stage migration error', () => {
+  const normalized = normalizeConfig({
+    score: {
+      criteria: [{ id: 'retired_global_criterion', weight: 1, description: 'Move this to the score stage.' }],
+    },
+  });
+  assert.ok(normalized.errors.includes(
+    'score.criteria is retired; move these criteria to a pipeline kind: score stage with key: fit.',
+  ));
+});
+
+test('repeated score keys are an explicit order warning, not a competing-output error', () => {
+  const finalScoreStep = {
+    ...scoreStep,
+    id: 'score_fit_final',
+    depends_on: ['score_fit_initial'],
+  };
+  const normalized = normalizeConfig({ pipeline: [scoreStep, finalScoreStep] });
+  assert.deepEqual(normalized.errors, []);
+  assert.ok(normalized.warnings.includes(
+    'Score key "fit" is written by multiple stages in pipeline order: "score_fit_initial" -> "score_fit_final". Later stages overwrite "fit_score"; prior values remain in score_events.',
+  ));
+});
+
 test('score stage persists a genuine all-zero grade with its populated breakdown', async () => {
   await withDb(async ({ db, root, record }) => {
     let prompt = '';
@@ -88,6 +112,58 @@ test('score stage persists a genuine all-zero grade with its populated breakdown
     assert.equal(breakdown.criteria[0].grade, 0);
     assert.equal(breakdown.criteria[0].contribution, 0);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM score_events WHERE row_id = ?').get(record._row_id).count, 1);
+  });
+});
+
+test('repeated score keys resolve in pipeline order and retain superseded values by stage', async () => {
+  await withDb(async ({ db, record }) => {
+    const early = persistScoreStageResult({
+      db,
+      record,
+      step: scoreStep,
+      occurredAt: '2026-08-08T00:00:00.000Z',
+      calculation: {
+        score: 40,
+        reasoning: 'Early evidence supports a provisional score.',
+        breakdown: {
+          criteria: [{ id: 'coordination', weight: 1, grade: 4, reasoning: 'Early evidence.', assessable: true, contribution: 40 }],
+          missing_inputs: [],
+        },
+        gradedCriterionIds: ['coordination'],
+      },
+    });
+    assert.equal(early.fit_score, 40);
+    const between = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(record._row_id);
+    assert.equal(between.fit_score, 40);
+
+    const finalStep = { ...scoreStep, id: 'score_fit_final' };
+    const final = persistScoreStageResult({
+      db,
+      record: between,
+      step: finalStep,
+      occurredAt: '2026-08-08T00:00:01.000Z',
+      calculation: {
+        score: 78,
+        reasoning: 'Later evidence supports the final score.',
+        breakdown: {
+          criteria: [{ id: 'coordination', weight: 1, grade: 7.8, reasoning: 'Later evidence.', assessable: true, contribution: 78 }],
+          missing_inputs: [],
+        },
+        gradedCriterionIds: ['coordination'],
+      },
+    });
+    assert.equal(final.fit_score, 78);
+    const events = db.prepare(`
+      SELECT stage_id, score, breakdown_json
+      FROM score_events
+      WHERE row_id = ? AND axis = 'fit'
+      ORDER BY computed_at ASC
+    `).all(record._row_id);
+    assert.deepEqual(events.map((event) => [event.stage_id, event.score]), [
+      ['score_fit_initial', 40],
+      ['score_fit_final', 78],
+    ]);
+    assert.equal(JSON.parse(events[0].breakdown_json).criteria[0].grade, 4);
   });
 });
 
@@ -123,6 +199,32 @@ test('not graded is persisted as null with an explicit reason, never fabricated 
     assert.equal(stored.fit_score, null);
     assert.equal(JSON.parse(stored.fit_breakdown).reason, 'not_graded');
   });
+});
+
+test('score-stage migration clears only fabricated legacy zeros and preserves populated breakdowns', () => {
+  const root = listDir();
+  const seed = openListDb({ listDir: root, readonly: false });
+  ensureRecordColumns({ db: seed, columns: [{ name: 'score_breakdown', type: 'TEXT' }] });
+  upsertRecord({ db: seed, row: { _row_id: 'fabricated-zero', business_name: 'Fabricated Zero', fit_score: 0, score_breakdown: '' } });
+  upsertRecord({ db: seed, row: { _row_id: 'measured-score', business_name: 'Measured Score', fit_score: 78, score_breakdown: '[{"id":"coordination","grade":8}]' } });
+  upsertRecord({ db: seed, row: { _row_id: 'measured-zero', business_name: 'Measured Zero', fit_score: 0, score_breakdown: '[{"id":"coordination","grade":0}]' } });
+  seed.close();
+
+  const migrated = openListDb({ listDir: root, readonly: false });
+  const rows = migrated.prepare(`
+    SELECT _row_id, fit_score, fit_breakdown, score_breakdown
+    FROM records
+    ORDER BY _row_id ASC
+  `).all();
+  migrated.close();
+
+  const byId = new Map(rows.map((row) => [row._row_id, row]));
+  assert.equal(byId.get('fabricated-zero').fit_score, null);
+  assert.equal(JSON.parse(byId.get('fabricated-zero').fit_breakdown).reason, 'legacy_fabricated_zero_cleared');
+  assert.equal(byId.get('measured-zero').fit_score, 0);
+  assert.equal(byId.get('measured-zero').score_breakdown, '[{"id":"coordination","grade":0}]');
+  assert.equal(byId.get('measured-score').fit_score, 78);
+  assert.equal(byId.get('measured-score').score_breakdown, '[{"id":"coordination","grade":8}]');
 });
 
 test('dataflow records score skips and reruns only when a declared input changes', async () => {

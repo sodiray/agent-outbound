@@ -20,7 +20,7 @@ export type FitComponentConfigInput = {
   weight?: number;
 };
 
-/** Pipeline-owned fit model, declared by score.criteria and policy.fit_rule_version. */
+/** Pipeline-owned fit model, declared by a fit score stage and policy.fit_rule_version. */
 export type FitModelConfigInput = {
   criteria?: FitComponentConfigInput[];
   modelVersion?: string;

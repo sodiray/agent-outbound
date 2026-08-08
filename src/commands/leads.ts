@@ -1,6 +1,5 @@
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
 import { runPipelineDataflow } from '../orchestrator/pipeline/dataflow.js';
-import { runScoringWithBriefs } from '../orchestrator/scoring/runner.js';
 import { addSingleLead } from '../orchestrator/sourcing/single-lead.js';
 import {
   clearFieldOverrides,
@@ -44,20 +43,18 @@ export const leadAddCommand = async ({
   });
   const rowId = String(intake.record?.row_id || '').trim();
   const where = rowId ? `_row_id = ${sqlString(rowId)}` : '';
-  const pipelineAndScore = async () => {
+  const pipelineRun = async () => {
     if (!run || dryRun || !rowId) return null;
     const pipeline = await runPipelineDataflow({ listDir, where });
-    const score = await runScoringWithBriefs({ listDir, where });
     return {
       where,
       pipeline,
-      score,
     };
   };
 
   return {
     ...intake,
-    run: await pipelineAndScore(),
+    run: await pipelineRun(),
   };
 };
 
