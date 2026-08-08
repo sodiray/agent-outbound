@@ -1,92 +1,64 @@
-/**
- * Deterministic treatment tier and mail-treatment assignment.
- * Implements the provisional matrix in treatment-thresholds-and-physical-mail-programs.md.
- */
+/** Deterministic, pipeline-declared treatment and physical-mail assignment. */
 
 import {
   type EnrichmentBudgetConfigInput,
-  type GoldenTicketConfigInput,
-  type PostcardConfigInput,
+  type MailProgramConfigInput,
   type TreatmentStrategyConfigInput,
 } from '../../schemas/config.js';
 
 export const CALCULATION_RULE_VERSION = 'treatment-calculation-v1';
 
 export type TreatmentTier = string;
-export type MailTreatment = 'none' | 'standard_postcard' | 'golden_ticket';
+export type MailTreatment = string;
 export type TreatmentBandLadders = {
   fit?: readonly number[];
   fit_evidence_confidence?: readonly number[];
 };
 
-export type TreatmentInput = {
-  fitScore: number | null;
-  fitEvidenceConfidence: number | null;
-  /** Optional overall evidence summary — never overrides action-specific gates. */
-  identityConfidence?: number | null;
-  classificationConfidence?: number | null;
-  buyerConfidence?: number | null;
-  mailConfidence?: number | null;
-  timingScore?: number | null;
-  /** Count of independent strong timing signals (excludes stale_no_signal). */
-  strongTimingSignalCount?: number | null;
-  mailAddressReady?: boolean | null;
-  /** When true, Golden Ticket is withheld. Missing/false does not invent suppression. */
-  suppressed?: boolean | null;
-  materialContradiction?: boolean | null;
-  /**
-   * Local buying authority — required for Golden Ticket (fail closed when missing).
-   * Accepted: confirmed | likely | yes (legacy).
-   */
-  localBuyingAuthority?: string | null;
-  /** named_buyer_status: confirmed | likely required for GT. */
-  namedBuyerStatus?: string | null;
-  /** Observed/primary buyer name — required non-empty for GT named-buyer gate. */
-  namedBuyerName?: string | null;
-  /**
-   * Named-person current affiliation: confirmed | likely required for GT.
-   * unresolved / missing → fail closed (never invent affiliation).
-   */
-  buyerAffiliationStatus?: string | null;
-  /** Buying-center role (owner, gm, …) — required non-empty for GT. */
-  buyingCenterRole?: string | null;
-  /** Cohort / capacity flag — must be explicitly true for GT (fail closed). */
-  cohortCapacityOk?: boolean | null;
-  goldenTicketGates?: GoldenTicketGates;
-  cumulativeEnrichmentCostUsd?: number;
-  goldenTicketBudgetCeilingUsd?: number;
-  treatmentBands?: TreatmentBandLadders;
-  treatmentStrategy?: TreatmentStrategyConfigInput;
-  goldenTicket?: GoldenTicketConfigInput;
-  postcard?: PostcardConfigInput;
-  enrichmentBudget?: EnrichmentBudgetConfigInput;
+export type MailProgramReadiness = {
+  asset_ready?: boolean | null;
+  cohort_capacity_ok?: boolean | null;
 };
 
 export type GoldenTicketGates = {
-  fitScoreMin?: number;
-  fitEvidenceMin?: number;
-  identityConfidenceMin?: number;
-  buyerConfidenceMin?: number;
-  timingScoreMin?: number;
   mailReady: boolean;
   assetReady?: boolean;
   budgetOk?: boolean;
   cohortCapacityOk?: boolean;
 };
 
-const GT_LOCAL_AUTHORITY_OK = new Set(['confirmed', 'likely', 'yes']);
-const GT_NAMED_BUYER_OK = new Set(['confirmed', 'likely']);
-const GT_AFFILIATION_OK = new Set(['confirmed', 'likely']);
-const GT_AFFILIATION_UNRESOLVED = new Set(['unresolved', 'unknown', 'not_found', 'ambiguous']);
-
-function isMissingScore(v: number | null | undefined): boolean {
-  return v == null || Number.isNaN(Number(v));
-}
+export type TreatmentInput = {
+  fitScore: number | null;
+  fitEvidenceConfidence: number | null;
+  identityConfidence?: number | null;
+  classificationConfidence?: number | null;
+  buyerConfidence?: number | null;
+  mailConfidence?: number | null;
+  timingScore?: number | null;
+  strongTimingSignalCount?: number | null;
+  mailAddressReady?: boolean | null;
+  suppressed?: boolean | null;
+  materialContradiction?: boolean | null;
+  localBuyingAuthority?: string | null;
+  namedBuyerStatus?: string | null;
+  namedBuyerName?: string | null;
+  buyerAffiliationStatus?: string | null;
+  buyingCenterRole?: string | null;
+  cohortCapacityOk?: boolean | null;
+  mailProgramReadiness?: Record<string, MailProgramReadiness>;
+  /** Compatibility input for callers that have not yet supplied per-program readiness. */
+  goldenTicketGates?: GoldenTicketGates;
+  cumulativeEnrichmentCostUsd?: number;
+  treatmentBands?: TreatmentBandLadders;
+  treatmentStrategy?: TreatmentStrategyConfigInput;
+  enrichmentBudget?: EnrichmentBudgetConfigInput;
+};
 
 export type TreatmentResult = {
   treatment_tier: TreatmentTier;
   mail_treatment: MailTreatment;
-  golden_ticket_eligible: boolean;
+  mail_program_eligible: boolean;
+  high_confidence_mail_program_eligible: boolean;
   mail_eligibility_reasons: string[];
   mail_withheld_reasons: string[];
   reasons: string[];
@@ -94,16 +66,30 @@ export type TreatmentResult = {
 };
 
 type ScoredBand = { index: number; label: string };
+type MailProgramEvaluation = {
+  program: string;
+  eligible: boolean;
+  reasons: string[];
+  withheld: string[];
+};
 
+const confirmedValues = new Set(['confirmed', 'likely', 'yes']);
+const affiliationUnresolvedValues = new Set(['unresolved', 'unknown', 'not_found', 'ambiguous']);
+
+const text = (value: unknown) => String(value ?? '').trim();
+const lower = (value: unknown) => text(value).toLowerCase();
+const isMissingScore = (value: number | null | undefined) => value == null || Number.isNaN(Number(value));
 const formatBoundary = (value: number) => String(value);
 
 const labelForBand = (boundaries: readonly number[], index: number) => {
-  const lower = boundaries[index];
-  const upper = boundaries[index + 1];
-  if (index === 0) return `below${formatBoundary(upper)}`;
-  if (index === boundaries.length - 2) return `${formatBoundary(lower)}-100`;
-  if (Number.isInteger(lower) && Number.isInteger(upper)) return `${formatBoundary(lower)}-${formatBoundary(upper - 1)}`;
-  return `${formatBoundary(lower)}-<${formatBoundary(upper)}`;
+  const lowerBoundary = boundaries[index];
+  const upperBoundary = boundaries[index + 1];
+  if (index === 0) return `below${formatBoundary(upperBoundary)}`;
+  if (index === boundaries.length - 2) return `${formatBoundary(lowerBoundary)}-100`;
+  if (Number.isInteger(lowerBoundary) && Number.isInteger(upperBoundary)) {
+    return `${formatBoundary(lowerBoundary)}-${formatBoundary(upperBoundary - 1)}`;
+  }
+  return `${formatBoundary(lowerBoundary)}-<${formatBoundary(upperBoundary)}`;
 };
 
 const band = (score: number | null, boundaries: readonly number[]): 'unscored' | ScoredBand => {
@@ -113,354 +99,266 @@ const band = (score: number | null, boundaries: readonly number[]): 'unscored' |
   return { index: resolvedIndex, label: labelForBand(boundaries, resolvedIndex) };
 };
 
-/**
- * Assign treatment_tier from fit × fit_evidence_confidence matrix.
- */
-export function assignTreatmentTier(input: {
+const configuredMailPrograms = (strategy?: TreatmentStrategyConfigInput) => (
+  Object.entries(strategy?.mail_programs || {})
+    .sort(([leftId, left], [rightId, right]) => (
+      Number(right.priority || 0) - Number(left.priority || 0)
+      || leftId.localeCompare(rightId)
+    ))
+);
+
+const programReadiness = (input: TreatmentInput, program: string, rank: number): MailProgramReadiness => {
+  const declared = input.mailProgramReadiness?.[program];
+  if (declared) return declared;
+  if (rank !== 0 || !input.goldenTicketGates) return {};
+  return {
+    asset_ready: input.goldenTicketGates.assetReady,
+    cohort_capacity_ok: input.goldenTicketGates.cohortCapacityOk,
+  };
+};
+
+const hasTierProgram = (
+  strategy: TreatmentStrategyConfigInput | undefined,
+  tier: string,
+  program: string,
+  key: 'mail_programs' | 'mail_program_exceptions',
+) => strategy?.tiers?.[tier]?.[key]?.includes(program) === true;
+
+const scoreForMinimum = (input: TreatmentInput, minimum: string): number | null | undefined => {
+  const scores: Record<string, number | null | undefined> = {
+    fit_score: input.fitScore,
+    strong_fit: input.fitScore,
+    fit_evidence_confidence: input.fitEvidenceConfidence,
+    fit_evidence: input.fitEvidenceConfidence,
+    identity_confidence: input.identityConfidence,
+    classification_confidence: input.classificationConfidence,
+    buyer_confidence: input.buyerConfidence,
+    mail_confidence: input.mailConfidence,
+    timing_score: input.timingScore,
+    strong_signal_count: input.strongTimingSignalCount,
+    enrichment_budget_usd: input.cumulativeEnrichmentCostUsd,
+  };
+  return scores[minimum];
+};
+
+const evaluateMinimums = (input: TreatmentInput, minimums: Record<string, number> | undefined, skipTimingOrSignals: boolean) => (
+  Object.entries(minimums || {}).flatMap(([minimum, threshold]) => {
+    if (minimum === 'strong_signal_strength') return [];
+    if (skipTimingOrSignals && (minimum === 'timing_score' || minimum === 'strong_signal_count')) return [];
+    const value = scoreForMinimum(input, minimum);
+    if (minimum === 'enrichment_budget_usd') {
+      return Number(value || 0) > threshold ? [`${minimum}_exceeded`] : [];
+    }
+    if (minimum === 'fit_evidence_exclusive_maximum') {
+      return value == null || Number(value) >= threshold ? [`${minimum}_not_met`] : [];
+    }
+    if (isMissingScore(value)) return [`${minimum}_missing`];
+    return Number(value) < threshold ? [`${minimum}_below_${threshold}`] : [];
+  })
+);
+
+const evaluateRequirements = (
+  input: TreatmentInput,
+  requirements: MailProgramConfigInput['requirements'],
+  readiness: MailProgramReadiness,
+  minimums: MailProgramConfigInput['minimums'],
+) => {
+  const withheld: string[] = [];
+  if (requirements?.mail_address_ready === true && input.mailAddressReady !== true) {
+    withheld.push(input.mailAddressReady == null ? 'mail_address_ready_missing' : 'mail_address_not_ready');
+  }
+  if (requirements?.asset_ready === true && readiness.asset_ready !== true) withheld.push('asset_not_ready');
+  if (requirements?.cohort_capacity === true && readiness.cohort_capacity_ok !== true) {
+    withheld.push(readiness.cohort_capacity_ok === false ? 'cohort_capacity_unavailable' : 'cohort_capacity_missing');
+  }
+  if (requirements?.named_buyer === true) {
+    if (!lower(input.namedBuyerStatus)) withheld.push('named_buyer_status_missing');
+    else if (!confirmedValues.has(lower(input.namedBuyerStatus))) withheld.push('named_buyer_not_confirmed');
+    if (!text(input.namedBuyerName)) withheld.push('named_buyer_name_missing');
+  }
+  if (requirements?.buyer_affiliation === true) {
+    if (!lower(input.buyerAffiliationStatus)) withheld.push('buyer_affiliation_status_missing');
+    else if (affiliationUnresolvedValues.has(lower(input.buyerAffiliationStatus))) withheld.push('buyer_affiliation_unresolved');
+    else if (!confirmedValues.has(lower(input.buyerAffiliationStatus))) withheld.push('buyer_affiliation_not_confirmed');
+  }
+  if (requirements?.buying_center_role === true && !text(input.buyingCenterRole)) {
+    withheld.push('buying_center_role_missing');
+  }
+  if (requirements?.local_buying_authority === true) {
+    if (!lower(input.localBuyingAuthority)) withheld.push('local_buying_authority_missing');
+    else if (!confirmedValues.has(lower(input.localBuyingAuthority))) withheld.push('local_buying_authority_not_confirmed');
+  }
+  if (requirements?.unsuppressed === true && input.suppressed === true) withheld.push('suppressed');
+  if (requirements?.no_material_contradiction === true && input.materialContradiction === true) {
+    withheld.push('material_contradiction');
+  }
+  if (requirements?.timing_or_strong_signals === true) {
+    const timingMinimum = minimums?.timing_score;
+    const signalMinimum = minimums?.strong_signal_count;
+    const timingPresent = !isMissingScore(input.timingScore);
+    const signalsPresent = !isMissingScore(input.strongTimingSignalCount);
+    const timingOk = timingMinimum !== undefined && timingPresent && Number(input.timingScore) >= timingMinimum;
+    const signalsOk = signalMinimum !== undefined && signalsPresent
+      && Number(input.strongTimingSignalCount) >= signalMinimum;
+    if (!timingOk && !signalsOk) {
+      withheld.push(!timingPresent && !signalsPresent
+        ? 'timing_or_signals_missing'
+        : 'timing_or_correlated_signals_insufficient');
+    }
+  }
+  return withheld;
+};
+
+export const assignTreatmentTier = (input: {
   fitScore: number | null;
   fitEvidenceConfidence: number | null;
   treatmentBands?: TreatmentBandLadders;
   treatmentStrategy?: TreatmentStrategyConfigInput;
-}): { tier: TreatmentTier; reasons: string[] } {
+}): { tier: TreatmentTier; reasons: string[] } => {
   const strategy = input.treatmentStrategy;
   if (!strategy?.bands?.fit || !strategy.bands.fit_evidence_confidence || !strategy.matrix || !strategy.unscored_tier) {
     return { tier: '', reasons: ['treatment_not_configured'] };
   }
-  const fitBoundaries = strategy.bands.fit;
-  const confidenceBoundaries = strategy.bands.fit_evidence_confidence;
-  const fit = band(input.fitScore, fitBoundaries);
-  const conf = band(input.fitEvidenceConfidence, confidenceBoundaries);
-  const reasons: string[] = [
+  const fit = band(input.fitScore, strategy.bands.fit);
+  const confidence = band(input.fitEvidenceConfidence, strategy.bands.fit_evidence_confidence);
+  const reasons = [
     `fit_band=${fit === 'unscored' ? fit : fit.label}`,
-    `fit_evidence_band=${conf === 'unscored' ? conf : conf.label}`,
+    `fit_evidence_band=${confidence === 'unscored' ? confidence : confidence.label}`,
   ];
-
-  if (fit === 'unscored') {
-    return { tier: strategy.unscored_tier, reasons: [...reasons, 'unscored_fit'] };
-  }
-  if (conf === 'unscored') {
-    return { tier: strategy.unscored_tier, reasons: [...reasons, 'unscored_fit_evidence'] };
-  }
-  const tier = strategy.matrix[fit.index]?.[conf.index];
+  if (fit === 'unscored') return { tier: strategy.unscored_tier, reasons: [...reasons, 'unscored_fit'] };
+  if (confidence === 'unscored') return { tier: strategy.unscored_tier, reasons: [...reasons, 'unscored_fit_evidence'] };
+  const tier = strategy.matrix[fit.index]?.[confidence.index];
   return tier
     ? { tier, reasons: [...reasons, 'declared_treatment_matrix'] }
     : { tier: strategy.unscored_tier, reasons: [...reasons, 'treatment_matrix_incomplete'] };
-}
+};
 
-/**
- * Standard postcard eligibility: Tier A/B, or strong-fit exception with thin evidence.
- */
-export function evaluateStandardPostcard(input: {
+export const evaluateMailProgram = (input: TreatmentInput & {
   treatmentTier: TreatmentTier;
-  fitScore: number | null;
-  fitEvidenceConfidence: number | null;
-  mailAddressReady: boolean;
-  identityConfidence?: number | null;
-  postcard?: PostcardConfigInput;
-  treatmentStrategy?: TreatmentStrategyConfigInput;
-}): { eligible: boolean; reasons: string[]; withheld: string[] } {
-  const reasons: string[] = [];
-  const withheld: string[] = [];
-  const mins = input.postcard?.minimums;
-  if (!mins) return { eligible: false, reasons, withheld: ['postcard_not_configured'] };
-  if (!input.mailAddressReady) {
-    withheld.push('mail_address_not_ready');
-  }
-  if (input.identityConfidence != null && input.identityConfidence < mins.identity_confidence) {
-    withheld.push(`identity_confidence_below_${mins.identity_confidence}`);
-  }
-  const fit = input.fitScore ?? 0;
-  const conf = input.fitEvidenceConfidence ?? 0;
-  const tierRule = input.treatmentStrategy?.tiers?.[input.treatmentTier];
-  const tierOk = tierRule?.standard_postcard === true;
-  const strongFitException = fit >= mins.strong_fit
-    && conf >= mins.fit_evidence
-    && conf < mins.fit_evidence_exclusive_maximum
-    && tierRule?.postcard_exception === true;
-  if (!tierOk && !strongFitException) {
-    withheld.push('treatment_or_exception_not_met');
-  }
-  if (!tierOk && !strongFitException) withheld.push(`tier_${input.treatmentTier}_no_declared_mail`);
-  const eligible = withheld.length === 0 && (tierOk || strongFitException);
-  if (eligible) reasons.push(tierOk ? 'tier_allows_standard_postcard' : 'strong_fit_postcard_exception');
-  return { eligible, reasons, withheld };
-}
-
-/**
- * Count independent strong timing signals for the GT multi-signal path.
- * Excludes `stale_no_signal` (invented baseline) — never counts as evidence.
- */
-export function countStrongTimingSignals(
-  signals: Array<{ id?: string; decayed_strength?: number; strength?: number }> | null | undefined,
-  minStrength: number = 0,
-): number {
-  if (!Array.isArray(signals) || !signals.length) return 0;
-  let n = 0;
-  for (const s of signals) {
-    const id = String(s?.id || '');
-    if (id === 'stale_no_signal') continue;
-    const str = Number(s?.decayed_strength ?? s?.strength ?? 0);
-    if (Number.isFinite(str) && str >= minStrength) n += 1;
-  }
-  return n;
-}
-
-/**
- * Golden Ticket is a Tier A overlay with mandatory multi-domain gates.
- *
- * Production thresholds (fail closed when null/undefined):
- * - fit ≥ 85, fit evidence ≥ 80
- * - identity ≥ 90, classification ≥ 90, buyer ≥ 80, mail ≥ 90
- * - named buyer (status confirmed|likely + non-empty name)
- * - local buying authority confirmed|likely
- * - mail address ready, approved GT asset
- * - timing ≥ 70 OR ≥ 2 independent strong signals
- * - enrichment budget + cohort capacity
- * - not suppressed / no material contradiction
- */
-export function evaluateGoldenTicket(input: {
-  treatmentTier: TreatmentTier;
-  fitScore: number | null;
-  fitEvidenceConfidence: number | null;
-  identityConfidence?: number | null;
-  classificationConfidence?: number | null;
-  buyerConfidence?: number | null;
-  mailConfidence?: number | null;
-  timingScore?: number | null;
-  strongTimingSignalCount?: number | null;
-  mailAddressReady?: boolean | null;
-  assetReady?: boolean | null;
-  suppressed?: boolean | null;
-  materialContradiction?: boolean | null;
-  localBuyingAuthority?: string | null;
-  namedBuyerStatus?: string | null;
-  namedBuyerName?: string | null;
-  buyerAffiliationStatus?: string | null;
-  buyingCenterRole?: string | null;
-  cohortCapacityOk?: boolean | null;
-  cumulativeEnrichmentCostUsd?: number;
-  goldenTicketBudgetCeilingUsd?: number;
-  goldenTicket?: GoldenTicketConfigInput;
-  treatmentStrategy?: TreatmentStrategyConfigInput;
-}): { eligible: boolean; reasons: string[]; withheld: string[] } {
-  const reasons: string[] = [];
-  const withheld: string[] = [];
-  const mins = input.goldenTicket?.minimums;
-  if (!mins) return { eligible: false, reasons, withheld: ['golden_ticket_not_configured'] };
-
-  if (input.treatmentStrategy?.tiers?.[input.treatmentTier]?.golden_ticket !== true) {
-    withheld.push('tier_not_declared_for_golden_ticket');
-  }
-
-  if (isMissingScore(input.fitScore)) withheld.push('fit_score_missing');
-  else if ((input.fitScore as number) < mins.fit_score) {
-    withheld.push(`fit_below_${mins.fit_score}`);
-  }
-
-  if (isMissingScore(input.fitEvidenceConfidence)) withheld.push('fit_evidence_missing');
-  else if ((input.fitEvidenceConfidence as number) < mins.fit_evidence_confidence) {
-    withheld.push(`fit_evidence_below_${mins.fit_evidence_confidence}`);
-  }
-
-  if (isMissingScore(input.identityConfidence)) withheld.push('identity_confidence_missing');
-  else if ((input.identityConfidence as number) < mins.identity_confidence) {
-    withheld.push(`identity_confidence_below_${mins.identity_confidence}`);
-  }
-
-  if (isMissingScore(input.classificationConfidence)) {
-    withheld.push('classification_confidence_missing');
-  } else if ((input.classificationConfidence as number) < mins.classification_confidence) {
-    withheld.push(`classification_confidence_below_${mins.classification_confidence}`);
-  }
-
-  if (isMissingScore(input.buyerConfidence)) withheld.push('buyer_confidence_missing');
-  else if ((input.buyerConfidence as number) < mins.buyer_confidence) {
-    withheld.push(`buyer_confidence_below_${mins.buyer_confidence}`);
-  }
-
-  if (isMissingScore(input.mailConfidence)) withheld.push('mail_confidence_missing');
-  else if ((input.mailConfidence as number) < mins.mail_confidence) {
-    withheld.push(`mail_confidence_below_${mins.mail_confidence}`);
-  }
-
-  // mailAddressReady is required for GT: null/undefined/false all fail closed.
-  if (input.mailAddressReady == null) withheld.push('mail_address_ready_missing');
-  else if (!input.mailAddressReady) withheld.push('mail_address_not_ready');
-
-  // Asset must be explicitly ready — missing is not invent-pass.
-  if (input.assetReady !== true) withheld.push('golden_ticket_asset_not_ready');
-
-  // Named buyer: status confirmed|likely + non-empty name (fail closed).
-  const buyerStatusRaw = input.namedBuyerStatus != null
-    ? String(input.namedBuyerStatus).trim().toLowerCase()
-    : '';
-  const buyerName = input.namedBuyerName != null
-    ? String(input.namedBuyerName).trim()
-    : '';
-  if (!buyerStatusRaw) withheld.push('named_buyer_status_missing');
-  else if (!GT_NAMED_BUYER_OK.has(buyerStatusRaw)) {
-    withheld.push('named_buyer_not_confirmed');
-  }
-  if (!buyerName) withheld.push('named_buyer_name_missing');
-
-  // Current affiliation + buying-center role — high tier fail closed (never invent).
-  const affRaw = input.buyerAffiliationStatus != null
-    ? String(input.buyerAffiliationStatus).trim().toLowerCase()
-    : '';
-  if (!affRaw) withheld.push('buyer_affiliation_status_missing');
-  else if (GT_AFFILIATION_UNRESOLVED.has(affRaw)) {
-    withheld.push('buyer_affiliation_unresolved');
-  } else if (!GT_AFFILIATION_OK.has(affRaw)) {
-    withheld.push('buyer_affiliation_not_confirmed');
-  }
-  const roleRaw = input.buyingCenterRole != null
-    ? String(input.buyingCenterRole).trim()
-    : '';
-  if (!roleRaw) withheld.push('buying_center_role_missing');
-
-  // Local buying authority required for GT (fail closed when missing).
-  if (input.localBuyingAuthority == null || String(input.localBuyingAuthority).trim() === '') {
-    withheld.push('local_buying_authority_missing');
-  } else {
-    const auth = String(input.localBuyingAuthority).trim().toLowerCase();
-    if (!GT_LOCAL_AUTHORITY_OK.has(auth)) {
-      withheld.push('local_buying_authority_not_confirmed');
-    }
-  }
-
-  // Timing ≥ 70 OR ≥ 2 independent strong signals (multi-domain gate).
-  const timingMissing = isMissingScore(input.timingScore);
-  const signalCount = input.strongTimingSignalCount;
-  const signalCountMissing = signalCount == null || Number.isNaN(Number(signalCount));
-  const timingOk = !timingMissing && (input.timingScore as number) >= mins.timing_score;
-  const multiSignalOk = !signalCountMissing && Number(signalCount) >= mins.strong_signal_count;
-  if (!timingOk && !multiSignalOk) {
-    if (timingMissing && signalCountMissing) {
-      withheld.push('timing_or_signals_missing');
-    } else {
-      withheld.push('timing_or_correlated_signals_insufficient');
-    }
-  }
-
-  // Cohort capacity must be explicitly true (fail closed).
-  if (input.cohortCapacityOk !== true) {
-    withheld.push(
-      input.cohortCapacityOk === false
-        ? 'cohort_capacity_unavailable'
-        : 'cohort_capacity_missing',
-    );
-  }
-
-  if (input.suppressed === true) withheld.push('suppressed');
-  if (input.materialContradiction === true) withheld.push('material_contradiction');
-
-  const ceiling = input.goldenTicketBudgetCeilingUsd ?? mins.enrichment_budget_usd;
-  if ((input.cumulativeEnrichmentCostUsd ?? 0) > ceiling) {
-    withheld.push('enrichment_budget_exceeded');
-  }
-
+  program: string;
+  definition: MailProgramConfigInput;
+  rank?: number;
+}): MailProgramEvaluation => {
+  const tierDirectlyAllows = hasTierProgram(input.treatmentStrategy, input.treatmentTier, input.program, 'mail_programs');
+  const tierAllowsException = hasTierProgram(input.treatmentStrategy, input.treatmentTier, input.program, 'mail_program_exceptions');
+  const exceptionWithheld = tierAllowsException
+    ? evaluateMinimums(input, input.definition.tier_exception?.minimums, false)
+    : ['tier_not_declared_for_mail_program'];
+  const tierAllowsProgram = tierDirectlyAllows || (tierAllowsException && exceptionWithheld.length === 0);
+  const requirementWithheld = evaluateRequirements(
+    input,
+    input.definition.requirements,
+    programReadiness(input, input.program, input.rank || 0),
+    input.definition.minimums,
+  );
+  const withheld = [
+    ...(tierAllowsProgram ? [] : exceptionWithheld),
+    ...evaluateMinimums(input, input.definition.minimums, input.definition.requirements?.timing_or_strong_signals === true),
+    ...requirementWithheld,
+  ];
   const eligible = withheld.length === 0;
-  if (eligible) reasons.push('all_golden_ticket_gates_passed');
-  return { eligible, reasons, withheld };
-}
-
-/**
- * Full treatment + mail_treatment assignment. Mail is independent of tier labels.
- * At most one mail program: golden_ticket beats standard_postcard when both pass.
- */
-export function assignTreatmentAndMail(input: TreatmentInput): TreatmentResult {
-  const { tier, reasons } = assignTreatmentTier({
-    fitScore: input.fitScore,
-    fitEvidenceConfidence: input.fitEvidenceConfidence,
-    treatmentBands: input.treatmentBands,
-    treatmentStrategy: input.treatmentStrategy,
-  });
-
-  const postcard = evaluateStandardPostcard({
-    treatmentTier: tier,
-    fitScore: input.fitScore,
-    fitEvidenceConfidence: input.fitEvidenceConfidence,
-    mailAddressReady: Boolean(input.mailAddressReady),
-    identityConfidence: input.identityConfidence,
-    postcard: input.postcard,
-    treatmentStrategy: input.treatmentStrategy,
-  });
-
-  const assetReady = input.goldenTicketGates?.assetReady;
-  const cohortFromGates = input.goldenTicketGates?.cohortCapacityOk;
-  const cohortCapacityOk =
-    input.cohortCapacityOk === true || cohortFromGates === true
-      ? true
-      : input.cohortCapacityOk === false || cohortFromGates === false
-        ? false
-        : input.cohortCapacityOk ?? cohortFromGates ?? null;
-
-  const golden = evaluateGoldenTicket({
-    treatmentTier: tier,
-    fitScore: input.fitScore,
-    fitEvidenceConfidence: input.fitEvidenceConfidence,
-    identityConfidence: input.identityConfidence,
-    classificationConfidence: input.classificationConfidence,
-    buyerConfidence: input.buyerConfidence,
-    mailConfidence: input.mailConfidence,
-    timingScore: input.timingScore,
-    strongTimingSignalCount: input.strongTimingSignalCount,
-    // Preserve null/undefined for fail-closed GT; do not coerce to false here.
-    mailAddressReady: input.mailAddressReady,
-    assetReady: assetReady === true ? true : assetReady === false ? false : null,
-    suppressed: input.suppressed,
-    materialContradiction: input.materialContradiction,
-    localBuyingAuthority: input.localBuyingAuthority,
-    namedBuyerStatus: input.namedBuyerStatus,
-    namedBuyerName: input.namedBuyerName,
-    buyerAffiliationStatus: input.buyerAffiliationStatus,
-    buyingCenterRole: input.buyingCenterRole,
-    cohortCapacityOk,
-    cumulativeEnrichmentCostUsd: input.cumulativeEnrichmentCostUsd,
-    goldenTicketBudgetCeilingUsd:
-      input.goldenTicketBudgetCeilingUsd ?? input.goldenTicket?.minimums?.enrichment_budget_usd,
-    goldenTicket: input.goldenTicket,
-    treatmentStrategy: input.treatmentStrategy,
-  });
-
-  let mail_treatment: MailTreatment = 'none';
-  const mail_eligibility_reasons: string[] = [];
-  const mail_withheld_reasons: string[] = [];
-
-  if (golden.eligible) {
-    mail_treatment = 'golden_ticket';
-    mail_eligibility_reasons.push(...golden.reasons);
-  } else if (postcard.eligible) {
-    mail_treatment = 'standard_postcard';
-    mail_eligibility_reasons.push(...postcard.reasons);
-    mail_withheld_reasons.push(...golden.withheld.map((w) => `golden:${w}`));
-  } else {
-    mail_withheld_reasons.push(...postcard.withheld.map((w) => `postcard:${w}`));
-    mail_withheld_reasons.push(...golden.withheld.map((w) => `golden:${w}`));
-  }
-
   return {
-    treatment_tier: tier,
-    mail_treatment,
-    golden_ticket_eligible: golden.eligible,
-    mail_eligibility_reasons,
-    mail_withheld_reasons,
-    reasons,
+    program: input.program,
+    eligible,
+    reasons: eligible ? [tierDirectlyAllows ? 'tier_allows_mail_program' : 'tier_exception_allows_mail_program'] : [],
+    withheld,
+  };
+};
+
+export const countStrongTimingSignals = (
+  signals: Array<{ id?: string; decayed_strength?: number; strength?: number }> | null | undefined,
+  minimumStrength: number = 0,
+): number => (
+  (signals || []).filter((signal) => {
+    const id = text(signal?.id);
+    const strength = Number(signal?.decayed_strength ?? signal?.strength ?? 0);
+    return id !== 'stale_no_signal' && Number.isFinite(strength) && strength >= minimumStrength;
+  }).length
+);
+
+export const assignTreatmentAndMail = (input: TreatmentInput): TreatmentResult => {
+  const assigned = assignTreatmentTier(input);
+  const programs = configuredMailPrograms(input.treatmentStrategy);
+  if (programs.length === 0) {
+    return {
+      treatment_tier: assigned.tier,
+      mail_treatment: '',
+      mail_program_eligible: false,
+      high_confidence_mail_program_eligible: false,
+      mail_eligibility_reasons: [],
+      mail_withheld_reasons: ['mail_programs_not_configured'],
+      reasons: assigned.reasons,
+      calculation_rule_version: CALCULATION_RULE_VERSION,
+    };
+  }
+  const evaluations = programs.map(([program, definition], rank) => evaluateMailProgram({
+    ...input,
+    treatmentTier: assigned.tier,
+    program,
+    definition,
+    rank,
+  }));
+  const selected = evaluations.find((evaluation) => evaluation.eligible);
+  const selectedDefinition = selected ? input.treatmentStrategy?.mail_programs?.[selected.program] : undefined;
+  return {
+    treatment_tier: assigned.tier,
+    mail_treatment: selected?.program || 'none',
+    mail_program_eligible: Boolean(selected),
+    high_confidence_mail_program_eligible: selectedDefinition?.requires_high_confidence_buyer === true,
+    mail_eligibility_reasons: selected?.reasons.map((reason) => `mail_program:${selected.program}:${reason}`) || [],
+    mail_withheld_reasons: evaluations.flatMap((evaluation) => (
+      evaluation.eligible ? [] : evaluation.withheld.map((reason) => `mail_program:${evaluation.program}:${reason}`)
+    )),
+    reasons: assigned.reasons,
     calculation_rule_version: CALCULATION_RULE_VERSION,
   };
-}
+};
 
-/** Provisional cumulative enrichment ceilings (USD). */
-export function enrichmentBudgetRemaining(input: {
+/** @deprecated Use evaluateMailProgram with a declared program id. */
+export const evaluateGoldenTicket = (input: TreatmentInput & {
+  treatmentTier: TreatmentTier;
+  assetReady?: boolean | null;
+  cohortCapacityOk?: boolean | null;
+}) => {
+  const [selected] = configuredMailPrograms(input.treatmentStrategy);
+  if (!selected) return { eligible: false, reasons: [], withheld: ['mail_programs_not_configured'] };
+  const [program, definition] = selected;
+  const result = evaluateMailProgram({
+    ...input,
+    mailProgramReadiness: {
+      ...input.mailProgramReadiness,
+      [program]: {
+        asset_ready: input.assetReady ?? input.mailProgramReadiness?.[program]?.asset_ready,
+        cohort_capacity_ok: input.cohortCapacityOk ?? input.mailProgramReadiness?.[program]?.cohort_capacity_ok,
+      },
+    },
+    program,
+    definition,
+    rank: 0,
+  });
+  return { eligible: result.eligible, reasons: result.reasons, withheld: result.withheld };
+};
+
+/** @deprecated Use evaluateMailProgram with a declared program id. */
+export const evaluateStandardPostcard = (input: TreatmentInput & { treatmentTier: TreatmentTier }) => {
+  const selected = configuredMailPrograms(input.treatmentStrategy).at(-1);
+  if (!selected) return { eligible: false, reasons: [], withheld: ['mail_programs_not_configured'] };
+  const [program, definition] = selected;
+  const result = evaluateMailProgram({ ...input, program, definition, rank: configuredMailPrograms(input.treatmentStrategy).length - 1 });
+  return { eligible: result.eligible, reasons: result.reasons, withheld: result.withheld };
+};
+
+export const enrichmentBudgetRemaining = (input: {
   candidateOrTreatment: TreatmentTier | 'foundational';
   spentUsd: number;
-  forGoldenTicket?: boolean;
+  mailProgram?: string;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
-}): { ceiling: number; remaining: number; withinBudget: boolean } {
-  const ceilings = input.enrichmentBudget?.ceilings || {};
-  const ceiling = input.forGoldenTicket
-    ? ceilings.golden_ticket_total
-    : ceilings[input.candidateOrTreatment] ?? ceilings.foundational ?? 0;
+}): { ceiling: number; remaining: number; withinBudget: boolean } => {
+  const ceilings = input.enrichmentBudget?.ceilings;
+  const tierCeiling = ceilings?.tiers?.[input.candidateOrTreatment]
+    ?? (input.candidateOrTreatment === 'foundational' ? ceilings?.foundational : undefined);
+  const programCeiling = input.mailProgram ? ceilings?.mail_programs?.[input.mailProgram] : undefined;
+  const ceiling = Math.max(tierCeiling ?? 0, programCeiling ?? 0);
   const remaining = Math.max(0, ceiling - (input.spentUsd || 0));
   return { ceiling, remaining, withinBudget: remaining > 0 || (input.spentUsd || 0) <= ceiling };
-}
+};

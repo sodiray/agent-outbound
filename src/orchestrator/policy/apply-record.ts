@@ -85,10 +85,8 @@ import {
   type CandidateTierConfigInput,
   type EnrichmentBudgetConfigInput,
   type EnrichmentRepairConfigInput,
-  type GoldenTicketConfigInput,
   type IdentityConfidenceConfigInput,
   type MailConfidenceConfigInput,
-  type PostcardConfigInput,
   type PriorityConfigInput,
   type PhoneConfidenceConfigInput,
   type ReachabilityConfigInput,
@@ -136,11 +134,9 @@ export type PolicyApplyInput = {
   buyerConfidence?: BuyerConfidenceConfigInput;
   /** Configured mail evidence weights and contradiction deductions. */
   mailConfidence?: MailConfidenceConfigInput;
-  goldenTicket?: GoldenTicketConfigInput;
   actionConfidence?: ActionConfidenceConfigInput;
   reachability?: ReachabilityConfigInput;
   candidateTier?: CandidateTierConfigInput;
-  postcard?: PostcardConfigInput;
   enrichmentRepair?: EnrichmentRepairConfigInput;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
   policy?: {
@@ -163,7 +159,7 @@ export type PolicyApplyResult = {
   campaign?: AccountCampaign | null;
   readiness?: ReturnType<typeof evaluateOutboundReadiness>;
   enrichment_repair_plan?: EnrichmentRepairPlan | null;
-  enrichment_hold_reasons?: string[];
+  holding_tier_reasons?: string[];
 };
 
 const num = (v: unknown, fallback: number | null = null): number | null => {
@@ -512,7 +508,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const timingScore = timingCalc.timing_score;
   const strongTimingSignalCount = countStrongTimingSignals(
     timingCalc.signals,
-    input.goldenTicket?.minimums?.strong_signal_strength,
+    Math.max(0, ...Object.values(input.treatmentStrategy?.mail_programs || {}).map((program) => (
+      Number(program.minimums?.strong_signal_strength || 0)
+    ))),
   );
   const storedPhoneConfidence = num(record.phone_confidence, null);
   const phoneConfidence = input.phoneConfidence
@@ -534,8 +532,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const costCheck = withinEnrichmentCeiling({
     candidate_tier: String(record.candidate_tier || ''),
     treatment_tier: String(record.treatment_tier || ''),
+    mail_treatment: String(record.mail_treatment || ''),
     enrichment_usd: enrichmentUsd,
-    golden_ticket: Boolean(record.golden_ticket_eligible),
     enrichmentBudget: input.enrichmentBudget,
   });
   const mailAddressReady = deriveMailAddressReady(record);
@@ -554,10 +552,18 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   const buyer = resolveBuyerEvidenceFromRecord(record);
   const cohortCapacityOk = resolveCohortCapacityOk(record);
-  const assetReadyExplicit = record.golden_ticket_asset_ready == null
-    || String(record.golden_ticket_asset_ready).trim() === ''
-    ? null
-    : isAffirmativeFlag(record.golden_ticket_asset_ready);
+  const mailProgramReadiness = Object.fromEntries(
+    Object.entries(input.treatmentStrategy?.mail_programs || {}).map(([program, definition]) => {
+      const assetField = definition.readiness?.asset_ready_field;
+      const cohortField = definition.readiness?.cohort_capacity_field;
+      const assetValue = assetField ? record[assetField] : undefined;
+      const cohortValue = cohortField ? record[cohortField] : undefined;
+      return [program, {
+        asset_ready: assetValue == null || String(assetValue).trim() === '' ? null : isAffirmativeFlag(assetValue),
+        cohort_capacity_ok: cohortValue == null || String(cohortValue).trim() === '' ? null : isAffirmativeFlag(cohortValue),
+      }];
+    }),
+  );
 
   let treatment = assignTreatmentAndMail({
     fitScore,
@@ -580,16 +586,10 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     buyerAffiliationStatus: buyer.affiliationStatus,
     buyingCenterRole: buyer.role,
     cohortCapacityOk,
-    goldenTicketGates: {
-      mailReady: mailAddressReady,
-      assetReady: assetReadyExplicit === true,
-      cohortCapacityOk: cohortCapacityOk === true,
-    },
+    mailProgramReadiness,
     cumulativeEnrichmentCostUsd: enrichmentUsd,
     treatmentBands: input.treatmentBands,
     treatmentStrategy: input.treatmentStrategy,
-    goldenTicket: input.goldenTicket,
-    postcard: input.postcard,
     enrichmentBudget: input.enrichmentBudget,
   });
   const treatmentStrategy = input.treatmentStrategy;
@@ -598,7 +598,9 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const tierPermitsOutreach = (tier: string) => tierRoute(tier) === 'outbound';
   const tierNeedsEnrichment = (tier: string) => tierRoute(tier) === 'enrichment';
   const tierNeedsRecycleMonitoring = (tier: string) => tierRoute(tier) === 'recycle_monitoring';
-  const tierAllowsGoldenTicket = (tier: string) => treatmentStrategy?.tiers?.[tier]?.golden_ticket === true;
+  const tierRequiresHighConfidenceBuyer = (tier: string) => (
+    treatmentStrategy?.tiers?.[tier]?.requires_high_confidence_buyer === true
+  );
 
   const taxonomyResolutionFailed = taxonomy.reasons.includes('taxonomy_not_loaded')
     || taxonomy.reasons.includes('taxonomy_version_missing')
@@ -614,7 +616,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       ...treatment,
       treatment_tier: configuredHoldTier,
       mail_treatment: 'none',
-      golden_ticket_eligible: false,
+      mail_program_eligible: false,
+      high_confidence_mail_program_eligible: false,
       reasons: [...treatment.reasons, taxonomyReason, 'taxonomy_resolution_forced_hold'],
       mail_withheld_reasons: [
         ...treatment.mail_withheld_reasons,
@@ -663,7 +666,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       ...treatment,
       treatment_tier: configuredHoldTier,
       mail_treatment: 'none',
-      golden_ticket_eligible: false,
+      mail_program_eligible: false,
+      high_confidence_mail_program_eligible: false,
       reasons: [...treatment.reasons, ...thinReasons],
       mail_withheld_reasons: [
         ...treatment.mail_withheld_reasons,
@@ -680,22 +684,24 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       ...treatment,
       treatment_tier: configuredHoldTier,
       mail_treatment: 'none',
-      golden_ticket_eligible: false,
+      mail_program_eligible: false,
+      high_confidence_mail_program_eligible: false,
       reasons: [...treatment.reasons, coverageReason],
       mail_withheld_reasons: [...treatment.mail_withheld_reasons, `coverage:${coverageReason}`],
     };
   }
-  // Partial unknown: never Tier A / golden_ticket (confidence already capped <80 by derive).
+  // Partial unknown: never a high-confidence tier or selected mail program.
   if (
     anyMissingComponent
     && !allUnknownComponents
-    && (tierAllowsGoldenTicket(treatment.treatment_tier) || treatment.mail_treatment === 'golden_ticket')
+    && (tierRequiresHighConfidenceBuyer(treatment.treatment_tier) || treatment.high_confidence_mail_program_eligible)
   ) {
     treatment = {
       ...treatment,
       treatment_tier: treatment.treatment_tier,
-      mail_treatment: treatment.mail_treatment === 'golden_ticket' ? 'none' : treatment.mail_treatment,
-      golden_ticket_eligible: false,
+      mail_treatment: treatment.high_confidence_mail_program_eligible ? 'none' : treatment.mail_treatment,
+      mail_program_eligible: false,
+      high_confidence_mail_program_eligible: false,
       reasons: [...treatment.reasons, 'partial_unknown_blocks_tier_a'],
     };
   }
@@ -707,19 +713,19 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     namedBuyerStatus: buyer.status,
     namedBuyerName: buyer.name,
     affiliation: { status: buyer.affiliationStatus, role: buyer.role },
-    goldenTicketPath: treatment.golden_ticket_eligible || treatment.mail_treatment === 'golden_ticket',
-    highTier: tierAllowsGoldenTicket(treatment.treatment_tier),
+    highTier: tierRequiresHighConfidenceBuyer(treatment.treatment_tier),
   });
-  // Unresolved affiliation holds any non-D tier; high-tier missing gates hold A.
+  // Unresolved affiliation holds any non-recycle tier; high-confidence tiers fail closed.
   const forceHoldFromBuyer =
     buyerHoldReasons.includes('buyer_affiliation_unresolved')
-    || (tierAllowsGoldenTicket(treatment.treatment_tier) && buyerHoldReasons.length > 0);
+    || (tierRequiresHighConfidenceBuyer(treatment.treatment_tier) && buyerHoldReasons.length > 0);
   if (forceHoldFromBuyer && !tierNeedsRecycleMonitoring(treatment.treatment_tier) && !tierNeedsEnrichment(treatment.treatment_tier)) {
     treatment = {
       ...treatment,
       treatment_tier: configuredHoldTier,
       mail_treatment: 'none',
-      golden_ticket_eligible: false,
+      mail_program_eligible: false,
+      high_confidence_mail_program_eligible: false,
       reasons: [...treatment.reasons, ...buyerHoldReasons, 'buyer_resolution_forced_hold'],
       mail_withheld_reasons: [
         ...treatment.mail_withheld_reasons,
@@ -919,6 +925,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         named_buyer_status: buyer.status,
         named_buyer_name: buyer.name,
         missing_fit_inputs: missing_inputs,
+        treatmentStrategy,
       });
       next_action = {
         action_id: `na_enrichment_repair_${rowId}`,
@@ -929,7 +936,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         work_state: 'enrichment_repair',
         reason: prelimPlan.hold_reasons.length
           ? prelimPlan.hold_reasons.join('; ')
-          : treatment.reasons.join('; ') || 'enrichment_hold',
+          : treatment.reasons.join('; ') || 'holding_tier',
         on_success: 'reapply_policy_after_repair',
         readiness_gates: prelimPlan.steps.slice(0, 8).map((s) => s.field),
         policy_version: NEXT_ACTION_POLICY_VERSION,
@@ -1179,7 +1186,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     || readiness.blockers.includes('buyer_affiliation_unresolved')
     || tierNeedsEnrichment(treatment.treatment_tier);
 
-  const enrichment_hold_reasons = collectEnrichmentHoldReasons({
+  const holding_tier_reasons = collectEnrichmentHoldReasons({
     treatmentTier: treatment.treatment_tier,
     treatmentReasons: treatment.reasons,
     readinessBlockers: readiness.blockers,
@@ -1187,10 +1194,11 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     buyerHoldReasons: buyerHoldReasons,
     eligibilityOutcome: eligibility.outcome,
     eligibilityReasons: eligibility.reasons,
+    treatmentStrategy,
   });
 
   let enrichment_repair_plan: EnrichmentRepairPlan | null = null;
-  if (readinessForcesRepair || enrichment_hold_reasons.length > 0 && tierNeedsEnrichment(treatment.treatment_tier)) {
+  if (readinessForcesRepair || holding_tier_reasons.length > 0 && tierNeedsEnrichment(treatment.treatment_tier)) {
     enrichment_repair_plan = planEnrichmentRepair({
       record: {
         ...record,
@@ -1198,13 +1206,14 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
         mail_confidence: mailConfidence,
         mail_address_ready: mailAddressReady ? 1 : 0,
       },
-      hold_reasons: enrichment_hold_reasons,
+      hold_reasons: holding_tier_reasons,
       treatment_tier: treatment.treatment_tier,
       candidate_tier: candidate.candidate_tier,
       named_buyer_status: buyer.status,
       named_buyer_name: buyer.name,
       missing_fit_inputs: missing_inputs,
       config: input.enrichmentRepair,
+      treatmentStrategy,
     });
     // Install / refresh repair next_action (idempotent shape).
     if (
@@ -1222,7 +1231,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
             ? 'not_started'
             : 'paused_repair',
         work_state: 'enrichment_repair',
-        reason: enrichment_hold_reasons.join('; ') || 'enrichment_hold',
+        reason: holding_tier_reasons.join('; ') || 'holding_tier',
         on_success: 'reapply_policy_after_repair',
         readiness_gates: enrichment_repair_plan.steps.slice(0, 8).map((s) => s.field),
         policy_version: NEXT_ACTION_POLICY_VERSION,
@@ -1311,7 +1320,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     candidate_tier: candidate.candidate_tier,
     treatment_tier: treatment.treatment_tier,
     mail_treatment: treatment.mail_treatment,
-    golden_ticket_eligible: treatment.golden_ticket_eligible ? 1 : 0,
+    mail_program_eligible: treatment.mail_program_eligible ? 1 : 0,
+    high_confidence_mail_program_eligible: treatment.high_confidence_mail_program_eligible ? 1 : 0,
     treatment_reasons: treatment.reasons.join('; '),
     treatment_json: JSON.stringify(treatment),
     priority_lane: priority.priority_lane,
@@ -1347,7 +1357,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     contradictions_json: JSON.stringify(contradictions),
     field_evidence_json: JSON.stringify(field_evidence),
     // Enrichment hold → autonomous repair queue signal.
-    enrichment_hold_reasons_json: JSON.stringify(enrichment_hold_reasons),
+    holding_tier_reasons_json: JSON.stringify(holding_tier_reasons),
     ...(enrichment_repair_plan
       ? {
         enrichment_repair_plan_json: JSON.stringify(enrichment_repair_plan),
@@ -1447,7 +1457,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     campaign,
     readiness,
     enrichment_repair_plan,
-    enrichment_hold_reasons,
+    holding_tier_reasons,
   };
 }
 
@@ -1535,12 +1545,8 @@ export function readinessInputFromRecord(input: {
   const costCheck = withinEnrichmentCeiling({
     candidate_tier: String(record.candidate_tier || ''),
     treatment_tier: String(record.treatment_tier || ''),
+    mail_treatment: String(record.mail_treatment || ''),
     enrichment_usd: enrichmentUsd,
-    golden_ticket: Boolean(
-      record.golden_ticket_eligible === true
-      || record.golden_ticket_eligible === 1
-      || record.golden_ticket_eligible === '1',
-    ),
     enrichmentBudget: input.enrichmentBudget,
   });
   // Prefer live ledger check; honor explicit false flags from apply patch / operators.

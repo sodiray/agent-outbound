@@ -147,8 +147,8 @@ test('policy Tier A gate holds masked or absent buyer evidence', () => {
     recomputeFitFromBreakdown: true,
   });
   assert.equal(result.treatment_tier, 'enrichment_hold');
-  assert.ok(result.enrichment_hold_reasons.includes('named_buyer_status_missing'));
-  assert.ok(result.enrichment_hold_reasons.includes('named_buyer_name_missing'));
+  assert.ok(result.holding_tier_reasons.includes('named_buyer_status_missing'));
+  assert.ok(result.holding_tier_reasons.includes('named_buyer_name_missing'));
 });
 
 test('policy Tier A gate keeps affiliation fail-closed without account-bound evidence', () => {
@@ -160,9 +160,9 @@ test('policy Tier A gate keeps affiliation fail-closed without account-bound evi
     recomputeFitFromBreakdown: true,
   });
   assert.equal(result.treatment_tier, 'enrichment_hold');
-  assert.ok(result.enrichment_hold_reasons.includes('buyer_affiliation_status_missing'));
-  assert.ok(!result.enrichment_hold_reasons.includes('named_buyer_name_missing'));
-  assert.ok(!result.enrichment_hold_reasons.includes('buying_center_role_missing'));
+  assert.ok(result.holding_tier_reasons.includes('buyer_affiliation_status_missing'));
+  assert.ok(!result.holding_tier_reasons.includes('named_buyer_name_missing'));
+  assert.ok(!result.holding_tier_reasons.includes('buying_center_role_missing'));
 });
 
 test('policy Tier A gate retains legacy buyer fields and requires a buyer', () => {
@@ -186,7 +186,7 @@ test('policy Tier A gate retains legacy buyer fields and requires a buyer', () =
     recomputeFitFromBreakdown: true,
   });
   assert.equal(absent.treatment_tier, 'enrichment_hold');
-  assert.ok(absent.enrichment_hold_reasons.includes('named_buyer_name_missing'));
+  assert.ok(absent.holding_tier_reasons.includes('named_buyer_name_missing'));
   assert.equal(resolveBuyerEvidenceFromRecord(absent.patch).name, null);
 });
 
@@ -251,7 +251,7 @@ test('policy persists evidence-derived confidence and awards Golden Ticket only 
   assert.equal(complete.patch.buyer_confidence, 100);
   assert.equal(complete.patch.mail_confidence, 100);
   assert.equal(complete.patch.mail_address_ready, 1);
-  assert.equal(complete.patch.golden_ticket_eligible, 1);
+  assert.equal(complete.patch.mail_program_eligible, 1);
   assert.ok(!complete.enrichment_repair_plan?.steps.some((step) => step.field === 'buyer_confidence'));
 
   const thin = applyOutboundPolicy({
@@ -269,7 +269,7 @@ test('policy persists evidence-derived confidence and awards Golden Ticket only 
     },
     recomputeFitFromBreakdown: true,
   });
-  assert.equal(thin.patch.golden_ticket_eligible, 0);
+  assert.equal(thin.patch.mail_program_eligible, 0);
   assert.ok(Number(thin.patch.buyer_confidence) < 80);
   assert.ok(Number(thin.patch.mail_confidence) < 90);
 });

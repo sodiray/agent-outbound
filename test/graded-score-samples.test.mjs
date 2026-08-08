@@ -358,7 +358,7 @@ test('graded scoring coverage guard sends thin fit evidence to enrichment_hold',
     assert.equal(result.score_status, 'needs_discovery');
     assert.equal(policy.treatment_tier, 'enrichment_hold');
     assert.equal(policy.patch.fit_score, null);
-    assert.equal(policy.patch.candidate_tier, 'hold');
+    assert.equal(policy.patch.candidate_tier, '');
     assert.equal(JSON.parse(policy.patch.next_action_json).action_type, 'enrichment_repair');
   } finally {
     db.close();

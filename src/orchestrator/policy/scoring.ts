@@ -283,20 +283,24 @@ export function calculatePriority(input: PriorityInput): PriorityResult {
 
 /** Candidate tier from preliminary fit (controls research depth, not outreach). */
 export function assignCandidateTier(preliminaryFit: number | null, config?: CandidateTierConfigInput): {
-  candidate_tier: 'A' | 'B' | 'C' | 'D' | 'hold';
+  candidate_tier: string;
   reasons: string[];
 } {
-  if (preliminaryFit == null || Number.isNaN(preliminaryFit)) {
-    return { candidate_tier: 'hold', reasons: ['unscored'] };
-  }
   const bands = config?.bands;
-  if (!bands || bands.length !== 5) {
-    return { candidate_tier: 'hold', reasons: ['candidate_tier_not_configured'] };
+  const tiers = config?.tiers;
+  if (preliminaryFit == null || Number.isNaN(preliminaryFit)) {
+    return {
+      candidate_tier: config?.unscored_tier || '',
+      reasons: ['unscored', ...(config?.unscored_tier ? [] : ['candidate_tier_not_configured'])],
+    };
   }
-  if (preliminaryFit >= bands[3]) return { candidate_tier: 'A', reasons: [`prelim_fit_${bands[3]}_100`] };
-  if (preliminaryFit >= bands[2]) return { candidate_tier: 'B', reasons: [`prelim_fit_${bands[2]}_${bands[3] - 1}`] };
-  if (preliminaryFit >= bands[1]) return { candidate_tier: 'C', reasons: [`prelim_fit_${bands[1]}_${bands[2] - 1}`] };
-  return { candidate_tier: 'D', reasons: [`prelim_fit_below_${bands[1]}`] };
+  if (!bands || bands.length !== 5 || !tiers || tiers.length !== 4) {
+    return { candidate_tier: '', reasons: ['candidate_tier_not_configured'] };
+  }
+  if (preliminaryFit >= bands[3]) return { candidate_tier: tiers[3], reasons: [`prelim_fit_${bands[3]}_100`] };
+  if (preliminaryFit >= bands[2]) return { candidate_tier: tiers[2], reasons: [`prelim_fit_${bands[2]}_${bands[3] - 1}`] };
+  if (preliminaryFit >= bands[1]) return { candidate_tier: tiers[1], reasons: [`prelim_fit_${bands[1]}_${bands[2] - 1}`] };
+  return { candidate_tier: tiers[0], reasons: [`prelim_fit_below_${bands[1]}`] };
 }
 
 function clamp(n: number, lo: number, hi: number) {

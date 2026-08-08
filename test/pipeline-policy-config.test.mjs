@@ -35,10 +35,10 @@ test('configured pipeline policy thresholds are honored across every moved polic
       golden_ticket: { minimums: { buyer_confidence: 81 } },
       action_confidence: { minimums: { identity: 70 } },
       reachability: { minimums: { email_verification: 60 } },
-      candidate_tier: { bands: [0, 40, 50, 80, 100] },
+      candidate_tier: { bands: [0, 40, 50, 80, 100], tiers: ['D', 'C', 'B', 'A'], unscored_tier: 'hold' },
       postcard: { minimums: { strong_fit: 85 } },
       enrichment_repair: { minimums: { identity_confidence: 70 } },
-      enrichment_budget: { ceilings: { A: 4 } },
+      enrichment_budget: { ceilings: { tiers: { A: 4 } } },
     },
   }).config.score;
 
@@ -67,13 +67,11 @@ test('configured pipeline policy thresholds are honored across every moved polic
 
 test('pipeline policy config rejects malformed thresholds, ladders, and ceiling values', () => {
   const malformed = [
-    { score: { golden_ticket: { minimums: { buyer_confidence: 101 } } } },
     { score: { action_confidence: { minimums: { email: -1 } } } },
     { score: { reachability: { minimums: { phone_ready: 80, phone_named_validated: 70 } } } },
     { score: { candidate_tier: { bands: [0, 50, 50, 80, 100] } } },
-    { score: { postcard: { minimums: { fit_evidence: 60, fit_evidence_exclusive_maximum: 60 } } } },
     { score: { enrichment_repair: { minimums: { buyer_confidence: 101 } } } },
-    { score: { enrichment_budget: { ceilings: { A: -1 } } } },
+    { score: { enrichment_budget: { ceilings: { tiers: { A: -1 } } } } },
   ];
   for (const config of malformed) assert.ok(normalizeConfig(config).errors.length > 0);
 });
@@ -85,7 +83,7 @@ test('pipeline policy remains fail-closed with no configured policy blocks', () 
     profile: { identity_confidence: 100, classification_confidence: 0, fit_evidence_confidence: 0, buyer_confidence: 0, timing_confidence: 0 },
   }).allowed, false);
   assert.equal(evaluateReachability({ contact_email: 'taylor@example.com' }).channels[0].ready, false);
-  assert.equal(assignCandidateTier(null).candidate_tier, 'hold');
+  assert.equal(assignCandidateTier(null).candidate_tier, '');
   assert.equal(evaluateStandardPostcard({
     treatmentTier: 'A', fitScore: 100, fitEvidenceConfidence: 100, mailAddressReady: false,
   }).eligible, false);

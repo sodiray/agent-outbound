@@ -314,7 +314,7 @@ test('phase-05 treatment: mail_treatment independent; A/B postcard; C/D none by 
   });
   assert.equal(tierAPostcard.treatment_tier, 'A');
   assert.equal(tierAPostcard.mail_treatment, 'standard_postcard');
-  assert.equal(tierAPostcard.golden_ticket_eligible, false);
+  assert.equal(tierAPostcard.high_confidence_mail_program_eligible, false);
 
   const tierB = assignTreatmentAndMail({
     fitScore: 70,
@@ -677,7 +677,7 @@ test('phase-05 golden ticket: identity confidence gate is mandatory', () => {
   });
   assert.equal(fullWeak.treatment_tier, 'A');
   assert.notEqual(fullWeak.mail_treatment, 'golden_ticket');
-  assert.equal(fullWeak.golden_ticket_eligible, false);
+  assert.equal(fullWeak.mail_program_eligible, false);
   assert.ok(
     fullWeak.mail_withheld_reasons.some((w) => w.includes('identity_confidence_below_90')),
   );
@@ -715,7 +715,7 @@ test('phase-05 golden ticket: identity confidence gate is mandatory', () => {
   });
   assert.equal(policyWeak.treatment_tier, 'A');
   assert.notEqual(policyWeak.mail_treatment, 'golden_ticket');
-  assert.equal(policyWeak.patch.golden_ticket_eligible, 0);
+  assert.equal(policyWeak.patch.mail_program_eligible, 0);
 });
 
 test('phase-05 golden ticket: non-A tiers never eligible even with strong gates', () => {
@@ -724,7 +724,7 @@ test('phase-05 golden ticket: non-A tiers never eligible even with strong gates'
     treatmentTier: 'B',
   });
   assert.equal(g.eligible, false);
-  assert.ok(g.withheld.includes('tier_not_declared_for_golden_ticket'));
+  assert.ok(g.withheld.includes('tier_not_declared_for_mail_program'));
 });
 
 test('phase-05 golden ticket: missing fitScore fails closed with fit_score_missing', () => {
@@ -741,7 +741,7 @@ test('phase-05 golden ticket: full production matrix → eligible', () => {
   const g = evaluateGoldenTicket(gtPassBase());
   assert.equal(g.eligible, true, JSON.stringify(g.withheld));
   assert.deepEqual(g.withheld, []);
-  assert.ok(g.reasons.includes('all_golden_ticket_gates_passed'));
+  assert.ok(g.reasons.includes('tier_allows_mail_program'));
 });
 
 test('phase-05 golden ticket: multi-signal path can substitute for timing ≥ 70', () => {
@@ -876,13 +876,13 @@ test('phase-05 golden ticket: full TV matrix table (parameterized fail-closed)',
       name: 'asset_not_ready',
       patch: { assetReady: false },
       eligible: false,
-      withheldAny: ['golden_ticket_asset_not_ready'],
+      withheldAny: ['asset_not_ready'],
     },
     {
       name: 'asset_missing',
       patch: { assetReady: null },
       eligible: false,
-      withheldAny: ['golden_ticket_asset_not_ready'],
+      withheldAny: ['asset_not_ready'],
     },
     {
       name: 'named_buyer_status_missing',
@@ -954,7 +954,7 @@ test('phase-05 golden ticket: full TV matrix table (parameterized fail-closed)',
       name: 'budget_exceeded',
       patch: { cumulativeEnrichmentCostUsd: 9 },
       eligible: false,
-      withheldAny: ['enrichment_budget_exceeded'],
+      withheldAny: ['enrichment_budget_usd_exceeded'],
     },
     {
       name: 'multi_signal_ok_without_timing_70',
@@ -996,8 +996,15 @@ test('phase-05 golden ticket: full TV matrix table (parameterized fail-closed)',
       `${c.name}: expected eligible=${c.eligible}, got ${g.eligible}; withheld=${JSON.stringify(g.withheld)}`,
     );
     for (const code of c.withheldAny) {
+      const genericCode = {
+        not_tier_a: 'tier_not_declared_for_mail_program',
+        fit_below_85: 'fit_score_below_85',
+        fit_evidence_missing: 'fit_evidence_confidence_missing',
+        fit_evidence_below_80: 'fit_evidence_confidence_below_80',
+        enrichment_budget_exceeded: 'enrichment_budget_usd_exceeded',
+      }[code] || code;
       assert.ok(
-        g.withheld.includes(code === 'not_tier_a' ? 'tier_not_declared_for_golden_ticket' : code),
+        g.withheld.includes(genericCode),
         `${c.name}: expected withheld ${code}, got ${JSON.stringify(g.withheld)}`,
       );
     }
@@ -1048,7 +1055,7 @@ test('phase-05 inventable-confidence: missing identity/buyer/classification → 
   assert.ok(readiness.blockers.includes('identity_confidence_below_80'));
   assert.equal(r.readiness?.ready, false);
   // GT must not invent buyer/classification/named buyer
-  assert.equal(r.patch.golden_ticket_eligible, 0);
+  assert.equal(r.patch.mail_program_eligible, 0);
   assert.notEqual(r.mail_treatment, 'golden_ticket');
 });
 
@@ -1079,7 +1086,7 @@ test('phase-05 inventable-confidence: raw address does not invent mail_confidenc
   // Channel ready may come from address_rdi via reachability, but confidence must not be invented to 80+
   const mailCh = readiness.permitted_channels?.includes('mail');
   // mail_confidence on profile path used for GT
-  assert.equal(r.patch.golden_ticket_eligible, 0);
+  assert.equal(r.patch.mail_program_eligible, 0);
   // reachability confidence for mail with only rdi should be 0 (not invented 80)
   const reach = JSON.parse(String(r.patch.reachability_json));
   const mail = reach.channels.find((c) => c.channel === 'mail');

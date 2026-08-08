@@ -87,8 +87,8 @@ export function appendCostEntry(ledger: CostLedger, entry: Omit<CostEntry, 'entr
 export function withinEnrichmentCeiling(input: {
   candidate_tier?: string;
   treatment_tier?: string;
+  mail_treatment?: string;
   enrichment_usd: number;
-  golden_ticket?: boolean;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
 }): { within_budget: boolean; ceiling: number; reason?: string } {
   const ceilings = input.enrichmentBudget?.ceilings;
@@ -97,17 +97,12 @@ export function withinEnrichmentCeiling(input: {
       ? { within_budget: false, ceiling: 0, reason: 'enrichment_budget_not_configured' }
       : { within_budget: true, ceiling: 0, reason: 'enrichment_budget_not_configured' };
   }
-  const tier = String(input.candidate_tier || input.treatment_tier || 'foundational').toLowerCase();
-  let ceiling: number | undefined = ceilings.foundational;
-  if (tier === 'a' || tier === 'tier_a') ceiling = ceilings.A;
-  else if (tier === 'b' || tier === 'tier_b') ceiling = ceilings.B;
-  else if (tier === 'c' || tier === 'tier_c') ceiling = ceilings.C;
-  else if (tier === 'd' || tier === 'tier_d') ceiling = ceilings.D;
-  else if (tier === 'enrichment_hold') ceiling = ceilings.enrichment_hold;
-  if (input.golden_ticket && ceilings.golden_ticket_total !== undefined) {
-    ceiling = Math.max(ceiling ?? 0, ceilings.golden_ticket_total);
-  }
-  if (ceiling === undefined) {
+  const tier = String(input.candidate_tier || input.treatment_tier || '').trim();
+  const tierCeiling = tier ? ceilings.tiers?.[tier] : ceilings.foundational;
+  const program = String(input.mail_treatment || '').trim();
+  const programCeiling = program ? ceilings.mail_programs?.[program] : undefined;
+  const ceiling = Math.max(tierCeiling ?? 0, programCeiling ?? 0);
+  if (tierCeiling === undefined && programCeiling === undefined) {
     return { within_budget: false, ceiling: 0, reason: 'enrichment_budget_tier_not_configured' };
   }
   if (input.enrichment_usd > ceiling) {
@@ -361,12 +356,8 @@ export function evaluateEnrichmentCeilingGate(input: {
   const check = withinEnrichmentCeiling({
     candidate_tier: String(working.candidate_tier || ''),
     treatment_tier: String(working.treatment_tier || ''),
+    mail_treatment: String(working.mail_treatment || ''),
     enrichment_usd,
-    golden_ticket: Boolean(
-      working.golden_ticket_eligible === true
-      || working.golden_ticket_eligible === 1
-      || String(working.golden_ticket_eligible || '').toLowerCase() === 'true',
-    ),
     enrichmentBudget: input.enrichmentBudget,
   });
 

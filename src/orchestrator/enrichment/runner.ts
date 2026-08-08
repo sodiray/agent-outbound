@@ -43,11 +43,9 @@ import type {
   CandidateTierConfigInput,
   EnrichmentBudgetConfigInput,
   EnrichmentRepairConfigInput,
-  GoldenTicketConfigInput,
   IdentityConfidenceConfigInput,
   MailConfidenceConfigInput,
   PhoneConfidenceConfigInput,
-  PostcardConfigInput,
   PriorityConfigInput,
   ReachabilityConfigInput,
   ContactPolicyConfigInput,
@@ -711,11 +709,9 @@ export const executeEnrichmentAction = async ({
   phoneConfidence,
   buyerConfidence,
   mailConfidence,
-  goldenTicket,
   actionConfidence,
   reachability,
   candidateTier,
-  postcard,
   enrichmentRepair,
   enrichmentBudget,
   contactPolicy,
@@ -739,11 +735,9 @@ export const executeEnrichmentAction = async ({
   phoneConfidence?: PhoneConfidenceConfigInput;
   buyerConfidence?: BuyerConfidenceConfigInput;
   mailConfidence?: MailConfidenceConfigInput;
-  goldenTicket?: GoldenTicketConfigInput;
   actionConfidence?: ActionConfidenceConfigInput;
   reachability?: ReachabilityConfigInput;
   candidateTier?: CandidateTierConfigInput;
-  postcard?: PostcardConfigInput;
   enrichmentRepair?: EnrichmentRepairConfigInput;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
   contactPolicy?: ContactPolicyConfigInput;
@@ -876,11 +870,9 @@ export const executeEnrichmentAction = async ({
       phoneConfidence,
       buyerConfidence,
       mailConfidence,
-      goldenTicket,
       actionConfidence,
       reachability,
       candidateTier,
-      postcard,
       enrichmentRepair,
       enrichmentBudget,
       contactPolicy,
@@ -1091,11 +1083,9 @@ export const executeEnrichmentStepOnRecords = async ({
         phoneConfidence: config?.score?.phone_confidence,
         buyerConfidence: config?.score?.buyer_confidence,
         mailConfidence: config?.score?.mail_confidence,
-        goldenTicket: config?.score?.golden_ticket,
         actionConfidence: config?.score?.action_confidence,
         reachability: config?.score?.reachability,
         candidateTier: config?.score?.candidate_tier,
-        postcard: config?.score?.postcard,
         enrichmentRepair: config?.score?.enrichment_repair,
         enrichmentBudget: config?.score?.enrichment_budget,
         contactPolicy: config?.contact_policy,
@@ -1571,11 +1561,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               phoneConfidence: config?.score?.phone_confidence,
               buyerConfidence: config?.score?.buyer_confidence,
               mailConfidence: config?.score?.mail_confidence,
-              goldenTicket: config?.score?.golden_ticket,
               actionConfidence: config?.score?.action_confidence,
               reachability: config?.score?.reachability,
               candidateTier: config?.score?.candidate_tier,
-              postcard: config?.score?.postcard,
               enrichmentRepair: config?.score?.enrichment_repair,
               enrichmentBudget: config?.score?.enrichment_budget,
               contactPolicy: config?.contact_policy,

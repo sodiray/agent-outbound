@@ -78,7 +78,7 @@ test('applyOutboundPolicy: enrichment_hold → next_action enrichment_repair + h
   assert.equal(out.next_action?.action_type, 'enrichment_repair');
   assert.equal(out.next_action?.work_state, 'enrichment_repair');
   assert.equal(out.patch.work_state, 'enrichment_repair');
-  const reasons = JSON.parse(String(out.patch.enrichment_hold_reasons_json || '[]'));
+  const reasons = JSON.parse(String(out.patch.holding_tier_reasons_json || '[]'));
   assert.ok(Array.isArray(reasons) && reasons.length > 0, 'hold reasons persisted');
   assert.ok(
     reasons.some((r) => String(r).includes('enrichment_hold') || String(r).includes('insufficient') || String(r).includes('treatment')),
@@ -113,7 +113,7 @@ test('applyOutboundPolicy: unresolved buyer affiliation holds (not invent confir
   });
   assert.equal(out.treatment_tier, 'enrichment_hold');
   assert.equal(out.next_action?.action_type, 'enrichment_repair');
-  const reasons = JSON.parse(String(out.patch.enrichment_hold_reasons_json || '[]'));
+  const reasons = JSON.parse(String(out.patch.holding_tier_reasons_json || '[]'));
   assert.ok(
     reasons.includes('buyer_affiliation_unresolved')
     || reasons.some((r) => String(r).includes('affiliation')),
@@ -142,7 +142,7 @@ test('applyOutboundPolicy: tier A missing named buyer → hold + repair', () => 
   });
   assert.equal(out.treatment_tier, 'enrichment_hold');
   assert.equal(out.next_action?.action_type, 'enrichment_repair');
-  const reasons = JSON.parse(String(out.patch.enrichment_hold_reasons_json || '[]'));
+  const reasons = JSON.parse(String(out.patch.holding_tier_reasons_json || '[]'));
   assert.ok(
     reasons.some((r) => String(r).includes('named_buyer')),
     JSON.stringify(reasons),
@@ -245,6 +245,7 @@ test('resolveBuyerAffiliationFromRecord: never invents confirmed from blank', ()
     namedBuyerStatus: null,
     namedBuyerName: null,
     affiliation: empty,
+    highTier: true,
   });
   assert.ok(reasons.includes('named_buyer_status_missing'));
   assert.ok(reasons.includes('buyer_affiliation_status_missing'));
@@ -319,6 +320,6 @@ test('assignTreatmentAndMail: GT still requires named buyer (matrix regression)'
 test('assignTreatmentAndMail: absent strategy does not invent a tier or mail product', () => {
   const result = assignTreatmentAndMail({ fitScore: 90, fitEvidenceConfidence: 90 });
   assert.equal(result.treatment_tier, '');
-  assert.equal(result.mail_treatment, 'none');
+  assert.equal(result.mail_treatment, '');
   assert.ok(result.reasons.includes('treatment_not_configured'));
 });

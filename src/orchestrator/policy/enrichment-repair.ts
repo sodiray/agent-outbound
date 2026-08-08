@@ -1,5 +1,5 @@
 /**
- * Autonomous targeted enrichment repair for enrichment_hold.
+ * Autonomous targeted enrichment repair for pipeline-declared holding tiers.
  * Order is always: foundational → candidate_tier → targeted (never skip depth).
  * planEnrichmentRepair is pure — policy apply persists the plan + hold reasons.
  */
@@ -7,6 +7,7 @@
 import {
   DEFAULT_SCORE_ENRICHMENT_REPAIR,
   type EnrichmentRepairConfigInput,
+  type TreatmentStrategyConfigInput,
 } from '../../schemas/config.js';
 import { resolveBuyerEvidenceFromRecord } from './evidence.js';
 import { isAffirmativeFlag } from './booleanish.js';
@@ -51,7 +52,6 @@ const num = (v: unknown): number | null => {
 
 const AFFILIATION_OK = new Set(['confirmed', 'likely']);
 const AFFILIATION_UNRESOLVED = new Set(['unresolved', 'unknown', 'not_found', 'ambiguous']);
-const LEGACY_HIGH_BUYER_GATE_TIERS = new Set(['A']);
 
 /**
  * Named-person current-affiliation + buying-center role.
@@ -67,23 +67,18 @@ export const resolveBuyerAffiliationFromRecord = (
 /**
  * Buyer-resolution hold reasons (fail closed).
  * - unresolved affiliation always holds when the status field is present
- * - high tiers (A / GT path) fail closed when affiliation or role is missing
- * - Tier A requires named buyer status + name (GT matrix already covers GT)
+ * - pipeline-declared high-confidence tiers fail closed when affiliation or role is missing
  */
 export function collectBuyerResolutionHoldReasons(input: {
   treatmentTier: string;
   namedBuyerStatus: string | null;
   namedBuyerName: string | null;
   affiliation: BuyerAffiliationResolution;
-  /** When true, treat as high-tier (GT eligible path) for missing affiliation. */
-  goldenTicketPath?: boolean;
   /** Pipeline-declared tier requires the high-confidence buyer gates. */
   highTier?: boolean;
 }): string[] {
   const reasons: string[] = [];
-  const highTier = input.highTier === true
-    || input.goldenTicketPath === true
-    || LEGACY_HIGH_BUYER_GATE_TIERS.has(String(input.treatmentTier || ''));
+  const highTier = input.highTier === true;
   const aff = input.affiliation;
 
   if (aff.status && AFFILIATION_UNRESOLVED.has(aff.status)) {
@@ -126,18 +121,19 @@ export function planEnrichmentRepair(input: {
   named_buyer_name?: string | null;
   missing_fit_inputs?: string[];
   config?: EnrichmentRepairConfigInput;
+  treatmentStrategy?: TreatmentStrategyConfigInput;
 }): EnrichmentRepairPlan {
   const record = input.record || {};
   const account_id = text(record._row_id || record.id || 'unknown');
-  const treatment_tier = text(input.treatment_tier ?? record.treatment_tier) || 'enrichment_hold';
-  const candidate_tier = text(input.candidate_tier ?? record.candidate_tier) || 'hold';
+  const treatment_tier = text(input.treatment_tier ?? record.treatment_tier);
+  const candidate_tier = text(input.candidate_tier ?? record.candidate_tier);
   const hold_reasons = [...(input.hold_reasons || [])];
   const steps: EnrichmentRepairStep[] = [];
   const seen = new Set<string>();
   const config = input.config;
   const mins = { ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums, ...config?.minimums };
-  const channelEvidenceCandidateTiers: readonly string[] = config?.channel_evidence_candidate_tiers
-    || DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers;
+  const channelEvidenceCandidateTiers = config?.channel_evidence_candidate_tiers || [];
+  const holdingTier = input.treatmentStrategy?.tiers?.[treatment_tier]?.holding === true;
 
   const push = (step: EnrichmentRepairStep) => {
     if (seen.has(step.field)) return;
@@ -207,7 +203,7 @@ export function planEnrichmentRepair(input: {
       priority: 10,
     });
   }
-  if (candidate_tier === 'hold' || !candidate_tier) {
+  if (!candidate_tier) {
     push({
       field: 'candidate_tier',
       reason: 'candidate_tier_unassigned',
@@ -300,7 +296,7 @@ export function planEnrichmentRepair(input: {
     });
   }
 
-  // Strong-fit thin-evidence path: targeted evidence lifts for A/B candidacy.
+  // Strong-fit thin-evidence path: targeted evidence lifts for pipeline-declared candidacy.
   if (
     fitScore != null
     && fitScore >= mins.strong_fit
@@ -314,9 +310,9 @@ export function planEnrichmentRepair(input: {
     });
   }
 
-  // Channel evidence for candidate A/B depth (mail / email when tier allows).
+  // Channel evidence for pipeline-declared candidate depth (mail / email when tier allows).
   const depthAllowsChannels = channelEvidenceCandidateTiers.includes(candidate_tier)
-    || treatment_tier === 'enrichment_hold';
+    || holdingTier;
   if (depthAllowsChannels) {
     if (blank(record.contact_email) && blank(record.email)) {
       push({
@@ -379,7 +375,7 @@ export function planEnrichmentRepair(input: {
 }
 
 /**
- * Collect enrichment_hold reason codes from treatment + readiness + integrity + buyer gates.
+ * Collect holding-state reason codes from treatment + readiness + integrity + buyer gates.
  */
 export function collectEnrichmentHoldReasons(input: {
   treatmentTier: string;
@@ -389,6 +385,7 @@ export function collectEnrichmentHoldReasons(input: {
   buyerHoldReasons?: string[];
   eligibilityOutcome?: string;
   eligibilityReasons?: string[];
+  treatmentStrategy?: TreatmentStrategyConfigInput;
 }): string[] {
   const out: string[] = [];
   const add = (code: string) => {
@@ -396,20 +393,21 @@ export function collectEnrichmentHoldReasons(input: {
     if (c && !out.includes(c)) out.push(c);
   };
 
-  if (input.treatmentTier === 'enrichment_hold') {
-    add('treatment_enrichment_hold');
+  const isHoldingTier = input.treatmentStrategy?.tiers?.[input.treatmentTier]?.holding === true;
+  if (isHoldingTier) {
+    add('treatment_holding_tier');
     for (const r of input.treatmentReasons || []) add(r);
   }
   for (const b of input.readinessBlockers || []) {
-    if (b === 'enrichment_hold' || b.startsWith('named_buyer') || b.startsWith('buyer_')
+    if (b === 'holding_tier' || b.startsWith('named_buyer') || b.startsWith('buyer_')
       || b.startsWith('buying_center') || b.includes('affiliation')) {
       add(b);
     }
   }
   for (const e of input.integrityErrors || []) add(`integrity:${e}`);
   for (const r of input.buyerHoldReasons || []) add(r);
-  if (input.eligibilityOutcome === 'enrichment_hold') {
-    add('eligibility_enrichment_hold');
+  if (input.eligibilityOutcome === input.treatmentTier && isHoldingTier) {
+    add('eligibility_holding_tier');
     for (const r of input.eligibilityReasons || []) add(r);
   }
   return out;

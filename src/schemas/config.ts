@@ -41,7 +41,6 @@ export const DEFAULT_SCORE_ENRICHMENT_REPAIR = {
     strong_fit: 65,
     strong_fit_evidence: 60,
   },
-  channel_evidence_candidate_tiers: ['A', 'B', 'hold'],
 } as const;
 
 export const DEFAULT_CONTACT_POLICY = {
@@ -155,7 +154,7 @@ export const resolveContactPolicy = (
   fallback_wait_days: input?.fallback_wait_days,
 });
 
-export type GoldenTicketMinimum =
+export type MailProgramMinimum =
   | 'fit_score'
   | 'fit_evidence_confidence'
   | 'identity_confidence'
@@ -167,10 +166,6 @@ export type GoldenTicketMinimum =
   | 'strong_signal_count'
   | 'enrichment_budget_usd';
 
-export type GoldenTicketConfigInput = {
-  minimums?: Partial<Record<GoldenTicketMinimum, number>>;
-};
-
 export type ActionConfidenceConfigInput = {
   minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_ACTION_CONFIDENCE.minimums, number>>;
 };
@@ -181,6 +176,8 @@ export type ReachabilityConfigInput = {
 
 export type CandidateTierConfigInput = {
   bands?: number[];
+  tiers?: string[];
+  unscored_tier?: string;
 };
 
 /**
@@ -197,42 +194,62 @@ export type TreatmentStrategyConfigInput = {
   tiers?: Record<string, {
     route?: 'outbound' | 'enrichment' | 'recycle_monitoring';
     pipeline?: string;
-    standard_postcard?: boolean;
-    postcard_exception?: boolean;
-    golden_ticket?: boolean;
+    /** Declares the tier as the pipeline's enrichment / evidence holding state. */
+    holding?: boolean;
+    /** Mail-program identifiers permitted directly for this tier. */
+    mail_programs?: string[];
+    /** Mail-program identifiers permitted through their declared fit exception. */
+    mail_program_exceptions?: string[];
+    /** Requires named-buyer, affiliation, and buying-center evidence before outreach. */
+    requires_high_confidence_buyer?: boolean;
   }>;
+  /** Pipeline-owned physical-mail program declarations. */
+  mail_programs?: Record<string, MailProgramConfigInput>;
+};
+
+export type MailProgramRequirements = {
+  mail_address_ready?: boolean;
+  asset_ready?: boolean;
+  named_buyer?: boolean;
+  buyer_affiliation?: boolean;
+  buying_center_role?: boolean;
+  local_buying_authority?: boolean;
+  cohort_capacity?: boolean;
+  unsuppressed?: boolean;
+  no_material_contradiction?: boolean;
+  timing_or_strong_signals?: boolean;
+};
+
+export type MailProgramConfigInput = {
+  priority?: number;
+  /** Applies the configured high-confidence buyer gate to this program. */
+  requires_high_confidence_buyer?: boolean;
+  minimums?: Partial<Record<MailProgramMinimum, number>>;
+  requirements?: MailProgramRequirements;
+  tier_exception?: {
+    minimums?: Partial<Record<MailProgramMinimum, number>>;
+  };
+  readiness?: {
+    asset_ready_field?: string;
+    cohort_capacity_field?: string;
+  };
 };
 
 export type PriorityConfigInput = {
   tier_lanes?: Record<string, 'reply_interest' | 'promised_followup' | 'blocking_repair' | 'enrichment' | 'outbound' | 'recycle_monitoring'>;
 };
 
-export type PostcardMinimum =
-  | 'identity_confidence'
-  | 'strong_fit'
-  | 'fit_evidence'
-  | 'fit_evidence_exclusive_maximum';
-
-export type PostcardConfigInput = {
-  minimums?: Partial<Record<PostcardMinimum, number>>;
-};
-
 export type EnrichmentRepairConfigInput = {
   minimums?: Partial<Record<keyof typeof DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums, number>>;
-  channel_evidence_candidate_tiers?: Array<'A' | 'B' | 'C' | 'D' | 'hold'>;
+  channel_evidence_candidate_tiers?: string[];
 };
 
-export type EnrichmentBudgetCeiling =
-  | 'foundational'
-  | 'A'
-  | 'B'
-  | 'C'
-  | 'D'
-  | 'enrichment_hold'
-  | 'golden_ticket_total';
-
 export type EnrichmentBudgetConfigInput = {
-  ceilings?: Partial<Record<EnrichmentBudgetCeiling, number>>;
+  ceilings?: {
+    foundational?: number;
+    tiers?: Record<string, number>;
+    mail_programs?: Record<string, number>;
+  };
 };
 
 export type IdentityConfidenceConfig = {
@@ -1189,6 +1206,10 @@ const ScoreTreatmentBandsSchema = z.object({
 const TreatmentStrategyTierSchema = z.object({
   route: z.enum(['outbound', 'enrichment', 'recycle_monitoring']),
   pipeline: z.string().trim().min(1).optional(),
+  holding: z.boolean().optional(),
+  mail_programs: z.array(z.string().trim().min(1)).min(1).optional(),
+  mail_program_exceptions: z.array(z.string().trim().min(1)).min(1).optional(),
+  requires_high_confidence_buyer: z.boolean().optional(),
   standard_postcard: z.boolean().optional(),
   postcard_exception: z.boolean().optional(),
   golden_ticket: z.boolean().optional(),
@@ -1205,6 +1226,49 @@ const PriorityConfigSchema = z.object({
   ])).default({}),
 }).strict();
 
+const MailProgramMinimumSchema = z.object({
+  fit_score: z.coerce.number().min(0).max(100),
+  fit_evidence_confidence: z.coerce.number().min(0).max(100),
+  identity_confidence: z.coerce.number().min(0).max(100),
+  classification_confidence: z.coerce.number().min(0).max(100),
+  buyer_confidence: z.coerce.number().min(0).max(100),
+  mail_confidence: z.coerce.number().min(0).max(100),
+  timing_score: z.coerce.number().min(0).max(100),
+  strong_signal_strength: z.coerce.number().min(0).max(100),
+  strong_signal_count: z.coerce.number().nonnegative(),
+  enrichment_budget_usd: z.coerce.number().nonnegative(),
+  strong_fit: z.coerce.number().min(0).max(100),
+  fit_evidence: z.coerce.number().min(0).max(100),
+  fit_evidence_exclusive_maximum: z.coerce.number().min(0).max(100),
+}).partial();
+
+const MailProgramRequirementsSchema = z.object({
+  mail_address_ready: z.boolean().optional(),
+  asset_ready: z.boolean().optional(),
+  named_buyer: z.boolean().optional(),
+  buyer_affiliation: z.boolean().optional(),
+  buying_center_role: z.boolean().optional(),
+  local_buying_authority: z.boolean().optional(),
+  cohort_capacity: z.boolean().optional(),
+  unsuppressed: z.boolean().optional(),
+  no_material_contradiction: z.boolean().optional(),
+  timing_or_strong_signals: z.boolean().optional(),
+}).strict();
+
+const MailProgramConfigSchema = z.object({
+  priority: z.coerce.number().nonnegative().optional(),
+  requires_high_confidence_buyer: z.boolean().optional(),
+  minimums: MailProgramMinimumSchema.optional(),
+  requirements: MailProgramRequirementsSchema.optional(),
+  tier_exception: z.object({
+    minimums: MailProgramMinimumSchema.optional(),
+  }).strict().optional(),
+  readiness: z.object({
+    asset_ready_field: z.string().trim().min(1).optional(),
+    cohort_capacity_field: z.string().trim().min(1).optional(),
+  }).strict().optional(),
+}).strict();
+
 const TreatmentStrategyConfigSchema = z.object({
   bands: z.object({
     fit: ScoreTreatmentBandLadderSchema,
@@ -1213,6 +1277,7 @@ const TreatmentStrategyConfigSchema = z.object({
   matrix: z.array(z.array(z.string().trim().min(1)).length(4)).length(4),
   unscored_tier: z.string().trim().min(1),
   tiers: z.record(TreatmentStrategyTierSchema),
+  mail_programs: z.record(MailProgramConfigSchema).optional(),
 }).strict();
 
 const ConfidenceMinimumSchema = z.coerce.number().min(0).max(100);
@@ -1264,21 +1329,6 @@ const ContactPolicySchema = z.object({
   fallback_wait_days: NonNegativeWholePolicyValueSchema.optional(),
 }).default({});
 
-const GoldenTicketConfigSchema = z.object({
-  minimums: z.object({
-    fit_score: ConfidenceMinimumSchema,
-    fit_evidence_confidence: ConfidenceMinimumSchema,
-    identity_confidence: ConfidenceMinimumSchema,
-    classification_confidence: ConfidenceMinimumSchema,
-    buyer_confidence: ConfidenceMinimumSchema,
-    mail_confidence: ConfidenceMinimumSchema,
-    timing_score: ConfidenceMinimumSchema,
-    strong_signal_strength: ConfidenceMinimumSchema,
-    strong_signal_count: NonNegativePolicyValueSchema,
-    enrichment_budget_usd: NonNegativePolicyValueSchema,
-  }).partial(),
-}).strict();
-
 const ActionConfidenceConfigSchema = z.object({
   minimums: z.object({
     identity: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ACTION_CONFIDENCE.minimums.identity),
@@ -1310,24 +1360,11 @@ const ReachabilityConfigSchema = z.object({
 
 const CandidateTierConfigSchema = z.object({
   bands: ScoreTreatmentBandLadderSchema,
+  tiers: z.array(z.string().trim().min(1)).length(4)
+    .refine((tiers) => new Set(tiers).size === tiers.length, 'Candidate tiers must be unique.')
+    .optional(),
+  unscored_tier: z.string().trim().min(1).optional(),
 }).partial().strict();
-
-const PostcardConfigSchema = z.object({
-  minimums: z.object({
-    identity_confidence: ConfidenceMinimumSchema,
-    strong_fit: ConfidenceMinimumSchema,
-    fit_evidence: ConfidenceMinimumSchema,
-    fit_evidence_exclusive_maximum: ConfidenceMinimumSchema,
-  }).partial().superRefine((minimums, ctx) => {
-    if (minimums.fit_evidence === undefined || minimums.fit_evidence_exclusive_maximum === undefined) return;
-    if (minimums.fit_evidence_exclusive_maximum > minimums.fit_evidence) return;
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'score.postcard.minimums.fit_evidence_exclusive_maximum must exceed fit_evidence.',
-      path: ['fit_evidence_exclusive_maximum'],
-    });
-  }),
-}).strict();
 
 const EnrichmentRepairConfigSchema = z.object({
   minimums: z.object({
@@ -1338,13 +1375,12 @@ const EnrichmentRepairConfigSchema = z.object({
     strong_fit: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums.strong_fit),
     strong_fit_evidence: ConfidenceMinimumSchema.default(DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums.strong_fit_evidence),
   }).partial().default(() => ({ ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums })),
-  channel_evidence_candidate_tiers: z.array(z.enum(['A', 'B', 'C', 'D', 'hold']))
+  channel_evidence_candidate_tiers: z.array(z.string().trim().min(1))
     .min(1)
     .refine((tiers) => new Set(tiers).size === tiers.length, 'Candidate tiers must be unique.')
-    .default(() => [...DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers]),
+    .optional(),
 }).default(() => ({
   minimums: { ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums },
-  channel_evidence_candidate_tiers: [...DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers],
 }));
 
 const EnrichmentBudgetConfigSchema = z.object({
@@ -1356,6 +1392,8 @@ const EnrichmentBudgetConfigSchema = z.object({
     D: NonNegativePolicyValueSchema,
     enrichment_hold: NonNegativePolicyValueSchema,
     golden_ticket_total: NonNegativePolicyValueSchema,
+    tiers: z.record(NonNegativePolicyValueSchema),
+    mail_programs: z.record(NonNegativePolicyValueSchema),
   }).partial(),
 }).strict();
 
@@ -1495,11 +1533,11 @@ const ScoreSchema = z.object({
   phone_confidence: PhoneConfidenceConfigSchema,
   buyer_confidence: BuyerConfidenceConfigSchema,
   mail_confidence: MailConfidenceConfigSchema,
-  golden_ticket: GoldenTicketConfigSchema,
+  golden_ticket: z.unknown().optional(),
   action_confidence: ActionConfidenceConfigSchema,
   reachability: ReachabilityConfigSchema,
   candidate_tier: CandidateTierConfigSchema,
-  postcard: PostcardConfigSchema,
+  postcard: z.unknown().optional(),
   enrichment_repair: EnrichmentRepairConfigSchema,
   enrichment_budget: EnrichmentBudgetConfigSchema,
 }).partial().default({});
@@ -1944,11 +1982,9 @@ const coerceLegacyScore = (raw) => {
     ...(score.phone_confidence !== undefined ? { phone_confidence: score.phone_confidence } : {}),
     ...(score.buyer_confidence !== undefined ? { buyer_confidence: score.buyer_confidence } : {}),
     ...(score.mail_confidence !== undefined ? { mail_confidence: score.mail_confidence } : {}),
-    ...(score.golden_ticket !== undefined ? { golden_ticket: score.golden_ticket } : {}),
     ...(score.action_confidence !== undefined ? { action_confidence: score.action_confidence } : {}),
     ...(score.reachability !== undefined ? { reachability: score.reachability } : {}),
     ...(score.candidate_tier !== undefined ? { candidate_tier: score.candidate_tier } : {}),
-    ...(score.postcard !== undefined ? { postcard: score.postcard } : {}),
     ...(score.enrichment_repair !== undefined ? { enrichment_repair: score.enrichment_repair } : {}),
     ...(score.enrichment_budget !== undefined ? { enrichment_budget: score.enrichment_budget } : {}),
   };
@@ -2295,9 +2331,9 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
             ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums,
             ...(parsed.data?.score?.enrichment_repair?.minimums || {}),
           },
-          channel_evidence_candidate_tiers:
-            parsed.data?.score?.enrichment_repair?.channel_evidence_candidate_tiers
-            ?? [...DEFAULT_SCORE_ENRICHMENT_REPAIR.channel_evidence_candidate_tiers],
+          ...(parsed.data?.score?.enrichment_repair?.channel_evidence_candidate_tiers
+            ? { channel_evidence_candidate_tiers: parsed.data.score.enrichment_repair.channel_evidence_candidate_tiers }
+            : {}),
         },
       },
       ai: {

@@ -212,7 +212,7 @@ test('mail treatment is independent; golden ticket is tier-A overlay', () => {
   });
   assert.equal(full.treatment_tier, 'A');
   assert.equal(full.mail_treatment, 'golden_ticket');
-  assert.equal(full.golden_ticket_eligible, true);
+  assert.equal(full.mail_program_eligible, true);
 
   const postcardOnly = assignTreatmentAndMail({
     treatmentStrategy: treasureValleyTreatmentStrategy,
@@ -267,11 +267,11 @@ test('candidate tier controls research depth', () => {
   assert.equal(assignCandidateTier(70, treasureValleyCandidateTier).candidate_tier, 'B');
   assert.equal(assignCandidateTier(55, treasureValleyCandidateTier).candidate_tier, 'C');
   assert.equal(assignCandidateTier(20, treasureValleyCandidateTier).candidate_tier, 'D');
-  assert.equal(assignCandidateTier(null).candidate_tier, 'hold');
+  assert.equal(assignCandidateTier(null).candidate_tier, '');
 });
 
 test('enrichment ceilings match provisional policy', () => {
-  const r = enrichmentBudgetRemaining({ candidateOrTreatment: 'B', spentUsd: 0.5, enrichmentBudget: { ceilings: { B: 1, golden_ticket_total: 8 } } });
+  const r = enrichmentBudgetRemaining({ candidateOrTreatment: 'B', spentUsd: 0.5, enrichmentBudget: { ceilings: { tiers: { B: 1 } } } });
   assert.ok(r.withinBudget);
   assert.ok(r.remaining < 1);
 });

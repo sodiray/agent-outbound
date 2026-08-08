@@ -266,7 +266,7 @@ test('phase-04: thin evidence / unscored fit → treatment_tier enrichment_hold'
   });
   assert.equal(full.treatment_tier, 'enrichment_hold');
   assert.equal(full.mail_treatment, 'none');
-  assert.equal(full.golden_ticket_eligible, false);
+  assert.equal(full.mail_program_eligible, false);
 });
 
 test('phase-04: a pipeline may restrict an enrichment tier from outbound readiness', () => {
@@ -301,7 +301,7 @@ test('phase-04: a pipeline may restrict an enrichment tier from outbound readine
 
 test('phase-04: candidate tier + enrichment ceilings support decision-driven depth', () => {
   assert.equal(assignCandidateTier(90, treasureValleyCandidateTier).candidate_tier, 'A');
-  assert.equal(assignCandidateTier(null).candidate_tier, 'hold');
+  assert.equal(assignCandidateTier(null).candidate_tier, '');
 
   const holdBudget = enrichmentBudgetRemaining({
     enrichmentBudget: treasureValleyEnrichmentBudget,

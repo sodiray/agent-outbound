@@ -73,7 +73,6 @@ test('withinEnrichmentCeiling: tier table (at/under/over + golden floor)', () =>
     { name: 'A under', tier: 'A', spend: 2.99, within: true, ceiling: ENRICHMENT_COST_CEILINGS.A },
     { name: 'A at ceiling', tier: 'A', spend: 3, within: true, ceiling: ENRICHMENT_COST_CEILINGS.A },
     { name: 'A over', tier: 'A', spend: 3.01, within: false, ceiling: ENRICHMENT_COST_CEILINGS.A },
-    { name: 'tier_a alias', tier: 'tier_a', spend: 3.01, within: false, ceiling: ENRICHMENT_COST_CEILINGS.A },
     { name: 'B under', tier: 'B', spend: 0.99, within: true, ceiling: ENRICHMENT_COST_CEILINGS.B },
     { name: 'B over', tier: 'B', spend: 1.01, within: false, ceiling: ENRICHMENT_COST_CEILINGS.B },
     { name: 'C under', tier: 'C', spend: 0.3, within: true, ceiling: ENRICHMENT_COST_CEILINGS.C },
@@ -83,18 +82,18 @@ test('withinEnrichmentCeiling: tier table (at/under/over + golden floor)', () =>
     { name: 'foundational default', tier: '', spend: 0.16, within: false, ceiling: ENRICHMENT_COST_CEILINGS.foundational },
     { name: 'candidate_tier preferred when treatment empty', candidate: 'B', spend: 1.01, within: false, ceiling: ENRICHMENT_COST_CEILINGS.B },
     {
-      name: 'golden ticket raises floor to 8',
+      name: 'declared mail program raises floor to 8',
       tier: 'C',
       spend: 5,
-      golden: true,
+      mailProgram: 'golden_ticket',
       within: true,
       ceiling: ENRICHMENT_COST_CEILINGS.golden_ticket_total,
     },
     {
-      name: 'golden over total',
+      name: 'declared mail program over total',
       tier: 'A',
       spend: 8.01,
-      golden: true,
+      mailProgram: 'golden_ticket',
       within: false,
       ceiling: ENRICHMENT_COST_CEILINGS.golden_ticket_total,
     },
@@ -106,7 +105,7 @@ test('withinEnrichmentCeiling: tier table (at/under/over + golden floor)', () =>
       treatment_tier: c.tier,
       candidate_tier: c.candidate,
       enrichment_usd: c.spend,
-      golden_ticket: c.golden,
+      mail_treatment: c.mailProgram,
     });
     assert.equal(result.within_budget, c.within, c.name);
     assert.equal(result.ceiling, c.ceiling, `${c.name} ceiling`);
