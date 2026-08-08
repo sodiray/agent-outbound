@@ -43,6 +43,7 @@ export const SEQUENCE_STATES = [
   'paused_inbound',
   'paused_repair',
   'waiting',
+  'unreachable',
   'exhausted',
   'recycle_wait',
   'completed',

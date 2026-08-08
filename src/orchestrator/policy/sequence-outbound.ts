@@ -18,6 +18,7 @@ export const SEQUENCE_STATES_BLOCK_OUTBOUND = new Set<SequenceState | string>([
   'paused_review',
   'paused_inbound',
   'paused_repair',
+  'unreachable',
   'recycle_wait',
   'completed',
   'cancelled',

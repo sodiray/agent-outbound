@@ -78,6 +78,8 @@ const seedList = ({
       'treatment_tier',
       'suppressed',
       'readiness_json',
+      'phone',
+      'phone_confidence',
     ],
   });
   const na =
@@ -87,12 +89,12 @@ const seedList = ({
   db.prepare(`
     INSERT INTO records (
       _row_id, business_name, sequence_name, sequence_status, sequence_step,
-      contact_email, lifecycle_stage, account_sequence_state, work_state, next_action_json,
+      contact_email, phone, phone_confidence, lifecycle_stage, account_sequence_state, work_state, next_action_json,
       active_contact_id, treatment_tier, suppressed, readiness_json,
       _created_at, _updated_at, created_at, updated_at
     ) VALUES (
       ?, 'Gate HVAC', 'default', 'active', 0,
-      'owner@example-gate.test', 'contacted', ?, 'executing_external_action', ?,
+      'owner@example-gate.test', '208-555-0100', 100, 'contacted', ?, 'executing_external_action', ?,
       'c_owner', 'B', 0, ?,
       ?, ?, ?, ?
     )

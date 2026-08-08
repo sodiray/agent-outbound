@@ -14,6 +14,7 @@ export * from './apply-record.js';
 export * from './load-contacts.js';
 export * from './transmitter-suppression.js';
 export * from './sequence-outbound.js';
+export * from './sequence-reachability.js';
 export * from './evidence.js';
 export * from './taxonomy.js';
 export * from './timing-reachability.js';

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
-import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
+import { ensureRecordColumns, openListDb, upsertContact, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { executePipelineSequenceAction } from '../dist/orchestrator/pipeline/sequence-step-runtime.js';
 
 const assignmentConfig = `
@@ -87,13 +87,33 @@ test('channel execution preserves the selected sequence instead of restoring sta
   const listDir = createAssignmentList();
   const db = openListDb({ listDir, readonly: false });
   try {
-    ensureRecordColumns({ db, columns: [{ name: 'readiness_json', type: 'TEXT' }] });
+    ensureRecordColumns({
+      db,
+      columns: [
+        { name: 'readiness_json', type: 'TEXT' },
+        { name: 'phone', type: 'TEXT' },
+        { name: 'phone_confidence', type: 'REAL' },
+        { name: 'contact_name', type: 'TEXT' },
+      ],
+    });
     const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('account_route');
     upsertRecord({
       db,
       row: {
         ...record,
-        readiness_json: JSON.stringify({ permitted_channels: [] }),
+        readiness_json: JSON.stringify({ permitted_channels: ['phone'] }),
+        phone: '208-555-0100',
+        phone_confidence: 100,
+        contact_name: 'Pat Contact',
+      },
+    });
+    upsertContact({
+      db,
+      contact: {
+        row_id: 'account_route',
+        contact_id: 'route_contact',
+        name: 'Pat Contact',
+        phone: '208-555-0100',
       },
     });
     const staleRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('account_route');

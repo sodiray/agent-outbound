@@ -731,6 +731,15 @@ test('linkedin lifecycle: executeChannelStep honors invite_sent + sets lifecycle
         ?, datetime('now'), datetime('now'), datetime('now'), datetime('now')
       )
     `).run('https://www.linkedin.com/in/dec', nextActionJson('li_dec'));
+    upsertContact({
+      db,
+      contact: {
+        row_id: 'li_dec',
+        contact_id: 'c1',
+        name: 'Declined Contact',
+        linkedin_url: 'https://www.linkedin.com/in/dec',
+      },
+    });
     const decRow = db.prepare('SELECT * FROM records WHERE _row_id=?').get('li_dec');
     assert.equal(evaluateLinkedinConnectGate(decRow).reason, 'linkedin_lifecycle_declined');
     const blocked = await executeChannelStep({

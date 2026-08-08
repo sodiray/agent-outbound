@@ -3,10 +3,18 @@
  * impossible state, provider drift signals, Phase G portfolio checks.
  */
 
-import { checkStateIntegrity, parseNextActionFromRecord } from '../policy/lifecycle.js';
+import {
+  checkStateIntegrity,
+  parseNextActionFromRecord,
+  SEQUENCE_STATES,
+  type SequenceState,
+} from '../policy/lifecycle.js';
 import { parseAccountCampaignFromRecord } from '../policy/contact-campaign.js';
 import { OUTBOUND_ACTION_TYPES } from '../policy/sequence-outbound.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
+import { hydrateActiveContactOntoRecord } from '../policy/load-contacts.js';
+import { evaluateSequenceReachability } from '../policy/sequence-reachability.js';
+import { listContactsByRecord } from '../runtime/db.js';
 
 export type HealthIssue = {
   code: string;
@@ -50,6 +58,28 @@ function tableHasColumn(db: any, table: string, column: string): boolean {
   }
 }
 
+const AUTHORITATIVE_IN_PLAY_SEQUENCE_STATES = new Set<SequenceState>([
+  'active',
+  'paused_review',
+  'paused_inbound',
+  'paused_repair',
+  'waiting',
+]);
+
+const AUTHORITATIVE_NOT_IN_PLAY_SEQUENCE_STATES = new Set(
+  SEQUENCE_STATES.filter((state) => !AUTHORITATIVE_IN_PLAY_SEQUENCE_STATES.has(state)),
+);
+
+const AUTHORITATIVE_NOT_IN_PLAY_SEQUENCE_STATE_SQL = Array.from(
+  AUTHORITATIVE_NOT_IN_PLAY_SEQUENCE_STATES,
+).map((state) => `'${state}'`).join(', ');
+
+const authoritativeSequenceStateSql = (hasAccountSequenceState: boolean) => (
+  hasAccountSequenceState
+    ? `lower(COALESCE(NULLIF(account_sequence_state, ''), sequence_status, ''))`
+    : `lower(COALESCE(sequence_status, ''))`
+);
+
 export function runHealthChecks(input: {
   db: any;
   limit?: number;
@@ -70,18 +100,17 @@ export function runHealthChecks(input: {
     sourced_review_pileup: 0,
     tier_d_with_outbound_next_action: 0,
     in_play_disqualified_contradiction: 0,
+    active_without_reachable_contact: 0,
   };
 
   // ----- Portfolio-level aggregate checks (not limited to sample) -----
 
   const hasAccountSeq = tableHasColumn(input.db, 'records', 'account_sequence_state');
   const hasCostLedger = tableHasColumn(input.db, 'records', 'cost_ledger_json');
+  const authoritativeSequenceState = authoritativeSequenceStateSql(hasAccountSeq);
 
   // Open paused_review queue (sequence + account_sequence_state when present).
-  const pausedWhere = hasAccountSeq
-    ? `(lower(COALESCE(account_sequence_state, '')) = 'paused_review'
-        OR lower(COALESCE(sequence_status, '')) = 'paused_review')`
-    : `lower(COALESCE(sequence_status, '')) = 'paused_review'`;
+  const pausedWhere = `${authoritativeSequenceState} = 'paused_review'`;
   const openPausedReview = safeCount(
     input.db,
     `SELECT COUNT(*) AS n FROM records WHERE ${pausedWhere}`,
@@ -219,10 +248,7 @@ export function runHealthChecks(input: {
   const falseHealthWhere = `
      COALESCE(disqualified_at,'') = ''
        AND COALESCE(suppressed, 0) = 0
-       AND (
-         lower(COALESCE(sequence_status, '')) IN ('active', 'engaged')
-         ${hasAccountSeq ? `OR lower(COALESCE(account_sequence_state, '')) = 'active'` : ''}
-       )
+       AND ${authoritativeSequenceState} IN ('active', 'engaged')
        AND (${emptyNextAction} OR ${staleNextDate})
   `;
   const falseHealthRows = safeAll(
@@ -356,19 +382,19 @@ export function runHealthChecks(input: {
       dqClauses.push(`lower(COALESCE(lifecycle_stage, '')) = 'disqualified'`);
     }
     const idleEnrollmentEvidence = [
-      hasAccountSeq ? `COALESCE(account_sequence_state, '') != ''` : '',
       hasLaunchedAt ? `COALESCE(launched_at, '') != ''` : '',
       hasNextAction ? `TRIM(COALESCE(next_action_json, '')) NOT IN ('', '{}', 'null', '[]')` : '',
       hasSequenceStep ? `COALESCE(sequence_step, 0) > 0` : '',
     ].filter(Boolean);
     const idleInPlay = idleEnrollmentEvidence.length > 0
-      ? `(lower(COALESCE(sequence_status, '')) = 'idle' AND (${idleEnrollmentEvidence.join(' OR ')}))`
+      ? `(lower(COALESCE(sequence_status, '')) = 'idle'
+          AND (${idleEnrollmentEvidence.join(' OR ')})
+          ${hasAccountSeq ? `AND ${authoritativeSequenceState} NOT IN (${AUTHORITATIVE_NOT_IN_PLAY_SEQUENCE_STATE_SQL})` : ''})`
       : '0=1';
     const inPlayActive = `
       (
-        lower(COALESCE(sequence_status, '')) IN ('active', 'engaged')
+        ${authoritativeSequenceState} IN ('active', 'engaged', 'paused_review', 'paused_inbound', 'paused_repair', 'waiting')
         OR ${idleInPlay}
-        ${hasAccountSeq ? `OR lower(COALESCE(account_sequence_state, '')) IN ('active', 'paused_review', 'paused_inbound', 'waiting')` : ''}
       )
     `;
     const contraWhere = `(${dqClauses.join(' OR ')}) AND ${inPlayActive}`;
@@ -394,6 +420,33 @@ export function runHealthChecks(input: {
         severity: 'error',
         record_id: String(r._row_id || ''),
         detail: `disqualified but still in-play (seq=${r.account_sequence_state || r.sequence_status || ''}; dq=${r.disqualified_at || r.lifecycle_stage || ''}; ${r.business_name || ''})`,
+      });
+    }
+  }
+
+  // active_without_reachable_contact: sequence work is waste when no currently
+  // permitted channel has a usable recipient. Suppressed records are excluded by
+  // the evaluator: standing consent instructions remain distinct from missing data.
+  {
+    const activeRows = safeAll(
+      input.db,
+      `SELECT * FROM records WHERE ${authoritativeSequenceState} = 'active'`,
+    );
+    const unreachableRows = activeRows.filter((row) => {
+      const hydrated = hydrateActiveContactOntoRecord({ db: input.db, record: row });
+      const reachability = evaluateSequenceReachability({
+        record: hydrated.record,
+        contacts: listContactsByRecord({ db: input.db, recordId: String(row._row_id || row.id || '') }),
+      });
+      return reachability.applicable && !reachability.reachable;
+    });
+    counts.active_without_reachable_contact = unreachableRows.length;
+    for (const row of unreachableRows.slice(0, Math.min(limit, 50))) {
+      issues.push({
+        code: 'active_without_reachable_contact',
+        severity: 'warning',
+        record_id: String(row._row_id || ''),
+        detail: `active sequence has no reachable contact on a permitted channel (${row.business_name || ''})`,
       });
     }
   }

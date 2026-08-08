@@ -11,6 +11,7 @@ import {
   findAsset,
   insertChannelEvent,
   insertDraft,
+  listContactsByRecord,
   insertPipelineEvent,
   nowTimestamp,
   upsertRecord,
@@ -54,6 +55,11 @@ import {
   evaluateTransmitterSuppression,
 } from '../policy/index.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
+import {
+  evaluateSequenceReachability,
+  reenteredSequencePatch,
+  unreachableSequencePatch,
+} from '../policy/sequence-reachability.js';
 import {
   applyLinkedinInviteSent,
   evaluateLinkedinConnectGate,
@@ -504,6 +510,74 @@ export const executeChannelStep = async ({
     assertRecordAccessForMutation({ listDir: String(listDir), recordId });
   }
 
+  // Reachability is a current delivery fact. Resolve the active contact before
+  // evaluating it so stale denormalized fields cannot keep an empty target active.
+  const hydrated = hydrateActiveContactOntoRecord({ db, record });
+  const reachableRecord = hydrated.record;
+  const currentSequenceState = String(reachableRecord.account_sequence_state || '').trim().toLowerCase();
+  if (currentSequenceState && currentSequenceState !== 'unreachable') {
+    const preReachabilityGate = shouldExecuteSequenceOutbound(reachableRecord, now, {
+      channel: String(channelHint || step?.config?.channel || '').trim(),
+      stepKind: String(step?.kind || '').trim().toLowerCase(),
+      taskType: String(step?.config?.task_type || step?.config?.taskType || '').trim(),
+      timeZone: sequence?.timezone,
+    });
+    if (!preReachabilityGate.execute) {
+      return {
+        status: 'skipped',
+        reason: `sequence_outbound_gated: ${preReachabilityGate.reason}`,
+        provider_id: '',
+        auto_skipped_steps: [],
+      };
+    }
+  }
+  const sequenceReachability = evaluateSequenceReachability({
+    record: reachableRecord,
+    contacts: listContactsByRecord({ db, recordId }),
+  });
+  if (sequenceReachability.applicable && !sequenceReachability.reachable) {
+    if (!dryRun) {
+      ensureRecordColumns({
+        db,
+        columns: [
+          'sequence_status',
+          'account_sequence_state',
+          'next_action_date',
+          'last_error',
+        ],
+      });
+      upsertRecord({
+        db,
+        row: {
+          ...reachableRecord,
+          ...unreachableSequencePatch(),
+        },
+      });
+    }
+    return {
+      status: 'skipped',
+      reason: 'sequence_unreachable:no_reachable_contact',
+      provider_id: '',
+      auto_skipped_steps: [],
+    };
+  }
+
+  const shouldReenter = sequenceReachability.applicable
+    && String(reachableRecord.account_sequence_state || '').trim().toLowerCase() === 'unreachable';
+  const sequenceRecord = shouldReenter
+    ? {
+      ...reachableRecord,
+      ...reenteredSequencePatch(),
+    }
+    : reachableRecord;
+  if (shouldReenter && !dryRun) {
+    ensureRecordColumns({
+      db,
+      columns: ['sequence_status', 'account_sequence_state', 'last_error'],
+    });
+    upsertRecord({ db, row: sequenceRecord });
+  }
+
   const usesAssetId = String(step?.uses_asset || '').trim();
   const assetForStep = usesAssetId ? findAsset({ db, rowId: recordId, stepId: usesAssetId }) : null;
 
@@ -516,7 +590,7 @@ export const executeChannelStep = async ({
   const earlyStepKind = String(step?.kind || '').trim().toLowerCase();
   const earlyTaskType = String(step?.config?.task_type || step?.config?.taskType || '').trim();
   const earlyChannel = String(channelHint || step?.config?.channel || '').trim();
-  const outboundGate = shouldExecuteSequenceOutbound(record, now, {
+  const outboundGate = shouldExecuteSequenceOutbound(sequenceRecord, now, {
     channel: earlyChannel || namedAssertChannel({
       channelHint,
       stepKind: earlyStepKind,
@@ -543,7 +617,7 @@ export const executeChannelStep = async ({
     channel: earlyChannel,
   });
   const readinessPermission = readinessChannel
-    ? readinessChannelPermission({ record, channel: readinessChannel })
+    ? readinessChannelPermission({ record: sequenceRecord, channel: readinessChannel })
     : { computed: false, permitted: true };
   if (readinessPermission.computed && !readinessPermission.permitted) {
     const reason = `channel_not_permitted:${readinessChannel}`;
@@ -577,7 +651,7 @@ export const executeChannelStep = async ({
       upsertRecord({
         db,
         row: {
-          ...record,
+          ...sequenceRecord,
           sequence_name: sequenceName,
           sequence_step: progression.sequenceStep,
           sequence_status: progression.completed ? 'completed' : 'active',
@@ -599,8 +673,7 @@ export const executeChannelStep = async ({
   // Resolve campaign active contact onto denormalized fields before args_map /
   // templates / Unipile read contact_email (etc.). Seniority-primary projection
   // alone can be stale after rotation.
-  const hydrated = hydrateActiveContactOntoRecord({ db, record });
-  const sendRecord = hydrated.record;
+  const sendRecord = sequenceRecord;
   const activeContactId = hydrated.active_contact_id;
 
   // Early step/channel identity for pre-claim gates and idempotency pins.

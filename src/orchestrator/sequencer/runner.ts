@@ -6,8 +6,10 @@ import {
   hasSuppression,
   inPlayWhere,
   insertChannelEvent,
+  listContactsByRecord,
   openGlobalSuppressionDb,
   openListDb,
+  ensureRecordColumns,
   upsertRecord,
 } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
@@ -49,6 +51,12 @@ import {
 import { applyContactRotation } from '../policy/contact-campaign.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
 import { evaluateTransmitterSuppression } from '../policy/transmitter-suppression.js';
+import { hydrateActiveContactOntoRecord } from '../policy/load-contacts.js';
+import {
+  evaluateSequenceReachability,
+  reenteredSequencePatch,
+  unreachableSequencePatch,
+} from '../policy/sequence-reachability.js';
 
 const parseExtra = (value) => {
   try {
@@ -246,6 +254,37 @@ const getLaunchDecision = ({ sequence, firstStep, today }) => {
   return { timing, launchBaseDate, filtered };
 };
 
+const reconcileSequenceReachability = ({ db, record }) => {
+  const hydrated = hydrateActiveContactOntoRecord({ db, record });
+  const targetRecord = hydrated.record;
+  const reachability = evaluateSequenceReachability({
+    record: targetRecord,
+    contacts: listContactsByRecord({ db, recordId: getRecordRowId(targetRecord) }),
+  });
+  if (!reachability.applicable || reachability.reachable) {
+    const shouldReenter = reachability.applicable
+      && String(targetRecord.account_sequence_state || '').trim().toLowerCase() === 'unreachable';
+    const reentered = shouldReenter
+      ? { ...targetRecord, ...reenteredSequencePatch() }
+      : targetRecord;
+    if (shouldReenter) {
+      ensureRecordColumns({ db, columns: ['sequence_status', 'account_sequence_state', 'last_error'] });
+      upsertRecord({ db, row: reentered });
+    }
+    return { reachable: true, record: reentered };
+  }
+
+  ensureRecordColumns({
+    db,
+    columns: ['sequence_status', 'account_sequence_state', 'next_action_date', 'last_error'],
+  });
+  upsertRecord({
+    db,
+    row: { ...targetRecord, ...unreachableSequencePatch() },
+  });
+  return { reachable: false, record: targetRecord };
+};
+
 /**
  * Collect in-play sequence records, then apply logical-time outbound gate.
  * `now` controls wait due_at / sequence_state blocks without mutating wall clock.
@@ -289,10 +328,18 @@ export const collectDueRecords = ({
     ORDER BY updated_at DESC
     ${fetchLimit > 0 ? 'LIMIT ?' : ''}
   `).all(...scope.params, ...(fetchLimit > 0 ? [fetchLimit] : []));
-  const due = (rows || []).filter((record: any) => shouldExecuteSequenceOutbound(record, now, {
-    today,
-    timeZone,
-  }).execute);
+  const due = (rows || []).filter((record: any) => {
+    const state = String(record.account_sequence_state || '').trim().toLowerCase();
+    if (state === 'unreachable') {
+      const hydrated = hydrateActiveContactOntoRecord({ db, record });
+      const reachability = evaluateSequenceReachability({
+        record: hydrated.record,
+        contacts: listContactsByRecord({ db, recordId: getRecordRowId(hydrated.record) }),
+      });
+      return reachability.applicable && reachability.reachable;
+    }
+    return shouldExecuteSequenceOutbound(record, now, { today, timeZone }).execute;
+  });
   const isolation = canaryConfig
     || (listDir ? loadCanaryConfig({ listDir }) : null);
   const scoped = isolation ? filterRecordsForCanary(due, isolation) : due;
@@ -1311,6 +1358,12 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
       for (const record of group.records) {
       const recordId = getRecordRowId(record);
       try {
+        const enrollment = reconcileSequenceReachability({ db, record });
+        if (!enrollment.reachable) {
+          summary.skipped += 1;
+          continue;
+        }
+        const enrolledRecord = enrollment.record;
         if (launchMode !== 'draft') {
           const launchDecision = getLaunchDecision({ sequence, firstStep, today: launchToday });
           if ('skip' in launchDecision.filtered) {
@@ -1325,7 +1378,7 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
             upsertRecord({
               db,
               row: {
-                ...record,
+                ...enrolledRecord,
                 sequence_name: activeSequenceName,
                 sequence_step: advancement.sequenceStep,
                 launched_at: toLaunchTimestamp(launchDecision.launchBaseDate),
@@ -1342,7 +1395,7 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
             upsertRecord({
               db,
               row: {
-                ...record,
+                ...enrolledRecord,
                 sequence_name: activeSequenceName,
                 next_action_date: launchDecision.filtered.date,
                 sequence_status: 'idle',
@@ -1354,7 +1407,7 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
           }
         }
 
-        const templateResolved = resolveStepTemplate({ config, step: firstStep, record }) || null;
+        const templateResolved = resolveStepTemplate({ config, step: firstStep, record: enrolledRecord }) || null;
         const executableStep = templateResolved
           ? {
             ...firstStep,
@@ -1378,7 +1431,7 @@ export const launchDraft = async ({ listDir, sequenceName = '', limit = 50 }) =>
           listName: config?.list?.name || '',
           toolCatalog,
           db,
-          record,
+          record: enrolledRecord,
           sequenceName: activeSequenceName,
           stepNumber: 1,
           step: {
@@ -1488,6 +1541,12 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
 
       for (const row of group.records) {
         try {
+          const enrollment = reconcileSequenceReachability({ db, record: row });
+          if (!enrollment.reachable) {
+            summary.skipped += 1;
+            continue;
+          }
+          const enrolledRow = enrollment.record;
           const readyDraft = launchIntent.uses_email
             ? db.prepare(`
               SELECT draft_id
@@ -1498,7 +1557,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
                 AND status = 'ready'
               ORDER BY updated_at DESC
               LIMIT 1
-            `).get(getRecordRowId(row), activeSequenceName)
+            `).get(getRecordRowId(enrolledRow), activeSequenceName)
             : null;
           if (launchIntent.uses_email && !readyDraft) {
             summary.skipped += 1;
@@ -1518,7 +1577,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
             upsertRecord({
               db,
               row: {
-                ...row,
+                ...enrolledRow,
                 sequence_name: activeSequenceName,
                 sequence_step: advancement.sequenceStep,
                 launched_at: toLaunchTimestamp(launchDecision.launchBaseDate),
@@ -1535,7 +1594,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
             upsertRecord({
               db,
               row: {
-                ...row,
+                ...enrolledRow,
                 sequence_name: activeSequenceName,
                 next_action_date: launchDecision.filtered.date,
                 sequence_status: 'idle',
@@ -1546,7 +1605,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
             continue;
           }
 
-          const templateResolved = resolveStepTemplate({ config, step: firstStep, record: row }) || null;
+          const templateResolved = resolveStepTemplate({ config, step: firstStep, record: enrolledRow }) || null;
           const executableStep = templateResolved
             ? {
               ...firstStep,
@@ -1570,7 +1629,7 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
             listName: config?.list?.name || '',
             toolCatalog,
             db,
-            record: row,
+            record: enrolledRow,
             sequenceName: activeSequenceName,
             stepNumber: 1,
             step: {
