@@ -44,6 +44,7 @@ sequences:
           tool:
             server: fake_smtp
             tools: [SEND_TEST]
+            effect: { class: human_contact, channel: email }
           output_map:
             message_id: message_id
             provider_id: provider_id
@@ -57,6 +58,7 @@ sequences:
           tool:
             server: fake_smtp
             tools: [SEND_TEST]
+            effect: { class: human_contact, channel: email }
 policy:
   version: tv-pipeline-v1
   forbidden_channels: [send_sms, visit, field_visit]
@@ -311,7 +313,11 @@ test('executeChannelStep success path persists next_action succession via produc
         action: 'tool_call',
         args: { subject: 'Approved subject', body: 'Approved body' },
         daily_cap: 999,
-        tool: { server: 'fake_smtp', tools: ['SEND_TEST'] },
+        tool: {
+          server: 'fake_smtp',
+          tools: ['SEND_TEST'],
+          effect: { class: 'human_contact', channel: 'email' },
+        },
         output_map: { message_id: 'message_id', provider_id: 'provider_id' },
         idempotency: { key_source: ['_row_id'], scope: 'list' },
       },
@@ -378,7 +384,11 @@ test('executeChannelStep success without prior next_action still installs one su
         action: 'tool_call',
         args: { subject: 'Approved subject', body: 'Approved body' },
         daily_cap: 999,
-        tool: { server: 'fake_smtp', tools: ['SEND_TEST'] },
+        tool: {
+          server: 'fake_smtp',
+          tools: ['SEND_TEST'],
+          effect: { class: 'human_contact', channel: 'email' },
+        },
         output_map: { message_id: 'message_id', provider_id: 'provider_id' },
         idempotency: { key_source: ['_row_id'], scope: 'list' },
       },
@@ -432,7 +442,11 @@ test('draft intent does not advance lifecycle or next_action', async () => {
       id: 'email_1',
       config: {
         action: 'tool_call',
-        tool: { server: 'fake_smtp', tools: ['SEND_TEST'] },
+        tool: {
+          server: 'fake_smtp',
+          tools: ['SEND_TEST'],
+          effect: { class: 'human_contact', channel: 'email' },
+        },
         args: {
           subject: 'Lifecycle review draft',
           body: 'This draft exists only to verify lifecycle succession behavior.',

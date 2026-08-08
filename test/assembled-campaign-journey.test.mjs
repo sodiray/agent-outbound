@@ -54,6 +54,7 @@ pipeline:
           tool:
             server: smtp
             tools: [SMTP_SEND]
+            effect: { class: human_contact, channel: email }
           args_map:
             to: contact_email
           args:
@@ -76,6 +77,7 @@ pipeline:
           tool:
             server: smtp
             tools: [SMTP_SEND]
+            effect: { class: human_contact, channel: email }
           args_map:
             to: contact_email
           args:
@@ -245,7 +247,11 @@ const email1Step = {
   draft_approval_required: true,
   config: {
     action: 'tool_call',
-    tool: { server: 'smtp', tools: ['SMTP_SEND'] },
+    tool: {
+      server: 'smtp',
+      tools: ['SMTP_SEND'],
+      effect: { class: 'human_contact', channel: 'email' },
+    },
     args_map: { to: 'contact_email' },
     args: {
       subject: 'Journey email 1',

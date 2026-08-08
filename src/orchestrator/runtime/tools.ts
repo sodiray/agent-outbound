@@ -6,11 +6,13 @@ import type { ProviderToolSchema, ToolProvider } from './providers/types.js';
 import { isCommandServerProvider } from '../lib/provider-registry.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { isBudgetExceededError } from './contract.js';
+import type { ToolEffectDeclaration } from '../policy/tool-effects.js';
 
 export type ToolSpec = {
   server?: string;
   toolkits?: string[];
   tools?: string[];
+  effect?: ToolEffectDeclaration;
 };
 
 export type ToolCatalogEntry = {

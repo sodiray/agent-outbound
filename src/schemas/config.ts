@@ -416,10 +416,16 @@ export const ProviderModelSchema = z.string().trim().superRefine((value, ctx) =>
   }
 });
 
+const ToolEffectSchema = z.object({
+  class: z.enum(['data_lookup', 'data_enrichment', 'human_contact']),
+  channel: z.string().trim().min(1).optional(),
+}).strict();
+
 export const ToolSpecSchema = z.object({
   server: z.string().default(''),
   toolkits: z.array(z.string()).default([]),
   tools: z.array(z.string()).default([]),
+  effect: ToolEffectSchema.optional(),
   list_tool: z.string().default(''),
   list: z.string().default(''),
   search: z.string().default(''),

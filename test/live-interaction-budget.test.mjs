@@ -82,7 +82,11 @@ const emailStep = ({ stepId, provider }) => ({
   id: stepId,
   config: {
     action: 'tool_call',
-    tool: { server: 'test_provider', tools: ['SEND'] },
+    tool: {
+      server: 'test_provider',
+      tools: ['SEND'],
+      effect: { class: 'human_contact', channel: 'email' },
+    },
     daily_cap: 999,
     args: { subject: 'Test', body: 'Test body' },
     output_map: { message_id: 'message_id', provider_id: 'message_id' },

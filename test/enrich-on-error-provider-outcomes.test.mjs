@@ -31,7 +31,11 @@ const toolStep = ({ onError = 'empty', error = new Error('HTTP 404 Not Found') }
   id: 'remote_lookup',
   action: 'tool_call',
   on_error: onError,
-  tool: { server: 'provider', tools: ['FETCH'] },
+  tool: {
+    server: 'provider',
+    tools: ['FETCH'],
+    effect: { class: 'data_lookup' },
+  },
   args_map: { url: 'website' },
   output_map: { site_text: 'markdown' },
   outputs: { site_text: { type: 'string' } },

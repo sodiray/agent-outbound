@@ -217,8 +217,16 @@ test('executeToolCallAction: injected __tryTool waterfall maps outputs (no inven
     listDir: '/tmp',
     stepId: 'email_find',
     stepConfig: {
-      tool: { server: 'hunter', tools: ['HUNTER_EMAIL_FINDER'] },
-      waterfall: [{ server: 'apollo', tools: ['APOLLO_PEOPLE_SEARCH'] }],
+      tool: {
+        server: 'hunter',
+        tools: ['HUNTER_EMAIL_FINDER'],
+        effect: { class: 'data_lookup' },
+      },
+      waterfall: [{
+        server: 'apollo',
+        tools: ['APOLLO_PEOPLE_SEARCH'],
+        effect: { class: 'data_lookup' },
+      }],
       output_map: { contact_email: 'email' },
       __tryTool: async (spec) => {
         if (spec.tools[0] === 'HUNTER_EMAIL_FINDER') {

@@ -2,6 +2,7 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { loadTools, type ToolSpec } from '../../runtime/tools.js';
 import { collectProviderToolUsage } from '../../runtime/providers/usage.js';
 import { isBudgetExceededError } from '../../runtime/contract.js';
+import { assertToolCallEffectsAllowed } from '../../policy/tool-effects.js';
 
 type ToolCallActionInput = {
   mcp?: Client | null;
@@ -272,6 +273,11 @@ export const executeToolCallAction = async ({
   if (chain.length === 0) {
     throw new Error(`tool_call:${stepId}: no tool resolved — check the step's tool / waterfall / fallback_tools against connected servers/toolkits.`);
   }
+  assertToolCallEffectsAllowed({
+    stepId,
+    toolSpecs: chain,
+    externalSend: stepConfig.external_send === true,
+  });
 
   const staticArgs = (stepConfig?.args && typeof stepConfig.args === 'object' ? stepConfig.args : {}) as Record<string, unknown>;
   const argsMap = (stepConfig?.args_map && typeof stepConfig.args_map === 'object' ? stepConfig.args_map : {}) as Record<string, string>;

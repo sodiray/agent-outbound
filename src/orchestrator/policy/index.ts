@@ -4,6 +4,7 @@
  */
 
 export * from './forbidden-channels.js';
+export * from './tool-effects.js';
 export * from './treatment.js';
 export * from './scoring.js';
 export * from './lifecycle.js';
