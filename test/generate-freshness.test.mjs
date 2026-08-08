@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,51 +9,36 @@ import { runGenerateStep } from '../dist/orchestrator/generate/runner.js';
 import { ensureRecordColumns, openListDb } from '../dist/orchestrator/runtime/db.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
 
-const runnerPath = join(process.cwd(), 'src/orchestrator/generate/runner.ts');
-
-test('generate retains enrichment dependency freshness wiring', () => {
-  const source = readFileSync(runnerPath, 'utf8');
-  assert.ok(source.includes('dependencyFieldsForStep(stepConfig)'));
-  assert.ok(source.includes('isEnrichFresh({ cached, stepConfig, depValues, force })'));
-  assert.ok(source.includes('writeStaleness({'));
-});
-
-test('business-evidence projection contributes to generate freshness', () => {
-  const source = readFileSync(runnerPath, 'utf8');
-  assert.ok(source.includes('business_evidence_context: buildBusinessEvidenceModelContext({ record }).data'));
-});
-
-test('pipeline config validates generic evidence controls', () => {
+test('pipeline config rejects the retired business-evidence projection', () => {
   const normalized = normalizeConfig({
     pipeline: [{
       kind: 'generate',
       id: 'market_content',
+      inputs: ['site_text'],
       context_projection: 'business_evidence',
       requires_evidence: true,
     }],
   });
-  assert.deepEqual(normalized.errors, []);
-  assert.equal(normalized.config.pipeline[0].context_projection, 'business_evidence');
-  assert.equal(normalized.config.pipeline[0].requires_evidence, true);
+  assert.match(normalized.error, /context_projection is replaced by declared inputs/i);
 });
 
-test('an arbitrary step opting into business-evidence projection receives the curated context', () => {
+test('a model stage receives only its declared evidence context', () => {
   const record = {
     business_name: 'Peak HVAC',
     site_text: 'Commercial HVAC maintenance and emergency repair.',
     fit_score: 88,
   };
-  const optedIn = modelContextForStep({
+  const declared = modelContextForStep({
     record,
-    stepConfig: { context_projection: 'business_evidence' },
+    stepConfig: { inputs: ['site_text'] },
   });
   const defaultContext = modelContextForStep({
     record,
     stepConfig: {},
   });
 
-  assert.equal(optedIn.data.site_text, record.site_text);
-  assert.equal(optedIn.data.fit_score, undefined);
+  assert.equal(declared.data.site_text, record.site_text);
+  assert.equal(declared.data.fit_score, undefined);
   assert.equal(defaultContext.data.site_text, undefined);
 });
 
@@ -80,7 +65,7 @@ test('an arbitrary evidence-gated step persists declared outputs', async () => {
       step: {
         id: 'content_for_any_market',
         kind: 'generate',
-        context_projection: 'business_evidence',
+        inputs: ['site_text'],
         requires_evidence: true,
         outputs: {
           preliminary_snapshot: { type: 'string' },
@@ -120,7 +105,6 @@ test('an arbitrary evidence-gated step refuses records with no business evidence
       step: {
         id: 'content_for_any_market',
         kind: 'generate',
-        context_projection: 'business_evidence',
         requires_evidence: true,
         outputs: {
           preliminary_snapshot: { type: 'string' },

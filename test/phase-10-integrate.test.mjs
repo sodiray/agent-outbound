@@ -158,7 +158,7 @@ test('TV config: policy.enforce_readiness true; treatment_assignment is policy_a
   assert.equal(treatment.action, 'policy_apply');
 });
 
-test('TV config validates via normalizeConfig and preserves enforce_readiness', () => {
+test('TV config reports its strict-input migration checklist and preserves enforce_readiness', () => {
   const raw = loadTvRaw();
   const normalized = normalizeConfig(raw, { listDir: TV_ROOT });
   const errors = Array.isArray(normalized.errors)
@@ -166,11 +166,8 @@ test('TV config validates via normalizeConfig and preserves enforce_readiness', 
     : normalized.error
       ? [normalized.error]
       : [];
-  assert.deepEqual(
-    errors,
-    [],
-    `normalizeConfig errors: ${JSON.stringify(errors)}`,
-  );
+  assert.ok(errors.some((error) => error.includes('pipeline.school_gate (filter)')));
+  assert.ok(errors.some((error) => error.includes('pipeline.franchise_profile (enrich) must declare at least one input')));
 
   // PolicySchema preserves readiness + rule versions + review gates (no strip).
   assert.equal(normalized.config.policy?.enforce_readiness, true);
@@ -196,11 +193,7 @@ test('TV config validates via normalizeConfig and preserves enforce_readiness', 
 
   // readConfig path (production config loader)
   const loaded = readConfig(TV_ROOT);
-  assert.deepEqual(
-    loaded.errors || [],
-    [],
-    `readConfig errors: ${JSON.stringify(loaded.errors)}`,
-  );
+  assert.ok((loaded.errors || []).some((error) => error.includes('pipeline.school_gate (filter)')));
   assert.equal(loaded.config.policy?.enforce_readiness, true);
   assert.equal(loaded.config.policy?.fit_rule_version, raw.policy?.fit_rule_version);
   assert.equal(

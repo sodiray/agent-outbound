@@ -20,6 +20,7 @@ test('named sequence reply_check overrides default while missing reply_check inh
     pipeline: [{
       kind: 'assign',
       id: 'route_sequence',
+      inputs: ['sequence_status'],
       target: 'sequence_name',
       fallback: 'default',
       rules: [
@@ -64,6 +65,7 @@ test('reply polling uses a named sequence reply_check and default inheritance', 
     pipeline: [{
       kind: 'assign',
       id: 'route_sequence',
+      inputs: ['sequence_status'],
       target: 'sequence_name',
       fallback: 'default',
       rules: [

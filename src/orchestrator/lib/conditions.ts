@@ -241,7 +241,6 @@ export const evaluateSemanticFilterBatches = async ({
           row,
           stepOutput: row,
           inputs: filter?.inputs || [],
-          identityFields,
           contextBudget,
           model: filter?.model || filter?.config?.model || '',
           aiConfig,
@@ -284,8 +283,8 @@ export const evaluateSemanticFilterBatches = async ({
             record: buildModelContext({
               record: row,
               inputs: filter?.inputs || [],
-              identityFields,
               budget: contextBudget,
+              strict: true,
             }).data,
           })),
         },

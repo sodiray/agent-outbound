@@ -21,10 +21,7 @@ import { getMcpClient } from '../runtime/mcp.js';
 import { emitActivity } from '../runtime/activity.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
-import {
-  buildBusinessEvidenceModelContext,
-  businessEvidenceIsAvailable,
-} from '../lib/model-context.js';
+import { businessEvidenceIsAvailable } from '../lib/model-context.js';
 import {
   buildOutputZodSchema,
   dependencyFieldsForStep,
@@ -269,11 +266,7 @@ const dependencyValuesFor = ({ stepConfig, record }: {
   for (const dep of dependencyFieldsFor(stepConfig)) {
     depValues[String(dep)] = dependencyValueForRecord({ dep, record, extra });
   }
-  if (stepConfig.context_projection !== 'business_evidence') return depValues;
-  return {
-    ...depValues,
-    business_evidence_context: buildBusinessEvidenceModelContext({ record }).data,
-  };
+  return depValues;
 };
 
 const persistAsset = ({

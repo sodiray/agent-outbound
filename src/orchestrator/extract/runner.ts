@@ -1,6 +1,7 @@
 import { ensureRecordColumns, upsertRecord } from '../runtime/db.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
 import { getRecordRowId } from '../lib/record.js';
+import { stageInputRecord } from '../lib/stage-inputs.js';
 
 export const EXTRACTOR_NAMES = ['email', 'phone', 'url'] as const;
 
@@ -187,6 +188,7 @@ export const extractFromRecord = ({ step, record }: { step: ExtractStep; record:
   const config = step.config && typeof step.config === 'object' && !Array.isArray(step.config)
     ? { ...step, ...(step.config as Record<string, unknown>) }
     : step;
+  const inputs = stageInputRecord({ step: config, record });
   const fields = sourceFieldsFor(config.from);
   const extractor = text(config.using) as ExtractorName;
   const select = text(config.select || 'first') as ExtractSelect;
@@ -194,16 +196,16 @@ export const extractFromRecord = ({ step, record }: { step: ExtractStep; record:
     ? [...DEFAULT_EMAIL_EXCLUSIONS, ...exclusionsFor(config.exclude)]
     : exclusionsFor(config.exclude);
   const source = fields
-    .map((field, sourceIndex) => ({ field, sourceIndex, value: text(record[field]) }))
+    .map((field, sourceIndex) => ({ field, sourceIndex, value: text(inputs[field]) }))
     .find((entry) => orderedMatches({
       candidates: candidatesFor({ source: entry.value, sourceIndex: entry.sourceIndex, extractor }),
-      record,
+      record: inputs,
       exclusions,
     }).length > 0);
   const matches = source
     ? orderedMatches({
       candidates: candidatesFor({ source: source.value, sourceIndex: source.sourceIndex, extractor }),
-      record,
+      record: inputs,
       exclusions,
     })
     : [];

@@ -4,6 +4,7 @@ import { collectProviderToolUsage } from '../../runtime/providers/usage.js';
 import { isBudgetExceededError } from '../../runtime/contract.js';
 import { assertToolCallEffectsAllowed } from '../../policy/tool-effects.js';
 import { readConfig } from '../../lib/config.js';
+import { stageInputRecord } from '../../lib/stage-inputs.js';
 
 type ToolCallActionInput = {
   mcp?: Client | null;
@@ -286,9 +287,13 @@ export const executeToolCallAction = async ({
 
   const staticArgs = (stepConfig?.args && typeof stepConfig.args === 'object' ? stepConfig.args : {}) as Record<string, unknown>;
   const argsMap = (stepConfig?.args_map && typeof stepConfig.args_map === 'object' ? stepConfig.args_map : {}) as Record<string, string>;
+  const inputs = stageInputRecord({
+    step: { id: stepId, kind: 'enrich', ...stepConfig },
+    record,
+  });
   const args: Record<string, unknown> = { ...staticArgs };
   for (const [argName, fieldName] of Object.entries(argsMap)) {
-    const value = record?.[String(fieldName || '').trim()];
+    const value = inputs[String(fieldName || '').trim()];
     if (!isBlankValue(value)) args[argName] = value;
   }
 

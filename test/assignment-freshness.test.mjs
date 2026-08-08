@@ -20,6 +20,7 @@ sequences:
 pipeline:
   - kind: assign
     id: route_from_signal
+    inputs: [sequence_status, routing_signal]
     target: sequence_name
     fallback: holding_route
     rules:

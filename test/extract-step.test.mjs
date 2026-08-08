@@ -21,6 +21,7 @@ const step = ({
   id: 'site_email_extract',
   depends_on: ['site_scrape'],
   from,
+  inputs: [...new Set([...(Array.isArray(from) ? from : [from]), 'domain', 'website'])],
   using: 'email',
   select,
   exclude,
@@ -53,6 +54,7 @@ test('extract accepts a typed, model-free email configuration', () => {
   const siteScrape = {
     kind: 'enrich',
     id: 'site_scrape',
+    inputs: ['business_name'],
     outputs: { site_text: { type: 'string', description: 'Scraped site text.' } },
   };
   const config = normalizeConfig({ pipeline: [siteScrape, step()] });

@@ -17,11 +17,7 @@ import { formatErrorMessage } from '../../lib/error-format.js';
 import { attachProviderToolUsage, providerToolUsageFromError } from '../../runtime/providers/usage.js';
 import { isBudgetExceededError } from '../../runtime/contract.js';
 import { readConfig } from '../../lib/config.js';
-import {
-  buildBusinessEvidenceModelContext,
-  buildModelContext,
-  withModelContextTelemetry,
-} from '../../lib/model-context.js';
+import { buildModelContext, withModelContextTelemetry } from '../../lib/model-context.js';
 
 const promptTemplate = readFileSync(new URL('prompt.md', import.meta.url), 'utf8');
 
@@ -42,22 +38,17 @@ const buildExecuteStepResultSchema = (outputSchema?: z.ZodTypeAny) => {
 export const modelContextForStep = ({
   record,
   stepConfig,
-  identityFields,
   budget,
 }: {
   record: unknown;
   stepConfig: Record<string, unknown>;
-  identityFields?: unknown;
   budget?: unknown;
 }) => {
-  if (stepConfig.context_projection === 'business_evidence') {
-    return buildBusinessEvidenceModelContext({ record, budget });
-  }
   return buildModelContext({
     record,
     inputs: stepConfig.inputs || [],
-    identityFields,
     budget,
+    strict: true,
   });
 };
 
@@ -322,7 +313,6 @@ export const executeStepAction = async ({
   const modelContext = modelContextForStep({
     record,
     stepConfig,
-    identityFields: config?.source?.identity || [],
     budget: config?.model_context,
   });
   const systemPrompt = renderPromptTemplate({

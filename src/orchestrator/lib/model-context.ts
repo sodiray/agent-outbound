@@ -123,6 +123,26 @@ const normalizeFieldNames = (fields: unknown): string[] => (
     : []
 );
 
+const inputEntries = (inputs: unknown): Array<{ name: string; from?: string; value?: unknown }> => {
+  if (Array.isArray(inputs)) return normalizeFieldNames(inputs).map((field) => ({ name: field, from: field }));
+  if (!isRecord(inputs)) return [];
+  return Object.entries(inputs).reduce<Array<{ name: string; from?: string; value?: unknown }>>((entries, [name, definition]) => {
+    const entry = isRecord(definition) ? definition : {};
+    const from = String(entry.from || '').trim();
+    if (from) return [...entries, { name, from }];
+    if (Object.prototype.hasOwnProperty.call(entry, 'value')) return [...entries, { name, value: entry.value }];
+    return entries;
+  }, []);
+};
+
+const valueAtPath = (source: Record<string, unknown>, path: string): unknown => (
+  path.split('.').filter(Boolean).reduce<unknown>((current, segment) => (
+    current && typeof current === 'object' && !Array.isArray(current)
+      ? (current as Record<string, unknown>)[segment]
+      : undefined
+  ), source)
+);
+
 const observationsFrom = (value: unknown): Array<Record<string, unknown>> => {
   const parsed = jsonValue(value);
   const observations = Array.isArray(parsed)
@@ -197,23 +217,30 @@ export const buildModelContext = ({
   inputs = [],
   identityFields = [],
   budget,
+  strict = false,
 }: {
   record: unknown;
   inputs?: unknown;
   identityFields?: unknown;
   budget?: unknown;
+  strict?: boolean;
 }): ModelContext => {
   const source = isRecord(record) ? record : {};
-  const allowedFields = normalizeFieldNames([
-    ...DEFAULT_IDENTITY_FIELDS,
-    ...normalizeFieldNames(identityFields),
-    ...normalizeFieldNames(inputs),
-  ]);
-  const data = allowedFields.reduce<Record<string, unknown>>((context, field) => {
-    if (source[field] === undefined) return context;
-    return { ...context, [field]: source[field] };
+  const implicitFields = strict
+    ? []
+    : normalizeFieldNames([...DEFAULT_IDENTITY_FIELDS, ...normalizeFieldNames(identityFields)]);
+  const entries: Array<{ name: string; from?: string; value?: unknown }> = [
+    ...implicitFields.map((field) => ({ name: field, from: field })),
+    ...inputEntries(inputs),
+  ];
+  const data = entries.reduce<Record<string, unknown>>((context, entry) => {
+    const value = entry.from ? valueAtPath(source, entry.from) : entry.value;
+    if (value === undefined) return context;
+    return { ...context, [entry.name]: value };
   }, {});
-  const observations = observationsFrom(source.observations_json);
+  const observations = strict
+    ? (Object.prototype.hasOwnProperty.call(data, 'observations_json') ? observationsFrom(data.observations_json) : [])
+    : observationsFrom(source.observations_json);
   const withObservations = observations.length > 0
     ? { ...data, observations_json: observations }
     : data;

@@ -19,6 +19,7 @@ ai:
 pipeline:
   - kind: assign
     id: route_nested
+    inputs: [sequence_status]
     target: pipeline_name
     fallback: nested
   - kind: pipeline
@@ -27,10 +28,12 @@ pipeline:
     steps:
       - kind: enrich
         id: lookup
+        inputs: [business_name]
         outputs:
           lookup_result: { type: string, description: Lookup result }
       - kind: generate
         id: draft
+        inputs: [business_name]
         outputs:
           draft_result: { type: string, description: Draft result }
 sequences:
@@ -75,6 +78,7 @@ ai:
 pipeline:
   - kind: assign
     id: route_nested
+    inputs: [sequence_status]
     target: pipeline_name
     fallback: nested
   - kind: pipeline

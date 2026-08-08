@@ -8,6 +8,7 @@ import {
 import { validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib/pipeline-graph.js';
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 import { findProhibitedSteps } from '../orchestrator/policy/pipeline-prohibitions.js';
+import { stageInputDiagnosticMessages } from '../orchestrator/lib/stage-inputs.js';
 
 export const DEFAULT_SCORE_MIN_COVERAGE = 0.5;
 
@@ -441,6 +442,24 @@ const ToolCatalogEntrySchema = z.object({
   parameters: z.any().default({}),
 }).partial().default({});
 
+const StageInputDefinitionSchema = z.object({
+  from: z.string().trim().min(1).optional(),
+  value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+  required: z.boolean().default(true),
+}).strict().superRefine((value, ctx) => {
+  const sources = Number(Boolean(value.from)) + Number(value.value !== undefined);
+  if (sources === 1) return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    message: 'stage input must declare exactly one of from or value.',
+  });
+});
+
+const StageInputsSchema = z.union([
+  z.array(z.string().trim().min(1)),
+  z.record(StageInputDefinitionSchema),
+]).default([]);
+
 export const StepConfigSchema = z.object({
   description: z.string().default(''),
   id: z.string().default(''),
@@ -477,9 +496,9 @@ export const StepConfigSchema = z.object({
   max_results: z.coerce.number().int().min(1).max(5000).optional(),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(), // Deprecated alias; prefer config.outputs.
-  // The only non-identity record scalars visible to a model for this step.
+  // The only record values visible to a model for this step.
   // New database columns stay invisible until listed here.
-  inputs: z.array(z.string()).default([]),
+  inputs: StageInputsSchema,
   // Optional named projection for model steps that need a curated record view.
   context_projection: ModelContextProjectionSchema.optional(),
   // Refuse model generation when the required evidence class is absent.
@@ -773,7 +792,7 @@ const PipelineFilterStepSchema = z.object({
   on_fail: z.enum(['drop', 'flag']).default('drop'),
   model: ProviderModelSchema.optional(),
   condition: z.string().default(''),
-  inputs: z.array(z.string()).default([]),
+  inputs: StageInputsSchema,
   // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
   reasoning: z.boolean().optional(),
 }).partial({ description: true, depends_on: true, runs_after: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
@@ -788,7 +807,7 @@ const PipelineAssignRuleSchema = z.object({
   description: z.string().default(''),
   condition: z.string().default(''),
   model: ProviderModelSchema.optional(),
-  inputs: z.array(z.string()).default([]),
+  inputs: StageInputsSchema,
   reasoning: z.boolean().optional(),
 }).partial({ id: true, type: true, match: true, conditions: true, description: true, condition: true, model: true, reasoning: true, inputs: true });
 
@@ -801,6 +820,7 @@ const PipelineAssignStepSchema = z.object({
   target: z.enum(['sequence_name', 'pipeline_name']),
   fallback: z.string().min(1),
   rules: z.array(PipelineAssignRuleSchema).default([]),
+  inputs: StageInputsSchema,
   batch_size: z.coerce.number().int().min(1).max(200).default(10),
   ...PipelineWhenFields,
 }).partial({ description: true, depends_on: true, runs_after: true, rules: true, batch_size: true });
@@ -813,6 +833,7 @@ const PipelineReviewStepSchema = z.object({
   runs_after: PipelineFilterStepSchema.shape.runs_after,
   label: z.string().default(''),
   fields: z.array(z.string()).default([]),
+  inputs: StageInputsSchema,
   ...PipelineWhenFields,
 });
 
@@ -848,7 +869,7 @@ const PipelineEnrichmentStepSchema = z.object({
   output_map: z.record(z.string()).default({}),
   outputs: z.record(EnrichmentOutputDefSchema).default({}),
   columns: z.record(z.string()).optional(),
-  inputs: z.array(z.string()).default([]),
+  inputs: StageInputsSchema,
   on_error: z.enum(['fail', 'empty']).default('fail'),
   ...PipelineWhenFields,
   prompt_file: z.string().default(''),
@@ -906,6 +927,7 @@ const PipelineExtractStepSchema = z.object({
   // Exclusions are literal substrings by default. `*` enables a safe glob,
   // never a user-supplied regular expression.
   exclude: z.array(z.string().min(1)).default([]),
+  inputs: StageInputsSchema,
   outputs: z.record(ExtractOutputDefSchema),
   ...PipelineWhenFields,
 }).strict();
@@ -996,6 +1018,7 @@ const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
     .refine((value) => Number(value.slice(0, -1)) > 0, 'wait.after must be greater than zero.'),
   working_days: WorkingDaysSchema.default([...SEQUENCE_WORKING_DAY_VALUES]),
   non_working_day_policy: z.enum(NON_WORKING_DAY_POLICY_VALUES).default('shift_forward'),
+  inputs: StageInputsSchema,
   ...PipelineWhenFields,
 });
 
@@ -1021,6 +1044,7 @@ const PipelineExternalStepFields = {
   uses_asset: z.string().optional(),
   draft_approval_required: z.boolean().optional(),
   review: ReviewPresentationSchema,
+  inputs: StageInputsSchema,
   config: ExternalStepConfigSchema.default({}),
   ...PipelineWhenFields,
 };
@@ -1047,6 +1071,7 @@ const PipelineManualTaskStepSchema = PipelineSequenceStepBaseSchema.extend({
   kind: z.literal('manual_task'),
   side_effecting: z.boolean().default(false),
   review: ReviewPresentationSchema,
+  inputs: StageInputsSchema,
   config: ExternalStepConfigSchema.default({}),
   ...PipelineWhenFields,
 });
@@ -2363,12 +2388,25 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
   const optOutErrors = inboundCapable && !optOutConfigured
     ? ['Inbound-capable pipelines must declare reply_check.classifier (model, prompt, and output schema).']
     : [];
-  const errors = [...new Set([...graph.errors, ...router.errors, ...prohibitionErrors, ...optOutErrors])];
+  const stageInputs = stageInputDiagnosticMessages(config, options);
+  const errors = [...new Set([
+    ...graph.errors,
+    ...router.errors,
+    ...prohibitionErrors,
+    ...optOutErrors,
+    ...stageInputs.errors,
+  ])];
 
   return {
     error: [...errors, ...unknownErrors].join('\n'),
     errors: [...new Set([...errors, ...unknownErrors])],
-    warnings: [...new Set([...graph.warnings, ...router.warnings, ...territoryWarnings, ...unknownWarnings])],
+    warnings: [...new Set([
+      ...graph.warnings,
+      ...router.warnings,
+      ...territoryWarnings,
+      ...unknownWarnings,
+      ...stageInputs.warnings,
+    ])],
     config,
   };
 };

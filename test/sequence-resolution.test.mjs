@@ -16,6 +16,7 @@ ai:
 pipeline:
   - kind: assign
     id: route_campaign
+    inputs: [sequence_status]
     target: pipeline_name
     fallback: tier_a
   - kind: pipeline

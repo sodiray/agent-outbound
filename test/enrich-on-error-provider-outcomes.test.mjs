@@ -30,6 +30,7 @@ const toolStep = ({ onError = 'empty', error = new Error('HTTP 404 Not Found') }
   kind: 'enrich',
   id: 'remote_lookup',
   action: 'tool_call',
+  inputs: ['website'],
   on_error: onError,
   tool: {
     server: 'provider',

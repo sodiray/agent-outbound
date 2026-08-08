@@ -19,6 +19,7 @@ import {
   whenPredicateForStep,
 } from '../lib/step-when.js';
 import { executePipelineSequenceAction } from './sequence-step-runtime.js';
+import { stageInputRecord } from '../lib/stage-inputs.js';
 
 export type StepExecutionOutcome = {
   passed: boolean;
@@ -229,7 +230,7 @@ const executeFieldCheckBatch = async (
     const recordId = getRecordRowId(row);
     try {
       outcomes.set(recordId, outcomeFor(evaluateFieldCheckGroup({
-        row,
+        row: stageInputRecord({ step, record: row }),
         conditions: resolvedConditions,
         match: step.match || 'all',
         listDir: ctx.listDir,
@@ -959,7 +960,11 @@ export const executeStepBatch = async (
   const matchingRows: Array<Record<string, unknown>> = [];
   const skippedOutcomes = new Map<string, StepExecutionOutcome>();
   rows.forEach((row) => {
-    const whenOutcome = shouldRunForRecord({ record: row, predicate, listDir: ctx.listDir });
+    const whenOutcome = shouldRunForRecord({
+      record: stageInputRecord({ step, record: row }),
+      predicate,
+      listDir: ctx.listDir,
+    });
     if (whenOutcome.passed) {
       matchingRows.push(row);
       return;

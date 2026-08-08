@@ -22,7 +22,7 @@ const composeStep = {
   id: 'compose_copy',
   model: 'anthropic/claude-haiku-4-5-20251001',
   structure: { message: 'One factual sentence.' },
-  inputs: { account: { from: 'business_name' } },
+  inputs: { account: { from: 'business_name' }, tier: { from: 'tier' } },
   length: { max_words: 10 },
   outputs: { message: { type: 'string', description: 'Message.' } },
   when: whenTierA,
@@ -32,6 +32,7 @@ const extractStep = {
   kind: 'extract',
   id: 'extract_email',
   from: 'site_text',
+  inputs: ['tier', 'site_text', 'domain', 'website'],
   using: 'email',
   outputs: { discovered_email: { type: 'string', description: 'Email.' } },
   when: whenTierA,
@@ -42,19 +43,20 @@ const assignStep = {
   id: 'assign_route',
   target: 'sequence_name',
   fallback: 'holding',
+  inputs: ['tier', 'sequence_status'],
   rules: [{ sequence: 'qualified', conditions: [{ field: 'tier', operator: 'eq', value: 'A' }] }],
   when: whenTierA,
 };
 
-const waitStep = { kind: 'wait', id: 'wait_one_day', after: '1d', when: whenTierA };
-const manualTaskStep = { kind: 'manual_task', id: 'phone_1', config: { task_type: 'human_phone' }, when: whenTierA };
-const sendEmailStep = { kind: 'send_email', id: 'email_1', side_effecting: true, when: whenTierA };
-const linkedinStep = { kind: 'linkedin_connect', id: 'linkedin_1', side_effecting: true, when: whenTierA };
+const waitStep = { kind: 'wait', id: 'wait_one_day', after: '1d', inputs: ['tier'], when: whenTierA };
+const manualTaskStep = { kind: 'manual_task', id: 'phone_1', config: { task_type: 'human_phone' }, inputs: ['tier'], when: whenTierA };
+const sendEmailStep = { kind: 'send_email', id: 'email_1', side_effecting: true, inputs: ['tier'], when: whenTierA };
+const linkedinStep = { kind: 'linkedin_connect', id: 'linkedin_1', side_effecting: true, inputs: ['tier'], when: whenTierA };
 
 const supportedSteps = [
-  { kind: 'enrich', id: 'enrich_one', when: whenTierA },
-  { kind: 'generate', id: 'generate_one', when: whenTierA },
-  { kind: 'review', id: 'review_one', when: whenTierA },
+  { kind: 'enrich', id: 'enrich_one', inputs: ['tier'], when: whenTierA },
+  { kind: 'generate', id: 'generate_one', inputs: ['tier'], when: whenTierA },
+  { kind: 'review', id: 'review_one', inputs: ['tier'], when: whenTierA },
   composeStep,
   extractStep,
   assignStep,
@@ -180,8 +182,8 @@ test('enrich, generate, and newly gated steps report the identical when-skip sha
     const skipped = records[1];
     const expected = { ...expectedSkip(skipped, root), errored: undefined };
     const cases = [
-      { kind: 'enrich', id: 'enrich_gate', when: whenTierA },
-      { kind: 'generate', id: 'generate_gate', when: whenTierA },
+      { kind: 'enrich', id: 'enrich_gate', inputs: ['tier'], when: whenTierA },
+      { kind: 'generate', id: 'generate_gate', inputs: ['tier'], when: whenTierA },
       extractStep,
       waitStep,
     ];

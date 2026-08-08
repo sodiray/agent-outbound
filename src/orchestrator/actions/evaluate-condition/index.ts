@@ -10,13 +10,12 @@ export const evaluateConditionAction = async ({
   row,
   stepOutput,
   inputs = [],
-  identityFields = [],
   contextBudget = undefined,
   model = '',
   aiConfig = {},
 }) => {
   const ctx = { ...(row || {}), ...(stepOutput || {}) };
-  const modelContext = buildModelContext({ record: ctx, inputs, identityFields, budget: contextBudget });
+  const modelContext = buildModelContext({ record: ctx, inputs, budget: contextBudget, strict: true });
 
   const prompt = promptTemplate
     .replace('{{condition_text}}', String(conditionText || ''))

@@ -25,6 +25,7 @@ sequences: { default: { steps: [] } }
 pipeline:
   - kind: assign
     id: route_pipeline
+    inputs: [sequence_status]
     target: pipeline_name
     fallback: nested
   - kind: pipeline
@@ -33,9 +34,11 @@ pipeline:
     steps:
       - kind: enrich
         id: lookup
+        inputs: [business_name]
         outputs: { nested_lookup: { type: string, description: Lookup result } }
       - kind: generate
         id: draft
+        inputs: [business_name]
         outputs: { nested_draft: { type: string, description: Draft result } }
 `);
   return listDir;
