@@ -50,6 +50,7 @@ import {
   writeStaleness,
 } from '../enrichment/runner.js';
 import { skippedWhenOutcome } from '../lib/step-when.js';
+import { flattenPipelineSteps } from '../lib/subpipelines.js';
 
 type DbStatement = {
   get: (...params: unknown[]) => unknown;
@@ -650,7 +651,7 @@ export const runGeneration = async ({ listDir, stepId = '', where = '', limit = 
   }
   assertPhaseModelReferences({ config, phase: 'pipeline' });
 
-  const generateSteps = (Array.isArray(config.pipeline) ? config.pipeline : []).filter((step: GenerateStepInput) => step?.kind === 'generate');
+  const generateSteps = flattenPipelineSteps(config).filter((step: GenerateStepInput) => step?.kind === 'generate');
   const selectedSteps = stepId
     ? generateSteps.filter((step: GenerateStepInput) => String(step?.id || '').trim() === String(stepId).trim())
     : generateSteps;

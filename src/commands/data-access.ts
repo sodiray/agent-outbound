@@ -8,6 +8,7 @@ import { leadStatus } from '../orchestrator/runtime/status.js';
 import { listCommandDefinitions } from '../orchestrator/runtime/describe.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
+import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
 
 const DEFAULT_QUERY_LIMIT = 500;
 const MAX_QUERY_LIMIT = 5000;
@@ -147,7 +148,7 @@ const resolveProjectionExpression = ({ token, config }: { token: string; config:
   const dotParts = normalized.split('.');
   if (dotParts.length === 2) {
     const [stepId, fieldName] = dotParts;
-    const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
+    const pipeline = flattenPipelineSteps(config);
     const matched = pipeline.find((step: any) => String(step?.id || '').trim() === stepId && String(step?.kind || '') === 'enrich');
     if (matched && fieldName) {
       return `${fieldName} AS ${stepId}_${fieldName}`;
@@ -158,7 +159,7 @@ const resolveProjectionExpression = ({ token, config }: { token: string; config:
 
 const extractConfiguredColumnDescriptions = (config: any) => {
   const descriptions: Record<string, string> = {};
-  const pipeline = Array.isArray(config?.pipeline) ? config.pipeline : [];
+  const pipeline = flattenPipelineSteps(config);
   for (const step of pipeline.filter((item: any) => String(item?.kind || '') === 'enrich')) {
     const stepId = String(step?.id || '').trim();
     const outputs = step?.outputs && typeof step.outputs === 'object' ? step.outputs : {};

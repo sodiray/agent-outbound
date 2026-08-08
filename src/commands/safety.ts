@@ -13,6 +13,7 @@ import { assertConfigModelReferences } from '../orchestrator/lib/model-validatio
 import { reviewStageFieldWarnings } from '../orchestrator/pipeline/review.js';
 import { normalizeConfig } from '../schemas/config.js';
 import { inspectFieldCheckValueFiles } from '../orchestrator/lib/field-check-values.js';
+import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
 
 type SnapshotManifest = {
   id: string;
@@ -252,7 +253,7 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
   }
 
   const outputOwners = new Map<string, string>();
-  const enrichSteps = (Array.isArray(config?.pipeline) ? config.pipeline : []).filter((step: any) => String(step?.kind || '') === 'enrich');
+  const enrichSteps = flattenPipelineSteps(config).filter((step: any) => String(step?.kind || '') === 'enrich');
   for (const step of enrichSteps) {
     const stepId = String(step?.id || '').trim();
     const outputs = step?.outputs && typeof step.outputs === 'object' ? step.outputs : {};
@@ -289,7 +290,7 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
 export const recordRevertStepCommand = ({ list, rowId, stepId }: { list: string; rowId: string; stepId: string }) => {
   const listDir = resolveListDir(list);
   const { config } = readConfig(listDir);
-  const step: any = (Array.isArray(config?.pipeline) ? config.pipeline : []).find((item: any) => String(item?.id || '').trim() === String(stepId || '').trim() && String(item?.kind || '') === 'enrich');
+  const step: any = flattenPipelineSteps(config).find((item: any) => String(item?.id || '').trim() === String(stepId || '').trim() && String(item?.kind || '') === 'enrich');
   if (!step) {
     throw new AgentOutboundError({
       code: 'NOT_FOUND',

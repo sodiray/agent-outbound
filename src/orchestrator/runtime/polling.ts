@@ -17,6 +17,11 @@ import { processBounceEvent } from './bounce-process.js';
 import { fetchInboxMessages } from './imap-client.js';
 import { processInboundEmail } from './inbound-email.js';
 import { loadMailboxesCatalog, resolveMailboxCredentials } from '../lib/mailboxes.js';
+import {
+  replyCheckSequenceForRecord,
+  replyCheckSequenceNames,
+  resolveReplyCheck,
+} from '../lib/reply-check.js';
 
 type PollContext = {
   mcp: Client;
@@ -185,40 +190,50 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
   } = await import('../policy/canary-isolation.js');
   assertListAccessForMutation(listDir);
   const canaryConfig = loadCanaryConfig({ listDir });
-  const sequenceConfig = config?.sequences?.default || {};
-  const replyCheck = sequenceConfig?.reply_check || {};
-  const toolSpec = replyCheck?.tool || {};
-  const listTool = String(
-    toolSpec?.list_tool
-      || toolSpec?.list
-      || (Array.isArray(toolSpec?.tools) ? toolSpec.tools[0] : '')
-      || 'GMAIL_LIST_MESSAGES',
-  );
+  const summary = { replied: 0, engaged: 0, opted_out: 0, scanned: 0, errors: [] as string[] };
+  const replyCheckGroups = replyCheckSequenceNames({ config }).reduce((groups, sequenceName) => {
+    const replyCheck = resolveReplyCheck({ config, sequenceName });
+    const key = JSON.stringify(replyCheck);
+    const group = groups.get(key) || { replyCheck, sequenceNames: new Set<string>() };
+    group.sequenceNames.add(sequenceName);
+    groups.set(key, group);
+    return groups;
+  }, new Map<string, { replyCheck: Record<string, unknown>; sequenceNames: Set<string> }>());
+  for (const { replyCheck, sequenceNames } of replyCheckGroups.values()) {
+    const toolSpec = replyCheck.tool && typeof replyCheck.tool === 'object'
+      ? replyCheck.tool as Record<string, unknown>
+      : {};
+    const listTool = String(
+      toolSpec.list_tool
+        || toolSpec.list
+        || (Array.isArray(toolSpec.tools) ? toolSpec.tools[0] : '')
+        || 'GMAIL_LIST_MESSAGES',
+    );
+    const lookbackMinutes = Number(replyCheck.lookback_minutes || config?.watch?.poll_replies_minutes || 60);
+    const since = determineSince(db, lookbackMinutes);
+    const sinceUnix = Math.floor(since.getTime() / 1000);
+    const maxResults = Number(replyCheck.max_results || 100);
 
-  const lookbackMinutes = Number(replyCheck?.lookback_minutes || config?.watch?.poll_replies_minutes || 60);
-  const since = determineSince(db, lookbackMinutes);
-  const sinceUnix = Math.floor(since.getTime() / 1000);
-  const maxResults = Number(replyCheck?.max_results || 100);
+    emitActivity({ event: 'poll_start', phase: 'replies', sequences: [...sequenceNames], since: since.toISOString(), tool: listTool });
 
-  emitActivity({ event: 'poll_start', phase: 'replies', since: since.toISOString(), tool: listTool });
+    let rawResult: any;
+    try {
+      rawResult = await executeComposioTool(mcp, listTool, {
+        query: `after:${sinceUnix} in:inbox`,
+        q: `after:${sinceUnix} in:inbox`,
+        max_results: maxResults,
+        maxResults,
+      });
+    } catch (error) {
+      const message = String((error as any)?.message || error);
+      emitActivity({ event: 'poll_error', phase: 'replies', sequences: [...sequenceNames], error: message });
+      summary.errors.push(message);
+      continue;
+    }
 
-  let rawResult: any;
-  try {
-    rawResult = await executeComposioTool(mcp, listTool, {
-      query: `after:${sinceUnix} in:inbox`,
-      q: `after:${sinceUnix} in:inbox`,
-      max_results: maxResults,
-      maxResults,
-    });
-  } catch (error) {
-    emitActivity({ event: 'poll_error', phase: 'replies', error: String((error as any)?.message || error) });
-    return { replied: 0, engaged: 0, opted_out: 0, scanned: 0, errors: [String((error as any)?.message || error)] };
-  }
-
-  const messages = asArray(rawResult);
-  const summary = { replied: 0, engaged: 0, opted_out: 0, scanned: messages.length, errors: [] as string[] };
-
-  for (const message of messages) {
+    const messages = asArray(rawResult);
+    summary.scanned += messages.length;
+    for (const message of messages) {
     try {
       const threadId = extractThreadId(message);
       const messageId = extractMessageId(message);
@@ -227,6 +242,7 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
 
       const record = findRecordByThreadId(db, threadId);
       if (!record) continue;
+      if (!sequenceNames.has(replyCheckSequenceForRecord({ config, record }))) continue;
       if (filterRecordsForCanary([record], canaryConfig).length === 0) continue;
 
       const recordId = getRecordRowId(record);
@@ -246,7 +262,7 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
           messageId,
           threadId,
           replyAt,
-          model: config?.sequences?.default?.reply_check?.model || '',
+          model: String(replyCheck.model || ''),
           aiConfig: config?.ai || {},
         });
       } catch (err) {
@@ -283,6 +299,7 @@ export const runReplyPoll = async ({ mcp, listDir, db, globalSuppressionDb, conf
       if (isBudgetExceededError(error)) throw error;
       summary.errors.push(String((error as any)?.message || error));
     }
+  }
   }
 
   emitActivity({

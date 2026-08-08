@@ -11,7 +11,7 @@ import { getMcpClient } from '../runtime/mcp.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
-import { stepStatusColumn } from '../lib/subpipelines.js';
+import { flattenPipelineSteps, stepStatusColumn } from '../lib/subpipelines.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import {
@@ -1368,7 +1368,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
   }
   assertPhaseModelReferences({ config, phase: 'pipeline' });
 
-  const enrichSteps = (Array.isArray(config.pipeline) ? config.pipeline : []).filter((step: any) => step?.kind === 'enrich');
+  const enrichSteps = flattenPipelineSteps(config).filter((step: any) => step?.kind === 'enrich');
   const stepIdMatch = (step: any) => {
     const topId = String(step?.id || '').trim();
     const configId = String(step?.config?.id || '').trim();

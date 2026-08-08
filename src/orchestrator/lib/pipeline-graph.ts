@@ -427,6 +427,12 @@ export const validateRouterConfig = (config: any) => {
   const errors: string[] = [];
   const warnings: string[] = [];
 
+  sequenceNames
+    .filter((name) => subpipelineNames.includes(name))
+    .forEach((name) => {
+      errors.push(`Sequence name "${name}" is ambiguous because it is defined as both a sequencer and a sub-pipeline.`);
+    });
+
   if (sequenceNames.length > 1 && sequenceAssignSteps.length === 0) {
     errors.push(`Router configuration is ambiguous: sequences ${sequenceNames.map((name) => `"${name}"`).join(', ')} are defined, but pipeline has no kind: assign step.`);
   }

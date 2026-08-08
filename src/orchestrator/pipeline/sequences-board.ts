@@ -17,6 +17,7 @@ export type SequenceBoard = {
   total_assigned: number;
   completed: number;
   awaiting_manual: number;
+  empty_reason?: string;
 };
 
 const isParkedReason = (reason: string) => (
@@ -49,7 +50,7 @@ export const getSequenceBoard = ({
   limitPerBucket?: number;
 }): SequenceBoard => {
   const name = text(sequence) || 'default';
-  resolveConfiguredSequence({ config, name });
+  const resolved = resolveConfiguredSequence({ config, name });
   const steps = flattenPipelineSteps(config)
     .filter((step: any) => stepSubpipelineName(step) === name);
 
@@ -126,5 +127,12 @@ export const getSequenceBoard = ({
     total_assigned: assignedIds.length,
     completed,
     awaiting_manual: awaitingManual,
+    ...(steps.length === 0
+      ? {
+        empty_reason: resolved.kind === 'sequencer'
+          ? `Sequence "${name}" is a traditional sequencer; this board shows nested pipeline steps only.`
+          : `Sequence "${name}" has no nested pipeline steps.`,
+      }
+      : {}),
   };
 };

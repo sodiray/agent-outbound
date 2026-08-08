@@ -420,6 +420,8 @@ export const ToolSpecSchema = z.object({
   server: z.string().default(''),
   toolkits: z.array(z.string()).default([]),
   tools: z.array(z.string()).default([]),
+  list_tool: z.string().default(''),
+  list: z.string().default(''),
   search: z.string().default(''),
   limit: z.coerce.number().int().positive().max(200).default(25),
 }).partial().default({});
@@ -996,6 +998,7 @@ export const ExecutablePipelineStepSchema = z.discriminatedUnion('kind', Executa
 const SubpipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineEnrichmentStepSchema,
   PipelineExtractStepSchema,
+  PipelineGenerateStepSchema,
   PipelineComposeStepSchema,
   PipelineFilterStepSchema,
   PipelineReviewStepSchema,
@@ -1469,7 +1472,7 @@ const CrmSchema = z.object({
 const SequenceSchema = z.object({
   manual: z.boolean().default(false),
   start_when: z.string().default(''),
-  reply_check: StepConfigSchema.default({}),
+  reply_check: StepConfigSchema.optional(),
   on_reply: z.enum(['pause', 'continue', 'stop']).default('pause'),
   on_bounce: z.enum(['pause', 'continue', 'stop']).default('stop'),
   on_opt_out: z.enum(['pause', 'continue', 'stop']).default('stop'),
