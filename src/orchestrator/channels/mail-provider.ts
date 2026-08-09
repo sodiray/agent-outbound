@@ -385,7 +385,10 @@ export function createLobMailProvider(opts: {
 
 /**
  * Resolve a mail provider from env/config.
- * Prefer sink when AO_MAIL_SINK=1 or provider=sink; else Lob when key present.
+ * Prefer sink when AO_MAIL_SINK=1 or provider=sink; else Lob only when
+ * explicitly named (channels.mail.provider / AO_MAIL_PROVIDER). Credential
+ * presence never selects a live provider — if LOB_API_KEY is set with no
+ * declaration and sink is not active, that is a misconfiguration.
  */
 export function resolveMailProvider(opts: {
   listDir?: string;
@@ -402,12 +405,33 @@ export function resolveMailProvider(opts: {
       || (opts.listDir ? join(opts.listDir, 'mail-sink') : join(process.cwd(), 'mail-sink'));
     return createMailProviderSink({ sinkDir });
   }
-  if (name === 'lob' || text(env.LOB_API_KEY)) {
+  if (name === 'lob') {
     return createLobMailProvider({
       apiKey: env.LOB_API_KEY,
       baseUrl: env.LOB_API_BASE,
       fetchImpl: opts.fetchImpl,
     });
+  }
+  // A declared name nothing implements is a misconfiguration, not "no mail".
+  // Returning null here would make a typo indistinguishable from a pipeline
+  // that deliberately configured no provider, which is the silent-declaration
+  // failure this whole change exists to remove.
+  if (name) {
+    throw new Error(
+      `Unknown mail provider "${name}". Declare channels.mail.provider `
+      + '(or AO_MAIL_PROVIDER) as "lob" or "sink".',
+    );
+  }
+  // Credential without an explicit provider declaration is ambiguous: the
+  // operator set up mail credentials but nothing declared a live provider.
+  // Fail loud rather than silently selecting Lob or returning null ("no mail").
+  if (text(env.LOB_API_KEY)) {
+    throw new Error(
+      'LOB_API_KEY is set but no mail provider was declared. '
+      + 'Set channels.mail.provider (or AO_MAIL_PROVIDER) to select a live provider, '
+      + 'or select sink (AO_MAIL_SINK=1 or provider=sink). '
+      + 'A credential never selects a live provider by itself.',
+    );
   }
   return null;
 }

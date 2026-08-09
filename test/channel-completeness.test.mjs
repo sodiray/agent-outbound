@@ -55,6 +55,7 @@ import {
   applyMailConfirmed,
   parseMailProviderStatus,
   listMailSinkPieces,
+  resolveMailProvider,
 } from '../dist/orchestrator/channels/mail-provider.js';
 import {
   completeManualTask,
@@ -822,6 +823,91 @@ test('linkedin transmitter refuses a contact suppressed after record hydration',
 // ---------------------------------------------------------------------------
 // 4. Mail provider path
 // ---------------------------------------------------------------------------
+
+// resolveMailProvider: a live provider is something a pipeline declares.
+// A credential lets a declared provider work — it never decides that it is live.
+test('mail provider resolve: declared provider name selects live Lob when credential present', () => {
+  const provider = resolveMailProvider({
+    providerName: 'lob',
+    env: { LOB_API_KEY: 'test-key-not-for-live-use' },
+  });
+  assert.ok(provider);
+  assert.equal(provider.name, 'lob');
+});
+
+test('mail provider resolve: sink wins over credential when sink mode is active', () => {
+  // AO_MAIL_SINK=1 (deliveryModeForChannel) with credential present → sink, not Lob.
+  const byFlag = resolveMailProvider({
+    env: { AO_MAIL_SINK: '1', LOB_API_KEY: 'test-key-not-for-live-use' },
+    sinkDir: join(tmpdir(), 'ao-mail-sink-flag'),
+  });
+  assert.ok(byFlag);
+  assert.equal(byFlag.name, 'mail_sink');
+
+  // providerName=sink also wins even with credential present.
+  const byName = resolveMailProvider({
+    providerName: 'sink',
+    env: { LOB_API_KEY: 'test-key-not-for-live-use' },
+    sinkDir: join(tmpdir(), 'ao-mail-sink-name'),
+  });
+  assert.ok(byName);
+  assert.equal(byName.name, 'mail_sink');
+
+  // AO_MAIL_PROVIDER=sink has the same precedence.
+  const byEnvName = resolveMailProvider({
+    env: {
+      AO_MAIL_PROVIDER: 'sink',
+      LOB_API_KEY: 'test-key-not-for-live-use',
+    },
+    sinkDir: join(tmpdir(), 'ao-mail-sink-env'),
+  });
+  assert.ok(byEnvName);
+  assert.equal(byEnvName.name, 'mail_sink');
+});
+
+test('mail provider resolve: no credential and no declaration returns null', () => {
+  const provider = resolveMailProvider({ env: {} });
+  assert.equal(provider, null);
+});
+
+test('mail provider resolve: credential without declaration throws naming config key and env var', () => {
+  assert.throws(
+    () => resolveMailProvider({
+      env: { LOB_API_KEY: 'test-key-not-for-live-use' },
+    }),
+    (err) => {
+      const message = String(err?.message || err);
+      assert.match(message, /LOB_API_KEY/);
+      assert.match(message, /channels\.mail\.provider/);
+      assert.match(message, /AO_MAIL_PROVIDER|sink/i);
+      // Must not silently return a provider or null — throw is required.
+      assert.ok(err instanceof Error);
+      return true;
+    },
+  );
+});
+
+// A name nothing implements must not read as "this pipeline configured no
+// mail". A typo and a deliberate no-provider decision have to be different
+// outcomes, or the declaration is unenforced again by another route.
+test('mail provider resolve: an unknown declared provider name throws instead of returning null', () => {
+  assert.throws(
+    () => resolveMailProvider({ providerName: 'lobb', env: { LOB_API_KEY: 'test-key-not-for-live-use' } }),
+    (err) => {
+      assert.match(String(err?.message || err), /Unknown mail provider "lobb"/);
+      return true;
+    },
+  );
+  // And with no credential at all — the typo is the problem, not the key.
+  assert.throws(
+    () => resolveMailProvider({ providerName: 'lobb', env: {} }),
+    /Unknown mail provider/,
+  );
+  // Control: the two names that ARE implemented still resolve, so this is a
+  // check on unknown names and not a blanket refusal.
+  assert.ok(resolveMailProvider({ providerName: 'lob', env: { LOB_API_KEY: 'k' } }));
+  assert.ok(resolveMailProvider({ providerName: 'sink', env: {}, sinkDir: '/tmp/ao-sink-probe' }));
+});
 
 test('mail provider: sink allocate → submit → confirm', async () => {
   const { listDir, db, now } = createList({ _row_id: 'mail_1' });
