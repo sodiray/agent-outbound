@@ -82,3 +82,55 @@ test('config validation makes under-declared stage reads an actionable error', (
     'pipeline.company_gate (filter) reads undeclared input fields: "company_resolution" (conditions).',
   ));
 });
+
+test('config warns when a step reads a field with no current producer', () => {
+  const normalized = normalizeConfig({
+    pipeline: [{
+      kind: 'filter',
+      id: 'email_review_gate',
+      type: 'field_check',
+      inputs: ['email_body'],
+      conditions: [{ field: 'email_body', operator: 'is_not_empty' }],
+    }],
+  });
+
+  assert.ok(normalized.warnings.some((warning) => (
+    warning.includes('pipeline.email_review_gate') && warning.includes('email_body')
+  )));
+});
+
+test('config does not warn for sourced, manually overridden, or inbound fields', () => {
+  const normalized = normalizeConfig({
+    source: {
+      searches: [{ manual_results: [{ sourced_note: 'Imported with the lead.' }] }],
+    },
+    pipeline: [
+      {
+        kind: 'filter',
+        id: 'source_gate',
+        type: 'field_check',
+        inputs: ['sourced_note'],
+        conditions: [{ field: 'sourced_note', operator: 'is_not_empty' }],
+      },
+      {
+        kind: 'filter',
+        id: 'manual_gate',
+        type: 'field_check',
+        inputs: ['human_note'],
+        conditions: [{ field: 'human_note', operator: 'is_not_empty' }],
+      },
+      {
+        kind: 'filter',
+        id: 'inbound_gate',
+        type: 'field_check',
+        inputs: ['inbound_proposed_classification'],
+        conditions: [{ field: 'inbound_proposed_classification', operator: 'is_not_empty' }],
+      },
+    ],
+  }, { manualOverrideFields: ['human_note'] });
+
+  assert.deepEqual(
+    normalized.warnings.filter((warning) => warning.includes('no current pipeline step produces it')),
+    [],
+  );
+});

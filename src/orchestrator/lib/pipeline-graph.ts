@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { getTargetColumnsForStepConfig } from './step-columns.js';
 import { isReviewFieldAvailable } from './review-field-resolution.js';
+import { stageInputReferences } from './stage-inputs.js';
 import {
   flattenPipelineSteps,
   namespaceSubpipelineStepId,
@@ -16,6 +17,9 @@ import {
 type PipelineGraphOptions = {
   listDir?: string;
   recordFields?: Iterable<string>;
+  manualOverrideFields?: Iterable<string>;
+  seededFields?: Iterable<string>;
+  inboundFields?: Iterable<string>;
 };
 
 type ProseHit = {
@@ -357,7 +361,15 @@ const BASE_RECORD_FIELDS = new Set([
   'needs_review', 'review_reason', 'review_flagged_at', 'routed_by', 'created_at', 'updated_at',
 ]);
 
-const sourceSuppliedFields = (config: any, recordFields: Iterable<string> = []) => {
+const INBOUND_RECORD_FIELDS = new Set([
+  'lifecycle_stage', 'account_sequence_state', 'work_state', 'inbound_pending_human_review',
+  'inbound_classification_in_flight', 'inbound_pause_at', 'inbound_classification_error',
+  'inbound_classification_failed_at', 'inbound_proposed_classification', 'meeting_booked_at',
+  'next_action_json', 'email_bounced', 'email_status', 'email_bounce_type',
+  'suppressed_contact_ids', 'suppressed_contact_ids_json',
+]);
+
+const configuredRecordFields = (config: any, options: PipelineGraphOptions = {}) => {
   const source = config?.source || {};
   const searches = Array.isArray(source?.searches) ? source.searches : [];
   const strategies = Array.isArray(source?.strategies) ? source.strategies : [];
@@ -374,11 +386,38 @@ const sourceSuppliedFields = (config: any, recordFields: Iterable<string> = []) 
   ));
   return new Set([
     ...BASE_RECORD_FIELDS,
-    ...Array.from(recordFields),
+    ...INBOUND_RECORD_FIELDS,
+    ...Array.from(options.manualOverrideFields || []),
+    ...Array.from(options.seededFields || []),
+    ...Array.from(options.inboundFields || []),
     ...stringArray(source?.identity),
     ...mapped,
     ...manual,
   ].map((field) => String(field || '').trim()).filter(Boolean));
+};
+
+const sourceSuppliedFields = (config: any, recordFields: Iterable<string> = []) => new Set([
+  ...configuredRecordFields(config),
+  ...Array.from(recordFields).map((field) => String(field || '').trim()).filter(Boolean),
+]);
+
+export const abandonedStateReadWarnings = (config: any, options: PipelineGraphOptions = {}): string[] => {
+  const produced = new Set(producedFieldsByStep(config).map((producer) => producer.field));
+  const supplied = configuredRecordFields(config, options);
+  return pipelineSteps(config).flatMap((step: any) => {
+    const id = stepId(step);
+    if (!id) return [];
+    const kind = String(step?.kind || '').trim();
+    const references = stageInputReferences(step, options);
+    const byField = new Map<string, string[]>();
+    references.forEach(({ field, source }) => {
+      if (!field || produced.has(field) || supplied.has(field)) return;
+      byField.set(field, [...(byField.get(field) || []), source]);
+    });
+    return Array.from(byField.entries()).map(([field, sources]) => (
+      `pipeline.${id} (${kind}) reads field "${field}" (${[...new Set(sources)].join(', ')}), but no current pipeline step produces it and no known non-pipeline source supplies it.`
+    ));
+  });
 };
 
 const stableValue = (value: unknown): unknown => {

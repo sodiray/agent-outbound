@@ -12,7 +12,12 @@ export {
 
 export const getConfigPath = (listDir) => join(listDir, 'outbound.yaml');
 
-export const readConfig = (listDir, options: { recordFields?: Iterable<string> } = {}) => {
+export const readConfig = (listDir, options: {
+  recordFields?: Iterable<string>;
+  manualOverrideFields?: Iterable<string>;
+  seededFields?: Iterable<string>;
+  inboundFields?: Iterable<string>;
+} = {}) => {
   const path = getConfigPath(listDir);
   if (!existsSync(path)) {
     return {

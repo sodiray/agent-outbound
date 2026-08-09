@@ -5,7 +5,7 @@ import yaml from 'js-yaml';
 import { collectConfigToolRefs } from '../orchestrator/lib/tool-catalog.js';
 import { getConfigPath, readConfig } from '../orchestrator/lib/config.js';
 import { addIsoDays, computeStepSchedule, resolveWorkingDayConfig, toIsoDate, toZonedIsoDate } from '../orchestrator/lib/working-days.js';
-import { getRecordById, openListDb, upsertRecord } from '../orchestrator/runtime/db.js';
+import { getRecordById, listActiveFieldOverrides, openListDb, upsertRecord } from '../orchestrator/runtime/db.js';
 import { listConnectedToolkits } from '../orchestrator/runtime/mcp.js';
 import { getDbPath, getSnapshotsDir, resolveListDir } from '../orchestrator/runtime/paths.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
@@ -223,12 +223,17 @@ export const configDiffCommand = ({ list, filePath = '', snapshotId = '' }: { li
 
 export const configValidateCommand = async ({ list, filePath = '' }: { list: string; filePath?: string }) => {
   const listDir = resolveListDir(list);
-  const recordFields = (() => {
+  const { manualOverrideFields, recordFields } = (() => {
     const db = openListDb({ listDir, readonly: true });
     try {
-      return db.prepare('PRAGMA table_info(records)').all()
-        .map((column: { name?: unknown }) => String(column.name || '').trim())
-        .filter(Boolean);
+      return {
+        recordFields: db.prepare('PRAGMA table_info(records)').all()
+          .map((column: { name?: unknown }) => String(column.name || '').trim())
+          .filter(Boolean),
+        manualOverrideFields: listActiveFieldOverrides({ db })
+          .map((override: { field?: unknown }) => String(override.field || '').trim())
+          .filter(Boolean),
+      };
     } finally {
       db.close();
     }
@@ -237,9 +242,9 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
     ? (() => {
       const raw = readFileSync(filePath, 'utf8');
       const parsed = yaml.load(raw) || {};
-      return normalizeConfig(parsed, { listDir, recordFields });
+      return normalizeConfig(parsed, { listDir, recordFields, manualOverrideFields });
     })()
-    : readConfig(listDir, { recordFields });
+    : readConfig(listDir, { recordFields, manualOverrideFields });
   const errors = [...(Array.isArray(loaded?.errors) ? loaded.errors : [])];
   const warnings: string[] = [...(Array.isArray(loaded?.warnings) ? loaded.warnings : [])];
   const config = loaded?.config || {};

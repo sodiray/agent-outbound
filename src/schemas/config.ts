@@ -5,7 +5,7 @@ import {
   normalizeWorkingDayToken,
   SEQUENCE_WORKING_DAY_VALUES,
 } from '../orchestrator/lib/working-days.js';
-import { validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib/pipeline-graph.js';
+import { abandonedStateReadWarnings, validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib/pipeline-graph.js';
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 import { findProhibitedSteps } from '../orchestrator/policy/pipeline-prohibitions.js';
 import { stageInputDiagnosticMessages } from '../orchestrator/lib/stage-inputs.js';
@@ -2482,7 +2482,13 @@ const channelDailyCapValidationMessages = (input: Record<string, unknown>): stri
   return [...channelErrors, ...stepErrors];
 };
 
-export const normalizeConfig = (value, options: { listDir?: string; recordFields?: Iterable<string> } = {}) => {
+export const normalizeConfig = (value, options: {
+  listDir?: string;
+  recordFields?: Iterable<string>;
+  manualOverrideFields?: Iterable<string>;
+  seededFields?: Iterable<string>;
+  inboundFields?: Iterable<string>;
+} = {}) => {
   const input = coerceLegacyScore(coerceLegacyContactPolicy(value || {}));
   const unknownKeys = unknownConfigKeys(input, ConfigSchema);
   const unknownErrors = unknownKeys
@@ -2694,6 +2700,7 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
     warnings: [...new Set([
       ...graph.warnings,
       ...router.warnings,
+      ...abandonedStateReadWarnings(config, options),
       ...territoryWarnings,
       ...unknownWarnings,
       ...stageInputs.warnings,
