@@ -473,6 +473,13 @@ export type ManualTaskRow = {
   reason: string;
   /** The step's declared `config.channel`, verbatim. Empty when undeclared. */
   channel: string;
+  /**
+   * True when the parked step is present in the supplied config (or when no
+   * config was supplied — the back-compat path makes no declaration claim).
+   * False when config was supplied and the step is no longer declared there:
+   * a historical park for a removed step. Empty labels, never type-filtered.
+   */
+  declared: boolean;
 };
 
 /**
@@ -482,12 +489,20 @@ export type ManualTaskRow = {
  * words for it. Guessing from substrings in the step id is only a fallback for
  * steps that declare nothing — a step named `postcard_production` is mail
  * whatever the engine can spell.
+ *
+ * When the caller supplied a config and the step is absent from it, do not
+ * invent a label: empty task_type/channel and declared=false. Substring
+ * inference is only for steps that exist (or the no-config path).
  */
 const manualTaskLabels = (
   step: Record<string, unknown> | undefined,
   stepId: string,
-): { taskType: string; channel: string; inferred: string } => {
-  const config = (step?.config && typeof step.config === 'object' ? step.config : {}) as Record<string, unknown>;
+  {
+    configSupplied,
+  }: {
+    configSupplied: boolean;
+  },
+): { taskType: string; channel: string; inferred: string; declared: boolean } => {
   const inferred = stepId.includes('visit')
     ? 'visit'
     : stepId.includes('mail') || stepId.includes('letter')
@@ -495,10 +510,17 @@ const manualTaskLabels = (
       : stepId.includes('linkedin')
         ? 'linkedin'
         : 'manual';
+  // Config present but step gone: historical park. Honest emptiness, not a guess.
+  if (configSupplied && !step) {
+    return { taskType: '', channel: '', inferred, declared: false };
+  }
+  const stepConfig = (step?.config && typeof step.config === 'object' ? step.config : {}) as Record<string, unknown>;
   return {
-    taskType: text(config.task_type || config.taskType) || inferred,
-    channel: text(config.channel),
+    taskType: text(stepConfig.task_type || stepConfig.taskType) || inferred,
+    channel: text(stepConfig.channel),
     inferred,
+    // No config: not claiming orphaned; treat as declared so filters still work.
+    declared: true,
   };
 };
 
@@ -518,8 +540,9 @@ export const listAwaitingManualTasks = ({
   offset?: number;
 }): { total: number; tasks: ManualTaskRow[] } => {
   const typeFilter = text(taskType).toLowerCase();
+  const configSupplied = config != null;
   const declaredSteps = new Map<string, Record<string, unknown>>();
-  if (config) {
+  if (configSupplied) {
     for (const step of flattenPipelineSteps(config as any) as Array<Record<string, unknown>>) {
       const id = text((step as any)?.id);
       if (id) declaredSteps.set(id, step);
@@ -559,7 +582,7 @@ export const listAwaitingManualTasks = ({
   // list one.
   const matched: ManualTaskRow[] = rows.map((row: any) => {
     const stepId = text(row.step_id);
-    const labels = manualTaskLabels(declaredSteps.get(stepId), stepId);
+    const labels = manualTaskLabels(declaredSteps.get(stepId), stepId, { configSupplied });
     return {
       record_id: text(row.record_id),
       step_id: stepId,
@@ -573,10 +596,14 @@ export const listAwaitingManualTasks = ({
       pipeline_name: text(row.pipeline_name),
       parked_at: text(row.parked_at),
       reason: text(row.reason),
+      declared: labels.declared,
       __inferred: labels.inferred,
     } as ManualTaskRow & { __inferred: string };
   }).filter((task) => {
     if (!typeFilter) return true;
+    // Ghost parks (config present, step removed) never match a type filter —
+    // even when their step id would have substring-guessed into that bucket.
+    if (!task.declared) return false;
     const inferred = (task as ManualTaskRow & { __inferred: string }).__inferred;
     // The author's words first; the engine's guess only as a courtesy to
     // callers still asking for `mail` when the step declares `golden_ticket`.
