@@ -433,7 +433,7 @@ export const abandonedStateReadWarnings = (config: any, options: PipelineGraphOp
     if (!id) return [];
     const kind = String(step?.kind || '').trim();
     const engineResolved = engineResolvedFieldsForStep(step);
-    const references = stageInputReferences(step, options);
+    const references = stageInputReferences(step, { ...options, templates: config?.templates });
     const byField = new Map<string, string[]>();
     references.forEach(({ field, source }) => {
       if (

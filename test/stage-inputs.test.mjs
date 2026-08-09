@@ -198,3 +198,55 @@ test('config does not warn for engine-managed state or LinkedIn-resolved invitat
     'pipeline.account_intelligence (generate) reads field "decision_maker_title" (model context), but no current pipeline step produces it and no known non-pipeline source supplies it.',
   ]);
 });
+
+test('a template placeholder counts as a read of the field it interpolates', () => {
+  const sendStep = {
+    kind: 'send_email',
+    id: 'email_1',
+    template: 'welcome',
+    side_effecting: true,
+    inputs: ['contact_email', 'contact_first_name'],
+    config: {
+      action: 'tool_call',
+      args_map: { to: 'contact_email' },
+    },
+  };
+  const templates = (body) => ({
+    welcome: {
+      id: 'welcome',
+      versions: [
+        { version: 1, subject: 'Hello', body: 'Hi {{contact_first_name | default: there}},' },
+        { version: 2, subject: 'Hello', body },
+      ],
+    },
+  });
+  const unread = (config) => stageInputDiagnosticMessages(config).warnings
+    .filter((warning) => warning.includes('unread'));
+
+  // Interpolated by the newest version: declaring it is correct, not a dead declaration.
+  assert.deepEqual(
+    unread({ pipeline: [sendStep], templates: templates('Hi {{contact_first_name}},') }),
+    [],
+  );
+
+  // Still interpolated by version 1, which `template_version` may select. Every version is
+  // scanned, so dropping it from only the newest must not report the input as unread.
+  assert.deepEqual(
+    unread({ pipeline: [sendStep], templates: templates('Hi there,') }),
+    [],
+  );
+
+  // Interpolated by no version at all: now it really is declared and never read.
+  const gone = templates('Hi there,');
+  gone.welcome.versions[0].body = 'Hi there,';
+  assert.deepEqual(
+    unread({ pipeline: [sendStep], templates: gone }),
+    ['pipeline.email_1 (send_email) declares unread inputs: "contact_first_name".'],
+  );
+
+  // No catalog to consult — the check must not fail open and pass everything.
+  assert.deepEqual(
+    unread({ pipeline: [sendStep] }),
+    ['pipeline.email_1 (send_email) declares unread inputs: "contact_first_name".'],
+  );
+});

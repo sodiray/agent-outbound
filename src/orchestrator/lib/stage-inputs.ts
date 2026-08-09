@@ -1,5 +1,6 @@
 import { flattenPipelineSteps } from './subpipelines.js';
 import { emailHeaderTemplateFields } from './email-headers.js';
+import { collectTemplateKeys } from './templates.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
@@ -21,6 +22,8 @@ type StageLike = Record<string, unknown>;
 
 type StageInputDiagnosticOptions = {
   listDir?: string;
+  /** The config's `templates` catalog, so a referenced template's placeholders count as reads. */
+  templates?: unknown;
 };
 
 const asRecord = (value: unknown): StageLike => (
@@ -200,6 +203,27 @@ export const resolveStageInputs = ({
   };
 };
 
+/**
+ * Fields a referenced template interpolates. The template body is authored config, so its
+ * `{{placeholders}}` are reads exactly as an args_map entry is — without this, a step that
+ * declares an input its template uses is reported as declaring an unread input. Every version
+ * is scanned, since `template_version` may select any of them. The placeholder grammar is
+ * `collectTemplateKeys`, deliberately reused rather than restated: a second copy of it would
+ * drift from the renderer and warn about the wrong fields.
+ */
+const templatePlaceholderFields = (templateRef: unknown, templates: unknown): string[] => {
+  const ids = (Array.isArray(templateRef) ? templateRef : [templateRef]).map(text).filter(Boolean);
+  if (ids.length === 0) return [];
+  const catalog = asRecord(templates);
+  return [...new Set(ids.flatMap((id) => {
+    const versions = asRecord(catalog[id]).versions;
+    return (Array.isArray(versions) ? versions : []).flatMap((version) => {
+      const entry = asRecord(version);
+      return collectTemplateKeys(`${text(entry.subject)}\n${text(entry.body)}`);
+    });
+  }).map(fieldRoot).filter(Boolean))];
+};
+
 export const stageInputReferences = (stepValue: unknown, options: StageInputDiagnosticOptions = {}): StageInputReference[] => {
   const step = asRecord(stepValue);
   const config = effectiveConfig(step);
@@ -211,6 +235,7 @@ export const stageInputReferences = (stepValue: unknown, options: StageInputDiag
     ...tokens(step.description).map((field) => ({ field, source: 'description template' })),
     ...tokens(config.prompt_args).map((field) => ({ field, source: 'prompt_args template' })),
     ...tokens(step.template).map((field) => ({ field, source: 'template' })),
+    ...templatePlaceholderFields(step.template, options.templates).map((field) => ({ field, source: 'template body' })),
     ...tokens(step.variables).map((field) => ({ field, source: 'variables template' })),
     ...emailHeaderTemplateFields(config.headers).map((field) => ({ field, source: 'headers template' })),
     ...promptTokens(config.prompt_file, options).map((field) => ({ field, source: `prompt_file:${text(config.prompt_file)}` })),
@@ -292,8 +317,9 @@ export const stageInputDiagnostics = (configValue: unknown, options: StageInputD
     const id = text(record.id);
     return id ? [{ stage: `pipeline.${id}`, step: record }] : [];
   });
+  const withTemplates = { ...options, templates: options.templates ?? config.templates };
   return [...pipeline, ...sequenceSteps(config)]
-    .map(({ stage, step }) => diagnosticFor({ stage, kind: text(step.kind), step, options }))
+    .map(({ stage, step }) => diagnosticFor({ stage, kind: text(step.kind), step, options: withTemplates }))
     .filter((diagnostic): diagnostic is StageInputDiagnostic => Boolean(diagnostic));
 };
 
