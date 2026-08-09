@@ -222,6 +222,29 @@ test('compose keeps ordinary sentence boundaries, sentence-openers, granted name
   });
 });
 
+test('compose does not treat function words as proper names outside sentence-initial positions', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: liveStep(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: {
+          outputs: {
+            email_subject: 'A brief question',
+            email_body: 'Thanks for your time, I can offer a free preliminary read on where the time goes.\n\nHi there, Your intake runs entirely through phone.\n\nRay\nMission',
+          },
+        },
+        usage: {},
+      }),
+    });
+    assert.equal(result.failed, 0, JSON.stringify(result.errors));
+  });
+});
+
 test('compose rejects invented specifics with an accurate per-record reason', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const claims = [
@@ -285,8 +308,9 @@ test('compose discounts capitalized sentence openers without allowing invented m
     }
 
     const inventedNameCases = [
-      { text: 'I can meet you on Fairview Avenue.', reason: /proper name or place "Fairview"/ },
+      { text: 'I can meet you on Fairview Avenue.', reason: /proper name or place "Fairview Avenue"/ },
       { text: 'I spoke with Dave.', reason: /proper name or place "Dave"/ },
+      { text: 'I spoke with Redwood Harbor Partners.', reason: /proper name or place "Redwood Harbor Partners"/ },
     ];
     for (const claim of inventedNameCases) {
       const result = await runComposeStep({

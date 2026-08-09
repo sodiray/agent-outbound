@@ -101,6 +101,14 @@ type SpecificToken = {
 
 const tlds = createRequire(import.meta.url)('tlds') as string[];
 const plausibleTopLevelDomains = new Set([...tlds, 'example', 'invalid', 'localhost', 'test']);
+const englishFunctionWords = new Set([
+  'a', 'all', 'an', 'and', 'another', 'any', 'are', 'as', 'at', 'be', 'best', 'both', 'but', 'can', 'could', 'dear',
+  'each', 'either', 'enough', 'every', 'few', 'fewer', 'for', 'from', 'hello', 'her', 'here', 'hey', 'hi', 'his', 'how',
+  'i', 'if', 'in', 'is', 'it', 'its', 'little', 'many', 'may', 'most', 'much', 'my', 'neither', 'no', 'of', 'on', 'one',
+  'or', 'other', 'our', 'please', 'regards', 'several', 'should', 'some', 'such', 'that', 'the', 'their', 'these', 'this',
+  'those', 'thank', 'thanks', 'to', 'we', 'what', 'when', 'where', 'which', 'who', 'why', 'will', 'with', 'worth', 'would',
+  'you', 'your',
+]);
 
 const normalizedSpecific = (value: string) => value
   .normalize('NFKC')
@@ -112,6 +120,8 @@ const isSentenceInitialCapitalizedWord = ({ source, index }: { source: string; i
   const prefix = source.slice(0, index);
   return /(?:^|[.!?\r\n])(?:[\p{Z}\t"“”'‘’()[\]{}]*|[\p{Z}\t"“”'‘’()[\]{}]*(?:[-*•]|\d+[.)])[\p{Z}\t]*)$/u.test(prefix);
 };
+
+const isNameLikeWord = (value: string) => !englishFunctionWords.has(normalizedSpecific(value));
 
 const overlaps = (match: RegExpMatchArray, otherMatches: RegExpMatchArray[]) => {
   const start = match.index || 0;
@@ -150,12 +160,16 @@ const specificTokens = ({ text, discountSentenceInitialCapitalizedWords = true }
   const numbers = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:[$€£¥]\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:k|m|bn?|million|billion|trillion))?|\d+(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s*%|\d+(?:,\d{3})*(?:\.\d+)?\s+(?:people|employees|staff|users|locations|offices|vans|customers|clients|units|properties|dollars?|euros?|pounds?))(?![\p{L}\p{N}])/giu))
     .filter((match) => !overlaps(match, phoneMatches))
     .map((match) => match[0]);
-  const names = Array.from(source.matchAll(/\p{Lu}[\p{L}\p{M}'’-]*/gu))
+  const multiWordNames = Array.from(source.matchAll(/\b\p{Lu}[\p{L}\p{M}'’-]*(?:\s+\p{Lu}[\p{L}\p{M}'’-]*)+\b/gu))
     .filter((match) => (
       !discountSentenceInitialCapitalizedWords
       || !isSentenceInitialCapitalizedWord({ source, index: match.index })
     ))
+    .filter((match) => Array.from(match[0].matchAll(/\p{Lu}[\p{L}\p{M}'’-]*/gu)).every((word) => isNameLikeWord(word[0])))
     .map((match) => match[0]);
+  const referencedNames = Array.from(source.matchAll(/\b(?:(?:spoke|talked|met|connected|worked)\s+(?:with|to)|(?:with|from|by|for|in|near|around|across|outside|at)|(?:hi|hello|dear))\s+(\p{Lu}[\p{L}\p{M}'’-]*)\b/giu))
+    .map((match) => match[1])
+    .filter((value) => /^\p{Lu}/u.test(value) && isNameLikeWord(value));
   const serviceLines = Array.from(source.matchAll(/\b(?:you|your\s+(?:company|business|team|firm|organization|organisation))\s+(?:offer|offers|provide|provides|sell|sells|speciali[sz]e\s+in|speciali[sz]es\s+in)\s+([\p{L}\p{M}'’& -]{2,80}?)(?:[.!?\n]|$)/giu))
     .map((match) => match[1].trim());
 
@@ -165,7 +179,8 @@ const specificTokens = ({ text, discountSentenceInitialCapitalizedWords = true }
     ...domains.map((value) => ({ kind: 'URL or domain' as const, value })),
     ...phoneNumbers.map((value) => ({ kind: 'phone number' as const, value })),
     ...numbers.map((value) => ({ kind: 'number' as const, value })),
-    ...names.map((value) => ({ kind: 'proper name or place' as const, value })),
+    ...multiWordNames.map((value) => ({ kind: 'proper name or place' as const, value })),
+    ...referencedNames.map((value) => ({ kind: 'proper name or place' as const, value })),
     ...serviceLines.map((value) => ({ kind: 'service line' as const, value })),
   ]);
 };
