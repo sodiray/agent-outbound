@@ -246,6 +246,18 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_channel_events_row ON channel_events(row_id, occurred_at DESC);
   CREATE INDEX IF NOT EXISTS idx_channel_events_channel ON channel_events(channel, occurred_at DESC);
 
+  CREATE TABLE IF NOT EXISTS channel_daily_cap_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    interaction_type TEXT NOT NULL,
+    day_start TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    accepted_at TEXT DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS idx_channel_daily_cap_reservations_day
+    ON channel_daily_cap_reservations(channel, interaction_type, day_start, status);
+
   CREATE TABLE IF NOT EXISTS inbound_messages (
     inbound_message_id TEXT PRIMARY KEY,
     mailbox_id TEXT NOT NULL,

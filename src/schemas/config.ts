@@ -2397,6 +2397,53 @@ const unknownConfigDiagnostic = (unknown: UnknownConfigKey): string => {
   return `Unknown config key "${unknown.path}" is not recognized.${suggestion}`;
 };
 
+const isDailyCap = (value: unknown) => (
+  Number.isInteger(Number(value)) && Number(value) >= 0
+);
+
+const channelDailyCapValidationMessages = (input: Record<string, unknown>): string[] => {
+  const channels = isRecord(input.channels) ? input.channels : {};
+  const channelErrors = Object.entries(channels).flatMap(([channel, config]) => {
+    if (!isRecord(config)) return [];
+    const path = `channels.${channel}`;
+    const dailyCapErrors = config.daily_cap === undefined
+      ? []
+      : channel === 'linkedin'
+        ? [`${path}.daily_cap is ambiguous and cannot be enforced; declare ${path}.invite_daily_cap instead.`]
+        : [`${path}.daily_cap cannot be enforced by this channel; remove it.`];
+    const inviteCapErrors = config.invite_daily_cap === undefined
+      ? []
+      : channel !== 'linkedin'
+        ? [`${path}.invite_daily_cap is only supported for channels.linkedin.`]
+        : isDailyCap(config.invite_daily_cap)
+          ? []
+          : [`${path}.invite_daily_cap must be a non-negative integer.`];
+    return [...dailyCapErrors, ...inviteCapErrors];
+  });
+  const stepErrors = [
+    ...flattenPipelineSteps(input),
+    ...Object.entries(isRecord(input.sequences) ? input.sequences : {}).flatMap(([name, sequence]) => (
+      isRecord(sequence) && Array.isArray(sequence.steps)
+        ? sequence.steps.map((step, index) => ({ step, path: `sequences.${name}.steps[${index}]` }))
+        : []
+    )),
+  ].flatMap((entry) => {
+    const step = isRecord(entry) && 'step' in entry ? entry.step : entry;
+    if (!isRecord(step) || !isRecord(step.config) || step.config.daily_cap === undefined) return [];
+    const path = isRecord(entry) && 'path' in entry
+      ? String(entry.path)
+      : `pipeline.${String(step.id || 'unknown')}`;
+    const kind = String(step.kind || '').trim().toLowerCase();
+    const channel = String(step.config.channel || '').trim().toLowerCase();
+    if (kind === 'send_email' || channel === 'email') return [];
+    if (kind === 'linkedin_connect' || channel === 'linkedin') {
+      return [`${path}.config.daily_cap cannot enforce LinkedIn invitations; declare channels.linkedin.invite_daily_cap instead.`];
+    }
+    return [`${path}.config.daily_cap cannot be enforced by this step; remove it.`];
+  });
+  return [...channelErrors, ...stepErrors];
+};
+
 export const normalizeConfig = (value, options: { listDir?: string; recordFields?: Iterable<string> } = {}) => {
   const input = coerceLegacyScore(coerceLegacyContactPolicy(value || {}));
   const unknownKeys = unknownConfigKeys(input, ConfigSchema);
@@ -2406,11 +2453,12 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
   const unknownWarnings = unknownKeys
     .filter((unknown) => !isConfigErrorUnknownKey(unknown))
     .map(unknownConfigDiagnostic);
+  const channelDailyCapErrors = channelDailyCapValidationMessages(input);
   const parsed = ConfigSchema.safeParse(input);
   if (!parsed.success) {
     return {
       error: parsed.error.message,
-      errors: [...new Set([parsed.error.message, ...unknownErrors])],
+      errors: [...new Set([parsed.error.message, ...unknownErrors, ...channelDailyCapErrors])],
       warnings: [...new Set(unknownWarnings)],
       config: ConfigSchema.parse({}),
     };
@@ -2597,6 +2645,7 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
     ...scoreStageErrors,
     ...emailVerificationStepValidationMessages(config),
     ...retiredGlobalScoreCriteriaErrors(config),
+    ...channelDailyCapErrors,
   ])];
 
   return {

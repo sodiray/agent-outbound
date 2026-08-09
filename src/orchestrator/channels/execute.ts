@@ -26,6 +26,12 @@ import { recordCostEvent } from '../lib/costs.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { readConfig } from '../lib/config.js';
 import { resolveChannelProviderCredentials } from '../lib/channel-credentials.js';
+import {
+  acceptChannelDailyCapReservation,
+  releaseChannelDailyCapReservation,
+  reserveChannelDailyCap,
+  settleChannelDailyCapReservation,
+} from '../lib/channel-daily-caps.js';
 import { countMailboxSendsToday, resolveSendMailbox, smtpCredentialEnv } from '../lib/mailboxes.js';
 import {
   commitLiveInteraction,
@@ -1384,11 +1390,37 @@ export const executeChannelStep = async ({
         };
       }
 
+      const channelConfig = projectConfig?.channels?.linkedin;
+      const inviteDailyCap = channelConfig && typeof channelConfig === 'object' && !Array.isArray(channelConfig)
+        ? Number(channelConfig.invite_daily_cap)
+        : Number.NaN;
+      const inviteCapReservation = Number.isFinite(inviteDailyCap) && inviteDailyCap >= 0
+        ? reserveChannelDailyCap({
+          db,
+          channel: 'linkedin',
+          interactionType: 'invite',
+          cap: inviteDailyCap,
+          at: now,
+        })
+        : null;
+      if (inviteCapReservation && !inviteCapReservation.allowed) {
+        return {
+          status: 'skipped',
+          reason: `Daily LinkedIn invite cap reached (${inviteDailyCap}).`,
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
+
       const liClaim = reserveProviderInteraction({ providerChannel: 'linkedin' });
-      if (liClaim.ok === false) return liClaim.result as any;
+      if (liClaim.ok === false) {
+        if (inviteCapReservation?.allowed) {
+          releaseChannelDailyCapReservation({ db, reservationId: inviteCapReservation.reservationId });
+        }
+        return liClaim.result as any;
+      }
 
       const { executeUnipileLinkedinConnect } = await import('./unipile.js');
-      const channelConfig = projectConfig?.channels?.linkedin;
       const provider = String(
         channelConfig && typeof channelConfig === 'object' && !Array.isArray(channelConfig)
           ? channelConfig.provider || 'unipile'
@@ -1406,6 +1438,9 @@ export const executeChannelStep = async ({
         });
       if (providerCredentials && !providerCredentials.ready) {
         releaseProviderInteraction({ mode: liClaim.mode });
+        if (inviteCapReservation?.allowed) {
+          releaseChannelDailyCapReservation({ db, reservationId: inviteCapReservation.reservationId });
+        }
         if (idemKey) {
           failIdempotency({
             db,
@@ -1458,6 +1493,9 @@ export const executeChannelStep = async ({
       }
       if (linkedinResult.status !== 'sent') {
         releaseProviderInteraction({ mode: liClaim.mode });
+        if (inviteCapReservation?.allowed) {
+          releaseChannelDailyCapReservation({ db, reservationId: inviteCapReservation.reservationId });
+        }
         if (idemKey && linkedinResult.status === 'failed') {
           failIdempotency({
             db,
@@ -1507,6 +1545,9 @@ export const executeChannelStep = async ({
 
       // CRITICAL: complete idempotency immediately after provider accept (before bookkeeping).
       (sendRecord as any).__provider_accept_attempted = true;
+      if (inviteCapReservation?.allowed) {
+        acceptChannelDailyCapReservation({ db, reservationId: inviteCapReservation.reservationId, at: now });
+      }
       commitProviderInteraction({
         mode: liClaim.mode,
         providerChannel: 'linkedin',
@@ -1559,12 +1600,16 @@ export const executeChannelStep = async ({
               sequence: sequenceName,
               reason: linkedinResult.reason,
               readiness: linkedinResult.readiness,
+              interaction_type: 'invite',
               linkedin_lifecycle_state: 'invite_sent',
               ...(activeContactId ? { contact_id: activeContactId } : {}),
             },
             occurred_at: now,
           },
         });
+        if (inviteCapReservation?.allowed) {
+          settleChannelDailyCapReservation({ db, reservationId: inviteCapReservation.reservationId });
+        }
       }
 
       const lifecyclePatch = applyLinkedinInviteSent({
