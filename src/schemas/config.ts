@@ -846,6 +846,7 @@ const PipelineFilterStepSchema = z.object({
   inputs: StageInputsSchema,
   // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
   reasoning: z.boolean().optional(),
+  ...PipelineWhenFields,
 }).partial({ description: true, depends_on: true, runs_after: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
 
 const PipelineAssignRuleSchema = z.object({
@@ -2302,8 +2303,21 @@ const isSafetyCriticalUnknownKey = ({ path, suggestion }: UnknownConfigKey): boo
 };
 
 const isConfigErrorUnknownKey = (unknown: UnknownConfigKey): boolean => (
-  !unknown.path.includes('.') || isSafetyCriticalUnknownKey(unknown)
+  !unknown.path.includes('.') || unknown.path.startsWith('pipeline[') || isSafetyCriticalUnknownKey(unknown)
 );
+
+const pipelineContainerDependencyErrors = (input: Record<string, unknown>): string[] => {
+  const pipeline = Array.isArray(input.pipeline) ? input.pipeline : [];
+  return pipeline.flatMap((entry, index) => {
+    if (!isRecord(entry) || String(entry.kind || '').trim() !== 'pipeline') return [];
+    const path = `pipeline[${index}]`;
+    return ['depends_on', 'runs_after'].flatMap((field) => (
+      entry[field] === undefined
+        ? []
+        : [`${path}.${field} is not supported on kind: pipeline; declare the dependency on each child step that requires it.`]
+    ));
+  });
+};
 
 const scoreStageValidationMessages = (config: Record<string, unknown>): string[] => (
   flattenPipelineSteps(config).flatMap((step) => {
@@ -2454,11 +2468,12 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
     .filter((unknown) => !isConfigErrorUnknownKey(unknown))
     .map(unknownConfigDiagnostic);
   const channelDailyCapErrors = channelDailyCapValidationMessages(input);
+  const containerDependencyErrors = pipelineContainerDependencyErrors(input);
   const parsed = ConfigSchema.safeParse(input);
   if (!parsed.success) {
     return {
       error: parsed.error.message,
-      errors: [...new Set([parsed.error.message, ...unknownErrors, ...channelDailyCapErrors])],
+      errors: [...new Set([parsed.error.message, ...unknownErrors, ...channelDailyCapErrors, ...containerDependencyErrors])],
       warnings: [...new Set(unknownWarnings)],
       config: ConfigSchema.parse({}),
     };
@@ -2646,6 +2661,7 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
     ...emailVerificationStepValidationMessages(config),
     ...retiredGlobalScoreCriteriaErrors(config),
     ...channelDailyCapErrors,
+    ...containerDependencyErrors,
   ])];
 
   return {

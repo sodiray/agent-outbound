@@ -174,6 +174,7 @@ const NON_EXECUTION_REASONS = /^(channel_not_permitted:|sequence_outbound_gated|
 const HARD_REJECTED_ACTION_SKIP = /\b(prohibits?|prohibited|forbidden)\b/i;
 
 const WHEN_GATED_STEP_KINDS = new Set([
+  'filter',
   'compose',
   'extract',
   'contact_source',

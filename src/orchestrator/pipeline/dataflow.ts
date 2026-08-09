@@ -1351,8 +1351,11 @@ export const runPipelineDataflow = async ({
         const keep = overridesByRecord.get(recordId);
         const keptHere = step.dropGate && !outcome.passed && Boolean(keep && (keep.keepAll || keep.keepSteps.has(step.id)));
         const effectivePassed = outcome.passed || keptHere;
+        const skippedByWhen = isSkippedWhenOutcome(outcome);
         const reason = effectivePassed
-          ? (keptHere ? `override: kept (auto-verdict was: ${String(outcome.reason || '').trim() || 'failed'})` : '')
+          ? (keptHere
+            ? `override: kept (auto-verdict was: ${String(outcome.reason || '').trim() || 'failed'})`
+            : (skippedByWhen ? String(outcome.reason || '') : ''))
           : (String(outcome.reason || '').trim() || 'failed');
         insertPipelineEvent({
           db,

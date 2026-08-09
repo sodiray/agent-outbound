@@ -11,7 +11,7 @@ import {
 } from '../lib/subpipelines.js';
 import { pipelineNameForRecord } from '../lib/sequence-resolution.js';
 
-const MATERIAL_FILTER_FIELDS = ['type', 'match', 'condition', 'conditions', 'value', 'operator', 'field', 'on_fail', 'model'] as const;
+const MATERIAL_FILTER_FIELDS = ['type', 'match', 'condition', 'conditions', 'value', 'operator', 'field', 'on_fail', 'model', 'when'] as const;
 
 export const filterMaterialConfig = (stepConfig: any, { listDir = '' }: { listDir?: string } = {}): Record<string, any> => {
   const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};

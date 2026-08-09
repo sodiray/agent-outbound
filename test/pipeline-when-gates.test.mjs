@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
-import { runDataflowCore } from '../dist/orchestrator/pipeline/dataflow.js';
+import { runDataflowCore, runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { skippedWhenOutcome, shouldRunForRecord } from '../dist/orchestrator/lib/step-when.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
@@ -38,6 +38,15 @@ const extractStep = {
   when: whenTierA,
 };
 
+const filterStep = {
+  kind: 'filter',
+  id: 'filter_tier_a',
+  type: 'field_check',
+  inputs: ['tier'],
+  conditions: [{ field: 'tier', operator: 'eq', value: 'A' }],
+  when: whenTierA,
+};
+
 const assignStep = {
   kind: 'assign',
   id: 'assign_route',
@@ -57,6 +66,7 @@ const supportedSteps = [
   { kind: 'enrich', id: 'enrich_one', inputs: ['tier'], when: whenTierA },
   { kind: 'generate', id: 'generate_one', inputs: ['tier'], when: whenTierA },
   { kind: 'review', id: 'review_one', inputs: ['tier'], when: whenTierA },
+  filterStep,
   composeStep,
   extractStep,
   assignStep,
@@ -93,6 +103,22 @@ test('when validates for every meaningful executable kind', () => {
       `${step.kind} must reject a malformed when predicate`,
     );
   }
+});
+
+test('unknown pipeline step keys are validation errors and container dependencies are explicitly rejected', () => {
+  const unknownKey = normalizePipeline([{ ...filterStep, safety_gate: true }]);
+  assert.ok(unknownKey.errors.some((error) => error.includes('pipeline[0].safety_gate')));
+  assert.ok(!unknownKey.warnings.some((warning) => warning.includes('pipeline[0].safety_gate')));
+
+  const containerDependency = normalizePipeline([{
+    kind: 'pipeline',
+    id: 'nested_campaign',
+    depends_on: ['prepare_records'],
+    steps: [],
+  }]);
+  assert.ok(containerDependency.errors.some((error) => (
+    error.includes('pipeline[0].depends_on is not supported on kind: pipeline')
+  )));
 });
 
 const withDb = async (callback) => {
@@ -238,4 +264,70 @@ test('a step with no when always runs', async () => {
     assert.equal(outcome.passed, true);
     assert.equal(outcome.reason, 'extracted:email:1:site_text');
   });
+});
+
+test('a filter skipped by when remains in play and records a distinct passed skip event', async () => {
+  const root = listDir();
+  writeFileSync(join(root, 'outbound.yaml'), `
+ai:
+  default_model: anthropic/claude-haiku-4-5-20251001
+pipeline:
+  - kind: filter
+    id: tier_a_gate
+    type: field_check
+    inputs: [tier, evaluate_gate]
+    when:
+      match: all
+      conditions:
+        - field: evaluate_gate
+          operator: eq
+          value: yes
+    match: all
+    conditions:
+      - field: tier
+        operator: eq
+        value: A
+`);
+  const db = openListDb({ listDir: root, readonly: false });
+  ensureRecordColumns({ db, columns: ['tier', 'evaluate_gate'] });
+  upsertRecord({
+    db,
+    row: { _row_id: 'filter_passed', business_name: 'Alpha', tier: 'A', evaluate_gate: 'yes' },
+  });
+  upsertRecord({
+    db,
+    row: { _row_id: 'filter_skipped', business_name: 'Beta', tier: 'B', evaluate_gate: 'no' },
+  });
+  upsertRecord({
+    db,
+    row: { _row_id: 'filter_dropped', business_name: 'Gamma', tier: 'B', evaluate_gate: 'yes' },
+  });
+  db.close();
+
+  await runPipelineDataflow({ listDir: root });
+
+  const check = openListDb({ listDir: root, readonly: true });
+  try {
+    const events = check.prepare(`
+      SELECT record_id, passed, reason
+      FROM pipeline_events
+      WHERE step_id = 'tier_a_gate'
+      ORDER BY record_id
+    `).all();
+    assert.deepEqual(events, [
+      { record_id: 'filter_dropped', passed: 0, reason: 'Tier is "B" — expected "A"' },
+      { record_id: 'filter_passed', passed: 1, reason: '' },
+      { record_id: 'filter_skipped', passed: 1, reason: 'skipped:Evaluate gate is "no" — expected "yes"' },
+    ]);
+    assert.equal(
+      check.prepare('SELECT disqualified_at FROM records WHERE _row_id = ?').get('filter_skipped').disqualified_at,
+      '',
+    );
+    assert.notEqual(
+      check.prepare('SELECT disqualified_at FROM records WHERE _row_id = ?').get('filter_dropped').disqualified_at,
+      '',
+    );
+  } finally {
+    check.close();
+  }
 });
