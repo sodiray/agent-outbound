@@ -1595,6 +1595,7 @@ export const executeChannelStep = async ({
             notes: linkedinResult.reason,
             provider_message_id: liProviderId,
             provider_id: liProviderId,
+            provenance: 'performed_and_evidenced',
             payload: {
               step: stepNumber,
               step_id: sequenceStepId,
@@ -2449,7 +2450,7 @@ export const executeChannelStep = async ({
       || stepOutputs.message_id
       || stepOutputs.piece_id
       || stepOutputs.sms_message_id
-      || randomUUID()
+      || (intent === 'draft' ? randomUUID() : '')
     );
     const providerThreadId = String(
       stepArtifacts.provider_thread_id
@@ -2461,6 +2462,23 @@ export const executeChannelStep = async ({
         : '')
       || ''
     ).trim();
+    const engineOwnedSend = intent === 'send'
+      && ['send_email', 'send_sms', 'linkedin_connect'].includes(stepKind);
+    if (!dryRun && engineOwnedSend && !providerMessageId) {
+      return {
+        status: 'failed',
+        reason: 'Engine-owned send returned no provider message id; outcome is unverified.',
+        provider_id: '',
+        auto_skipped_steps: [],
+      };
+    }
+    const provenance = intent === 'draft'
+      ? ''
+      : engineOwnedSend
+        ? 'performed_and_evidenced'
+        : step?.side_effecting === true
+          ? 'dispatched_unverified'
+          : '';
 
     if (!dryRun) {
       insertChannelEvent({
@@ -2479,6 +2497,7 @@ export const executeChannelStep = async ({
           // Email path: thread id from send result (sink/SMTP) or prior record thread.
           thread_id: providerThreadId,
           provider_thread_id: providerThreadId,
+          provenance,
           payload: {
             step: stepNumber,
             step_id: sequenceStepId,

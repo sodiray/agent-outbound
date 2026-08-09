@@ -8,6 +8,8 @@ export type TimelineEvent = {
   kind: string;
   source: string;
   summary: string;
+  tense: 'occurred' | 'planned';
+  provenance?: 'performed_and_evidenced' | 'dispatched_unverified';
   detail?: Record<string, unknown>;
 };
 
@@ -93,6 +95,8 @@ export function getAccountTimeline(input: {
         kind: awaiting ? `pipeline_${kind}_awaiting` : kind,
         source: 'pipeline_events',
         summary: `${kind} ${e.step_id || ''} ${label}: ${reason}`.trim(),
+        tense: 'occurred',
+        provenance: Number(e.side_effecting) === 1 && passed ? 'dispatched_unverified' : undefined,
         detail: {
           step_id: e.step_id,
           passed: Number(e.passed),
@@ -110,17 +114,29 @@ export function getAccountTimeline(input: {
   // --- channel_events (sends, replies, delivery, etc.) ---
   try {
     const ce = input.db.prepare(`
-      SELECT * FROM channel_events WHERE row_id = ? ORDER BY occurred_at DESC LIMIT ?
+      SELECT ce.*, timeline.tense, timeline.provenance
+      FROM channel_events ce
+      JOIN records_timeline timeline ON timeline.timeline_id = ce.event_id
+      WHERE ce.row_id = ?
+      ORDER BY ce.occurred_at DESC
+      LIMIT ?
     `).all(rid, limit);
     for (const e of ce) {
       const channel = String(e.channel || '');
       const eventType = String(e.event_type || e.action || 'channel');
       const disposition = String(e.disposition || '');
       const notes = String(e.notes || '');
+      const tense = e.tense === 'planned' ? 'planned' : 'occurred';
+      const provenance = e.provenance === 'performed_and_evidenced'
+        || e.provenance === 'dispatched_unverified'
+        ? e.provenance
+        : undefined;
       const parts = [
+        tense,
         channel,
         eventType,
         disposition ? `disp=${disposition}` : '',
+        provenance ? `provenance=${provenance}` : '',
         notes,
       ].filter(Boolean);
       events.push({
@@ -128,6 +144,8 @@ export function getAccountTimeline(input: {
         kind: eventType,
         source: 'channel_events',
         summary: parts.join(' · '),
+        tense,
+        provenance,
         detail: {
           channel,
           event_type: eventType,
@@ -137,6 +155,8 @@ export function getAccountTimeline(input: {
           provider_id: e.provider_id || undefined,
           thread_id: e.thread_id || e.provider_thread_id || undefined,
           sequence_step: e.sequence_step || undefined,
+          tense,
+          provenance,
         },
       });
     }
@@ -161,6 +181,7 @@ export function getAccountTimeline(input: {
         kind,
         source: 'interactions',
         summary: `${kind}: ${summaryText}`.trim(),
+        tense: 'occurred',
         detail: {
           interaction_id: e.interaction_id,
           contact: e.contact || undefined,
@@ -185,6 +206,7 @@ export function getAccountTimeline(input: {
           kind: String(a.kind || 'transition'),
           source: 'transition_audit',
           summary: `${a.kind}: ${a.from_state || ''} → ${a.to_state || ''} (${a.reason || ''})`,
+          tense: 'occurred',
           detail: a,
         });
       }
@@ -212,6 +234,7 @@ export function getAccountTimeline(input: {
         summary: `stage_review ${status} stage=${stageId} asset=${assetVersion}${
           review.notes ? `: ${review.notes}` : ''
         }`.trim(),
+        tense: 'occurred',
         detail: {
           review_id: review.review_id,
           stage_id: stageId,
@@ -235,6 +258,7 @@ export function getAccountTimeline(input: {
       kind: 'policy_apply',
       source: 'record',
       summary: `policy applied treatment=${row.treatment_tier} priority=${row.priority_lane}`,
+      tense: 'occurred',
     });
   }
 

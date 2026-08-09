@@ -238,6 +238,8 @@ const SCHEMA_SQL = `
     thread_id TEXT DEFAULT '',
     provider_message_id TEXT DEFAULT '',
     provider_thread_id TEXT DEFAULT '',
+    tense TEXT DEFAULT 'occurred',
+    provenance TEXT DEFAULT '',
     payload_json TEXT DEFAULT '{}',
     occurred_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -1145,6 +1147,11 @@ const ensurePipelineEventCompatibility = (db) => {
   try { db.exec('CREATE INDEX IF NOT EXISTS idx_pipeline_events_contact ON pipeline_events(record_id, contact_id, step_id)'); } catch {}
 };
 
+const ensureChannelEventCompatibility = (db) => {
+  try { db.exec("ALTER TABLE channel_events ADD COLUMN tense TEXT DEFAULT 'occurred'"); } catch {}
+  try { db.exec("ALTER TABLE channel_events ADD COLUMN provenance TEXT DEFAULT ''"); } catch {}
+};
+
 const ensureStalenessCompatibility = (db) => {
   try { db.exec("ALTER TABLE staleness ADD COLUMN input_hash TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE staleness ADD COLUMN policy_hash TEXT DEFAULT ''"); } catch {}
@@ -1312,8 +1319,37 @@ const ensureDataAccessViewsInternal = (db) => {
       END AS classification,
       ce.notes AS notes,
       ce.payload_json AS payload_json,
+      CASE
+        WHEN ce.tense = 'planned' OR datetime(ce.occurred_at) > datetime('now') THEN 'planned'
+        ELSE 'occurred'
+      END AS tense,
+      CASE
+        WHEN ce.tense = 'planned' OR datetime(ce.occurred_at) > datetime('now') THEN ''
+        WHEN ce.provenance IN ('performed_and_evidenced', 'dispatched_unverified') THEN ce.provenance
+        WHEN lower(ce.event_type) IN ('reply', 'reply_detected', 'bounce', 'bounced', 'delivered', 'returned') THEN 'performed_and_evidenced'
+        WHEN lower(ce.event_type) IN ('executed', 'sent', 'submitted') THEN 'dispatched_unverified'
+        ELSE ''
+      END AS provenance,
       ce.occurred_at AS occurred_at
     FROM channel_events ce
+    JOIN records r ON r._row_id = ce.row_id
+    WHERE NOT (
+      (ce.tense = 'planned' OR datetime(ce.occurred_at) > datetime('now'))
+      AND (
+        COALESCE(r.suppressed, 0) = 1
+        OR lower(COALESCE(r.sequence_status, '')) IN ('opted_out', 'bounced', 'completed', 'cancelled')
+        OR (lower(ce.channel) = 'email' AND COALESCE(r.dne_email, 0) = 1)
+        OR (lower(ce.channel) IN ('sms', 'call') AND COALESCE(r.dnc_phone, 0) = 1)
+        OR (
+          lower(ce.channel) = 'linkedin'
+          AND EXISTS (
+            SELECT 1
+            FROM contacts c
+            WHERE c.row_id = ce.row_id AND COALESCE(c.linkedin_suppressed, 0) = 1
+          )
+        )
+      )
+    )
     UNION ALL
     SELECT
       se.event_id AS timeline_id,
@@ -1326,6 +1362,8 @@ const ensureDataAccessViewsInternal = (db) => {
       '' AS classification,
       se.reasoning AS notes,
       json_object('score', se.score, 'axis', se.axis) AS payload_json,
+      'occurred' AS tense,
+      '' AS provenance,
       se.computed_at AS occurred_at
     FROM score_events se
     UNION ALL
@@ -1344,8 +1382,19 @@ const ensureDataAccessViewsInternal = (db) => {
         'stop_order', rs.stop_order,
         'scheduled_time', rs.scheduled_time
       ) AS payload_json,
+      CASE WHEN rs.disposition != '' THEN 'occurred' ELSE 'planned' END AS tense,
+      '' AS provenance,
       COALESCE(NULLIF(rs.updated_at, ''), rs.created_at) AS occurred_at
     FROM route_stops rs
+    JOIN records r ON r._row_id = rs.record_id
+    WHERE NOT (
+      rs.disposition = ''
+      AND (
+        COALESCE(r.suppressed, 0) = 1
+        OR lower(COALESCE(r.sequence_status, '')) IN ('opted_out', 'bounced', 'completed', 'cancelled')
+        OR COALESCE(r.dnk_visit, 0) = 1
+      )
+    )
     UNION ALL
     SELECT
       cl.id AS timeline_id,
@@ -1358,8 +1407,27 @@ const ensureDataAccessViewsInternal = (db) => {
       '' AS classification,
       cl.reason AS notes,
       cl.payload_json AS payload_json,
+      'occurred' AS tense,
+      '' AS provenance,
       cl.occurred_at AS occurred_at
-    FROM compliance_log cl;
+    FROM compliance_log cl
+    UNION ALL
+    SELECT
+      pe.event_id AS timeline_id,
+      pe.record_id AS row_id,
+      pe.contact_id AS contact_id,
+      'channel' AS event_family,
+      'dispatched' AS event_type,
+      pe.kind AS channel,
+      'unverified' AS disposition,
+      '' AS classification,
+      pe.reason AS notes,
+      json_object('step_id', pe.step_id, 'kind', pe.kind, 'side_effecting', pe.side_effecting) AS payload_json,
+      'occurred' AS tense,
+      'dispatched_unverified' AS provenance,
+      pe.occurred_at AS occurred_at
+    FROM pipeline_events pe
+    WHERE pe.side_effecting = 1 AND pe.passed = 1;
 
     DROP VIEW IF EXISTS sequence_state;
     CREATE VIEW sequence_state AS
@@ -1463,6 +1531,7 @@ const openDb = ({ dbPath, readonly = false }) => {
     ensureRecordCompatibility(db);
     migrateScoreStageData({ db });
     ensurePipelineEventCompatibility(db);
+    ensureChannelEventCompatibility(db);
     ensureStalenessCompatibility(db);
     ensureScoreEventCompatibility(db);
     ensureContactCompatibility(db);
@@ -1524,6 +1593,7 @@ export const openListDb = ({ listDir, readonly = false }) => {
     ensureRecordCompatibility(db);
     migrateScoreStageData({ db });
     ensurePipelineEventCompatibility(db);
+    ensureChannelEventCompatibility(db);
     ensureStalenessCompatibility(db);
     ensureScoreEventCompatibility(db);
     ensureContactCompatibility(db);
@@ -2824,13 +2894,22 @@ export const deleteRecordsKeepTop = ({ db, limit, orderBy }) => {
 
 export const insertChannelEvent = ({ db, event }) => {
   enforceCanaryRecordMutation(db, event?.row_id || event?.record_id);
+  ensureChannelEventCompatibility(db);
+  const occurredAt = event.occurred_at || nowIso();
+  const occurredAtMs = Date.parse(String(occurredAt));
+  const isFuture = Number.isFinite(occurredAtMs) && occurredAtMs > Date.now();
+  const tense = event.tense === 'planned' || isFuture ? 'planned' : 'occurred';
+  const provenance = tense === 'occurred'
+    && (event.provenance === 'performed_and_evidenced' || event.provenance === 'dispatched_unverified')
+    ? event.provenance
+    : '';
   db.prepare(`
     INSERT INTO channel_events (
       event_id, id, row_id, contact_id, channel, event_type, action, sequence_step, notes, disposition,
-      provider_id, thread_id, provider_message_id, provider_thread_id, payload_json, occurred_at, created_at
+      provider_id, thread_id, provider_message_id, provider_thread_id, tense, provenance, payload_json, occurred_at, created_at
     ) VALUES (
       @event_id, @id, @row_id, @contact_id, @channel, @event_type, @action, @sequence_step, @notes, @disposition,
-      @provider_id, @thread_id, @provider_message_id, @provider_thread_id, @payload_json, @occurred_at, @created_at
+      @provider_id, @thread_id, @provider_message_id, @provider_thread_id, @tense, @provenance, @payload_json, @occurred_at, @created_at
     )
   `).run({
     event_id: event.event_id || event.id,
@@ -2842,13 +2921,15 @@ export const insertChannelEvent = ({ db, event }) => {
     action: event.action || event.event_type || 'event',
     sequence_step: event.sequence_step || '',
     notes: event.notes || '',
-    disposition: event.disposition || '',
-    provider_id: event.provider_id || event.provider_message_id || '',
-    thread_id: event.thread_id || event.provider_thread_id || '',
-    provider_message_id: event.provider_message_id || '',
-    provider_thread_id: event.provider_thread_id || '',
+    disposition: tense === 'planned' ? '' : event.disposition || '',
+    provider_id: tense === 'planned' ? '' : event.provider_id || event.provider_message_id || '',
+    thread_id: tense === 'planned' ? '' : event.thread_id || event.provider_thread_id || '',
+    provider_message_id: tense === 'planned' ? '' : event.provider_message_id || '',
+    provider_thread_id: tense === 'planned' ? '' : event.provider_thread_id || '',
+    tense,
+    provenance,
     payload_json: safeJson(event.payload),
-    occurred_at: event.occurred_at || nowIso(),
+    occurred_at: occurredAt,
     created_at: nowIso(),
   });
   insertAccountTimelineEvent({
@@ -2860,11 +2941,11 @@ export const insertChannelEvent = ({ db, event }) => {
       event_family: 'channel',
       event_type: event.event_type || event.action || 'event',
       channel: event.channel || '',
-      disposition: event.disposition || '',
+      disposition: tense === 'planned' ? '' : event.disposition || '',
       classification: String(event?.payload?.classification || ''),
       notes: event.notes || '',
       payload: event.payload || {},
-      occurred_at: event.occurred_at || nowIso(),
+      occurred_at: occurredAt,
     },
   });
 };
