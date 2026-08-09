@@ -283,6 +283,15 @@ const emailStep = {
   },
 };
 
+const emailStepWithHeaders = (headers, inputs = []) => ({
+  ...emailStep,
+  inputs,
+  config: {
+    ...emailStep.config,
+    headers,
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Email: review gate + sink + idempotency
 // ---------------------------------------------------------------------------
@@ -394,6 +403,7 @@ test('email: ready draft sends via sink; second send is idempotent skip', async 
     const sent = JSON.parse(readFileSync(join(sinkDir, sinkFiles[0]), 'utf8'));
     assert.equal(sent.subject, 'Approved subject');
     assert.equal(sent.body, 'Approved body for sink send');
+    assert.equal(sent.headers, undefined);
 
     const second = await executeChannelStep({
       mcp: null,
@@ -412,6 +422,105 @@ test('email: ready draft sends via sink; second send is idempotent skip', async 
     assert.match(String(second.reason), /already sent/i);
     const sinkAfter = readdirSync(sinkDir).filter((f) => f.endsWith('.json'));
     assert.equal(sinkAfter.length, sinkFiles.length, 'idempotent re-send must not grow sink');
+    db.close();
+  } finally {
+    if (prev === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = prev;
+  }
+});
+
+test('email headers: a declared static header appears on the sent email', async () => {
+  const prev = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir, sinkDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+    insertDraft({
+      db,
+      draft: {
+        draft_id: 'draft_static_header',
+        row_id: 'fixture_channel_1',
+        sequence_name: 'default',
+        step_number: 1,
+        step_id: 'email_1',
+        channel: 'email',
+        status: 'ready',
+        subject: 'Static header subject',
+        body: 'Static header body',
+      },
+    });
+
+    const sent = await executeChannelStep({
+      mcp: null,
+      listDir,
+      listName: 'Channel Real Path',
+      db,
+      record,
+      sequenceName: 'default',
+      stepNumber: 1,
+      step: emailStepWithHeaders({ Precedence: 'bulk' }),
+      sequence: { steps: [] },
+      channelHint: 'email',
+      intent: 'send',
+    });
+    assert.equal(sent.status, 'sent', JSON.stringify(sent));
+    const sinkFile = readdirSync(sinkDir).find((file) => file.endsWith('.json'));
+    assert.ok(sinkFile, 'expected SMTP sink output');
+    const message = JSON.parse(readFileSync(join(sinkDir, sinkFile), 'utf8'));
+    assert.equal(message.headers.Precedence, 'bulk');
+    db.close();
+  } finally {
+    if (prev === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = prev;
+  }
+});
+
+test('email headers: a declared record-field header resolves per record', async () => {
+  const prev = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir, sinkDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
+    insertDraft({
+      db,
+      draft: {
+        draft_id: 'draft_record_header',
+        row_id: 'fixture_channel_1',
+        sequence_name: 'default',
+        step_number: 1,
+        step_id: 'email_1',
+        channel: 'email',
+        status: 'ready',
+        subject: 'Record header subject',
+        body: 'Record header body',
+      },
+    });
+
+    const sent = await executeChannelStep({
+      mcp: null,
+      listDir,
+      listName: 'Channel Real Path',
+      db,
+      record,
+      sequenceName: 'default',
+      stepNumber: 1,
+      step: emailStepWithHeaders({
+        'List-Unsubscribe': '<mailto:unsubscribe@example.test?subject=unsubscribe-{_row_id}>',
+      }, ['_row_id']),
+      sequence: { steps: [] },
+      channelHint: 'email',
+      intent: 'send',
+    });
+    assert.equal(sent.status, 'sent', JSON.stringify(sent));
+    const sinkFile = readdirSync(sinkDir).find((file) => file.endsWith('.json'));
+    assert.ok(sinkFile, 'expected SMTP sink output');
+    const message = JSON.parse(readFileSync(join(sinkDir, sinkFile), 'utf8'));
+    assert.equal(
+      message.headers['List-Unsubscribe'],
+      '<mailto:unsubscribe@example.test?subject=unsubscribe-fixture_channel_1>',
+    );
     db.close();
   } finally {
     if (prev === undefined) delete process.env.AO_SMTP_SINK;

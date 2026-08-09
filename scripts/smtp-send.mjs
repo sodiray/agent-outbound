@@ -12,7 +12,7 @@
  * Client must issue EHLO again on the encrypted channel, then AUTH / MAIL / …
  *
  * Usage (as MCP command tool):
- *   node scripts/smtp-send.mjs send --to ADDR --subject S --body B [--from ADDR] [--json]
+ *   node scripts/smtp-send.mjs send --to ADDR --subject S --body B [--from ADDR] [--headers JSON] [--json]
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -31,6 +31,7 @@ smtp-send — send one email via SMTP or sink file.
 
 Options:
   --from <email>       From address (default SMTP_FROM or SMTP_USER)
+  --headers <json>     Additional RFC 5322 headers as a JSON object
   --to-name <name>     Recipient display name
   --business-name <n>  Merge context (optional)
   --template-id <id>   Optional template marker for logs
@@ -47,10 +48,44 @@ Env (Mailforge / real SMTP):
   SMTP_FROM     From header (defaults to SMTP_USER)
   AO_SMTP_SINK  set to 1 to force sink mode even if SMTP_HOST is set
   AO_SMTP_SINK_DIR  directory for sink JSON files
+  AO_SMTP_HEADERS  JSON header map set by the outbound channel executor
 `.trim();
 
 const b64 = (s) => Buffer.from(String(s || ''), 'utf8').toString('base64');
 const crlf = (lines) => `${lines.join('\r\n')}\r\n`;
+
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const REFUSED_HEADERS = new Set([
+  'apparently-to', 'authentication-results', 'bcc', 'cc', 'content-length', 'content-transfer-encoding',
+  'content-type', 'date', 'delivered-to', 'delivery-date', 'dkim-signature', 'domainkey-signature',
+  'from', 'in-reply-to', 'message-id', 'mime-version', 'received', 'received-spf',
+  'references', 'reply-to', 'return-path', 'sender', 'to', 'x-google-dkim-signature',
+]);
+
+const parseHeaders = (raw) => {
+  if (raw === undefined || raw === '') return {};
+  const parsed = (() => {
+    try {
+      return JSON.parse(String(raw));
+    } catch {
+      throw new Error('--headers must be a JSON object');
+    }
+  })();
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('--headers must be a JSON object');
+  }
+  return Object.fromEntries(Object.entries(parsed).map(([name, value]) => {
+    const normalized = name.toLowerCase();
+    if (!HEADER_NAME.test(name)) throw new Error(`Invalid email header name: ${name}`);
+    if (REFUSED_HEADERS.has(normalized) || normalized.startsWith('arc-') || normalized.startsWith('resent-')) {
+      throw new Error(`Email header cannot be set: ${name}`);
+    }
+    if (typeof value !== 'string' || value.trim() === '' || /\r|\n/.test(value)) {
+      throw new Error(`Invalid email header value: ${name}`);
+    }
+    return [name, value];
+  }));
+};
 
 export const readSmtpResponse = (socket) => new Promise((resolve, reject) => {
   let buf = '';
@@ -119,6 +154,7 @@ export const smtpSession = async (socket, {
   to,
   subject,
   body,
+  headers = {},
   expectGreeting = true,
 }) => {
   if (expectGreeting) {
@@ -147,6 +183,7 @@ export const smtpSession = async (socket, {
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject}`,
+    ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
     `Message-ID: ${messageId}`,
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset=utf-8',
@@ -172,6 +209,7 @@ export const smtpSend = async ({
   to,
   subject,
   body,
+  headers = {},
 }) => {
   if (!host) throw new Error('SMTP_HOST is required for real SMTP mode');
   if (!user || !pass) throw new Error('SMTP_USER and SMTP_PASS are required for real SMTP mode');
@@ -189,13 +227,13 @@ export const smtpSend = async ({
       socket = await upgradeToTls(socket, host);
       // RFC 3207: after TLS, do NOT wait for another 220 — EHLO then AUTH.
       return await smtpSession(socket, {
-        user, pass, from, to, subject, body,
+        user, pass, from, to, subject, body, headers,
         expectGreeting: false,
       });
     }
     // Implicit TLS (465): server greets with 220 on the TLS socket.
     return await smtpSession(socket, {
-      user, pass, from, to, subject, body,
+      user, pass, from, to, subject, body, headers,
       expectGreeting: true,
     });
   } catch (err) {
@@ -204,7 +242,7 @@ export const smtpSend = async ({
   }
 };
 
-const sinkSend = ({ from, to, subject, body, toName, businessName, templateId }) => {
+const sinkSend = ({ from, to, subject, body, headers = {}, toName, businessName, templateId }) => {
   const sinkDir = process.env.AO_SMTP_SINK_DIR
     || join(process.cwd(), '.outbound', 'smtp-sink');
   mkdirSync(sinkDir, { recursive: true });
@@ -224,6 +262,7 @@ const sinkSend = ({ from, to, subject, body, toName, businessName, templateId })
     to_name: toName || '',
     business_name: businessName || '',
     template_id: templateId || '',
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
     subject,
     body,
     sent_at: new Date().toISOString(),
@@ -249,6 +288,7 @@ const main = async () => {
       'business-name': { type: 'string' },
       'template-id': { type: 'string' },
       'subject-template': { type: 'string' },
+      headers: { type: 'string' },
       json: { type: 'boolean', default: true },
       help: { type: 'boolean', default: false },
     },
@@ -289,6 +329,7 @@ const main = async () => {
     process.stderr.write('Error: --from is required\n');
     process.exit(2);
   }
+  const headers = parseHeaders(values.headers === undefined ? process.env.AO_SMTP_HEADERS : values.headers);
   const host = String(process.env.SMTP_HOST || '').trim();
   const useSink = process.env.AO_SMTP_SINK === '1' || !host;
 
@@ -299,6 +340,7 @@ const main = async () => {
       to,
       subject,
       body,
+      headers,
       toName: values['to-name'],
       businessName: values['business-name'],
       templateId: values['template-id'],
@@ -319,6 +361,7 @@ const main = async () => {
       to,
       subject,
       body,
+      headers,
     });
   }
 
@@ -331,6 +374,7 @@ const main = async () => {
     to,
     from,
     subject,
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
   })}\n`);
 };
 

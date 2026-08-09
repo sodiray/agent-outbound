@@ -1,4 +1,5 @@
 import { flattenPipelineSteps } from './subpipelines.js';
+import { emailHeaderTemplateFields } from './email-headers.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 
@@ -211,6 +212,7 @@ export const stageInputReferences = (stepValue: unknown, options: StageInputDiag
     ...tokens(config.prompt_args).map((field) => ({ field, source: 'prompt_args template' })),
     ...tokens(step.template).map((field) => ({ field, source: 'template' })),
     ...tokens(step.variables).map((field) => ({ field, source: 'variables template' })),
+    ...emailHeaderTemplateFields(config.headers).map((field) => ({ field, source: 'headers template' })),
     ...promptTokens(config.prompt_file, options).map((field) => ({ field, source: `prompt_file:${text(config.prompt_file)}` })),
     ...referencesForArgsMap(config.args_map),
     ...actionReferences(step, config),

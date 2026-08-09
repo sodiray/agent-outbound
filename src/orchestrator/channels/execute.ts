@@ -64,6 +64,8 @@ import {
   evaluateLinkedinConnectGate,
 } from '../policy/linkedin-lifecycle.js';
 import { assertOutboundContent } from '../lib/outbound-content.js';
+import { resolveEmailHeaders } from '../lib/email-headers.js';
+import { stageInputRecord } from '../lib/stage-inputs.js';
 import { resolveLinkedinInvitationMessage } from './unipile.js';
 
 const linkedinBodyForReview = ({
@@ -1976,6 +1978,17 @@ export const executeChannelStep = async ({
         baseArgs.to = resolveActiveContactEmailForSend({ record: sendRecord }).email
           || String(sendRecord.contact_email || sendRecord.email || '');
       }
+      const configuredHeaders = resolveEmailHeaders({
+        headers: stepConfig.headers,
+        inputs: stageInputRecord({ step, record: sendRecord }),
+      });
+      if (Object.keys(configuredHeaders).length > 0) baseArgs.headers = configuredHeaders;
+      const toolEnvironment = {
+        ...(sendMailbox ? smtpCredentialEnv(sendMailbox.credentials) : {}),
+        ...(Object.keys(configuredHeaders).length > 0
+          ? { AO_SMTP_HEADERS: JSON.stringify(configuredHeaders) }
+          : {}),
+      };
 
       const preSendFrom = String(baseArgs.from || '').trim();
       const preSendTo = String(baseArgs.to || '').trim().toLowerCase();
@@ -2099,7 +2112,7 @@ export const executeChannelStep = async ({
         },
         record: sendRecord,
         toolCatalog,
-        env: sendMailbox ? smtpCredentialEnv(sendMailbox.credentials) : undefined,
+        env: toolEnvironment,
       });
       const sendOutputs = (toolResult.outputs || {}) as Record<string, unknown>;
       // Provider rejection is NOT acceptance — never mark sent / invent provider id.

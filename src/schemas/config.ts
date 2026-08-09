@@ -10,6 +10,7 @@ import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 import { findProhibitedSteps } from '../orchestrator/policy/pipeline-prohibitions.js';
 import { stageInputDiagnosticMessages } from '../orchestrator/lib/stage-inputs.js';
 import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
+import { emailHeaderValidationMessages } from '../orchestrator/lib/email-headers.js';
 
 export const DEFAULT_SCORE_MIN_COVERAGE = 0.5;
 
@@ -556,6 +557,34 @@ const ExternalStepConfigSchema = StepConfigSchema.removeDefault().pick({
   columns: true,
   idempotency: true,
 }).strict();
+
+const EmailHeadersSchema = z.record(z.string()).superRefine((headers, ctx) => {
+  for (const message of emailHeaderValidationMessages(headers)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message,
+    });
+  }
+});
+
+const ExternalEmailStepConfigSchema = ExternalStepConfigSchema.extend({
+  headers: EmailHeadersSchema.optional(),
+}).superRefine((config, ctx) => {
+  if (config.args && typeof config.args === 'object' && !Array.isArray(config.args) && 'headers' in config.args) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'config.args.headers is not supported; declare email headers in config.headers.',
+      path: ['args', 'headers'],
+    });
+  }
+  if (config.args_map && typeof config.args_map === 'object' && !Array.isArray(config.args_map) && 'headers' in config.args_map) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'config.args_map.headers is not supported; declare email headers in config.headers.',
+      path: ['args_map', 'headers'],
+    });
+  }
+});
 
 const ReplyClassifierSchema = z.object({
   model: ProviderModelSchema,
@@ -1115,6 +1144,7 @@ const PipelineSendEmailStepSchema = z.object({
   kind: z.literal('send_email'),
   id: z.string().min(1),
   ...PipelineExternalStepFields,
+  config: ExternalEmailStepConfigSchema.default({}),
 });
 
 const PipelineSendSmsStepSchema = z.object({

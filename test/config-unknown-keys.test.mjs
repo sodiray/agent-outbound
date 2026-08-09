@@ -101,6 +101,48 @@ test('explicit extension surfaces preserve extra provider and channel fields', (
   assert.equal(result.config.source.searches[0].tool.provider_extension, 'supported');
 });
 
+test('a pipeline cannot declare an identity or threading email header', () => {
+  const result = normalizeConfig({
+    pipeline: [{
+      kind: 'send_email',
+      id: 'email_1',
+      side_effecting: true,
+      inputs: [],
+      config: {
+        headers: {
+          From: 'forged@example.test',
+        },
+      },
+    }],
+  });
+
+  assert.ok(result.errors.some((error) => error.includes('From cannot be declared')));
+});
+
+test('a pipeline email header must declare each interpolated record input', () => {
+  const step = {
+    kind: 'send_email',
+    id: 'email_1',
+    side_effecting: true,
+    config: {
+      headers: {
+        'List-Unsubscribe': '<mailto:unsubscribe@example.test?subject=unsubscribe-{_row_id}>',
+      },
+    },
+  };
+  const declared = normalizeConfig({
+    pipeline: [{ ...step, inputs: ['_row_id'] }],
+  });
+  const undeclared = normalizeConfig({
+    pipeline: [{ ...step, inputs: [] }],
+  });
+
+  assert.deepEqual(declared.errors, []);
+  assert.ok(undeclared.errors.some((error) => (
+    error.includes('pipeline.email_1 (send_email) reads undeclared input fields: "_row_id" (headers template).')
+  )));
+});
+
 test('a top-level enrichment budget block is an error instead of a discarded warning', () => {
   const result = normalizeConfig({
     enrichment_budget: {
