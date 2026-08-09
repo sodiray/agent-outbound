@@ -198,12 +198,26 @@ declaration is wrong; it does not tell you the replacement is right.
 
 ## Still open
 
-**Idempotency does not reach author-built side effects.** This plan named it as the re-execution
-control for author-declared stages. It is not: the schema rejects `idempotency` for enrich steps,
-so a stage that spends money now gets human approval and no duplicate-execution protection.
-Nothing was faked to paper over this — implying protection that does not exist is the same false
-promise the design exists to remove — but the gap is real and the plan was wrong to assume
-otherwise. It is the next piece of work.
+**Idempotency now reaches author-built side effects — closed (`98a12b4`).** This plan named it as
+the re-execution control for author-declared stages and was wrong: the schema rejected
+`idempotency` for every kind the engine does not transmit itself, so a stage that spends money got
+human approval and no duplicate-execution protection. Any step may now declare it, and the shared
+execution seam claims a key per record before the step runs. Engine-transmitted kinds are
+deliberately excluded — they claim their own key on the send path, and a second key for the same
+effect is worse than none.
+
+Closing it surfaced a larger defect that no failure was pointing at. **The enrichment runner
+retried a failed record automatically**, so a declared side effect whose provider threw *after* the
+purchase landed was silently purchased a second time inside one batch, and the step reported
+success. The provider waterfall already refused to advance on an external send for exactly this
+reason (`a transmission may have succeeded even when its response was not observed`); that
+reasoning now covers author-declared effects. Their failures are recorded `uncertain` rather than
+`failed`, because `failed` asserts the money did not leave — which the engine cannot know about a
+tool it merely invoked.
+
+Worth carrying forward: the guarantee an author asks for is not the same as the one they need.
+Approval answers *whether*, idempotency answers *how many times*, and this codebase had shipped
+the first while a retry three call-frames away quietly undid the second.
 
 **The item 5 warning was noisier than it should be — now fixed.** On a healthy, fully-valid
 config it produced 13 false warnings from engine-written columns (`enrichment_cost_usd`,
