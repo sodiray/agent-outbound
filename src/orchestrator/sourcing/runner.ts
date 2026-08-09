@@ -600,6 +600,53 @@ const strategyStatusFor = ({ kind, totalSeen, maxResults }: { kind: string; tota
   return totalSeen >= Number(maxResults || 100) ? 'capped' : 'done';
 };
 
+const zeroSearchReasonFor = ({
+  searches,
+  strategies,
+  summary,
+}: {
+  searches: any[];
+  strategies: any[];
+  summary: any;
+}) => {
+  if (Number(summary?.searches_run || 0) > 0 || Number(summary?.search_tasks_run || 0) > 0) return null;
+  if (searches.length === 0 && strategies.length === 0) {
+    return {
+      code: 'no_source_work_declared',
+      message: 'No source.searches or source.strategies are declared.',
+    };
+  }
+  if (strategies.length === 0) return null;
+  if (summary?.search_call_budget_hit) {
+    return {
+      code: 'search_call_budget_reached',
+      message: 'The source search-call budget was reached before a strategy task could run.',
+    };
+  }
+  if (summary?.search_result_budget_hit) {
+    return {
+      code: 'search_result_budget_reached',
+      message: 'The source result budget was reached before a strategy task could run.',
+    };
+  }
+  if (Number(summary?.search_tasks_parked || 0) > 0) {
+    return {
+      code: 'all_strategy_tasks_parked',
+      message: 'All runnable source strategy tasks are parked after repeated errors.',
+    };
+  }
+  if (Number(summary?.search_tasks_created || 0) === 0) {
+    return {
+      code: 'strategy_expanded_to_no_tasks',
+      message: 'Declared source strategies expanded to no executable search tasks.',
+    };
+  }
+  return {
+    code: 'all_strategy_tasks_exhausted',
+    message: 'All declared source strategy tasks are already complete, capped, or exhausted.',
+  };
+};
+
 const enqueueDensificationChildren = ({ db, task }: { db: any; task: any }) => {
   const children = densificationChildrenFor(task);
   const enqueued = children.filter((child) => {
@@ -1193,6 +1240,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         if (Number(limit || 0) > 0 && Number(summary.inserted_total || 0) >= Number(limit || 0)) break;
         attemptedTaskIds.add(String(task.id || ''));
         if (retryableTaskIds.has(String(task.id || ''))) summary.search_tasks_retried += 1;
+        summary.searches_run += 1;
         summary.search_tasks_run += 1;
         emitActivity({ event: 'step_start', phase: 'sourcing_task', step: task.id });
         tickProgress(db, runId, { stepIndex: summary.search_tasks_run, stepTotal: taskQueue.length, activeStep: String(task.id), message: `Sourcing tile ${summary.search_tasks_run}/${taskQueue.length}`, done: summary.inserted_total });
@@ -1347,6 +1395,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       summary.errors.push(...processed.errors);
     }
 
+    summary.zero_search_reason = zeroSearchReasonFor({ searches, strategies, summary }) || undefined;
     summary.territories = assignTerritories({ listDir, config, db, rowIds: summary.inserted_ids });
     summary.status = summary.errors.length > 0 || summary.search_tasks_parked > 0 ? 'partial' : 'ok';
     logSourcingEvent({ listDir, payload: summary });

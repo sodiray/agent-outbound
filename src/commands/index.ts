@@ -714,6 +714,15 @@ export const sourceMoreCommand = async ({ list, more = 0 }) => {
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'source' });
   try {
+    const searches = Array.isArray(loaded.config?.source?.searches) ? loaded.config.source.searches : [];
+    const strategies = Array.isArray(loaded.config?.source?.strategies) ? loaded.config.source.strategies : [];
+    if (strategies.length > 0 || searches.length === 0) {
+      const sourced = await runSourcing({ listDir, limit: Number(more || 0) });
+      return {
+        ...sourced,
+        target_new: Number(more || 0),
+      };
+    }
     return await runSourcingMore({ listDir, targetNew: Number(more || 0) });
   } catch (error) {
     return {
