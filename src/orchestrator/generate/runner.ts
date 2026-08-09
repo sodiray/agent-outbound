@@ -290,22 +290,41 @@ export const isGenerateFresh = ({
   cached,
   step,
   record,
+  assetOutputs = {},
   executionConfig,
   force = false,
 }: {
   cached: Record<string, unknown> | undefined;
   step: GenerateStepInput;
   record: GenerateRecord;
+  assetOutputs?: Record<string, unknown>;
   executionConfig?: Record<string, unknown>;
   force?: boolean;
 }) => {
   if (force || !cached) return false;
+  const stepConfig = enrichmentStepConfig(step);
+  const expectedOutputs = Object.fromEntries(
+    Object.entries(getDeclaredOutputs(stepConfig)).filter(([key]) => !CLAIM_ENGINE_OUTPUT_FIELDS.has(key)),
+  );
+  if (
+    outputOutcomeFor({ outputs: record, expectedOutputs }) === 'empty'
+    && outputOutcomeFor({ outputs: assetOutputs, expectedOutputs }) === 'empty'
+  ) return false;
   if (String(cached.dep_hash || '') !== generateDependencyHash({ step, record, executionConfig })) return false;
   const ttl = Number(cached.cache_ttl_seconds || 0);
   if (ttl <= 0) return true;
   const updatedAt = new Date(String(cached.updated_at || 0)).getTime();
   return (Date.parse(nowIso()) - updatedAt) / 1000 <= ttl;
 };
+
+const declaredOutputFailure = ({ stepId, outputNames, detail }: {
+  stepId: string;
+  outputNames: string[];
+  detail: string;
+}) => new Error(
+  `Step "${stepId}" could not produce declared output${outputNames.length === 1 ? '' : 's'} `
+  + `${outputNames.join(', ') || '(none)'}: ${detail}`,
+);
 
 const persistAsset = ({
   db,
@@ -347,6 +366,7 @@ export const runGenerateStep = async ({
   force = false,
   concurrency,
   logger,
+  executeAction = executeEnrichmentAction,
 }: {
   db: DbLike;
   listDir: string;
@@ -359,6 +379,7 @@ export const runGenerateStep = async ({
   force?: boolean;
   concurrency?: number;
   logger?: Logger;
+  executeAction?: typeof executeEnrichmentAction;
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'generate';
   const stepConfig = enrichmentStepConfig(step);
@@ -369,7 +390,6 @@ export const runGenerateStep = async ({
   const effectiveConcurrency = Number(concurrency || stepConfig.concurrency || 3);
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
   const toolDriven = hasToolFlavor(stepConfig);
-  const onErrorEmpty = String(stepConfig.on_error || 'empty').trim().toLowerCase() === 'empty';
 
   const summary = {
     processed: 0,
@@ -451,7 +471,14 @@ export const runGenerateStep = async ({
       executionConfig,
     });
     const cached = readStaleness({ db, recordId, stepId: id });
-    if (existing && isGenerateFresh({ cached, step, record: currentRecord, executionConfig, force })) {
+    if (existing && isGenerateFresh({
+      cached,
+      step,
+      record: currentRecord,
+      assetOutputs: outputsFromAsset(existing),
+      executionConfig,
+      force,
+    })) {
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({
         stepConfig,
         outputs: outputsFromAsset(existing),
@@ -463,7 +490,7 @@ export const runGenerateStep = async ({
 
     try {
       const inputRecord = mergedRecordForEnrichment({ db, record: currentRecord });
-      const executionResult = await executeEnrichmentAction({
+      const executionResult = await executeAction({
         db,
         mcp,
         listDir,
@@ -534,51 +561,20 @@ export const runGenerateStep = async ({
         try {
           return outputZod.parse(outputs);
         } catch (error) {
-          if (!onErrorEmpty) throw error;
-          return { __parse_error: formatErrorMessage(error) };
+          throw declaredOutputFailure({
+            stepId: id,
+            outputNames: Object.keys(expectedOutputs),
+            detail: formatErrorMessage(error),
+          });
         }
       })();
-      if (Object.prototype.hasOwnProperty.call(parsedOutputs, '__parse_error')) {
-        const detail = `Declared output parsing failed; stored raw result with empty structured outputs. ${String(parsedOutputs.__parse_error || '')}`.trim();
-        summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
-        const isReference = isReferenceResult({ toolDriven, resultText: result, executionResult });
-        const referenceAsset = assetResultForReference({
-          isReference,
-          resultText: result,
-          outputs,
-          executionResult,
-          reason: detail,
-        });
-        persistAsset({
-          db,
-          existing,
-          recordId,
-          stepId: id,
-          label: String(stepConfig.label || ''),
-          result: referenceAsset.result,
-          outputsJson: stringifyJson(emptyOutputsFor(outputZod)),
-          isReference,
-          status: 'empty',
-          reason: referenceAsset.reason,
-        });
-        writeStaleness({
-          db,
-          recordId,
-          stepId: id,
-          ...dependencyHashes,
-          cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
-          cacheTtl: String(stepConfig.cache || ''),
-        });
-        summary.processed += 1;
-        if (existing) summary.updated += 1;
-        if (!existing) summary.inserted += 1;
-        summary.record_ids.push(recordId);
-        emit({ logger, event: { event: 'row_complete', phase: 'generate', step: id, row: rowLabel, outcome: 'empty', reason: detail } });
-        return;
-      }
       const outcome = outputOutcomeFor({ outputs: parsedOutputs, expectedOutputs });
-      if (Object.keys(expectedOutputs).length > 0 && outcome === 'empty' && !onErrorEmpty) {
-        throw new Error(`Step "${id}" returned no outputs for declared outputs.`);
+      if (Object.keys(expectedOutputs).length > 0 && outcome === 'empty') {
+        throw declaredOutputFailure({
+          stepId: id,
+          outputNames: Object.keys(expectedOutputs),
+          detail: 'the model returned no usable output',
+        });
       }
 
       const outputsJson = Object.keys(expectedOutputs).length > 0 ? stringifyJson(parsedOutputs) : '{}';
@@ -604,7 +600,7 @@ export const runGenerateStep = async ({
         result: referenceAsset.result,
         outputsJson,
         isReference,
-        status: outcome === 'empty' ? 'empty' : 'ready',
+        status: 'ready',
         reason: referenceAsset.reason,
       });
 
@@ -635,36 +631,16 @@ export const runGenerateStep = async ({
       emit({ logger, event: { event: 'row_complete', phase: 'generate', step: id, row: rowLabel, asset_id: saved?.asset_id || '' } });
     } catch (error) {
       if (isBudgetExceededError(error)) throw error;
-      const detail = formatErrorMessage(error);
-      if (onErrorEmpty) {
-        summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
-        persistAsset({
-          db,
-          existing,
-          recordId,
-          stepId: id,
-          label: String(stepConfig.label || ''),
-          result: '',
-          outputsJson: stringifyJson(emptyOutputsFor(outputZod)),
-          isReference: false,
-          status: 'empty',
-          reason: detail,
-        });
-        writeStaleness({
-          db,
-          recordId,
-          stepId: id,
-          ...dependencyHashes,
-          cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
-          cacheTtl: String(stepConfig.cache || ''),
-        });
-        summary.processed += 1;
-        if (existing) summary.updated += 1;
-        if (!existing) summary.inserted += 1;
-        summary.record_ids.push(recordId);
-        emit({ logger, event: { event: 'row_complete', phase: 'generate', step: id, row: rowLabel, outcome: 'empty', reason: detail } });
-        return;
-      }
+      const rawDetail = formatErrorMessage(error);
+      const detail = rawDetail.startsWith(`Step "${id}" could not produce declared output`)
+        ? rawDetail
+        : Object.keys(declaredOutputs).length > 0
+          ? declaredOutputFailure({
+            stepId: id,
+            outputNames: Object.keys(declaredOutputs),
+            detail: rawDetail,
+          }).message
+          : rawDetail;
       summary.failed += 1;
       summary.errors.push({ record_id: recordId, error: detail });
       summary.record_ids.push(recordId);

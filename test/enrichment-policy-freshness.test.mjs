@@ -167,6 +167,65 @@ test('policy fingerprints are precise and unchanged policy retains the fresh ski
   }), true);
 });
 
+test('an empty enrich result is recorded but never treated as a fresh output cache', async () => {
+  const root = listDir();
+  const db = openListDb({ listDir: root, readonly: false });
+  const step = {
+    id: 'account_research',
+    kind: 'enrich',
+    inputs: ['website'],
+    outputs: {
+      account_research_json: { type: 'string', description: 'Account research.' },
+    },
+  };
+  let calls = 0;
+  const executeAction = async () => {
+    calls += 1;
+    return { outputs: {}, usage: {} };
+  };
+  try {
+    upsertRecord({
+      db,
+      row: {
+        _row_id: 'empty-enrich-result',
+        business_name: 'Empty enrich result',
+        website: 'https://example.test',
+      },
+    });
+    const firstRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('empty-enrich-result');
+    const first = await executeEnrichmentStepOnRecords({
+      db,
+      listDir: root,
+      config: {},
+      mcp: null,
+      toolCatalog: null,
+      step,
+      rows: [firstRecord],
+      executeAction,
+    });
+    assert.equal(first.processed, 1);
+    assert.equal(calls, 1);
+    assert.ok(db.prepare('SELECT 1 FROM staleness WHERE record_id = ? AND step_id = ?')
+      .get('empty-enrich-result', step.id));
+
+    const secondRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('empty-enrich-result');
+    const second = await executeEnrichmentStepOnRecords({
+      db,
+      listDir: root,
+      config: {},
+      mcp: null,
+      toolCatalog: null,
+      step,
+      rows: [secondRecord],
+      executeAction,
+    });
+    assert.equal(second.skipped_fresh, 0);
+    assert.equal(calls, 2);
+  } finally {
+    db.close();
+  }
+});
+
 test('dataflow records policy-driven reruns distinctly from unchanged skips', async () => {
   const root = listDir();
   writeFileSync(join(root, 'outbound.yaml'), dataflowPolicyYaml(treasureValleyTreatmentStrategy));

@@ -6,7 +6,9 @@ import test from 'node:test';
 
 import { runGenerateStep } from '../dist/orchestrator/generate/runner.js';
 import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
-import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
+import { ensureRecordColumns, insertAsset, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
+import { generateDependencyHash } from '../dist/orchestrator/generate/runner.js';
+import { writeStaleness } from '../dist/orchestrator/enrichment/runner.js';
 
 const dependencyStep = {
   id: 'dependency_freshness',
@@ -125,5 +127,130 @@ pipeline:
   } finally {
     if (previousFixture === undefined) delete process.env.AO_STEP_FIXTURE;
     else process.env.AO_STEP_FIXTURE = previousFixture;
+  }
+});
+
+test('an empty cached generate result is retried instead of being cached forever', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-generate-empty-cache-'));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const step = {
+    id: 'diagnostic_content_pack',
+    kind: 'generate',
+    inputs: ['site_text'],
+    outputs: {
+      diagnostic_hypotheses_json: { type: 'string' },
+      preliminary_snapshot: { type: 'string' },
+    },
+  };
+  const fixtureBefore = process.env.AO_STEP_FIXTURE;
+  try {
+    ensureRecordColumns({ db, columns: ['site_text', ...Object.keys(step.outputs)] });
+    upsertRecord({
+      db,
+      row: {
+        _row_id: 'empty_cached_generate',
+        business_name: 'Empty cached generate',
+        sequence_status: 'active',
+        site_text: 'A complete source record.',
+      },
+    });
+    const staleRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('empty_cached_generate');
+    insertAsset({
+      db,
+      rowId: 'empty_cached_generate',
+      stepId: step.id,
+      outputsJson: JSON.stringify({
+        diagnostic_hypotheses_json: '',
+        preliminary_snapshot: '',
+      }),
+      status: 'empty',
+      reason: 'prior model result was unusable',
+    });
+    writeStaleness({
+      db,
+      recordId: 'empty_cached_generate',
+      stepId: step.id,
+      depHash: generateDependencyHash({ step, record: staleRecord }),
+      cacheTtl: '',
+      cacheTtlSeconds: 0,
+    });
+    process.env.AO_STEP_FIXTURE = '1';
+
+    const result = await runGenerateStep({
+      db,
+      listDir,
+      config: {},
+      step,
+      rows: [staleRecord],
+    });
+
+    assert.equal(result.skipped_fresh, 0);
+    assert.equal(result.processed, 1);
+    const repaired = db.prepare(`
+      SELECT diagnostic_hypotheses_json, preliminary_snapshot
+      FROM records
+      WHERE _row_id = ?
+    `).get('empty_cached_generate');
+    assert.deepEqual(repaired, {
+      diagnostic_hypotheses_json: 'fixture_diagnostic_hypotheses_json',
+      preliminary_snapshot: 'fixture_preliminary_snapshot',
+    });
+  } finally {
+    if (fixtureBefore === undefined) delete process.env.AO_STEP_FIXTURE;
+    else process.env.AO_STEP_FIXTURE = fixtureBefore;
+    db.close();
+  }
+});
+
+test('a generate model result with no usable declared outputs fails without caching', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-generate-empty-model-output-'));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const step = {
+    id: 'diagnostic_content_pack',
+    kind: 'generate',
+    outputs: {
+      diagnostic_hypotheses_json: { type: 'string' },
+      preliminary_snapshot: { type: 'string' },
+    },
+  };
+  try {
+    upsertRecord({
+      db,
+      row: {
+        _row_id: 'empty_model_generate',
+        business_name: 'Empty model generate',
+        sequence_status: 'active',
+        created_at: now,
+      },
+    });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('empty_model_generate');
+    const result = await runGenerateStep({
+      db,
+      listDir,
+      config: {},
+      step,
+      rows: [record],
+      executeAction: async () => ({ outputs: {}, artifacts: {}, usage: {} }),
+    });
+
+    assert.equal(result.failed, 1);
+    assert.match(
+      result.errors[0].error,
+      /could not produce declared outputs diagnostic_hypotheses_json, preliminary_snapshot: the model returned no usable output/,
+    );
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS n FROM staleness WHERE record_id = ? AND step_id = ?')
+        .get('empty_model_generate', step.id).n,
+      0,
+    );
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS n FROM assets WHERE row_id = ? AND step_id = ?')
+        .get('empty_model_generate', step.id).n,
+      0,
+    );
+  } finally {
+    db.close();
   }
 });
