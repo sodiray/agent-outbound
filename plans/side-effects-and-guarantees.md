@@ -168,3 +168,45 @@ person.
 
 Items 1 and 2 are one change. Item 3 is independent and is the one that makes the engine
 publishable. Items 4 and 5 are legibility and can follow.
+
+---
+
+## As shipped
+
+All five landed on 2026-08-09, each with its failing test demonstrated before the fix.
+
+| | | commit |
+|---|---|---|
+| 1–2 | Approved content is sent content | `3234b70` |
+| 3 | Any step may declare a side effect and require approval | `ce6c81a` |
+| 4 | Timeline tense, reconciliation, provenance | `99216ab` |
+| 5 | Warn when a step reads a field nothing produces | `4944530` |
+
+Two things were found while building and are worth carrying forward.
+
+**Item 4 turned up a second false-fact path** nobody was looking for: generic sequence actions
+fabricated a random provider id when none came back, making an unverified action look evidenced.
+Removed — engine-owned sends now require real provider evidence, and historically ambiguous rows
+are presented as unverified rather than promoted to proven.
+
+**Item 5 earned itself immediately**, flagging a step that read `decision_maker_name` when the
+producing step writes `decision_maker_discovery_*`. Worth recording how that repaired: the first
+fix pointed the step at the discovery field and was wrong — measured across 365 records,
+`decision_maker_discovery_name` is populated 0 times, the legacy field 8, and
+`decision_maker_reveal_name` 10, so the fix traded 8 values for none. A warning tells you a
+declaration is wrong; it does not tell you the replacement is right.
+
+## Still open
+
+**Idempotency does not reach author-built side effects.** This plan named it as the re-execution
+control for author-declared stages. It is not: the schema rejects `idempotency` for enrich steps,
+so a stage that spends money now gets human approval and no duplicate-execution protection.
+Nothing was faked to paper over this — implying protection that does not exist is the same false
+promise the design exists to remove — but the gap is real and the plan was wrong to assume
+otherwise. It is the next piece of work.
+
+**The item 5 warning is noisier than it should be.** On a healthy, fully-valid config it produces
+13 warnings, all of them engine-written columns (`enrichment_cost_usd`, `duplicate_reason`,
+`invite_message`, the `policy_apply` confidence family) that the exemption list does not cover.
+A check people learn to ignore is worse than no check — this codebase already has one case where
+ignored warnings let three unenforced safety declarations reach a live pipeline.
