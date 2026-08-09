@@ -14,6 +14,7 @@ import {
   logComplianceEvent,
   openGlobalSuppressionDb,
   openListDb,
+  revokeQueuedDraftsForSuppression,
   upsertRecord,
 } from '../orchestrator/runtime/db.js';
 import {
@@ -2045,6 +2046,12 @@ export const suppressCommand = ({ list, value, valueType = 'email', reason = 'ma
 
     addSuppression({ db, entry });
     addSuppression({ db: globalDb, entry });
+    revokeQueuedDraftsForSuppression({
+      db,
+      value: entry.value,
+      valueType: entry.value_type,
+      reason: entry.reason,
+    });
     return { status: 'suppressed', ...entry };
   } finally {
     db.close();

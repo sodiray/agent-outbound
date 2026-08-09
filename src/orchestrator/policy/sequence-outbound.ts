@@ -10,6 +10,7 @@
  */
 
 import { parseNextActionFromRecord, type SequenceState } from './lifecycle.js';
+import { isAffirmativeFlag } from './booleanish.js';
 import { isActionDueOnDate, toZonedIsoDate } from '../lib/working-days.js';
 import { nowIso } from '../lib/record.js';
 
@@ -253,6 +254,24 @@ export function shouldExecuteSequenceOutbound(
   const row = record || {};
   const sequence_state = String(row.account_sequence_state || '').trim() || null;
   const channelHint = resolveOutboundChannelHint(options);
+
+  if (String(row.disqualified_at || '').trim() || String(row.lifecycle_stage || '').trim().toLowerCase() === 'disqualified') {
+    return {
+      execute: false,
+      reason: 'record_disqualified',
+      sequence_state,
+      action_type: null,
+    };
+  }
+
+  if (isAffirmativeFlag(row.suppressed, { failClosed: true })) {
+    return {
+      execute: false,
+      reason: 'record_suppressed',
+      sequence_state,
+      action_type: null,
+    };
+  }
 
   if (sequence_state && SEQUENCE_STATES_BLOCK_OUTBOUND.has(sequence_state)) {
     return {

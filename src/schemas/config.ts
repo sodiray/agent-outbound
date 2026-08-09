@@ -1909,11 +1909,16 @@ const WatchSchema = z.object({
   poll_delivery_minutes: z.coerce.number().int().min(1).default(15),
 }).partial().default({});
 
+const FirstTouchPolicySchema = z.object({
+  suppress_sibling_sequence_channels: z.array(z.enum(['email', 'linkedin'])).default([]),
+}).partial().default({});
+
 /** Project-level outbound policy (pipeline-declared prohibitions, hard readiness, versions). */
 const PolicySchema = z.object({
   version: z.string().trim().default(''),
   prohibited_channels: z.array(z.string().trim().min(1)).default([]),
   prohibited_task_types: z.array(z.string().trim().min(1)).default([]),
+  first_touch: FirstTouchPolicySchema,
   /** When true, channel execute hard-blocks non-ready external sends (send_email, linkedin_connect). */
   enforce_readiness: z.boolean().default(false),
   fit_rule_version: z.string().trim().default(''),

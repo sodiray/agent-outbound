@@ -568,6 +568,8 @@ const SCHEMA_SQL = `
     contact_id TEXT DEFAULT '',
     channel TEXT NOT NULL,
     step_id TEXT NOT NULL,
+    sequence_name TEXT DEFAULT '',
+    step_number INTEGER DEFAULT 0,
     provider_id TEXT DEFAULT '',
     provider_message_id TEXT DEFAULT '',
     delivery_mode TEXT NOT NULL,
@@ -1143,6 +1145,12 @@ const ensureDraftCompatibility = (db) => {
   try { db.exec("ALTER TABLE drafts ADD COLUMN content_binding_json TEXT DEFAULT '{}'"); } catch {}
 };
 
+const ensureLiveInteractionLedgerCompatibility = (db) => {
+  try { db.exec("ALTER TABLE live_interaction_ledger ADD COLUMN sequence_name TEXT DEFAULT ''"); } catch {}
+  try { db.exec('ALTER TABLE live_interaction_ledger ADD COLUMN step_number INTEGER DEFAULT 0'); } catch {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_live_interaction_ledger_first_touch ON live_interaction_ledger(record_id, delivery_mode, status, sequence_name, step_number, channel)'); } catch {}
+};
+
 /**
  * Ensure drafts table has its generic content-binding column.
  */
@@ -1444,6 +1452,7 @@ const openDb = ({ dbPath, readonly = false }) => {
     ensureInboundMessageCompatibility(db);
     ensureTerritoryCompatibility(db);
     ensureDraftCompatibility(db);
+    ensureLiveInteractionLedgerCompatibility(db);
     migrateContentAddressedEvidence({ db });
     ensureDataAccessViewsInternal(db);
   }
@@ -1504,6 +1513,7 @@ export const openListDb = ({ listDir, readonly = false }) => {
     ensureInboundMessageCompatibility(db);
     ensureTerritoryCompatibility(db);
     ensureDraftCompatibility(db);
+    ensureLiveInteractionLedgerCompatibility(db);
     migrateContentAddressedEvidence({ db });
     ensureDataAccessViewsInternal(db);
   }
@@ -1869,6 +1879,73 @@ const withFieldOverrides = ({ db, recordId, row }) => {
   return { ...row, ...Object.fromEntries(overrides) };
 };
 
+export const draftRevocationReason = (record: Record<string, unknown> | null | undefined): string | null => {
+  const disqualifiedAt = String(record?.disqualified_at || '').trim();
+  const lifecycle = String(record?.lifecycle_stage || '').trim().toLowerCase();
+  if (disqualifiedAt || lifecycle === 'disqualified') return 'record_disqualified';
+  if (!isAffirmativeFlag(record?.suppressed, { failClosed: true })) return null;
+  const suppressionReason = String(record?.suppressed_reason || '').trim().toLowerCase();
+  if (suppressionReason.includes('opt_out') || suppressionReason.includes('opt-out')) return 'record_opted_out';
+  if (suppressionReason.includes('dnc') || suppressionReason.includes('do_not_contact')) return 'record_dnc';
+  return 'record_suppressed';
+};
+
+export const revokeQueuedDraftsForRecord = ({
+  db,
+  record,
+}: {
+  db: any;
+  record: Record<string, unknown> | null | undefined;
+}): { revoked: number; reason: string | null } => {
+  const rowId = String(record?._row_id || record?.id || '').trim();
+  const reason = draftRevocationReason(record);
+  if (!rowId || !reason) return { revoked: 0, reason: null };
+  ensureDraftCompatibility(db);
+  const result = db.prepare(`
+    UPDATE drafts
+    SET status = 'revoked', reason = ?, updated_at = ?
+    WHERE row_id = ? AND status IN ('pending_approval', 'ready')
+  `).run(reason, nowIso(), rowId);
+  return { revoked: Number(result?.changes || 0), reason };
+};
+
+export const revokeQueuedDraftsForSuppression = ({
+  db,
+  value,
+  valueType,
+  reason,
+}: {
+  db: any;
+  value: string;
+  valueType: string;
+  reason: string;
+}): number => {
+  const normalizedValue = String(value || '').trim().toLowerCase();
+  const normalizedType = String(valueType || '').trim().toLowerCase();
+  if (!normalizedValue || !['email', 'linkedin'].includes(normalizedType)) return 0;
+  const recipientColumn = normalizedType === 'email' ? 'contact_email' : 'contact_linkedin_url';
+  const legacyRecipientColumn = normalizedType === 'email' ? 'email_primary' : 'contact_linkedin_url';
+  const result = db.prepare(`
+    UPDATE drafts
+    SET status = 'revoked', reason = ?, updated_at = ?
+    WHERE status IN ('pending_approval', 'ready')
+      AND channel = ?
+      AND row_id IN (
+        SELECT _row_id
+        FROM records
+        WHERE lower(COALESCE(${recipientColumn}, '')) = ?
+           OR lower(COALESCE(${legacyRecipientColumn}, '')) = ?
+      )
+  `).run(
+    `global_${normalizedType}_suppression:${String(reason || 'manual_suppress')}`,
+    nowIso(),
+    normalizedType,
+    normalizedValue,
+    normalizedValue,
+  );
+  return Number(result?.changes || 0);
+};
+
 export const upsertRecord = ({ db, row: inputRow }) => {
   const rowId = String(inputRow._row_id || inputRow.id || '').trim();
   if (!rowId) throw new Error('Record id/_row_id is required.');
@@ -1984,6 +2061,13 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     if (row.account_contact_plan_json !== undefined) {
       syncPrimaryContactProjectionInternal({ db, recordId: String(current._row_id || current.id || rowId) });
     }
+    revokeQueuedDraftsForRecord({
+      db,
+      record: {
+        ...row,
+        _row_id: String(current._row_id || current.id || rowId),
+      },
+    });
     return;
   }
 
@@ -2184,6 +2268,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       updated_at: timestamp,
     });
   }
+  revokeQueuedDraftsForRecord({ db, record: { ...row, _row_id: row._row_id || rowId } });
 };
 
 export const listRecords = ({ db, whereSql = '1=1', params = [], limit = 1000, orderBy = 'updated_at DESC' }) =>
@@ -2356,11 +2441,24 @@ export const reconcileOverrides = ({
     if (String(row.kind) === 'drop') {
       const alreadyDropped = String(record.disqualified_at || '').trim() !== '';
       if (alreadyDropped && String(record.disqualified_gate || '') === OVERRIDE_GATE) return;
+      const droppedRecord = {
+        ...record,
+        disqualified_at: now,
+        disqualified_gate: OVERRIDE_GATE,
+        disqualify_reason: `override: ${String(row.reason || '')}`,
+      };
       db.prepare(`
         UPDATE records SET disqualified_at = ?, disqualified_gate = ?, disqualify_reason = ?,
           needs_review = 0, review_reason = '', review_flagged_at = '', updated_at = ?
         WHERE _row_id = ?
-      `).run(now, OVERRIDE_GATE, `override: ${String(row.reason || '')}`, now, String(record._row_id));
+      `).run(
+        droppedRecord.disqualified_at,
+        droppedRecord.disqualified_gate,
+        droppedRecord.disqualify_reason,
+        now,
+        String(record._row_id),
+      );
+      revokeQueuedDraftsForRecord({ db, record: droppedRecord });
       summary.drops_applied += 1;
       return;
     }

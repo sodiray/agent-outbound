@@ -4,6 +4,8 @@ import {
   openListDb,
   updateDraft,
   ensureRecordColumns,
+  draftRevocationReason,
+  revokeQueuedDraftsForRecord,
   upsertRecord,
 } from '../orchestrator/runtime/db.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
@@ -348,6 +350,13 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
         | undefined;
       if (!record) {
         failures.push({ draft_id: id, reason: 'record_missing' });
+        continue;
+      }
+
+      const revocationReason = draftRevocationReason(record);
+      if (revocationReason) {
+        revokeQueuedDraftsForRecord({ db, record });
+        failures.push({ draft_id: id, reason: revocationReason });
         continue;
       }
 

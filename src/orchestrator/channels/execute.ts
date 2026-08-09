@@ -54,6 +54,7 @@ import {
   readinessChannelPermission,
   evaluateTransmitterSuppression,
   resolveReviewPresentation,
+  evaluateSiblingFirstTouch,
   type ResolvedReviewPresentation,
 } from '../policy/index.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
@@ -896,6 +897,23 @@ export const executeChannelStep = async ({
       }
     }
 
+    const siblingFirstTouch = evaluateSiblingFirstTouch({
+      db,
+      config: projectConfig,
+      recordId,
+      sequenceName: String(sequenceName || 'default'),
+      stepNumber: Number(stepNumber || 0),
+      channel: assertChannelEarly,
+    });
+    if (siblingFirstTouch.blocked) {
+      return {
+        status: 'skipped',
+        reason: siblingFirstTouch.reason,
+        provider_id: '',
+        auto_skipped_steps: [],
+      };
+    }
+
     const liveInteractionBudget = resolveLiveInteractionBudget(projectConfig);
     const reserveProviderInteraction = ({ providerChannel }: { providerChannel: 'email' | 'linkedin' }) => {
       const idempotencyClaim = claimExclusiveSend();
@@ -910,6 +928,8 @@ export const executeChannelStep = async ({
           contactId: activeContactId,
           channel: providerChannel,
           stepId: sequenceStepId,
+          sequenceName: String(sequenceName || 'default'),
+          stepNumber: Number(stepNumber || 0),
           at: now,
         });
         if (reservation.allowed) return { ok: true, mode: 'live' as const };
@@ -987,6 +1007,8 @@ export const executeChannelStep = async ({
           channel: providerChannel,
           stepId: sequenceStepId,
           providerId,
+          sequenceName: String(sequenceName || 'default'),
+          stepNumber: Number(stepNumber || 0),
           at: now,
         });
         return;
@@ -999,6 +1021,8 @@ export const executeChannelStep = async ({
           channel: providerChannel,
           stepId: sequenceStepId,
           providerId,
+          sequenceName: String(sequenceName || 'default'),
+          stepNumber: Number(stepNumber || 0),
           at: now,
         });
         return;
@@ -1010,6 +1034,8 @@ export const executeChannelStep = async ({
         channel: providerChannel,
         stepId: sequenceStepId,
         providerId,
+        sequenceName: String(sequenceName || 'default'),
+        stepNumber: Number(stepNumber || 0),
         at: now,
       });
     };

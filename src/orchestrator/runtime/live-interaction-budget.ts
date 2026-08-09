@@ -16,6 +16,8 @@ type LedgerRow = {
   contact_id: string;
   channel: string;
   step_id: string;
+  sequence_name: string;
+  step_number: number;
   provider_id: string;
   provider_message_id: string;
   delivery_mode: 'live' | 'sink';
@@ -85,6 +87,8 @@ export const reserveLiveInteraction = ({
   contactId,
   channel,
   stepId,
+  sequenceName = '',
+  stepNumber = 0,
   at = nowTimestamp(),
 }: {
   db: any;
@@ -93,6 +97,8 @@ export const reserveLiveInteraction = ({
   contactId: string;
   channel: string;
   stepId: string;
+  sequenceName?: string;
+  stepNumber?: number;
   at?: string;
 }) => {
   const identityKey = liveInteractionIdentity({ recordId, stepId, contactId });
@@ -124,19 +130,19 @@ export const reserveLiveInteraction = ({
     if (existing) {
       db.prepare(`
         UPDATE live_interaction_ledger
-        SET record_id = ?, contact_id = ?, channel = ?, step_id = ?,
+        SET record_id = ?, contact_id = ?, channel = ?, step_id = ?, sequence_name = ?, step_number = ?,
             provider_id = '', provider_message_id = '', delivery_mode = 'live',
             status = 'reserved', occurred_at = ?, updated_at = ?
         WHERE identity_key = ?
-      `).run(recordId, contactId, channel, stepId, at, at, identityKey);
+      `).run(recordId, contactId, channel, stepId, sequenceName, stepNumber, at, at, identityKey);
     } else {
       db.prepare(`
         INSERT INTO live_interaction_ledger (
-          ledger_id, identity_key, record_id, contact_id, channel, step_id,
+          ledger_id, identity_key, record_id, contact_id, channel, step_id, sequence_name, step_number,
           provider_id, provider_message_id, delivery_mode, status,
           occurred_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, '', '', 'live', 'reserved', ?, ?, ?)
-      `).run(ledgerId, identityKey, recordId, contactId, channel, stepId, at, at, at);
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', 'live', 'reserved', ?, ?, ?)
+      `).run(ledgerId, identityKey, recordId, contactId, channel, stepId, sequenceName, stepNumber, at, at, at);
     }
     return {
       allowed: true,
@@ -158,6 +164,8 @@ export const commitLiveInteraction = ({
   channel,
   stepId,
   providerId,
+  sequenceName = '',
+  stepNumber = 0,
   at = nowTimestamp(),
 }: {
   db: any;
@@ -166,15 +174,17 @@ export const commitLiveInteraction = ({
   channel: string;
   stepId: string;
   providerId: string;
+  sequenceName?: string;
+  stepNumber?: number;
   at?: string;
 }) => {
   const identityKey = liveInteractionIdentity({ recordId, stepId, contactId });
   const updated = db.prepare(`
     UPDATE live_interaction_ledger
-    SET channel = ?, provider_id = ?, provider_message_id = ?, status = 'accepted',
+    SET channel = ?, sequence_name = ?, step_number = ?, provider_id = ?, provider_message_id = ?, status = 'accepted',
         occurred_at = ?, updated_at = ?
     WHERE identity_key = ? AND delivery_mode = 'live' AND status IN ('reserved', 'accepted')
-  `).run(channel, providerId, providerId, at, at, identityKey);
+  `).run(channel, sequenceName, stepNumber, providerId, providerId, at, at, identityKey);
   if (Number(updated?.changes || 0) !== 1) throw new Error('Live interaction ledger reservation was not found.');
 };
 
@@ -185,6 +195,8 @@ export const recordUnbudgetedLiveInteraction = ({
   channel,
   stepId,
   providerId,
+  sequenceName = '',
+  stepNumber = 0,
   at = nowTimestamp(),
 }: {
   db: any;
@@ -193,20 +205,24 @@ export const recordUnbudgetedLiveInteraction = ({
   channel: string;
   stepId: string;
   providerId: string;
+  sequenceName?: string;
+  stepNumber?: number;
   at?: string;
 }) => {
   const identityKey = liveInteractionIdentity({ recordId, stepId, contactId });
   db.prepare(`
     INSERT INTO live_interaction_ledger (
-      ledger_id, identity_key, record_id, contact_id, channel, step_id,
+      ledger_id, identity_key, record_id, contact_id, channel, step_id, sequence_name, step_number,
       provider_id, provider_message_id, delivery_mode, status,
       occurred_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', 'accepted', ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', 'accepted', ?, ?, ?)
     ON CONFLICT(identity_key) DO UPDATE SET
       record_id = excluded.record_id,
       contact_id = excluded.contact_id,
       channel = excluded.channel,
       step_id = excluded.step_id,
+      sequence_name = excluded.sequence_name,
+      step_number = excluded.step_number,
       provider_id = excluded.provider_id,
       provider_message_id = excluded.provider_message_id,
       delivery_mode = 'live',
@@ -214,7 +230,7 @@ export const recordUnbudgetedLiveInteraction = ({
       occurred_at = excluded.occurred_at,
       updated_at = excluded.updated_at
   `).run(
-    randomUUID(), identityKey, recordId, contactId, channel, stepId,
+    randomUUID(), identityKey, recordId, contactId, channel, stepId, sequenceName, stepNumber,
     providerId, providerId, at, at, at,
   );
 };
@@ -247,6 +263,8 @@ export const recordSinkInteraction = ({
   channel,
   stepId,
   providerId,
+  sequenceName = '',
+  stepNumber = 0,
   at = nowTimestamp(),
 }: {
   db: any;
@@ -255,18 +273,20 @@ export const recordSinkInteraction = ({
   channel: string;
   stepId: string;
   providerId: string;
+  sequenceName?: string;
+  stepNumber?: number;
   at?: string;
 }) => {
   const identityKey = liveInteractionIdentity({ recordId, stepId, contactId });
   db.prepare(`
     INSERT INTO live_interaction_ledger (
-      ledger_id, identity_key, record_id, contact_id, channel, step_id,
+      ledger_id, identity_key, record_id, contact_id, channel, step_id, sequence_name, step_number,
       provider_id, provider_message_id, delivery_mode, status,
       occurred_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'sink', 'accepted', ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sink', 'accepted', ?, ?, ?)
     ON CONFLICT(identity_key) DO NOTHING
   `).run(
-    randomUUID(), identityKey, recordId, contactId, channel, stepId,
+    randomUUID(), identityKey, recordId, contactId, channel, stepId, sequenceName, stepNumber,
     providerId, providerId, at, at, at,
   );
 };
