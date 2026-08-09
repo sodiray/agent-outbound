@@ -310,7 +310,10 @@ const SCHEMA_SQL = `
     FOREIGN KEY(record_id) REFERENCES records(_row_id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_pipeline_events_record ON pipeline_events(record_id, occurred_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_pipeline_events_contact ON pipeline_events(record_id, contact_id, step_id);
+  -- No index on contact_id here. It is ALTER-added for databases written before it existed,
+  -- and CREATE TABLE IF NOT EXISTS above is a no-op on those, so indexing it at this point
+  -- fails and takes the entire schema exec down with it at open.
+  -- ensurePipelineEventCompatibility indexes it once the column is guaranteed.
 
   CREATE TABLE IF NOT EXISTS batch_events (
     run_id TEXT NOT NULL,
@@ -428,7 +431,8 @@ const SCHEMA_SQL = `
     row_id TEXT DEFAULT '',
     created_at TEXT NOT NULL
   );
-  CREATE INDEX IF NOT EXISTS idx_suppression_value ON suppression(identifier_type, identifier_value);
+  -- identifier_type/identifier_value are ALTER-added for older databases; indexed in
+  -- ensureSuppressionCompatibility once they are guaranteed to exist.
 
   CREATE TABLE IF NOT EXISTS routes (
     id TEXT PRIMARY KEY,
@@ -987,6 +991,7 @@ const ensureSuppressionCompatibility = (db) => {
   try { db.exec("UPDATE suppression SET entry_id = id WHERE (entry_id IS NULL OR entry_id = '') AND id IS NOT NULL AND id != ''"); } catch {}
   try { db.exec("UPDATE suppression SET identifier_value = value WHERE (identifier_value IS NULL OR identifier_value = '') AND value IS NOT NULL AND value != ''"); } catch {}
   try { db.exec("UPDATE suppression SET identifier_type = value_type WHERE (identifier_type IS NULL OR identifier_type = '') AND value_type IS NOT NULL AND value_type != ''"); } catch {}
+  try { db.exec('CREATE INDEX IF NOT EXISTS idx_suppression_value ON suppression(identifier_type, identifier_value)'); } catch {}
 };
 
 const ensureInboundMessageCompatibility = (db) => {
@@ -1646,7 +1651,6 @@ export const openGlobalSuppressionDb = ({ readonly = false } = {}) => {
         row_id TEXT DEFAULT '',
         created_at TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_suppression_value ON suppression(identifier_type, identifier_value);
     `);
     ensureSuppressionCompatibility(db);
   }
