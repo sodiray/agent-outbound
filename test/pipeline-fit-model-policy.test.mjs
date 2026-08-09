@@ -8,6 +8,7 @@ import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { runScoreStage } from '../dist/orchestrator/scoring/stage-runner.js';
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { getRecordDetail } from '../dist/viz/data.js';
+import { assignTreatmentAndMail } from '../dist/orchestrator/policy/treatment.js';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
@@ -34,6 +35,40 @@ const aTreatmentStrategy = {
   },
 };
 
+const goldenTicketTreatmentStrategy = {
+  bands: {
+    fit: [0, 50, 65, 78, 100],
+    fit_evidence_confidence: [0, 40, 60, 80, 100],
+  },
+  matrix: Array.from({ length: 4 }, () => ['A', 'A', 'A', 'A']),
+  unscored_tier: 'enrichment_hold',
+  tiers: {
+    A: {
+      route: 'outbound',
+      pipeline: 'tier_a',
+      requires_high_confidence_buyer: false,
+      mail_programs: ['standard_postcard', 'golden_ticket'],
+    },
+    enrichment_hold: { route: 'enrichment', pipeline: 'enrichment_hold', holding: true },
+  },
+  mail_programs: {
+    standard_postcard: {
+      priority: 1,
+      minimums: { fit_score: 70 },
+    },
+    golden_ticket: {
+      priority: 2,
+      minimums: {
+        fit_score: 78,
+        fit_evidence_confidence: 80,
+        identity_confidence: 80,
+        classification_confidence: 85,
+      },
+      requirements: { mail_address_ready: true },
+    },
+  },
+};
+
 const fitGrades = [8, 8, 7, 7, 8, 8];
 
 const staleScoreBreakdown = JSON.stringify(treasureValleyFitModel.criteria.map((criterion, index) => ({
@@ -50,8 +85,8 @@ const policyStep = {
   depends_on: ['score_fit'],
   inputs: [
     'fit_score', 'fit_breakdown', 'fit_breakdown_json', 'fit_reasoning',
-    'fit_evidence_confidence', 'identity_confidence', 'phone_confidence',
-    'buyer_confidence', 'mail_confidence', 'timing_score', 'strong_signal_strength',
+    'fit_evidence_confidence', 'identity_confidence', 'classification_confidence', 'phone_confidence',
+    'buyer_confidence', 'mail_confidence', 'mail_address_ready', 'timing_score', 'strong_signal_strength',
     'strong_signal_count', 'enrichment_cost_usd', 'treatment_tier', 'candidate_tier',
     'suppressed', 'address', 'phone', 'email_primary', 'contact_name', 'contact_email',
     'contact_title', 'website', 'domain', 'vertical',
@@ -116,6 +151,16 @@ const readyRecord = {
       provisional: false,
     })),
   }),
+};
+
+const goldenTicketRecord = {
+  ...readyRecord,
+  _row_id: 'liberty-asset-group',
+  business_name: 'Liberty Asset Group',
+  fit_score: 78,
+  classification_confidence: 92,
+  fit_evidence_confidence: 100,
+  mail_address_ready: 1,
 };
 
 const writeTaxonomy = (root) => {
@@ -196,4 +241,73 @@ test('pipeline policy_apply explicitly treats a pipeline without a fit stage as 
   assert.equal(record.treatment_tier, 'enrichment_hold');
   assert.match(record.treatment_reasons, /fit_band=unscored/);
   assert.equal(record.fit_calculation_json, undefined);
+});
+
+const runGoldenTicketPolicyPipeline = async (recordInput) => {
+  const root = listDir();
+  writeTaxonomy(root);
+  const dormantFitStep = {
+    ...declaredFitStep,
+    when: {
+      conditions: [{ field: 'skip_fit_stage', operator: 'eq', value: true }],
+    },
+    inputs: ['business_name', 'skip_fit_stage'],
+  };
+  const goldenTicketPolicyStep = {
+    ...policyStep,
+    depends_on: [],
+  };
+  writeFileSync(join(root, 'outbound.yaml'), JSON.stringify({
+    pipeline: [dormantFitStep, goldenTicketPolicyStep],
+    policy: { fit_rule_version: treasureValleyFitModel.modelVersion },
+    score: { treatment: goldenTicketTreatmentStrategy },
+  }));
+  const db = openListDb({ listDir: root, readonly: false });
+  ensureRecordColumns({ db, columns: ['classification_confidence', 'fit_evidence_confidence'] });
+  upsertRecord({ db, row: { ...recordInput, skip_fit_stage: false } });
+  db.close();
+
+  await runPipelineDataflow({ listDir: root });
+
+  const check = openListDb({ listDir: root, readonly: true });
+  const record = check.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordInput._row_id);
+  check.close();
+  return record;
+};
+
+test('pipeline policy_apply selects Golden Ticket from persisted mail readiness and names a failed higher-program minimum', async () => {
+  const complete = await runGoldenTicketPolicyPipeline(goldenTicketRecord);
+  assert.equal(complete.mail_treatment, 'golden_ticket');
+
+  const classificationBelowMinimum = await runGoldenTicketPolicyPipeline({
+    ...goldenTicketRecord,
+    _row_id: 'durham-school-services',
+    classification_confidence: 84,
+  });
+  assert.equal(classificationBelowMinimum.mail_treatment, 'standard_postcard');
+  assert.match(
+    classificationBelowMinimum.treatment_json,
+    /mail_program:golden_ticket:classification_confidence_below_85/,
+  );
+});
+
+test('policy assembly distinguishes an unknown value from an omitted evaluator input', () => {
+  const completeInput = {
+    policyInputAssembly: 'complete',
+    treatmentStrategy: goldenTicketTreatmentStrategy,
+    fitScore: 78,
+    fitEvidenceConfidence: 100,
+    identityConfidence: 100,
+    classificationConfidence: null,
+    mailAddressReady: true,
+  };
+  const unknown = assignTreatmentAndMail(completeInput);
+  assert.equal(unknown.mail_treatment, 'standard_postcard');
+  assert.ok(unknown.mail_withheld_reasons.includes('mail_program:golden_ticket:classification_confidence_missing'));
+
+  const { classificationConfidence, ...callerOmittedInput } = completeInput;
+  assert.throws(
+    () => assignTreatmentAndMail(callerOmittedInput),
+    /policy_treatment_input_not_supplied:golden_ticket:classificationConfidence/,
+  );
 });

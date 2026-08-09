@@ -52,6 +52,8 @@ export type TreatmentInput = {
   treatmentBands?: TreatmentBandLadders;
   treatmentStrategy?: TreatmentStrategyConfigInput;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
+  /** Production policy assembly supplied every input the declared programs inspect. */
+  policyInputAssembly?: 'complete';
 };
 
 export type TreatmentResult = {
@@ -139,6 +141,53 @@ const scoreForMinimum = (input: TreatmentInput, minimum: string): number | null 
     enrichment_budget_usd: input.cumulativeEnrichmentCostUsd,
   };
   return scores[minimum];
+};
+
+const policyInputForMinimum = (minimum: string): keyof TreatmentInput | null => {
+  const inputs: Partial<Record<string, keyof TreatmentInput>> = {
+    fit_score: 'fitScore',
+    strong_fit: 'fitScore',
+    fit_evidence_confidence: 'fitEvidenceConfidence',
+    fit_evidence: 'fitEvidenceConfidence',
+    identity_confidence: 'identityConfidence',
+    classification_confidence: 'classificationConfidence',
+    buyer_confidence: 'buyerConfidence',
+    mail_confidence: 'mailConfidence',
+    timing_score: 'timingScore',
+    strong_signal_count: 'strongTimingSignalCount',
+    enrichment_budget_usd: 'cumulativeEnrichmentCostUsd',
+  };
+  return inputs[minimum] || null;
+};
+
+const requiredPolicyInputsForProgram = (definition: MailProgramConfigInput): Array<keyof TreatmentInput> => {
+  const minimumInputs = Object.keys(definition.minimums || {})
+    .map(policyInputForMinimum)
+    .filter((input): input is keyof TreatmentInput => input !== null);
+  const requirements = definition.requirements || {};
+  return [...new Set([
+    ...minimumInputs,
+    ...(requirements.mail_address_ready ? ['mailAddressReady'] : []),
+    ...(requirements.asset_ready || requirements.cohort_capacity ? ['mailProgramReadiness'] : []),
+    ...(requirements.named_buyer ? ['namedBuyerStatus', 'namedBuyerName'] : []),
+    ...(requirements.buyer_affiliation ? ['buyerAffiliationStatus'] : []),
+    ...(requirements.buying_center_role ? ['buyingCenterRole'] : []),
+    ...(requirements.local_buying_authority ? ['localBuyingAuthority'] : []),
+    ...(requirements.unsuppressed ? ['suppressed'] : []),
+    ...(requirements.no_material_contradiction ? ['materialContradiction'] : []),
+    ...(requirements.timing_or_strong_signals ? ['timingScore', 'strongTimingSignalCount'] : []),
+  ])] as Array<keyof TreatmentInput>;
+};
+
+const assertCompletePolicyInput = (input: TreatmentInput) => {
+  if (input.policyInputAssembly !== 'complete') return;
+  for (const [program, definition] of configuredMailPrograms(input.treatmentStrategy)) {
+    for (const field of requiredPolicyInputsForProgram(definition)) {
+      if (!Object.hasOwn(input, field)) {
+        throw new Error(`policy_treatment_input_not_supplied:${program}:${field}`);
+      }
+    }
+  }
 };
 
 const evaluateMinimums = (input: TreatmentInput, minimums: Record<string, number> | undefined, skipTimingOrSignals: boolean) => (
@@ -277,6 +326,7 @@ export const countStrongTimingSignals = (
 );
 
 export const assignTreatmentAndMail = (input: TreatmentInput): TreatmentResult => {
+  assertCompletePolicyInput(input);
   const assigned = assignTreatmentTier(input);
   const programs = configuredMailPrograms(input.treatmentStrategy);
   if (programs.length === 0) {

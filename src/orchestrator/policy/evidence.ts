@@ -542,10 +542,13 @@ export const deriveMailConfidence = (
   return Math.max(0, Math.min(100, score - penalty));
 };
 
-/** The persisted mail-ready field mirrors the existing commercial-RDI readiness evidence. */
+/** The persisted mail-ready field is authoritative when prior validation has completed. */
 export function deriveMailAddressReady(record: Record<string, unknown>): boolean {
-  return Boolean(fieldValue(record, ['mailing_address', 'address']))
-    && text(record.address_rdi).toLowerCase() === 'commercial';
+  return isAffirmativeFlag(record.mail_address_ready)
+    || (
+      Boolean(fieldValue(record, ['mailing_address', 'address']))
+      && text(record.address_rdi).toLowerCase() === 'commercial'
+    );
 }
 
 export type ObservationStore = {

@@ -611,6 +611,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     treatmentBands: input.treatmentBands,
     treatmentStrategy: input.treatmentStrategy,
     enrichmentBudget: input.enrichmentBudget,
+    policyInputAssembly: 'complete',
   });
   const treatmentStrategy = input.treatmentStrategy;
   const configuredHoldTier = treatmentStrategy?.unscored_tier || '';

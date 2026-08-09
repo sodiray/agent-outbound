@@ -115,7 +115,8 @@ const actionReferences = (step: StageLike, config: StageLike): StageInputReferen
   if (action === 'policy_apply') {
     return [
       'fit_score', 'fit_breakdown_json', 'fit_reasoning', 'fit_evidence_confidence',
-      'identity_confidence', 'phone_confidence', 'buyer_confidence', 'mail_confidence',
+      'identity_confidence', 'classification_confidence', 'phone_confidence',
+      'buyer_confidence', 'mail_confidence', 'mail_address_ready',
       'timing_score', 'strong_signal_strength', 'strong_signal_count', 'enrichment_cost_usd',
       'treatment_tier', 'candidate_tier', 'suppressed', 'address', 'phone', 'email_primary',
       'contact_name', 'contact_email', 'contact_title', 'website', 'domain', 'vertical',
