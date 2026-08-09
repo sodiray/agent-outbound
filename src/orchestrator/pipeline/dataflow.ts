@@ -5,7 +5,14 @@ import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId, nowIso } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { prepareFieldCheckValueFiles } from '../lib/field-check-values.js';
-import { enrichmentStepNeedsMcp, readStaleness, writeStaleness } from '../enrichment/runner.js';
+import {
+  enrichmentStepConfig,
+  enrichmentStepNeedsMcp,
+  executionConfigForEnrichmentStep,
+  readStaleness,
+  writeStaleness,
+} from '../enrichment/runner.js';
+import { isGenerateFresh } from '../generate/runner.js';
 import { closeMcpClient, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
@@ -542,6 +549,40 @@ const refreshRecord = ({ db, record }: { db: any; record: DataflowRecord }) => (
   db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(getRecordRowId(record), getRecordRowId(record)) || record
 );
 
+const unchangedGenerateOutcome = ({
+  db,
+  listDir,
+  config,
+  step,
+  record,
+  force,
+}: {
+  db: any;
+  listDir: string;
+  config: Record<string, unknown>;
+  step: DataflowStep;
+  record: DataflowRecord;
+  force: boolean;
+}): StepExecutionOutcome | null => {
+  if (force || step.kind !== 'generate') return null;
+  const current = refreshRecord({ db, record });
+  const stepConfig = enrichmentStepConfig(step.step);
+  const cached = readStaleness({ db, recordId: getRecordRowId(current), stepId: step.id });
+  const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
+  if (!isGenerateFresh({ cached, step: step.step, record: current, executionConfig, force })) return null;
+  const outputs = stepConfig.outputs && typeof stepConfig.outputs === 'object'
+    ? stepConfig.outputs as Record<string, unknown>
+    : {};
+  return {
+    passed: true,
+    reason: 'skipped_unchanged_inputs',
+    declaredOutputWrites: Object.fromEntries(Object.keys(outputs).map((name) => [name, {
+      provided: true,
+      value: current[name],
+    }])),
+  };
+};
+
 type PipelineClock = string | Date | (() => string | Date);
 
 type TimeReadinessDb = {
@@ -706,7 +747,9 @@ const initializeResolved = ({
       // existence of a prior event. Let the stage compare that exact hash on
       // every pass so unchanged inputs are visibly skipped.
       if (step.kind === 'score') return false;
-      if (step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose') return !force;
+      // Transform stages own their staleness checks. Never pre-resolve them
+      // from a historical pass event: that would hide declared-input changes.
+      if (step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose') return false;
       if (step.kind === 'enrich') return false;
       if (step.kind === 'contact_source') return false;
       if (step.kind === 'review') {
@@ -1040,6 +1083,8 @@ export const runPipelineDataflow = async ({
       loadStep: async (step, record, inFlight) => {
         emitActivity({ event: 'step_start', phase: 'pipeline', step: step.id, kind: step.kind, rows: 1 });
         tickProgress(db, runId, { activeStep: step.id, stepIndex: step.index, stepTotal: steps.length, message: `${step.kind} · ${step.id}` });
+        const unchanged = unchangedGenerateOutcome({ db, listDir, config, step, record, force });
+        if (unchanged) return unchanged;
         return loaderFor(step, inFlight).load(record);
       },
       onStepOutcome: async (recordState, step, outcome) => {

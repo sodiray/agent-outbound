@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { zodSchema } from 'ai';
 import { normalizeConfig } from '../dist/schemas/config.js';
-import { buildComposeResultSchema, runComposeStep } from '../dist/orchestrator/compose/runner.js';
+import { buildComposeResultSchema, composeDependencyHash, runComposeStep } from '../dist/orchestrator/compose/runner.js';
 import { resolveStepTemplate } from '../dist/orchestrator/lib/templates.js';
 import { getAssetsForRow, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 
@@ -303,6 +303,7 @@ test('compose permits granted greeting and sender identity while rejecting an un
       step: greetingStep,
       rows: [{ ...record, contact_first_name: 'Alex' }],
       stepId: 'channel_copy',
+      force: true,
       generateObject: async () => ({
         object: { outputs: { headline: 'Hi Jordan,', message: 'A brief note.' } },
         usage: {},
@@ -454,5 +455,69 @@ test('compose rejects over-budget, partial, and hole-bearing outputs without per
       assert.equal(result.failed, 1);
     }
     assert.equal(getAssetsForRow({ db, rowId: record._row_id }).length, 0);
+  });
+});
+
+test('compose invalidates declared inputs and records unchanged skips', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const calls = [];
+    const generateObject = async (request) => {
+      calls.push(request);
+      const account = request.prompt.includes('"Beta"') ? 'Beta' : 'Acme';
+      return {
+        object: {
+          outputs: {
+            headline: 'Hello Ada',
+            message: `Ada, this is about ${account}.`,
+          },
+          used_inputs: ['person', 'account'],
+          grounding: [
+            { output: 'headline', text: 'Hello Ada', inputs: ['person'] },
+            { output: 'message', text: `Ada, this is about ${account}.`, inputs: ['person', 'account'] },
+          ],
+        },
+        usage: {},
+      };
+    };
+    const first = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject,
+    });
+    const second = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject,
+    });
+    const persisted = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(record._row_id);
+    const changed = { ...persisted, ...record, business_name: 'Beta' };
+    upsertRecord({ db, row: changed });
+    assert.equal(db.prepare('SELECT business_name FROM records WHERE _row_id = ?').get(record._row_id).business_name, 'Beta');
+    assert.notEqual(
+      composeDependencyHash({ step: step(), record }),
+      composeDependencyHash({ step: step(), record: changed }),
+    );
+    const third = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [changed],
+      stepId: 'channel_copy',
+      generateObject,
+    });
+
+    assert.equal(first.processed, 1);
+    assert.equal(second.non_execution_reasons[record._row_id], 'skipped_unchanged_inputs');
+    assert.equal(third.processed, 1);
+    assert.equal(calls.length, 2);
   });
 });

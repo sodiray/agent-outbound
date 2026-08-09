@@ -11,7 +11,7 @@ import {
 } from '../runtime/db.js';
 import { EVIDENCE_RECORD_COLUMNS } from '../policy/evidence.js';
 import { readConfig } from '../lib/config.js';
-import { getRecordRowId } from '../lib/record.js';
+import { getRecordRowId, nowIso } from '../lib/record.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
@@ -36,7 +36,6 @@ import {
   executionConfigForEnrichmentStep,
   declaredOutputWritesFor,
   getDeclaredOutputs,
-  isEnrichFresh,
   isEnrichmentBudgetSkip,
   mergedRecordForEnrichment,
   outputOutcomeFor,
@@ -270,6 +269,44 @@ const dependencyValuesFor = ({ stepConfig, record }: {
   return depValues;
 };
 
+export const generateDependencyHash = ({
+  step,
+  record,
+  executionConfig,
+}: {
+  step: GenerateStepInput;
+  record: GenerateRecord;
+  executionConfig?: Record<string, unknown>;
+}) => {
+  const stepConfig = enrichmentStepConfig(step);
+  return enrichDependencyHashes({
+    stepConfig,
+    depValues: dependencyValuesFor({ stepConfig, record }),
+    executionConfig,
+  }).depHash;
+};
+
+export const isGenerateFresh = ({
+  cached,
+  step,
+  record,
+  executionConfig,
+  force = false,
+}: {
+  cached: Record<string, unknown> | undefined;
+  step: GenerateStepInput;
+  record: GenerateRecord;
+  executionConfig?: Record<string, unknown>;
+  force?: boolean;
+}) => {
+  if (force || !cached) return false;
+  if (String(cached.dep_hash || '') !== generateDependencyHash({ step, record, executionConfig })) return false;
+  const ttl = Number(cached.cache_ttl_seconds || 0);
+  if (ttl <= 0) return true;
+  const updatedAt = new Date(String(cached.updated_at || 0)).getTime();
+  return (Date.parse(nowIso()) - updatedAt) / 1000 <= ttl;
+};
+
 const persistAsset = ({
   db,
   existing,
@@ -371,6 +408,7 @@ export const runGenerateStep = async ({
         outputs: outputsFromAsset(existing),
       });
       summary.skipped_locked += 1;
+      summary.non_execution_reasons[recordId] = 'skipped_locked_asset';
       return;
     }
 
@@ -406,16 +444,20 @@ export const runGenerateStep = async ({
       return;
     }
 
-    const depValues = dependencyValuesFor({ stepConfig, record: currentRecord });
     const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
-    const dependencyHashes = enrichDependencyHashes({ stepConfig, depValues, executionConfig });
+    const dependencyHashes = enrichDependencyHashes({
+      stepConfig,
+      depValues: dependencyValuesFor({ stepConfig, record: currentRecord }),
+      executionConfig,
+    });
     const cached = readStaleness({ db, recordId, stepId: id });
-    if (existing && isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })) {
+    if (existing && isGenerateFresh({ cached, step, record: currentRecord, executionConfig, force })) {
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({
         stepConfig,
         outputs: outputsFromAsset(existing),
       });
       summary.skipped_fresh += 1;
+      summary.non_execution_reasons[recordId] = 'skipped_unchanged_inputs';
       return;
     }
 

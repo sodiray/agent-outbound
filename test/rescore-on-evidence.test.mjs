@@ -12,12 +12,12 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import {
-  enrichDepHash,
   markScoringStale,
   evidencePatchIsMaterialRetrieval,
   scoringStaleRecordPatch,
   writeStaleness,
 } from '../dist/orchestrator/enrichment/runner.js';
+import { generateDependencyHash } from '../dist/orchestrator/generate/runner.js';
 import {
   buildEnrichEvidencePatch,
 } from '../dist/orchestrator/policy/evidence.js';
@@ -222,11 +222,13 @@ test('fresh generate assets carry write metadata through the live batch guard', 
       stepId: intelligenceStep.id,
       outputsJson: JSON.stringify({ classification_confidence: 82 }),
     });
+    const diagnosticRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fresh_diagnostic');
+    const intelligenceRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fresh_intelligence');
     writeStaleness({
       db,
       recordId: 'fresh_diagnostic',
       stepId: diagnosticStep.id,
-      depHash: enrichDepHash(diagnosticStep),
+      depHash: generateDependencyHash({ step: diagnosticStep, record: diagnosticRecord }),
       cacheTtlSeconds: 0,
       cacheTtl: '',
     });
@@ -234,13 +236,12 @@ test('fresh generate assets carry write metadata through the live batch guard', 
       db,
       recordId: 'fresh_intelligence',
       stepId: intelligenceStep.id,
-      depHash: enrichDepHash(intelligenceStep),
+      depHash: generateDependencyHash({ step: intelligenceStep, record: intelligenceRecord }),
       cacheTtlSeconds: 0,
       cacheTtl: '',
     });
 
     const context = { db, listDir, config: { ai: {} }, aiConfig: {}, mcp: null, toolCatalog: null };
-    const diagnosticRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fresh_diagnostic');
     const diagnosticOutcome = (await executeStepBatch(
       context,
       diagnosticStep,
@@ -250,7 +251,6 @@ test('fresh generate assets carry write metadata through the live batch guard', 
     assert.equal(diagnosticOutcome?.passed, true);
     assert.equal(diagnosticOutcome?.errored, undefined);
 
-    const intelligenceRecord = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fresh_intelligence');
     const intelligenceOutcome = (await executeStepBatch(
       context,
       intelligenceStep,

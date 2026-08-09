@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { recordCostEvent } from '../lib/costs.js';
-import { getRecordRowId } from '../lib/record.js';
+import { readStaleness, writeStaleness } from '../enrichment/runner.js';
+import { getRecordRowId, stableHash } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { ensureRecordColumns, insertAsset, upsertRecord } from '../runtime/db.js';
 
@@ -21,6 +22,18 @@ type ComposeStep = {
   outputs?: Record<string, { type?: string; description?: string }>;
   concurrency?: number;
 };
+
+export const composeDependencyHash = ({ step, record }: { step: ComposeStep; record: RecordRow }) => stableHash({
+  inputs: declaredInputs({ step, record }),
+  config: {
+    model: step.model || '',
+    inputs: step.inputs || {},
+    structure: step.structure || {},
+    rules: step.rules || [],
+    length: step.length || {},
+    outputs: step.outputs || {},
+  },
+});
 
 export type ComposeGenerator = (input: {
   task: string;
@@ -253,6 +266,7 @@ export const runComposeStep = async ({
   step,
   rows,
   stepId,
+  force = false,
   generateObject = generateObjectWithTools,
 }: {
   db: DbLike;
@@ -261,6 +275,7 @@ export const runComposeStep = async ({
   step: ComposeStep;
   rows: RecordRow[];
   stepId: string;
+  force?: boolean;
   generateObject?: ComposeGenerator;
 }) => {
   const summary = {
@@ -268,11 +283,21 @@ export const runComposeStep = async ({
     failed: 0,
     errors: [] as Array<{ record_id: string; error: string }>,
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
+    non_execution_reasons: {} as Record<string, string>,
   };
   await mapWithConcurrency(rows, async (record) => {
     const recordId = getRecordRowId(record);
     try {
       const inputs = declaredInputs({ step, record });
+      const depHash = composeDependencyHash({ step, record });
+      const cached = readStaleness({ db, recordId, stepId });
+      if (!force && String(cached?.dep_hash || '') === depHash) {
+        summary.declared_output_writes[recordId] = Object.fromEntries(
+          Object.keys(step.outputs || {}).map((key) => [key, { provided: true, value: record[key] }]),
+        );
+        summary.non_execution_reasons[recordId] = 'skipped_unchanged_inputs';
+        return;
+      }
       const resultSchema = buildComposeResultSchema(step);
       const result = await generateObject({
         task: `compose:${stepId}`,
@@ -301,6 +326,14 @@ export const runComposeStep = async ({
         ? persisted as RecordRow
         : record;
       upsertRecord({ db, row: { ...current, ...composed.outputs } });
+      writeStaleness({
+        db,
+        recordId,
+        stepId,
+        depHash,
+        cacheTtl: '',
+        cacheTtlSeconds: 0,
+      });
       insertAsset({
         db,
         rowId: recordId,

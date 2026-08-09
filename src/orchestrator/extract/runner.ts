@@ -1,7 +1,8 @@
 import { ensureRecordColumns, upsertRecord } from '../runtime/db.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
-import { getRecordRowId } from '../lib/record.js';
-import { stageInputRecord } from '../lib/stage-inputs.js';
+import { readStaleness, writeStaleness } from '../enrichment/runner.js';
+import { getRecordRowId, stableHash } from '../lib/record.js';
+import { resolveStageInputs, stageInputRecord } from '../lib/stage-inputs.js';
 
 export const EXTRACTOR_NAMES = ['email', 'phone', 'url'] as const;
 
@@ -70,6 +71,22 @@ const outputDefinitionsFor = (step: ExtractStep): Record<string, ExtractOutputDe
     return [[name, { type }]];
   }));
 };
+
+const materialExtractConfig = (step: ExtractStep): Record<string, unknown> => ({
+  from: step.from,
+  using: step.using,
+  select: step.select || 'first',
+  exclude: step.exclude || [],
+  outputs: outputDefinitionsFor(step),
+});
+
+export const extractDependencyHash = ({ step, record }: {
+  step: ExtractStep;
+  record: Record<string, unknown>;
+}): string => stableHash({
+  inputs: resolveStageInputs({ step, record }).values,
+  config: materialExtractConfig(step),
+});
 
 const domainFrom = (value: string): string => {
   const raw = value.trim().toLowerCase();
@@ -219,10 +236,12 @@ export const executeExtractStepOnRecords = ({
   db,
   step,
   rows,
+  force = false,
 }: {
   db: unknown;
   step: ExtractStep;
   rows: Array<Record<string, unknown>>;
+  force?: boolean;
 }): Map<string, { passed: boolean; reason: string; errored?: boolean; declaredOutputWrites: Record<string, { provided: boolean; value: unknown }> }> => {
   const config = step.config && typeof step.config === 'object' && !Array.isArray(step.config)
     ? { ...step, ...(step.config as Record<string, unknown>) }
@@ -259,10 +278,31 @@ export const executeExtractStepOnRecords = ({
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     try {
+      const depHash = extractDependencyHash({ step: config, record: row });
+      const cached = readStaleness({ db, recordId, stepId: String(config.id || '') });
+      if (!force && String(cached?.dep_hash || '') === depHash) {
+        outcomes.set(recordId, {
+          passed: true,
+          reason: 'skipped_unchanged_inputs',
+          declaredOutputWrites: Object.fromEntries(Object.keys(outputs).map((name) => [name, {
+            provided: true,
+            value: row[name],
+          }])),
+        });
+        return;
+      }
       const result = extractFromRecord({ step: config, record: row });
       const persistedValue = Array.isArray(result.value) ? JSON.stringify(result.value) : result.value;
       const patch = Object.fromEntries(Object.keys(outputs).map((name) => [name, persistedValue]));
       upsertRecord({ db, row: { ...row, ...patch } });
+      writeStaleness({
+        db,
+        recordId,
+        stepId: String(config.id || ''),
+        depHash,
+        cacheTtl: '',
+        cacheTtlSeconds: 0,
+      });
       outcomes.set(recordId, {
         passed: true,
         reason: `extracted:${extractor}:${result.matches.length}${result.sourceField ? `:${result.sourceField}` : ''}`,

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { extractFromRecord } from '../dist/orchestrator/extract/runner.js';
+import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
@@ -181,4 +182,64 @@ test('extract supports ordered source fallback plus phone and URL built-ins', ()
     step: { ...step(), using: 'url' },
     record,
   }).value, 'https://acme.com/contact');
+});
+
+test('dataflow re-extracts declared input changes after empty and non-empty output, and records unchanged skips', async () => {
+  const root = listDir();
+  writeFileSync(join(root, 'outbound.yaml'), `
+ai:
+  default_model: openrouter/anthropic/claude-haiku-4.5
+pipeline:
+  - kind: extract
+    id: site_email_extract
+    from: site_text
+    using: email
+    select: first
+    inputs: [site_text, domain, website]
+    outputs:
+      site_published_email: { type: string, description: Published business email. }
+`);
+  const db = openListDb({ listDir: root });
+  ensureRecordColumns({ db, columns: ['site_text', 'domain', 'website', 'site_published_email'] });
+  upsertRecord({
+    db,
+    row: {
+      _row_id: 'extract-dataflow-1',
+      business_name: 'Acme',
+      site_text: 'Use the contact form.',
+      domain: 'acme.example',
+      website: 'https://acme.example',
+    },
+  });
+  db.close();
+
+  await runPipelineDataflow({ listDir: root });
+  await runPipelineDataflow({ listDir: root });
+  const afterEmpty = openListDb({ listDir: root });
+  const emptyRecord = afterEmpty.prepare('SELECT * FROM records WHERE _row_id = ?').get('extract-dataflow-1');
+  upsertRecord({ db: afterEmpty, row: { ...emptyRecord, site_text: 'Email hello@acme.example.' } });
+  afterEmpty.close();
+  await runPipelineDataflow({ listDir: root });
+  const afterFirstMatch = openListDb({ listDir: root });
+  const matchedRecord = afterFirstMatch.prepare('SELECT * FROM records WHERE _row_id = ?').get('extract-dataflow-1');
+  upsertRecord({ db: afterFirstMatch, row: { ...matchedRecord, site_text: 'Email sales@acme.example.' } });
+  afterFirstMatch.close();
+  await runPipelineDataflow({ listDir: root });
+
+  const check = openListDb({ listDir: root, readonly: true });
+  const record = check.prepare('SELECT site_published_email FROM records WHERE _row_id = ?').get('extract-dataflow-1');
+  const reasons = check.prepare(`
+    SELECT reason FROM pipeline_events
+    WHERE record_id = ? AND step_id = ? AND passed = 1
+    ORDER BY occurred_at ASC
+  `).all('extract-dataflow-1', 'site_email_extract').map((event) => event.reason);
+  check.close();
+
+  assert.equal(record.site_published_email, 'sales@acme.example');
+  assert.deepEqual(reasons, [
+    'extracted:email:0',
+    'skipped_unchanged_inputs',
+    'extracted:email:1:site_text',
+    'extracted:email:1:site_text',
+  ]);
 });

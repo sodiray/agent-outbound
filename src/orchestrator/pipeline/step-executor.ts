@@ -198,7 +198,9 @@ const guardDeclaredOutputWrites = (
   const db = ctx.db as QueryableDb;
   const guarded = new Map<string, StepExecutionOutcome>();
   for (const [recordId, outcome] of outcomes) {
-    if (!shouldGuardDeclaredOutputWrites(outcome)) {
+    const guardCachedGenerate = step.kind === 'generate'
+      && String(outcome.reason || '') === 'skipped_unchanged_inputs';
+    if (!guardCachedGenerate && !shouldGuardDeclaredOutputWrites(outcome)) {
       guarded.set(recordId, outcome);
       continue;
     }
@@ -332,6 +334,7 @@ const executeExtractBatch = async (
   db: ctx.db,
   step,
   rows,
+  force: Boolean(ctx.force),
 });
 
 /** Production generate path: classification / content packs via generate runner (not fixture). */
@@ -419,6 +422,7 @@ const executeComposeBatch = async (
     step,
     rows,
     stepId,
+    force: Boolean(ctx.force),
     generateObject: ctx.composeGenerateObject,
   });
   const failures = new Map(result.errors.map((error) => [error.record_id, error.error]));
@@ -428,7 +432,11 @@ const executeComposeBatch = async (
     const failure = failures.get(recordId);
     outcomes.set(recordId, failure
       ? { passed: false, reason: failure, errored: true }
-      : { passed: true, reason: '', declaredOutputWrites: result.declared_output_writes[recordId] });
+      : {
+        passed: true,
+        reason: result.non_execution_reasons[recordId] || '',
+        declaredOutputWrites: result.declared_output_writes[recordId],
+      });
   });
   return outcomes;
 };

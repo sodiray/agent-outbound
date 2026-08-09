@@ -12,6 +12,7 @@ import { getMcpClient } from '../runtime/mcp.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
+import { resolveStageInputs } from '../lib/stage-inputs.js';
 import { flattenPipelineSteps, stepStatusColumn } from '../lib/subpipelines.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
@@ -758,7 +759,10 @@ export const dependencyValuesForRecord = ({ stepConfig, record }: {
   for (const dep of dependencyFieldsForStep(stepConfig)) {
     depValues[dep] = dependencyValueForRecord({ dep, record, extra });
   }
-  return depValues;
+  return {
+    ...depValues,
+    ...resolveStageInputs({ step: stepConfig, record }).values,
+  };
 };
 
 const resolveStepId = (step: any, index: number) => {
