@@ -65,7 +65,7 @@ test('source --more runs declared strategy tasks', async () => {
     const result = await sourceMoreCommand({ list: listDir, more: 1 });
 
     assert.equal(result.status, 'ok');
-    assert.equal(result.searches_run, 1);
+    assert.equal(result.searches_run, 0);
     assert.equal(result.search_tasks_run, 1);
     assert.equal(result.search_calls_made, 1);
     assert.equal(result.inserted_total, 1);

@@ -29,7 +29,7 @@ import { cleanupRemovedStep } from '../orchestrator/lib/step-cleanup.js';
 import { validateColumnName, validateWhereSql } from '../orchestrator/lib/sql-safety.js';
 import { recordCostEvent } from '../orchestrator/lib/costs.js';
 import { authorConfigAction } from '../orchestrator/actions/author-config/index.js';
-import { runSourcing, runSourcingMore } from '../orchestrator/sourcing/runner.js';
+import { runSourcing } from '../orchestrator/sourcing/runner.js';
 import { runPipelineDataflow } from '../orchestrator/pipeline/dataflow.js';
 import { runConfiguredScoreStages } from '../orchestrator/scoring/stages.js';
 import { resolvePipelineFitModel } from '../orchestrator/scoring/fit-model.js';
@@ -713,17 +713,29 @@ export const sourceMoreCommand = async ({ list, more = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'source' });
+  const targetNew = Math.max(0, Number(more || 0));
+  if (targetNew <= 0) {
+    return {
+      status: 'ok',
+      target_new: targetNew,
+      inserted_total: 0,
+      inserted_ids: [],
+      searches_run: 0,
+      exhausted_searches: [],
+      deduped_total: 0,
+      filtered_out: 0,
+      errors: [],
+      zero_search_reason: {
+        code: 'target_not_positive',
+        message: 'No additional records were requested.',
+      },
+    };
+  }
   try {
-    const searches = Array.isArray(loaded.config?.source?.searches) ? loaded.config.source.searches : [];
-    const strategies = Array.isArray(loaded.config?.source?.strategies) ? loaded.config.source.strategies : [];
-    if (strategies.length > 0 || searches.length === 0) {
-      const sourced = await runSourcing({ listDir, limit: Number(more || 0) });
-      return {
-        ...sourced,
-        target_new: Number(more || 0),
-      };
-    }
-    return await runSourcingMore({ listDir, targetNew: Number(more || 0) });
+    return {
+      ...await runSourcing({ listDir, limit: targetNew }),
+      target_new: targetNew,
+    };
   } catch (error) {
     return {
       status: 'error',
@@ -1177,7 +1189,7 @@ export const runCommand = async ({ list, more = 0 }) => {
   const canaryConfig = loadCanaryConfig({ listDir });
 
   const sourceResult: any = Number(more || 0) > 0
-    ? await runSourcingMore({ listDir, targetNew: Number(more || 0) })
+    ? await runSourcing({ listDir, limit: Number(more || 0) })
     : await runSourcing({ listDir, limit: 0 });
 
   const newIds = Array.isArray(sourceResult?.inserted_ids) ? sourceResult.inserted_ids : [];

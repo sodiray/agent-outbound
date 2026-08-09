@@ -1,10 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import {
-  clearSearchState,
   ensureRecordColumns,
   getSearchTask,
-  getSearchState,
   listRecoverableGeoTileTasks,
   listPendingSearchTasks,
   listSearchTasks,
@@ -951,18 +949,6 @@ const searchConfigHash = (search: any) => stableHash({
   max_results: Number(search?.max_results || 0),
 });
 
-const parsePaginationJson = (text: string) => {
-  const raw = String(text || '').trim();
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && Object.keys(parsed).length === 0) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-};
-
 export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) {
@@ -1240,7 +1226,6 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         if (Number(limit || 0) > 0 && Number(summary.inserted_total || 0) >= Number(limit || 0)) break;
         attemptedTaskIds.add(String(task.id || ''));
         if (retryableTaskIds.has(String(task.id || ''))) summary.search_tasks_retried += 1;
-        summary.searches_run += 1;
         summary.search_tasks_run += 1;
         emitActivity({ event: 'step_start', phase: 'sourcing_task', step: task.id });
         tickProgress(db, runId, { stepIndex: summary.search_tasks_run, stepTotal: taskQueue.length, activeStep: String(task.id), message: `Sourcing tile ${summary.search_tasks_run}/${taskQueue.length}`, done: summary.inserted_total });
@@ -1415,172 +1400,6 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
   } catch (error) {
     summary.errors.push(String((error as any)?.message || error));
     emitActivity({ event: 'error', phase: 'sourcing', message: String((error as any)?.message || error) });
-    endRun(db, runId, { status: 'error', error: String((error as any)?.message || error) });
-    throw error;
-  } finally {
-    db.close();
-  }
-};
-
-export const runSourcingMore = async ({ listDir, targetNew = 0 }) => {
-  const { config, errors } = readConfig(listDir);
-  if (errors.length > 0) {
-    throw new Error(`Invalid config: ${errors.join('; ')}`);
-  }
-  assertPhaseModelReferences({ config, phase: 'source' });
-
-  const target = Math.max(0, Number(targetNew || 0));
-  if (target <= 0) {
-    return {
-      status: 'ok',
-      target_new: 0,
-      inserted_total: 0,
-      inserted_ids: [],
-      searches_run: 0,
-      exhausted_searches: [],
-      deduped_total: 0,
-      filtered_out: 0,
-      errors: [],
-    };
-  }
-
-  const listName = config?.list?.name || 'list';
-  const searches = Array.isArray(config?.source?.searches) ? config.source.searches : [];
-  const excludeRules = normalizeExcludeRules(config?.source?.exclude);
-  const nearDuplicate = config?.source?.near_duplicate || {};
-  const db = openListDb({ listDir, readonly: false });
-  const mcp = await getMcpClient();
-  const toolCatalog = readToolCatalog(listDir);
-  const identityFields = getIdentityFields(config);
-
-  const summary: any = {
-    status: 'ok',
-    target_new: target,
-    inserted_total: 0,
-    inserted_ids: [],
-    searches_run: 0,
-    exhausted_searches: [],
-    deduped_total: 0,
-    filtered_out: 0,
-    excluded_by_rule: {},
-    errors: [],
-  };
-
-  const MAX_ITERATIONS = 5;
-
-  emitActivity({ event: 'phase_start', phase: 'sourcing_more', target_new: target, searches: searches.length });
-
-  const runId = beginRun(db, { phase: 'sourcing', target, message: `Sourcing ${target} additional leads` });
-
-  try {
-    await refreshEmbeddingsAndLinks({ db, listDir, identityFields, aiConfig: config?.ai || {} });
-
-    for (const search of searches) {
-      if (summary.inserted_total >= target) break;
-      summary.searches_run += 1;
-      const searchId = stableSearchId(search);
-      tickProgress(db, runId, { activeStep: String(searchId), message: `Searching: ${searchId}`, done: summary.inserted_total });
-      const configHash = searchConfigHash(search);
-      const stored = getSearchState({ db, searchId });
-      if (stored && String(stored.config_hash || '') !== configHash) {
-        clearSearchState({ db, searchId });
-      }
-      const fresh = stored && String(stored.config_hash || '') === configHash ? stored : null;
-      let paginationState = fresh ? parsePaginationJson(String(fresh.pagination_json || '{}')) : null;
-      let exhausted = fresh ? Boolean(fresh.exhausted) : false;
-      let totalFetched = fresh ? Number(fresh.total_results_fetched || 0) : 0;
-      if (exhausted) {
-        summary.exhausted_searches.push(searchId);
-        continue;
-      }
-
-      for (let i = 0; i < MAX_ITERATIONS; i += 1) {
-        if (summary.inserted_total >= target) break;
-
-        const searchResult = await toSearchRows({
-          mcp,
-          listDir,
-          search,
-          toolCatalog,
-          aiConfig: config?.ai || {},
-          paginationState,
-        });
-        recordCostEvent({
-          db,
-          listDir,
-          stepId: `sourcing_more:${searchId}`,
-          model: String((searchResult as any)?.model || ''),
-          provider: String((searchResult as any)?.provider || ''),
-          usage: searchResult.usage,
-        });
-
-        const rows = Array.isArray(searchResult.rows) ? searchResult.rows : [];
-        const mappedRows = rows.map((row: any) => {
-          const mapped = mapSearchRow({ row, outputMap: search?.output_map || {} });
-          mapped._row_id = mapped._row_id || mapped.id || makeRecordId(mapped);
-          mapped.id = mapped._row_id;
-          return mapped;
-        });
-        const remaining = Math.max(0, target - Number(summary.inserted_total || 0));
-        const processed = await processAndInsertRows({
-          db,
-          rows: mappedRows,
-          identityFields,
-          listName,
-          listDir,
-          aiConfig: config?.ai || {},
-          excludeRules,
-          nearDuplicate,
-          limit: remaining,
-        });
-
-        summary.inserted_ids.push(...processed.insertedIds);
-        summary.inserted_total += processed.insertedIds.length;
-        tickProgress(db, runId, { done: summary.inserted_total });
-        summary.deduped_total += processed.deduped;
-        summary.filtered_out += processed.filtered;
-        mergeExcludedByRule(summary, processed.excludedByRule);
-        summary.errors.push(...processed.errors);
-
-        totalFetched += rows.length;
-        const pagination = Object.prototype.hasOwnProperty.call(searchResult, 'pagination')
-          ? searchResult.pagination
-          : undefined;
-        if (pagination === null || pagination === undefined || rows.length === 0) {
-          exhausted = true;
-        }
-        paginationState = pagination === undefined ? null : pagination;
-
-        upsertSearchState({
-          db,
-          searchId,
-          configHash,
-          paginationJson: JSON.stringify(paginationState || {}),
-          exhausted,
-          lastResultCount: rows.length,
-          totalResultsFetched: totalFetched,
-        });
-
-        if (exhausted) {
-          summary.exhausted_searches.push(searchId);
-          break;
-        }
-      }
-    }
-
-    logSourcingEvent({ listDir, payload: { ...summary, mode: 'more' } });
-    emitActivity({
-      event: 'phase_complete',
-      phase: 'sourcing_more',
-      target_new: target,
-      inserted_total: summary.inserted_total,
-      exhausted_searches: summary.exhausted_searches,
-    });
-    endRun(db, runId, { status: 'done', message: `Sourced ${summary.inserted_total} new leads` });
-    return summary;
-  } catch (error) {
-    summary.errors.push(String((error as any)?.message || error));
-    emitActivity({ event: 'error', phase: 'sourcing_more', message: String((error as any)?.message || error) });
     endRun(db, runId, { status: 'error', error: String((error as any)?.message || error) });
     throw error;
   } finally {
