@@ -19,6 +19,11 @@ const contactRole = (value: unknown): 'primary' | 'secondary' => (
   text(value).toLowerCase() === 'secondary' ? 'secondary' : 'primary'
 );
 
+const settledVerificationStatus = (value: unknown) => {
+  const status = text(value).toLowerCase();
+  return Boolean(status) && !['pipeline_supplied', 'unchecked'].includes(status);
+};
+
 /**
  * Promote a pipeline-declared record field into an email-only contact.
  * Pipeline values retain non-provider provenance and can never modify an
@@ -43,7 +48,8 @@ export const promoteContactSource = ({
   if (!email) return { promoted: false, reason: 'contact_source_empty' };
 
   const existing = db.prepare(`
-    SELECT source
+    SELECT source, email_verification_status, email_verification_confidence,
+           email_verification_reason, email_verified_at
     FROM contacts
     WHERE row_id = ? AND lower(email) = ?
     LIMIT 1
@@ -61,9 +67,18 @@ export const promoteContactSource = ({
       source: 'pipeline',
       source_query: `pipeline:${stepId}:${field}`,
       confidence: 0,
-      email_verification_status: 'pipeline_supplied',
-      email_verification_confidence: 0,
-      email_verified_at: '',
+      email_verification_status: settledVerificationStatus(existing?.email_verification_status)
+        ? text(existing?.email_verification_status)
+        : 'pipeline_supplied',
+      email_verification_confidence: settledVerificationStatus(existing?.email_verification_status)
+        ? Number(existing?.email_verification_confidence || 0)
+        : 0,
+      email_verification_reason: settledVerificationStatus(existing?.email_verification_status)
+        ? text(existing?.email_verification_reason)
+        : '',
+      email_verified_at: settledVerificationStatus(existing?.email_verification_status)
+        ? text(existing?.email_verified_at)
+        : '',
       dne_email: isAffirmativeFlag(record.dne_email, { failClosed: true }),
       dnc_phone: isAffirmativeFlag(record.dnc_phone, { failClosed: true }),
       dne_phone: isAffirmativeFlag(record.dne_phone, { failClosed: true }),

@@ -22,6 +22,7 @@ import { executePipelineSequenceAction } from './sequence-step-runtime.js';
 import { promoteContactSource } from './contact-source.js';
 import { stageInputRecord } from '../lib/stage-inputs.js';
 import { runScoreStage, type ScoreStage } from '../scoring/stage-runner.js';
+import type { EmailVerificationProvider } from '../runtime/providers/email-verification/index.js';
 
 export type StepExecutionOutcome = {
   passed: boolean;
@@ -41,6 +42,7 @@ export type StepExecutionContext = {
   force?: boolean;
   now?: string;
   composeGenerateObject?: ComposeGenerator;
+  emailVerificationProvider?: EmailVerificationProvider;
 };
 
 type PipelineStepLike = Record<string, unknown> & {
@@ -295,6 +297,7 @@ const executeEnrichBatch = async (
     rows,
     stepId,
     force: Boolean(ctx.force),
+    emailVerificationProvider: ctx.emailVerificationProvider,
   });
   const failures = new Map((Array.isArray(result.errors) ? result.errors : []).map((error) => [
     String(error.record_id || '').trim(),

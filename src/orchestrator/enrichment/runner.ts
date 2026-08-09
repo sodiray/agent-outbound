@@ -28,8 +28,10 @@ import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/to
 import { providerToolUsageFromError } from '../runtime/providers/usage.js';
 import { decisionMakerProviderNeedsMcp } from '../runtime/providers/decision-makers/index.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
+import { executeEmailVerificationAction } from './actions/email-verification.js';
 import { executeToolCallAction, isRecordScopedProviderToolError } from './actions/tool-call.js';
 import { executeLinkedinCompanyResolutionAction } from './actions/linkedin-company-resolution.js';
+import type { EmailVerificationProvider } from '../runtime/providers/email-verification/index.js';
 import {
   buildEnrichEvidencePatch,
   EVIDENCE_RECORD_COLUMNS,
@@ -245,6 +247,9 @@ export const ttlToSeconds = (ttl) => {
 // over when a step is forced to recompute.
 const MATERIAL_ENRICH_FIELDS = [
   'action',
+  'provider',
+  'field',
+  'unit_cost_usd',
   'tool',
   'waterfall',
   'fallback_tools',
@@ -825,6 +830,7 @@ export const executeEnrichmentAction = async ({
   contactPolicy,
   outputSchema,
   toolCatalog,
+  emailVerificationProvider,
 }: {
   db?: Parameters<typeof upsertContact>[0]['db'];
   mcp: Client | null;
@@ -851,6 +857,7 @@ export const executeEnrichmentAction = async ({
   contactPolicy?: ContactPolicyConfigInput;
   outputSchema: z.ZodTypeAny;
   toolCatalog?: ToolCatalog;
+  emailVerificationProvider?: EmailVerificationProvider;
 }) => {
   const action = String(stepConfig?.action || '').trim().toLowerCase();
   const fixtureMode = String(process.env.AO_PIPELINE_FIXTURE || process.env.AO_STEP_FIXTURE || '').trim() === '1';
@@ -909,6 +916,15 @@ export const executeEnrichmentAction = async ({
       stepConfig,
       record,
       aiConfig,
+    });
+  }
+  if (action === 'email_verification') {
+    return executeEmailVerificationAction({
+      db,
+      stepId,
+      stepConfig,
+      record,
+      emailVerificationProvider,
     });
   }
   if (action === 'tool_call') {
@@ -1080,6 +1096,7 @@ export const executeEnrichmentStepOnRecords = async ({
   stepId = '',
   force = false,
   executeAction = executeEnrichmentAction,
+  emailVerificationProvider,
 }: {
   db: any;
   listDir: string;
@@ -1091,6 +1108,7 @@ export const executeEnrichmentStepOnRecords = async ({
   stepId?: string;
   force?: boolean;
   executeAction?: typeof executeEnrichmentAction;
+  emailVerificationProvider?: EmailVerificationProvider;
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
@@ -1185,6 +1203,7 @@ export const executeEnrichmentStepOnRecords = async ({
         ...enrichmentPolicyInputs(config || {}),
         outputSchema: outputZod,
         toolCatalog,
+        emailVerificationProvider,
       });
 
       if (isEnrichmentBudgetSkip(result)) {

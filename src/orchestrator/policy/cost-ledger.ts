@@ -355,11 +355,15 @@ export function evaluateEnrichmentCeilingGate(input: {
     enrichment_usd = enrichmentSpendUsd({ ledger, record });
   }
 
+  const declaredUnitCost = Number(input.stepConfig?.unit_cost_usd || 0);
+  const projectedEnrichmentUsd = Number.isFinite(declaredUnitCost) && declaredUnitCost > 0
+    ? enrichment_usd + declaredUnitCost
+    : enrichment_usd;
   const check = withinEnrichmentCeiling({
     candidate_tier: String(working.candidate_tier || ''),
     treatment_tier: String(working.treatment_tier || ''),
     mail_treatment: String(working.mail_treatment || ''),
-    enrichment_usd,
+    enrichment_usd: projectedEnrichmentUsd,
     enrichmentBudget: input.enrichmentBudget,
   });
 
@@ -377,7 +381,7 @@ export function evaluateEnrichmentCeilingGate(input: {
     ? check.reason
     : 'enrichment_ceiling';
   const detail = check.reason
-    || `enrichment_cost_exceeded:${enrichment_usd}>${check.ceiling}`;
+    || `enrichment_cost_exceeded:${projectedEnrichmentUsd}>${check.ceiling}`;
   return {
     apply: true,
     within_budget: false,

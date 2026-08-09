@@ -862,6 +862,8 @@ const PipelineEnrichmentStepSchema = z.object({
   cache_key: z.string().default(''),
   action: z.string().default(''),
   provider: z.string().default(''),
+  field: z.string().trim().default(''),
+  unit_cost_usd: z.coerce.number().min(0).default(0),
   mode: z.string().default(''),
   output_fields: z.record(z.string()).default({}),
   candidate_field: z.string().default(''),
@@ -898,6 +900,8 @@ const PipelineEnrichmentStepSchema = z.object({
   cache_key: true,
   action: true,
   provider: true,
+  field: true,
+  unit_cost_usd: true,
   mode: true,
   output_fields: true,
   candidate_field: true,
@@ -2274,6 +2278,28 @@ const scoreStageValidationMessages = (config: Record<string, unknown>): string[]
   })
 );
 
+const emailVerificationStepValidationMessages = (config: Record<string, unknown>): string[] => (
+  flattenPipelineSteps(config).flatMap((step) => {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) return [];
+    const verificationStep = step as Record<string, unknown>;
+    if (String(verificationStep.kind || '') !== 'enrich') return [];
+    if (String(verificationStep.action || '').trim().toLowerCase() !== 'email_verification') return [];
+    const id = String(verificationStep.id || '').trim() || 'unknown';
+    const field = String(verificationStep.field || '').trim();
+    const provider = String(verificationStep.provider || '').trim();
+    const inputs = Array.isArray(verificationStep.inputs)
+      ? verificationStep.inputs.map((input) => String(input || '').trim())
+      : [];
+    return [
+      ...(provider ? [] : [`pipeline.${id} (email_verification) must declare provider.`]),
+      ...(field ? [] : [`pipeline.${id} (email_verification) must declare field.`]),
+      ...(field && inputs.includes(field)
+        ? []
+        : [`pipeline.${id} (email_verification) inputs must include "${field || 'the verification field'}".`]),
+    ];
+  })
+);
+
 const repeatedScoreKeyWarnings = (config: Record<string, unknown>): string[] => {
   const stagesByKey = flattenPipelineSteps(config).reduce((keys, step) => {
     if (!step || typeof step !== 'object' || Array.isArray(step)) return keys;
@@ -2506,6 +2532,7 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
     ...optOutErrors,
     ...stageInputs.errors,
     ...scoreStageErrors,
+    ...emailVerificationStepValidationMessages(config),
     ...retiredGlobalScoreCriteriaErrors(config),
   ])];
 

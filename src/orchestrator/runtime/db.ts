@@ -91,6 +91,7 @@ const SCHEMA_SQL = `
     contact_title TEXT DEFAULT '',
     email_verification_status TEXT DEFAULT '',
     email_verification_confidence REAL DEFAULT 0,
+    email_verification_reason TEXT DEFAULT '',
     email_verified_at TEXT DEFAULT '',
     fit_score REAL DEFAULT NULL,
     trigger_score REAL DEFAULT 0,
@@ -206,6 +207,7 @@ const SCHEMA_SQL = `
     confidence REAL DEFAULT 0,
     email_verification_status TEXT DEFAULT '',
     email_verification_confidence REAL DEFAULT 0,
+    email_verification_reason TEXT DEFAULT '',
     email_verified_at TEXT DEFAULT '',
     dne_email INTEGER DEFAULT 0,
     dnc_phone INTEGER DEFAULT 0,
@@ -1157,6 +1159,7 @@ const ensureContactCompatibility = (db) => {
   try { db.exec("ALTER TABLE contacts ADD COLUMN source_query TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE contacts ADD COLUMN sourced_at TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE contacts ADD COLUMN confidence REAL DEFAULT 0"); } catch {}
+  try { db.exec("ALTER TABLE contacts ADD COLUMN email_verification_reason TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE contacts ADD COLUMN dne_phone INTEGER DEFAULT 0"); } catch {}
   try { db.exec("ALTER TABLE contacts ADD COLUMN linkedin_suppressed INTEGER DEFAULT 0"); } catch {}
 
@@ -3053,14 +3056,14 @@ export const upsertContact = ({ db, contact }) => {
       INSERT INTO contacts (
         contact_id, id, row_id, name, full_name, first_name, last_name, title, seniority,
         email, phone, linkedin_url, linkedin_urn, role, is_primary, source, source_query,
-        sourced_at, confidence, email_verification_status, email_verification_confidence,
+        sourced_at, confidence, email_verification_status, email_verification_confidence, email_verification_reason,
         email_verified_at, dne_email, dnc_phone, dne_phone, linkedin_suppressed,
         crm_person_id, created_at, updated_at
       )
       VALUES (
         @contact_id, @id, @row_id, @name, @full_name, @first_name, @last_name, @title, @seniority,
         @email, @phone, @linkedin_url, @linkedin_urn, @role, 0, @source, @source_query,
-        @sourced_at, @confidence, @email_verification_status, @email_verification_confidence,
+        @sourced_at, @confidence, @email_verification_status, @email_verification_confidence, @email_verification_reason,
         @email_verified_at, @dne_email, @dnc_phone, @dne_phone, @linkedin_suppressed,
         @crm_person_id, @created_at, @updated_at
       )
@@ -3082,6 +3085,7 @@ export const upsertContact = ({ db, contact }) => {
         confidence = excluded.confidence,
         email_verification_status = excluded.email_verification_status,
         email_verification_confidence = excluded.email_verification_confidence,
+        email_verification_reason = excluded.email_verification_reason,
         email_verified_at = excluded.email_verified_at,
         dne_email = excluded.dne_email,
         dnc_phone = excluded.dnc_phone,
@@ -3110,6 +3114,7 @@ export const upsertContact = ({ db, contact }) => {
       confidence: Number(contact?.confidence ?? existing?.confidence ?? 0),
       email_verification_status: String(contact?.email_verification_status ?? existing?.email_verification_status ?? ''),
       email_verification_confidence: Number(contact?.email_verification_confidence ?? existing?.email_verification_confidence ?? 0),
+      email_verification_reason: String(contact?.email_verification_reason ?? existing?.email_verification_reason ?? ''),
       email_verified_at: String(contact?.email_verified_at ?? existing?.email_verified_at ?? ''),
       dne_email: Number(
         isAffirmativeFlag(existing?.dne_email, { failClosed: true })
