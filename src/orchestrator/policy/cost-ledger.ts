@@ -91,11 +91,13 @@ export function withinEnrichmentCeiling(input: {
   enrichment_usd: number;
   enrichmentBudget?: EnrichmentBudgetConfigInput;
 }): { within_budget: boolean; ceiling: number; reason?: string } {
-  const ceilings = input.enrichmentBudget?.ceilings;
+  if (!input.enrichmentBudget) {
+    return { within_budget: true, ceiling: Number.POSITIVE_INFINITY };
+  }
+
+  const ceilings = input.enrichmentBudget.ceilings;
   if (!ceilings) {
-    return input.enrichment_usd > 0
-      ? { within_budget: false, ceiling: 0, reason: 'enrichment_budget_not_configured' }
-      : { within_budget: true, ceiling: 0, reason: 'enrichment_budget_not_configured' };
+    return { within_budget: false, ceiling: 0, reason: 'enrichment_budget_not_configured' };
   }
   const tier = String(input.candidate_tier || input.treatment_tier || '').trim();
   const tierCeiling = tier ? ceilings.tiers?.[tier] : ceilings.foundational;
@@ -303,7 +305,7 @@ export type EnrichmentCeilingGateResult = {
   within_budget: boolean;
   ceiling: number;
   enrichment_usd: number;
-  /** Stable skip reason for activity / status: `enrichment_ceiling`. */
+  /** Stable skip reason for activity / status. */
   reason?: string;
   /** Human/detail string for observations (includes spend vs ceiling). */
   detail?: string;
@@ -314,7 +316,7 @@ export type EnrichmentCeilingGateResult = {
 /**
  * Pre-provider enrichment spend check.
  * Hydrates from cost_events when db is present, else ledger / enrichment_cost_usd.
- * Callers skip with reason `enrichment_ceiling` when apply && !within_budget.
+ * Callers skip with the specific budget reason when apply && !within_budget.
  */
 export function evaluateEnrichmentCeilingGate(input: {
   db?: any;
@@ -371,6 +373,9 @@ export function evaluateEnrichmentCeilingGate(input: {
     };
   }
 
+  const reason = check.reason?.startsWith('enrichment_budget_')
+    ? check.reason
+    : 'enrichment_ceiling';
   const detail = check.reason
     || `enrichment_cost_exceeded:${enrichment_usd}>${check.ceiling}`;
   return {
@@ -378,8 +383,8 @@ export function evaluateEnrichmentCeilingGate(input: {
     within_budget: false,
     ceiling: check.ceiling,
     enrichment_usd,
-    reason: 'enrichment_ceiling',
-    detail: `enrichment_ceiling: ${detail}`,
+    reason,
+    detail: `${reason}: ${detail}`,
     recordPatch,
   };
 }

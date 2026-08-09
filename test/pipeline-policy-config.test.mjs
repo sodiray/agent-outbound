@@ -76,7 +76,7 @@ test('pipeline policy config rejects malformed thresholds, ladders, and ceiling 
   for (const config of malformed) assert.ok(normalizeConfig(config).errors.length > 0);
 });
 
-test('pipeline policy remains fail-closed with no configured policy blocks', () => {
+test('pipeline policy remains fail-closed with no configured policy blocks except enrichment spend', () => {
   assert.equal(evaluateGoldenTicket({ ...goldenTicketPassInput(), buyerConfidence: undefined }).eligible, false);
   assert.equal(actionConfidenceAllows({
     action: 'email',
@@ -88,7 +88,7 @@ test('pipeline policy remains fail-closed with no configured policy blocks', () 
     treatmentTier: 'A', fitScore: 100, fitEvidenceConfidence: 100, mailAddressReady: false,
   }).eligible, false);
   assert.ok(planEnrichmentRepair({ record: { _row_id: 'missing' } }).steps.length > 0);
-  assert.equal(withinEnrichmentCeiling({ candidate_tier: 'A', enrichment_usd: 3.01 }).within_budget, false);
+  assert.equal(withinEnrichmentCeiling({ candidate_tier: 'A', enrichment_usd: 3.01 }).within_budget, true);
   const readiness = evaluateOutboundReadiness({
     eligible: true,
     suppressed: false,

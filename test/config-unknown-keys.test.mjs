@@ -100,3 +100,14 @@ test('explicit extension surfaces preserve extra provider and channel fields', (
   assert.equal(result.config.channels.provider_extension.delivery_mode, 'future');
   assert.equal(result.config.source.searches[0].tool.provider_extension, 'supported');
 });
+
+test('a top-level enrichment budget block is an error instead of a discarded warning', () => {
+  const result = normalizeConfig({
+    enrichment_budget: {
+      ceilings: { tiers: { A: 3 } },
+    },
+  });
+
+  assert.ok(result.errors.some((error) => error.includes('enrichment_budget')));
+  assert.equal(result.config.score.enrichment_budget, undefined);
+});

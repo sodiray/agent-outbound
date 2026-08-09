@@ -7,6 +7,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { representativePipelineRoot } from './fixtures/pipelines/representative.mjs';
+import { treasureValleyEnrichmentBudget } from './fixtures/treatment-strategy.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TV = representativePipelineRoot;
@@ -143,6 +144,7 @@ test('residual cost ledger ceiling', () => {
   let ledger = parseCostLedger(null, 'acct');
   ledger = appendCostEntry(ledger, { kind: 'enrichment', amount_usd: 5 });
   const check = withinEnrichmentCeiling({
+    enrichmentBudget: treasureValleyEnrichmentBudget,
     treatment_tier: 'C',
     enrichment_usd: ledger.enrichment_usd,
   });

@@ -37,7 +37,7 @@ import {
   declaredOutputWritesFor,
   getDeclaredOutputs,
   isEnrichFresh,
-  isEnrichmentCeilingSkip,
+  isEnrichmentBudgetSkip,
   mergedRecordForEnrichment,
   outputOutcomeFor,
   parseExtra,
@@ -440,8 +440,9 @@ export const runGenerateStep = async ({
       }) as Record<string, unknown>;
 
       // Expensive generate steps skip the provider when over ceiling.
-      if (isEnrichmentCeilingSkip(executionResult)) {
-        const detail = String(executionResult.skip_detail || 'enrichment_ceiling');
+      if (isEnrichmentBudgetSkip(executionResult)) {
+        const reason = executionResult.skip_reason;
+        const detail = String(executionResult.skip_detail || reason);
         const emptyOutputs = emptyOutputsFor(outputZod);
         summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: emptyOutputs });
         const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId)
@@ -476,7 +477,7 @@ export const runGenerateStep = async ({
             phase: 'generate',
             step: id,
             row: rowLabel,
-            reason: 'enrichment_ceiling',
+            reason,
             detail,
           },
         });

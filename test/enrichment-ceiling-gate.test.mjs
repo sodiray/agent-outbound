@@ -32,6 +32,7 @@ import { treasureValleyEnrichmentBudget, treasureValleyTreatmentStrategy } from 
 const ENRICHMENT_COST_CEILINGS = treasureValleyEnrichmentBudget.ceilings;
 import {
   executeEnrichmentAction,
+  executeEnrichmentStepOnRecords,
   isEnrichmentCeilingSkip,
 } from '../dist/orchestrator/enrichment/runner.js';
 import {
@@ -39,6 +40,7 @@ import {
   ensureRecordColumns,
   insertCostEvent,
 } from '../dist/orchestrator/runtime/db.js';
+import { cleanupSockets, withActivityContext } from '../dist/orchestrator/runtime/activity.js';
 
 // Ensure fixture mode cannot bypass the pre-provider gate in this file.
 delete process.env.AO_PIPELINE_FIXTURE;
@@ -180,6 +182,111 @@ test('gate: same action under ceiling → proceeds (apply + within_budget)', () 
   assert.equal(gate.reason, undefined);
   assert.equal(gate.ceiling, ENRICHMENT_COST_CEILINGS.C);
   assert.ok(gate.enrichment_usd <= 0.1);
+});
+
+test('gate: an undeclared enrichment budget is unconstrained', () => {
+  const gate = evaluateEnrichmentCeilingGate({
+    record: overspentRecord('C', 5),
+    stepConfig: { action: 'tool_call' },
+  });
+
+  assert.equal(gate.apply, true);
+  assert.equal(gate.within_budget, true);
+  assert.equal(gate.ceiling, Number.POSITIVE_INFINITY);
+  assert.equal(gate.reason, undefined);
+});
+
+test('executeEnrichmentAction: an undeclared enrichment budget reaches the configured provider', async () => {
+  const provider = { calls: 0 };
+  const result = await executeEnrichmentAction({
+    mcp: null,
+    listDir: mkdtempSync(join(tmpdir(), 'ao-unconfigured-budget-')),
+    stepId: 'site_lookup',
+    description: 'lookup',
+    stepConfig: {
+      action: 'tool_call',
+      tool: {
+        server: 'test',
+        tools: ['LOOKUP'],
+        effect: { class: 'data_enrichment' },
+      },
+      output_map: { site_summary: 'summary' },
+      __tryTool: async () => {
+        provider.calls += 1;
+        return { result: { summary: 'enriched' }, provider: 'test' };
+      },
+    },
+    record: overspentRecord('C', 5),
+    aiConfig: {},
+    context: {},
+    outputSchema: dummySchema,
+  });
+
+  assert.equal(isEnrichmentCeilingSkip(result), false);
+  assert.equal(provider.calls, 1);
+  assert.equal(result.outputs.site_summary, 'enriched');
+});
+
+test('gate: an explicitly empty budget names its missing configuration distinctly', () => {
+  const gate = evaluateEnrichmentCeilingGate({
+    enrichmentBudget: {},
+    record: overspentRecord('C', 5),
+    stepConfig: { action: 'tool_call' },
+  });
+
+  assert.equal(gate.within_budget, false);
+  assert.equal(gate.reason, 'enrichment_budget_not_configured');
+});
+
+test('runner emits the unconfigured-budget reason instead of enrichment_ceiling', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-unconfigured-budget-event-'));
+  writeFileSync(join(listDir, 'outbound.yaml'), 'list: { name: budget-event }\npipeline: []\n');
+  writeFileSync(join(listDir, 'operator.md'), 'budget event');
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const record = {
+    ...overspentRecord('C', 5),
+    business_name: 'Budget Event Co',
+    sequence_name: 'default',
+    sequence_status: 'idle',
+    _created_at: now,
+    _updated_at: now,
+    created_at: now,
+    updated_at: now,
+  };
+  const columns = Object.keys(record);
+  ensureRecordColumns({ db, columns });
+  db.prepare(`INSERT INTO records (${columns.join(', ')}) VALUES (${columns.map((column) => `@${column}`).join(', ')})`).run(record);
+
+  try {
+    await withActivityContext({ listDir }, () => executeEnrichmentStepOnRecords({
+      db,
+      listDir,
+      config: { score: { enrichment_budget: {} } },
+      mcp: null,
+      toolCatalog: null,
+      step: {
+        kind: 'enrich',
+        id: 'site_lookup',
+        action: 'tool_call',
+        outputs: { site_summary: { type: 'string' } },
+      },
+      rows: [record],
+      force: true,
+    }));
+
+    const event = db.prepare(`
+      SELECT payload_json
+      FROM activity_history
+      WHERE event = 'row_skipped'
+      ORDER BY occurred_at DESC
+      LIMIT 1
+    `).get();
+    assert.equal(JSON.parse(event.payload_json).reason, 'enrichment_budget_not_configured');
+  } finally {
+    db.close();
+    cleanupSockets();
+  }
 });
 
 test('gate: policy_apply never blocked even when enrichment spend is huge', () => {

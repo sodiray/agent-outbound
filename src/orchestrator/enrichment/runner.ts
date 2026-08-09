@@ -66,25 +66,35 @@ const zeroUsage = () => ({
   tool_costs: [] as unknown[],
 });
 
-/** Structured skip from executeEnrichmentAction when over tier enrichment ceiling. */
-export type EnrichmentCeilingSkipResult = {
+export type EnrichmentBudgetSkipReason =
+  | 'enrichment_ceiling'
+  | 'enrichment_budget_not_configured'
+  | 'enrichment_budget_tier_not_configured';
+
+/** Structured skip from executeEnrichmentAction when a configured spend gate blocks it. */
+export type EnrichmentBudgetSkipResult = {
   outputs: Record<string, unknown>;
   artifacts: Record<string, unknown>;
   usage: ReturnType<typeof zeroUsage>;
   model: string;
   provider: string;
   skipped: true;
-  skip_reason: 'enrichment_ceiling';
+  skip_reason: EnrichmentBudgetSkipReason;
   skip_detail: string;
 };
 
-export const isEnrichmentCeilingSkip = (result: unknown): result is EnrichmentCeilingSkipResult => (
+export const isEnrichmentBudgetSkip = (result: unknown): result is EnrichmentBudgetSkipResult => (
   Boolean(
     result
     && typeof result === 'object'
-    && (result as EnrichmentCeilingSkipResult).skipped === true
-    && (result as EnrichmentCeilingSkipResult).skip_reason === 'enrichment_ceiling',
+    && (result as EnrichmentBudgetSkipResult).skipped === true
+    && ['enrichment_ceiling', 'enrichment_budget_not_configured', 'enrichment_budget_tier_not_configured']
+      .includes(String((result as EnrichmentBudgetSkipResult).skip_reason || '')),
   )
+);
+
+export const isEnrichmentCeilingSkip = (result: unknown): result is EnrichmentBudgetSkipResult => (
+  isEnrichmentBudgetSkip(result) && result.skip_reason === 'enrichment_ceiling'
 );
 
 /** Evidence + status patch when an enrich/generate step is blocked by the spend ceiling. */
@@ -846,12 +856,13 @@ export const executeEnrichmentAction = async ({
   if (!fixtureMode) {
     const gate = evaluateEnrichmentCeilingGate({ db, record, stepConfig, enrichmentBudget });
     if (gate.apply && !gate.within_budget) {
-      const detail = String(gate.detail || gate.reason || 'enrichment_ceiling');
+      const reason = (gate.reason || 'enrichment_ceiling') as EnrichmentBudgetSkipReason;
+      const detail = String(gate.detail || reason);
       return {
         outputs: {},
         artifacts: {
           skipped: true,
-          reason: 'enrichment_ceiling',
+          reason,
           enrichment_usd: gate.enrichment_usd,
           ceiling: gate.ceiling,
           step_id: stepId,
@@ -860,7 +871,7 @@ export const executeEnrichmentAction = async ({
         model: '',
         provider: 'cost_blocked',
         skipped: true as const,
-        skip_reason: 'enrichment_ceiling' as const,
+        skip_reason: reason,
         skip_detail: detail,
       };
     }
@@ -1172,8 +1183,9 @@ export const executeEnrichmentStepOnRecords = async ({
         toolCatalog,
       });
 
-      if (isEnrichmentCeilingSkip(result)) {
-        const detail = String(result.skip_detail || 'enrichment_ceiling');
+      if (isEnrichmentBudgetSkip(result)) {
+        const reason = result.skip_reason;
+        const detail = String(result.skip_detail || reason);
         const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || currentRecord;
         const patch = enrichmentCeilingSkipPatch({
           record: currentRow,
@@ -1185,13 +1197,13 @@ export const executeEnrichmentStepOnRecords = async ({
         upsertRecord({ db, row: { ...currentRow, ...patch } });
         summary.skipped_ceiling += 1;
         summary.record_ids.push(recordId);
-        summary.non_execution_reasons[recordId] = 'skipped:enrichment_ceiling';
+        summary.non_execution_reasons[recordId] = `skipped:${reason}`;
         emitActivity({
           event: 'row_skipped',
           phase: 'pipeline',
           step: id,
           row: rowLabel,
-          reason: 'enrichment_ceiling',
+          reason,
           detail,
         });
         return { outcome: 'skipped', attempt, ceiling: true };
@@ -1641,8 +1653,9 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               toolCatalog,
             });
 
-            if (isEnrichmentCeilingSkip(result)) {
-              const detail = String(result.skip_detail || 'enrichment_ceiling');
+            if (isEnrichmentBudgetSkip(result)) {
+              const reason = result.skip_reason;
+              const detail = String(result.skip_detail || reason);
               const patch = enrichmentCeilingSkipPatch({
                 record,
                 stepId: id,
@@ -1666,7 +1679,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 phase: 'enrichment',
                 step: id,
                 row: rowLabel,
-                reason: 'enrichment_ceiling',
+                reason,
                 detail,
               });
               return;

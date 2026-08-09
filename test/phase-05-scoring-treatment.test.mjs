@@ -1404,6 +1404,7 @@ test('phase-05 cost-ledger: ceilings feed readiness; overspend does not authoriz
       next_action_json: JSON.stringify({ action_id: 'na_cost', action_type: 'send_email' }),
     },
     recomputeFitFromBreakdown: true,
+    enrichmentBudget: treasureValleyEnrichmentBudget,
   });
   assert.ok(policy.patch.cost_ledger_json);
   assert.equal(Number(policy.patch.within_enrichment_budget), 0);
@@ -1412,7 +1413,10 @@ test('phase-05 cost-ledger: ceilings feed readiness; overspend does not authoriz
 
   // Hard enforce_readiness path uses the same cost ceiling (not a score override)
   const hard = guardChannelExecution({
-    config: { policy: { enforce_readiness: true, forbidden_channels: [] } },
+    config: {
+      policy: { enforce_readiness: true, forbidden_channels: [] },
+      score: { enrichment_budget: treasureValleyEnrichmentBudget },
+    },
     record: {
       _row_id: 'cost_guard',
       identity_confidence: 90,

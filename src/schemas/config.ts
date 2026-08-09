@@ -2240,6 +2240,10 @@ const isSafetyCriticalUnknownKey = ({ path, suggestion }: UnknownConfigKey): boo
   return ['policy', 'contact_policy', 'suppression', 'live_interaction_budget', 'budgets'].includes(suggestion || '');
 };
 
+const isConfigErrorUnknownKey = (unknown: UnknownConfigKey): boolean => (
+  !unknown.path.includes('.') || isSafetyCriticalUnknownKey(unknown)
+);
+
 const scoreStageValidationMessages = (config: Record<string, unknown>): string[] => (
   flattenPipelineSteps(config).flatMap((step) => {
     if (!step || typeof step !== 'object' || Array.isArray(step)) return [];
@@ -2308,10 +2312,10 @@ export const normalizeConfig = (value, options: { listDir?: string; recordFields
   const input = coerceLegacyScore(coerceLegacyContactPolicy(value || {}));
   const unknownKeys = unknownConfigKeys(input, ConfigSchema);
   const unknownErrors = unknownKeys
-    .filter(isSafetyCriticalUnknownKey)
+    .filter(isConfigErrorUnknownKey)
     .map(unknownConfigDiagnostic);
   const unknownWarnings = unknownKeys
-    .filter((unknown) => !isSafetyCriticalUnknownKey(unknown))
+    .filter((unknown) => !isConfigErrorUnknownKey(unknown))
     .map(unknownConfigDiagnostic);
   const parsed = ConfigSchema.safeParse(input);
   if (!parsed.success) {
