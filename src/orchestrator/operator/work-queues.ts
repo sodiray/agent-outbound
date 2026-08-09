@@ -704,6 +704,7 @@ export function listStageReviewQueue(input: {
  */
 export function listManualQueue(input: {
   db: any;
+  config?: unknown;
   limit?: number;
   offset?: number;
   taskType?: string;
@@ -712,6 +713,7 @@ export function listManualQueue(input: {
   const offset = Math.max(0, Number(input.offset) || 0);
   const listed = listAwaitingManualTasks({
     db: input.db,
+    config: input.config,
     taskType: input.taskType || '',
     limit,
     offset,
@@ -838,6 +840,7 @@ export const WORK_QUEUE_NAMES: WorkQueueName[] = [
 
 const QUEUE_FNS: Record<WorkQueueName, (input: {
   db: any;
+  config?: unknown;
   limit?: number;
   offset?: number;
   status?: string;
@@ -861,6 +864,7 @@ const QUEUE_FNS: Record<WorkQueueName, (input: {
  */
 export function listWorkQueue(input: {
   db: any;
+  config?: unknown;
   queue: string;
   limit?: number;
   offset?: number;

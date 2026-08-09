@@ -266,9 +266,10 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
       const taskType = String(c.req.query('type') || '');
       const limit = Number(c.req.query('limit') || 100);
       const offset = Number(c.req.query('offset') || 0);
+      const { config } = readConfig(listDir);
       const db = openListDb({ listDir, readonly: true });
       try {
-        return c.json({ ok: true, ...listAwaitingManualTasks({ db, taskType, limit, offset }) });
+        return c.json({ ok: true, ...listAwaitingManualTasks({ db, config, taskType, limit, offset }) });
       } finally {
         db.close();
       }

@@ -16,9 +16,10 @@ export const manualListCommand = ({
   offset?: number;
 }) => {
   const listDir = resolveListDir(list);
+  const { config } = readConfig(listDir);
   const db = openListDb({ listDir, readonly: true });
   try {
-    return listAwaitingManualTasks({ db, taskType, limit, offset });
+    return listAwaitingManualTasks({ db, config, taskType, limit, offset });
   } finally {
     db.close();
   }

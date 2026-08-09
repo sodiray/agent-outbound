@@ -471,21 +471,60 @@ export type ManualTaskRow = {
   pipeline_name: string;
   parked_at: string;
   reason: string;
+  /** The step's declared `config.channel`, verbatim. Empty when undeclared. */
+  channel: string;
+};
+
+/**
+ * What kind of work a parked task is.
+ *
+ * The author already said: `config.task_type` and `config.channel` are their
+ * words for it. Guessing from substrings in the step id is only a fallback for
+ * steps that declare nothing — a step named `postcard_production` is mail
+ * whatever the engine can spell.
+ */
+const manualTaskLabels = (
+  step: Record<string, unknown> | undefined,
+  stepId: string,
+): { taskType: string; channel: string; inferred: string } => {
+  const config = (step?.config && typeof step.config === 'object' ? step.config : {}) as Record<string, unknown>;
+  const inferred = stepId.includes('visit')
+    ? 'visit'
+    : stepId.includes('mail') || stepId.includes('letter')
+      ? 'mail'
+      : stepId.includes('linkedin')
+        ? 'linkedin'
+        : 'manual';
+  return {
+    taskType: text(config.task_type || config.taskType) || inferred,
+    channel: text(config.channel),
+    inferred,
+  };
 };
 
 /** Records currently parked on a manual_task step (reason awaiting_manual). */
 export const listAwaitingManualTasks = ({
   db,
+  config,
   taskType = '',
   limit = 100,
   offset = 0,
 }: {
   db: any;
+  /** The pipeline, so a task is labelled with the author's own words for it. */
+  config?: unknown;
   taskType?: string;
   limit?: number;
   offset?: number;
 }): { total: number; tasks: ManualTaskRow[] } => {
-  const typeFilter = text(taskType);
+  const typeFilter = text(taskType).toLowerCase();
+  const declaredSteps = new Map<string, Record<string, unknown>>();
+  if (config) {
+    for (const step of flattenPipelineSteps(config as any) as Array<Record<string, unknown>>) {
+      const id = text((step as any)?.id);
+      if (id) declaredSteps.set(id, step);
+    }
+  }
   const rows = db.prepare(`
     SELECT
       e.record_id AS record_id,
@@ -512,22 +551,20 @@ export const listAwaitingManualTasks = ({
           AND done.occurred_at > e.occurred_at
       )
     ORDER BY e.occurred_at ASC
-    LIMIT ? OFFSET ?
-  `).all(Math.max(1, Number(limit) || 100), Math.max(0, Number(offset) || 0));
+  `).all();
 
-  const tasks: ManualTaskRow[] = rows.map((row: any) => {
+  // Filtering happens on labels the database does not hold, so the page is cut
+  // after the filter rather than before it. A `total` counted separately from
+  // the rows it describes is how `--type mail` came to report three tasks and
+  // list one.
+  const matched: ManualTaskRow[] = rows.map((row: any) => {
     const stepId = text(row.step_id);
-    const taskTypeFromId = stepId.includes('visit')
-      ? 'visit'
-      : stepId.includes('mail') || stepId.includes('letter')
-        ? 'mail'
-        : stepId.includes('linkedin')
-          ? 'linkedin'
-          : 'manual';
+    const labels = manualTaskLabels(declaredSteps.get(stepId), stepId);
     return {
       record_id: text(row.record_id),
       step_id: stepId,
-      task_type: taskTypeFromId,
+      task_type: labels.taskType,
+      channel: labels.channel,
       business_name: text(row.business_name),
       address: text(row.address),
       contact_name: text(row.contact_name),
@@ -536,28 +573,25 @@ export const listAwaitingManualTasks = ({
       pipeline_name: text(row.pipeline_name),
       parked_at: text(row.parked_at),
       reason: text(row.reason),
-    };
-  }).filter((task) => !typeFilter || task.task_type === typeFilter);
+      __inferred: labels.inferred,
+    } as ManualTaskRow & { __inferred: string };
+  }).filter((task) => {
+    if (!typeFilter) return true;
+    const inferred = (task as ManualTaskRow & { __inferred: string }).__inferred;
+    // The author's words first; the engine's guess only as a courtesy to
+    // callers still asking for `mail` when the step declares `golden_ticket`.
+    return task.task_type.toLowerCase() === typeFilter
+      || task.channel.toLowerCase() === typeFilter
+      || inferred === typeFilter;
+  }).map((task) => {
+    const { __inferred, ...rest } = task as ManualTaskRow & { __inferred: string };
+    return rest;
+  });
 
-  const totalRow = db.prepare(`
-    SELECT COUNT(*) AS n
-    FROM pipeline_events e
-    WHERE e.kind = 'manual_task'
-      AND e.passed = 0
-      AND e.reason = 'awaiting_manual'
-      AND NOT EXISTS (
-        SELECT 1 FROM pipeline_events done
-        WHERE done.record_id = e.record_id
-          AND done.step_id = e.step_id
-          AND done.kind = 'manual_task'
-          AND done.passed = 1
-          AND done.occurred_at > e.occurred_at
-      )
-  `).get();
-
+  const start = Math.max(0, Number(offset) || 0);
   return {
-    total: Number(totalRow?.n || tasks.length),
-    tasks,
+    total: matched.length,
+    tasks: matched.slice(start, start + Math.max(1, Number(limit) || 100)),
   };
 };
 
