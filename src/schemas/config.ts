@@ -226,6 +226,12 @@ export type MailProgramConfigInput = {
   priority?: number;
   /** Applies the configured high-confidence buyer gate to this program. */
   requires_high_confidence_buyer?: boolean;
+  /** Pipeline-declared execution attributes for this physical-mail product. */
+  cost_cents?: number;
+  template_id?: string;
+  provider?: string;
+  format?: string;
+  content_field?: string;
   minimums?: Partial<Record<MailProgramMinimum, number>>;
   requirements?: MailProgramRequirements;
   tier_exception?: {
@@ -1276,9 +1282,6 @@ const TreatmentStrategyTierSchema = z.object({
   mail_programs: z.array(z.string().trim().min(1)).min(1).optional(),
   mail_program_exceptions: z.array(z.string().trim().min(1)).min(1).optional(),
   requires_high_confidence_buyer: z.boolean().optional(),
-  standard_postcard: z.boolean().optional(),
-  postcard_exception: z.boolean().optional(),
-  golden_ticket: z.boolean().optional(),
 }).strict();
 
 const PriorityConfigSchema = z.object({
@@ -1324,6 +1327,12 @@ const MailProgramRequirementsSchema = z.object({
 const MailProgramConfigSchema = z.object({
   priority: z.coerce.number().nonnegative().optional(),
   requires_high_confidence_buyer: z.boolean().optional(),
+  /** Product execution attributes. Names remain opaque pipeline-owned keys. */
+  cost_cents: z.coerce.number().int().nonnegative().optional(),
+  template_id: z.string().trim().min(1).optional(),
+  provider: z.string().trim().min(1).optional(),
+  format: z.string().trim().min(1).optional(),
+  content_field: z.string().trim().min(1).optional(),
   minimums: MailProgramMinimumSchema.optional(),
   requirements: MailProgramRequirementsSchema.optional(),
   tier_exception: z.object({
@@ -1457,7 +1466,6 @@ const EnrichmentBudgetConfigSchema = z.object({
     C: NonNegativePolicyValueSchema,
     D: NonNegativePolicyValueSchema,
     enrichment_hold: NonNegativePolicyValueSchema,
-    golden_ticket_total: NonNegativePolicyValueSchema,
     tiers: z.record(NonNegativePolicyValueSchema),
     mail_programs: z.record(NonNegativePolicyValueSchema),
   }).partial(),
@@ -1599,7 +1607,6 @@ const ScoreSchema = z.object({
   phone_confidence: PhoneConfidenceConfigSchema,
   buyer_confidence: BuyerConfidenceConfigSchema,
   mail_confidence: MailConfidenceConfigSchema,
-  golden_ticket: z.unknown().optional(),
   action_confidence: ActionConfidenceConfigSchema,
   reachability: ReachabilityConfigSchema,
   candidate_tier: CandidateTierConfigSchema,

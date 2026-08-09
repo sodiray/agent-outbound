@@ -52,35 +52,71 @@ import {
 } from '../runtime/live-interaction-budget.js';
 import { evaluateTransmitterSuppression } from '../policy/transmitter-suppression.js';
 import { resolveReviewPresentation } from '../policy/review-presentation.js';
+import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 const text = (value: unknown) => String(value || '').trim();
 
-/** Mail product types that completeManualTask may allocate / gate on stage review. */
-const MAIL_PRODUCT_TYPES = new Set(['standard_postcard', 'golden_ticket', 'mail']);
+type MailProductDefinition = {
+  cost_cents?: unknown;
+  template_id?: unknown;
+  provider?: unknown;
+  format?: unknown;
+  content_field?: unknown;
+  requirements?: { mail_address_ready?: boolean };
+};
 
-/**
- * Resolve mail product type for a manual step from config task_type or step id heuristics.
- * Returns null when the step is not a mail manual task.
- */
-const resolveMailProductType = ({
-  stepId,
+const mailProgramDefinitions = (config: any): Record<string, MailProductDefinition> => {
+  const programs = config?.score?.treatment?.mail_programs;
+  if (!programs || typeof programs !== 'object' || Array.isArray(programs)) return {};
+  return programs as Record<string, MailProductDefinition>;
+};
+
+const declaredMailProduct = (config: any, product: string): MailProductDefinition | undefined => (
+  mailProgramDefinitions(config)[product]
+);
+
+const resolveConfiguredMailProduct = ({
+  config,
   configured,
 }: {
-  stepId: string;
+  config: any;
   configured?: Record<string, unknown> | null;
 }): string | null => {
   const cfg = configured?.config as Record<string, unknown> | undefined;
-  const fromConfig = text(cfg?.task_type || cfg?.taskType).toLowerCase();
-  if (MAIL_PRODUCT_TYPES.has(fromConfig)) return fromConfig;
+  const fromConfig = text(cfg?.task_type || cfg?.taskType);
+  if (declaredMailProduct(config, fromConfig)) return fromConfig;
 
   const channel = text(cfg?.channel || configured?.channel).toLowerCase();
-  if (channel === 'mail' || fromConfig === 'postcard' || fromConfig === 'letter') {
-    return fromConfig === 'golden_ticket' ? 'golden_ticket'
-      : fromConfig === 'standard_postcard' ? 'standard_postcard'
-      : 'mail';
-  }
-
   return null;
+};
+
+const isMailManualTask = ({
+  config,
+  configured,
+}: {
+  config: any;
+  configured?: Record<string, unknown> | null;
+}): boolean => {
+  const cfg = configured?.config as Record<string, unknown> | undefined;
+  const channel = text(cfg?.channel || configured?.channel).toLowerCase();
+  if (channel === 'mail') return true;
+  return Boolean(resolveConfiguredMailProduct({ config, configured }));
+};
+
+const mailContent = ({
+  row,
+  definition,
+}: {
+  row: Record<string, unknown>;
+  definition?: MailProductDefinition;
+}): string => {
+  const configured = text(definition?.content_field);
+  return text(
+    (configured ? row[configured] : '')
+    || row.mail_copy
+    || row.mail_body
+    || row.preliminary_snapshot,
+  );
 };
 
 const parseJsonObject = (raw: unknown): Record<string, unknown> => {
@@ -344,15 +380,7 @@ const assertMailStageReviewAuthorized = ({
     );
   }
 
-  const mailBody = text(
-    row.golden_ticket_copy
-    || row.golden_ticket_body
-    || row.mail_copy
-    || row.mail_body
-    || row.postcard_copy
-    || row.postcard_body
-    || row.preliminary_snapshot,
-  );
+  const mailBody = mailContent({ row, definition: declaredMailProduct(config, productType) });
   const configuredStep = flattenPipelineSteps(config)
     .find((step) => text(step.id) === stepId);
   const reviewPresentation = resolveReviewPresentation({ step: configuredStep, record: row });
@@ -642,10 +670,11 @@ export const completeManualTask = async ({
   const configuredStep = config
     ? flattenPipelineSteps(config).find((step: any) => text(step?.id) === sid) as Record<string, unknown> | undefined
     : undefined;
-  const configuredMailProduct = resolveMailProductType({ stepId: sid, configured: configuredStep || null });
-  const recordMailTreatment = text(recordRow?.mail_treatment).toLowerCase();
+  const configuredMailProduct = resolveConfiguredMailProduct({ config, configured: configuredStep || null });
+  const recordMailTreatment = text(recordRow?.mail_treatment);
+  const configuredMailTask = isMailManualTask({ config, configured: configuredStep || null });
   const mailProduct = configuredMailProduct
-    || (MAIL_PRODUCT_TYPES.has(recordMailTreatment) ? recordMailTreatment : null);
+    || (recordMailTreatment && recordMailTreatment !== 'none' ? recordMailTreatment : null);
   if (!configuredStep && config?.channels?.mail && recordMailTreatment === 'none') {
     throw new Error(`Manual task ${sid} has no declared mail product and mail_treatment is none.`);
   }
@@ -675,18 +704,18 @@ export const completeManualTask = async ({
 
     // Mail product types: refuse complete without stage_review authorization when
     // policy.review_required_for includes that type (fail closed).
-    if (mailProduct) {
+    if (configuredMailTask || mailProduct) {
       assertMailStageReviewAuthorized({
         db,
         config,
         recordId: rid,
         stepId: sid,
-        productType: mailProduct,
+        productType: mailProduct || 'mail',
       });
     }
   }
 
-  const isMailStep = Boolean(mailProduct);
+  const isMailStep = configuredMailTask || Boolean(mailProduct);
 
   // Completion timestamps must be strictly after the park event so
   // listAwaitingManualTasks (done.occurred_at > park.occurred_at) closes the park.
@@ -723,26 +752,34 @@ export const completeManualTask = async ({
         `Cannot complete mail task for ${rid}: campaign mail_treatment is none (no mail permission).`,
       );
     }
-    const treatmentRaw = String(row.mail_treatment || campaign.mail_treatment || '').trim();
-    const mail_treatment: 'golden_ticket' | 'standard_postcard' =
-      treatmentRaw === 'golden_ticket' || campaign.mail_treatment === 'golden_ticket'
-        ? 'golden_ticket'
-        : 'standard_postcard';
-    if (
-      campaign.mail_treatment !== 'golden_ticket'
-      && campaign.mail_treatment !== 'standard_postcard'
-    ) {
+    const mail_treatment = text(campaign.mail_treatment);
+    if (!mail_treatment || mail_treatment === 'none') {
       throw new Error(
-        `Cannot complete mail task for ${rid}: invalid campaign mail_treatment=${campaign.mail_treatment}`,
+        `Cannot complete mail task for ${rid}: campaign has no declared mail product.`,
       );
+    }
+    if (configuredMailProduct && configuredMailProduct !== mail_treatment) {
+      throw new Error(
+        `Cannot complete mail task for ${rid}: configured product=${configuredMailProduct} does not match campaign product=${mail_treatment}.`,
+      );
+    }
+    const definition = declaredMailProduct(config, mail_treatment);
+    const declarations = mailProgramDefinitions(config);
+    if (Object.keys(declarations).length > 0 && !definition) {
+      throw new Error(
+        `Cannot complete mail task for ${rid}: campaign product=${mail_treatment} is not declared by this pipeline.`,
+      );
+    }
+    if (definition?.requirements?.mail_address_ready === true
+      && !isAffirmativeFlag(row.mail_address_ready, { failClosed: true })) {
+      throw new Error(`Cannot complete mail task for ${rid}: mail_address_not_ready.`);
     }
 
     let next;
     try {
       next = allocateMail({
         campaign,
-        mail_treatment:
-          campaign.mail_treatment === 'golden_ticket' ? 'golden_ticket' : 'standard_postcard',
+        mail_treatment,
       });
     } catch (err) {
       throw new Error(
@@ -780,17 +817,17 @@ export const completeManualTask = async ({
       ? mailProvider
       : resolveMailProvider({
         listDir: listDir || undefined,
-        providerName: config?.channels?.mail?.provider,
+        providerName: text(definition?.provider || config?.channels?.mail?.provider),
       });
     if (provider) {
-      const mailTemplateId = text(config?.channels?.mail?.template_id);
-      const mailContent = assertOutboundContent({
+      const mailTemplateId = text(definition?.template_id || config?.channels?.mail?.template_id);
+      const contentCheck = assertOutboundContent({
         channel: 'mail',
         stepId: sid,
         required: { template_id: mailTemplateId },
       });
-      if ('reason' in mailContent) {
-        throw new Error(mailContent.reason);
+      if ('reason' in contentCheck) {
+        throw new Error(contentCheck.reason);
       }
       const submitRequest: MailSubmitRequest = {
         recordId: rid,
@@ -804,23 +841,18 @@ export const completeManualTask = async ({
         },
         template_id: mailTemplateId,
         expected_cost_cents: (() => {
+          const declaredCost = Number(definition?.cost_cents);
+          if (Number.isFinite(declaredCost) && declaredCost >= 0) return declaredCost;
           const products = config?.channels?.mail?.products as Record<string, unknown> | undefined;
           const product = products?.[mail_treatment] as Record<string, unknown> | undefined;
           const cost = Number(product?.cost_cents);
           return Number.isFinite(cost) && cost >= 0 ? cost : undefined;
         })(),
-        metadata: { step_id: sid },
+        metadata: { step_id: sid, format: text(definition?.format) },
       };
       const contentVersion = stableHash({
         request: submitRequest,
-        mail_copy: text(
-          row.golden_ticket_copy
-          || row.golden_ticket_body
-          || row.mail_copy
-          || row.mail_body
-          || row.postcard_copy
-          || row.postcard_body,
-        ),
+        mail_copy: mailContent({ row, definition }),
       });
       const submitResult = await submitMailWithIdempotency({
         db,

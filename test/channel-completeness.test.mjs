@@ -1237,7 +1237,7 @@ test('mail provider: ambiguous network failure becomes uncertain and cannot blin
 test('cost reservations: reserve, release, settle, replay, ceiling, and high-cost gates are durable', () => {
   const { db } = createList({
     _row_id: 'cost_reservation_1',
-    golden_ticket_eligible: 1,
+    mail_program_eligible: 1,
   });
   const standard = reserveAccountCost({
     db,
@@ -1275,8 +1275,8 @@ test('cost reservations: reserve, release, settle, replay, ceiling, and high-cos
   assert.equal(
     Number(
       db.prepare(`
-        SELECT golden_ticket_eligible FROM records WHERE _row_id = 'cost_reservation_1'
-      `).get().golden_ticket_eligible,
+        SELECT mail_program_eligible FROM records WHERE _row_id = 'cost_reservation_1'
+      `).get().mail_program_eligible,
     ),
     1,
   );

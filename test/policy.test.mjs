@@ -172,7 +172,7 @@ test('declared treatment strategy applies opaque tier keys and routes', () => {
     tiers: {
       cold: { route: 'recycle_monitoring' },
       warm: { route: 'outbound' },
-      platinum: { route: 'outbound', standard_postcard: true, golden_ticket: true },
+      platinum: { route: 'outbound' },
       hold: { route: 'enrichment' },
     },
   };

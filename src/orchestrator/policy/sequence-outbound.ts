@@ -154,8 +154,6 @@ export function resolveOutboundChannelHint(opts?: SequenceOutboundOptions | null
     linkedin_connect: 'linkedin',
     mail: 'mail',
     send_mail: 'mail',
-    standard_postcard: 'mail',
-    golden_ticket: 'mail',
     sms: 'sms',
     send_sms: 'sms',
     phone: 'phone',

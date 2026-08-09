@@ -46,7 +46,7 @@ const canonicalHighCostEligibility = ({
     (db.prepare('PRAGMA table_info(records)').all() || [])
       .map((column: { name?: string }) => String(column.name || '')),
   );
-  const fields = ['high_cost_eligible', 'golden_ticket_eligible']
+  const fields = ['high_cost_eligible', 'mail_program_eligible']
     .filter((field) => available.has(field));
   if (fields.length === 0) return false;
   const row = db.prepare(`

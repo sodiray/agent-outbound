@@ -32,7 +32,8 @@ export type AccountCampaign = {
   routing_contact_ids: string[];
   excluded_contact_ids: string[];
   mail_allocated: boolean;
-  mail_treatment: 'none' | 'standard_postcard' | 'golden_ticket';
+  /** The selected pipeline-owned mail product, or the engine's no-mail sentinel. */
+  mail_treatment: string;
   per_contact_action_allowance: number;
   campaign_max_age_days: number;
   started_at?: string | null;
@@ -321,7 +322,7 @@ export function removeSuppressedContactsFromCampaign(input: {
  */
 export function allocateMail(input: {
   campaign: AccountCampaign;
-  mail_treatment: 'standard_postcard' | 'golden_ticket';
+  mail_treatment: string;
 }): AccountCampaign {
   if (input.campaign.mail_allocated) {
     throw new Error('Mail already allocated for this account campaign');

@@ -284,7 +284,7 @@ const namedAssertChannel = ({
   if (hay.includes('linkedin')) return 'linkedin';
   // Prefer email over bare "mail" substring (email contains "mail").
   if (hay.includes('email') || hay.includes('send_email')) return 'email';
-  if (/\bmail\b/.test(hay) || hay.includes('postcard') || hay.includes('golden_ticket')) return 'mail';
+  if (/\bmail\b/.test(hay)) return 'mail';
   if (hay.includes('phone') || hay.includes('call') || hay.includes('sms')) return 'phone';
   return null;
 };
@@ -1104,11 +1104,7 @@ export const executeChannelStep = async ({
     if (stepKind === 'manual_task') {
       // Durable park: write pipeline_events so operator queues / completeManualTask see the work.
       // Exactly one open park per record+step — do not insert a second awaiting event.
-      //
-      // Mail product types (standard_postcard, golden_ticket): when automated send is
-      // introduced, call evaluateExternalActionAuthorization / isReviewRequired with the
-      // same policy.review_required_for tokens before any external mail side effect.
-      // Manual parks remain awaiting_manual; they are not auto-sent here.
+      // Manual mail tasks remain awaiting_manual; they are not auto-sent here.
       if (db && !dryRun) {
         try {
           // Contact-cycle: an open park for a different contact must not block a new cycle.
@@ -1154,19 +1150,12 @@ export const executeChannelStep = async ({
           // so sequence state coordinates with A4 (paused_review) without auto-sending.
           if (
             isReviewRequired(projectConfig, stepKind, taskType)
-            && (taskType === 'standard_postcard' || taskType === 'golden_ticket'
-              || channel === 'mail' || sequenceStepId.toLowerCase().includes('mail')
-              || sequenceStepId.toLowerCase().includes('postcard')
-              || sequenceStepId.toLowerCase().includes('golden_ticket'))
+            && channel === 'mail'
           ) {
             const mailReviewPresentation = resolveReviewPresentation({ step, record: sendRecord });
             const mailBody = String(
-              sendRecord.golden_ticket_copy
-              || sendRecord.golden_ticket_body
-              || sendRecord.mail_copy
+              sendRecord.mail_copy
               || sendRecord.mail_body
-              || sendRecord.postcard_copy
-              || sendRecord.postcard_body
               || sendRecord.preliminary_snapshot
               || '',
             );

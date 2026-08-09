@@ -7,8 +7,8 @@
  * Phase A1 (MIS-835) slice:
  * - linkedin_connect: hard-block unless stage_review_json is authorized for the stage
  * - send_email: ready draft (interim approval artifact) OR authorized stage review
- * - standard_postcard / golden_ticket (mail product types): call the same helpers when
- *   mail is automated; today mail parks as manual_task and is not auto-sent here
+ * - pipeline-declared mail products: call the same helpers when mail is automated;
+ *   today mail parks as manual_task and is not auto-sent here
  *
  * asset_version is a material fingerprint (account, contact, recipient, content/claim,
  * step). On external send, recompute current version and refuse when authorized review

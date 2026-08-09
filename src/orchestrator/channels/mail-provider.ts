@@ -21,7 +21,7 @@ export type MailProviderStatus = 'allocated' | 'submitted' | 'confirmed' | 'fail
 
 export type MailSubmitRequest = {
   recordId: string;
-  treatment: 'standard_postcard' | 'golden_ticket' | string;
+  treatment: string;
   to: {
     name?: string;
     address_line_1?: string;

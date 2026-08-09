@@ -172,14 +172,10 @@ const num = (v: unknown, fallback: number | null = null): number | null => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-/**
- * Cohort capacity for Golden Ticket — must be explicitly true.
- * Accepts boolean/1/"true" flags or remaining count > 0.
- */
+/** Accepts boolean/1/"true" capacity flags or a remaining count above zero. */
 export function resolveCohortCapacityOk(record: Record<string, unknown>): boolean | null {
   const flag =
-    record.golden_ticket_cohort_ok
-    ?? record.cohort_capacity_ok
+    record.cohort_capacity_ok
     ?? record.gt_cohort_ok
     ?? null;
   if (flag === true || flag === 1 || flag === '1' || String(flag || '').toLowerCase() === 'true') {
@@ -189,7 +185,7 @@ export function resolveCohortCapacityOk(record: Record<string, unknown>): boolea
     return false;
   }
   const remaining = num(
-    record.golden_ticket_cohort_remaining ?? record.cohort_capacity_remaining,
+    record.cohort_capacity_remaining,
     null,
   );
   if (remaining != null) return remaining > 0;
@@ -1509,7 +1505,7 @@ function proposedChannelForStep(input: {
   if (kind === 'send_email' || channel === 'email') return 'email';
   if (kind === 'linkedin_connect' || channel === 'linkedin') return 'linkedin';
   if (channel === 'phone' || task === 'human_phone' || kind === 'human_phone') return 'phone';
-  if (channel === 'mail' || task === 'standard_postcard' || task === 'golden_ticket') return 'mail';
+  if (channel === 'mail') return 'mail';
   if (channel) return channel;
   if (kind.startsWith('send_')) return kind.slice('send_'.length) || undefined;
   return undefined;

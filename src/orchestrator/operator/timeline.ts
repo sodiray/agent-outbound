@@ -303,7 +303,7 @@ export function getDecisionView(input: { db: any; recordId: string }) {
     next_action: parse(row.next_action_json),
     stage_review: parse(row.stage_review_json),
     withheld: {
-      golden_ticket_eligible: row.golden_ticket_eligible,
+      mail_program_eligible: row.mail_program_eligible,
       mail_treatment: row.mail_treatment,
     },
   };
