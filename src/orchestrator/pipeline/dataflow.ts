@@ -90,7 +90,7 @@ type DataflowCoreOptions = {
   initialResolvedByRecord?: Map<string, Set<string>>;
   isApplicable?: (recordState: RecordState, step: DataflowStep) => boolean;
   isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
-  onStepOutcome: (recordState: RecordState, step: DataflowStep, outcome: StepExecutionOutcome) => Promise<{ record?: DataflowRecord; dropped?: boolean; resolved?: boolean; errored?: boolean }>;
+  onStepOutcome: (recordState: RecordState, step: DataflowStep, outcome: StepExecutionOutcome) => Promise<{ record?: DataflowRecord; dropped?: boolean; resolved?: boolean; errored?: boolean; pending?: boolean }>;
   onStepNotAttempted?: (recordState: RecordState, step: DataflowStep, reason: string) => Promise<void>;
   loadStep: (step: DataflowStep, record: DataflowRecord, inFlight: () => number) => Promise<StepExecutionOutcome>;
 };
@@ -273,7 +273,6 @@ const compareCost = (a: DataflowStep, b: DataflowStep) => (
 
 const defaultApplicable = (recordState: RecordState, step: DataflowStep) => (
   !recordState.status.dropped
-  && recordState.errored.size === 0
   && step.executable
   && !recordState.resolved.has(step.id)
   && !recordState.pending.has(step.id)
@@ -345,16 +344,31 @@ const nextStep = ({
 const notAttemptedReason = ({
   recordState,
   step,
+  steps,
   applicable,
   isTimeReady,
 }: {
   recordState: RecordState;
   step: DataflowStep;
+  steps: DataflowStep[];
   applicable: (recordState: RecordState, step: DataflowStep) => boolean;
   isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
 }) => {
   if (recordState.status.dropped) return 'skipped:record_dropped';
-  if (recordState.errored.size > 0) return `skipped:upstream_errored:${[...recordState.errored].join(',')}`;
+  const byId = new Map(steps.map((candidate) => [candidate.id, candidate]));
+  const upstreamErrors = new Set<string>();
+  const visited = new Set<string>();
+  const visitDependency = (dependencyId: string) => {
+    if (visited.has(dependencyId)) return;
+    visited.add(dependencyId);
+    if (recordState.errored.has(dependencyId)) {
+      upstreamErrors.add(dependencyId);
+      return;
+    }
+    byId.get(dependencyId)?.deps.forEach(visitDependency);
+  };
+  step.deps.forEach(visitDependency);
+  if (upstreamErrors.size > 0) return `skipped:upstream_errored:${[...upstreamErrors].join(',')}`;
   if (!step.executable) return `skipped:unsupported_step_kind:${step.kind || 'unknown'}`;
   if (recordState.resolved.has(step.id)) return 'skipped:already_resolved';
   if (recordState.pending.has(step.id)) return 'skipped:pending';
@@ -465,6 +479,7 @@ export const runDataflowCore = async ({
           .map((step) => onStepNotAttempted(recordState, step, notAttemptedReason({
             recordState,
             step,
+            steps,
             applicable: isApplicable,
             isTimeReady,
           }))));
@@ -491,6 +506,7 @@ export const runDataflowCore = async ({
     const outcomePromise = await withAdvancePermitImmediate(state, concurrency, () => loadStep(selected, recordState.record, () => state.activeAdvancers));
     const persisted = await withAdvancePermit(state, concurrency, async () => onStepOutcome(recordState, selected, outcomePromise));
     recordState.pending.delete(selected.id);
+    if (persisted.pending) recordState.pending.add(selected.id);
     if (persisted.errored) recordState.errored.add(selected.id);
     recordState.record = persisted.record || recordState.record;
     if (persisted.resolved !== false) recordState.resolved.add(selected.id);
@@ -1223,26 +1239,38 @@ export const runPipelineDataflow = async ({
         }
 
         if (step.kind === 'wait' || PIPELINE_ACTION_KINDS.has(step.kind)) {
-          insertPipelineEvent({
-            db,
-            event: {
-              event_id: randomUUID(),
-              record_id: recordId,
-              step_id: step.id,
-              kind: step.kind,
-              passed: outcome.passed,
-              reason: String(outcome.reason || ''),
-              side_effecting: Boolean(step.step?.side_effecting),
-              occurred_at: now,
-            },
-          });
+          const reason = String(outcome.reason || '');
+          const parked = Boolean(outcome.parked);
+          const alreadyParked = parked && Boolean(db.prepare(`
+            SELECT 1 AS ok
+            FROM pipeline_events
+            WHERE record_id = ? AND step_id = ? AND kind = ?
+              AND passed = 0 AND reason = ?
+            LIMIT 1
+          `).get(recordId, step.id, step.kind, reason)?.ok);
+          if (!alreadyParked) {
+            insertPipelineEvent({
+              db,
+              event: {
+                event_id: randomUUID(),
+                record_id: recordId,
+                step_id: step.id,
+                kind: step.kind,
+                passed: outcome.passed,
+                reason,
+                side_effecting: Boolean(step.step?.side_effecting),
+                occurred_at: now,
+              },
+            });
+          }
           summary.processed += outcome.passed ? 1 : 0;
-          summary.failed += outcome.passed ? 0 : 1;
-          if (!outcome.passed) {
+          summary.failed += outcome.passed || parked ? 0 : 1;
+          if (parked) summary.newly_parked += alreadyParked ? 0 : 1;
+          if (!outcome.passed && !parked) {
             summary.errors.push({
               step: step.id,
               record_id: recordId,
-              error: String(outcome.reason || 'failed'),
+              error: reason || 'failed',
             });
           }
           progressState.done += 1;
@@ -1253,13 +1281,15 @@ export const runPipelineDataflow = async ({
             step: step.id,
             kind: step.kind,
             processed: outcome.passed ? 1 : 0,
-            failed: outcome.passed ? 0 : 1,
+            failed: outcome.passed || parked ? 0 : 1,
+            parked: parked ? 1 : 0,
             rows: 1,
           });
           return {
             record: refreshRecord({ db, record: recordState.record }),
             resolved: outcome.passed,
-            errored: !outcome.passed,
+            errored: !outcome.passed && !parked,
+            pending: parked,
           };
         }
 

@@ -27,6 +27,7 @@ export type StepExecutionOutcome = {
   passed: boolean;
   reason: string;
   errored?: boolean;
+  parked?: boolean;
   declaredOutputWrites?: Record<string, { provided: boolean; value: unknown }>;
 };
 
@@ -168,6 +169,7 @@ export const declaredOutputWriteFailures = ({
 };
 
 const NON_EXECUTION_REASONS = /^(channel_not_permitted:|sequence_outbound_gated|skipped)/i;
+const HARD_REJECTED_ACTION_SKIP = /\b(prohibits?|prohibited|forbidden)\b/i;
 
 const WHEN_GATED_STEP_KINDS = new Set([
   'compose',
@@ -734,6 +736,7 @@ const executeSequenceActionBatch = async (
               passed: false,
               reason: 'Draft pending approval.',
               errored: false,
+              parked: true,
             }] as const;
           }
           sequenceIntent = 'draft';
@@ -771,6 +774,7 @@ const executeSequenceActionBatch = async (
             passed: false,
             reason: reason || 'Draft pending approval.',
             errored: false,
+            parked: true,
           }] as const;
         }
         return [recordId, { passed: true, reason }] as const;
@@ -780,32 +784,28 @@ const executeSequenceActionBatch = async (
           passed: false,
           reason: reason || 'Draft pending approval.',
           errored: false,
+          parked: true,
         }] as const;
       }
-      // A skip is not a failure. The dataflow treats any errored step as
-      // poisoning the whole record (`recordState.errored.size === 0` gates
-      // every remaining step), so classifying a deliberate skip as an error
-      // stops steps that have nothing to do with it.
-      //
-      // That produced a deadlock: the send step was gated because content was
-      // not ready (`sequence_outbound_gated: non_outbound_action_enrichment_repair`),
-      // the resulting error then blocked a dependent generate step — the step
-      // that produces the content — so the gate could never clear itself.
-      // Prohibited work and provider failures still set errored explicitly at
-      // their own return sites.
-      // A readiness refusal is also a completed skip: its channel is not a
-      // viable dependency for this record, so later independent channels must
-      // be able to run. Provider failures remain genuine errors.
-      if (
-        status === 'skipped'
-        && (/sequence_outbound_gated/i.test(reason) || /^channel_not_permitted:/i.test(reason))
-      ) {
+      if (status === 'skipped' && /^channel_not_permitted:/i.test(reason)) {
         return [
           recordId,
           {
-            passed: /^channel_not_permitted:/i.test(reason),
+            passed: true,
             reason,
             errored: false,
+          },
+        ] as const;
+      }
+      if (status === 'skipped') {
+        const hardRejected = HARD_REJECTED_ACTION_SKIP.test(reason);
+        return [
+          recordId,
+          {
+            passed: false,
+            reason: reason || `pipeline_${kind}_skipped`,
+            errored: hardRejected,
+            parked: !hardRejected,
           },
         ] as const;
       }
