@@ -214,4 +214,9 @@ test('the verification declaration accepts a provider identifier with no vendor-
 
   assert.deepEqual(result.errors, []);
   assert.equal(result.config.pipeline[0].provider, 'in_house_verifier');
+
+  const missingCost = normalizeConfig({
+    pipeline: [verificationStep({ unit_cost_usd: undefined })],
+  });
+  assert.ok(missingCost.errors.some((error) => error.includes('must declare unit_cost_usd')));
 });

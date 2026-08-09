@@ -2287,6 +2287,11 @@ const emailVerificationStepValidationMessages = (config: Record<string, unknown>
     const id = String(verificationStep.id || '').trim() || 'unknown';
     const field = String(verificationStep.field || '').trim();
     const provider = String(verificationStep.provider || '').trim();
+    const unitCost = Number(verificationStep.unit_cost_usd);
+    const declaresUnitCost = verificationStep.unit_cost_usd !== undefined
+      && verificationStep.unit_cost_usd !== null
+      && Number.isFinite(unitCost)
+      && unitCost >= 0;
     const inputs = Array.isArray(verificationStep.inputs)
       ? verificationStep.inputs.map((input) => String(input || '').trim())
       : [];
@@ -2296,6 +2301,7 @@ const emailVerificationStepValidationMessages = (config: Record<string, unknown>
       ...(field && inputs.includes(field)
         ? []
         : [`pipeline.${id} (email_verification) inputs must include "${field || 'the verification field'}".`]),
+      ...(declaresUnitCost ? [] : [`pipeline.${id} (email_verification) must declare unit_cost_usd.`]),
     ];
   })
 );
