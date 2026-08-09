@@ -945,6 +945,7 @@ export const completeManualTask = async ({
       kind: 'manual_task',
       passed: true,
       reason: skip ? `skipped:${text(note) || 'operator'}` : (text(note) || 'completed'),
+      side_effecting: configuredStep?.side_effecting !== false,
       contact_id: activeContactAtComplete,
       occurred_at: now,
     },

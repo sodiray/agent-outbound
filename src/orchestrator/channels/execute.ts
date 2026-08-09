@@ -1174,7 +1174,7 @@ export const executeChannelStep = async ({
                 kind: 'manual_task',
                 passed: false,
                 reason: 'awaiting_manual',
-                side_effecting: false,
+                side_effecting: step?.side_effecting !== false,
                 // Contact-cycle scope: parks belong to the active contact, not only account+step.
                 contact_id: activeContactId || String(sendRecord.active_contact_id || ''),
                 occurred_at: now,

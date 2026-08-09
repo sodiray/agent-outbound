@@ -796,6 +796,23 @@ const PipelineWhenFields = {
   when: FieldCheckPredicateSchema.strict().optional(),
 };
 
+const ReviewPresentationSchema = z.object({
+  purpose: z.string().default(''),
+  present: z.array(z.object({
+    field: z.string().trim().min(1),
+    label: z.string().trim().min(1).optional(),
+  })).default([]),
+  require_non_empty: z.array(z.string().trim().min(1)).default([]),
+}).partial().optional();
+
+// These are author declarations, not engine verification. Transmitting steps
+// override side_effecting below because the engine owns those effects.
+const PipelineAuthorStepVocabulary = {
+  side_effecting: z.boolean().optional(),
+  draft_approval_required: z.boolean().optional(),
+  review: ReviewPresentationSchema,
+};
+
 // Deterministic pre-insert exclusion: a sourced row matching ANY rule is never
 // persisted — no record, no embedding, no dedup spend. For things that are not
 // businesses at all (ATMs, restrooms, parks). Real-but-off-ICP businesses belong
@@ -829,6 +846,7 @@ const PipelineSequenceStepBaseSchema = z.object({
   description: z.string().default(''),
   depends_on: z.array(z.string()).default([]),
   runs_after: z.array(z.string()).default([]),
+  ...PipelineAuthorStepVocabulary,
 });
 
 const PipelineFilterStepSchema = z.object({
@@ -846,6 +864,7 @@ const PipelineFilterStepSchema = z.object({
   inputs: StageInputsSchema,
   // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
   reasoning: z.boolean().optional(),
+  ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 }).partial({ description: true, depends_on: true, runs_after: true, match: true, conditions: true, on_fail: true, model: true, condition: true, reasoning: true });
 
@@ -874,6 +893,7 @@ const PipelineAssignStepSchema = z.object({
   rules: z.array(PipelineAssignRuleSchema).default([]),
   inputs: StageInputsSchema,
   batch_size: z.coerce.number().int().min(1).max(200).default(10),
+  ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 }).partial({ description: true, depends_on: true, runs_after: true, rules: true, batch_size: true });
 
@@ -886,6 +906,7 @@ const PipelineReviewStepSchema = z.object({
   label: z.string().default(''),
   fields: z.array(z.string()).default([]),
   inputs: StageInputsSchema,
+  ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 });
 
@@ -925,6 +946,7 @@ const PipelineEnrichmentStepSchema = z.object({
   columns: z.record(z.string()).optional(),
   inputs: StageInputsSchema,
   on_error: z.enum(['fail', 'empty']).default('fail'),
+  ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
   prompt_file: z.string().default(''),
   prompt_args: z.record(z.any()).default({}),
@@ -985,6 +1007,7 @@ const PipelineExtractStepSchema = z.object({
   exclude: z.array(z.string().min(1)).default([]),
   inputs: StageInputsSchema,
   outputs: z.record(ExtractOutputDefSchema),
+  ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 }).strict();
 
@@ -996,6 +1019,7 @@ const PipelineContactSourceStepSchema = z.object({
   runs_after: z.array(z.string()).default([]),
   field: z.string().trim().min(1),
   role: z.enum(['primary', 'secondary']).default('primary'),
+  ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 }).strict();
 
@@ -1029,6 +1053,7 @@ const PipelineGenerateStepSchema = z.object({
   // are always included; use this for generated assets that must run for selected tiers
   // without being a hard dependency of treatment_assignment.
   run_in_pipeline: z.boolean().optional(),
+  ...PipelineAuthorStepVocabulary,
 });
 
 const ScoreCriterionSchema = z.object({
@@ -1053,6 +1078,7 @@ const PipelineScoreStepSchema = z.object({
   model: ProviderModelSchema,
   criteria: z.array(ScoreCriterionSchema).default([]),
   outputs: z.record(ScoreOutputDefSchema).default({}),
+  ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 }).strict();
 
@@ -1104,6 +1130,7 @@ const PipelineComposeStepSchema = z.object({
     'compose outputs must not be empty.',
   ),
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
+  ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 }).strict();
 
@@ -1119,15 +1146,6 @@ const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
   ...PipelineWhenFields,
 });
 
-const ReviewPresentationSchema = z.object({
-  purpose: z.string().default(''),
-  present: z.array(z.object({
-    field: z.string().trim().min(1),
-    label: z.string().trim().min(1).optional(),
-  })).default([]),
-  require_non_empty: z.array(z.string().trim().min(1)).default([]),
-}).partial().optional();
-
 const PipelineExternalStepFields = {
   description: PipelineSequenceStepBaseSchema.shape.description,
   depends_on: PipelineSequenceStepBaseSchema.shape.depends_on,
@@ -1139,8 +1157,8 @@ const PipelineExternalStepFields = {
   template_version: z.coerce.number().int().min(1).optional(),
   variables: z.record(z.any()).default({}),
   uses_asset: z.string().optional(),
-  draft_approval_required: z.boolean().optional(),
-  review: ReviewPresentationSchema,
+  draft_approval_required: PipelineAuthorStepVocabulary.draft_approval_required,
+  review: PipelineAuthorStepVocabulary.review,
   inputs: StageInputsSchema,
   config: ExternalStepConfigSchema.default({}),
   ...PipelineWhenFields,
@@ -1167,8 +1185,8 @@ const PipelineLinkedinConnectStepSchema = z.object({
 
 const PipelineManualTaskStepSchema = PipelineSequenceStepBaseSchema.extend({
   kind: z.literal('manual_task'),
-  side_effecting: z.boolean().default(false),
-  review: ReviewPresentationSchema,
+  side_effecting: z.boolean().default(true),
+  review: PipelineAuthorStepVocabulary.review,
   inputs: StageInputsSchema,
   config: ExternalStepConfigSchema.default({}),
   ...PipelineWhenFields,
@@ -1224,6 +1242,7 @@ const PipelineSubpipelineStepSchema = z.object({
   description: z.string().default(''),
   manual: z.boolean().default(false),
   steps: z.array(SubpipelineStepSchema).default([]),
+  ...PipelineAuthorStepVocabulary,
 }).partial({ description: true, manual: true, steps: true });
 
 export const PipelineStepSchema = z.discriminatedUnion('kind', [

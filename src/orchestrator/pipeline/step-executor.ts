@@ -4,7 +4,8 @@ import type { ComposeGenerator } from '../compose/runner.js';
 import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/conditions.js';
 import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 import { getRecordRowId } from '../lib/record.js';
-import { upsertRecord } from '../runtime/db.js';
+import { randomUUID } from 'node:crypto';
+import { insertDraft, upsertRecord } from '../runtime/db.js';
 import {
   flattenPipelineSteps,
   PIPELINE_ROUTE_TARGET,
@@ -23,6 +24,7 @@ import { promoteContactSource } from './contact-source.js';
 import { stageInputRecord } from '../lib/stage-inputs.js';
 import { runScoreStage, type ScoreStage } from '../scoring/stage-runner.js';
 import type { EmailVerificationProvider } from '../runtime/providers/email-verification/index.js';
+import { resolveReviewPresentation } from '../policy/review-presentation.js';
 
 export type StepExecutionOutcome = {
   passed: boolean;
@@ -186,6 +188,101 @@ const WHEN_GATED_STEP_KINDS = new Set([
   'manual_task',
   'score',
 ]);
+
+const ENGINE_OWNED_TRANSMITTER_KINDS = new Set(['send_email', 'send_sms', 'linkedin_connect']);
+
+const authorApprovalRequired = (step: PipelineStepLike): boolean => (
+  step.draft_approval_required === true
+  && !ENGINE_OWNED_TRANSMITTER_KINDS.has(textValue(step.kind))
+);
+
+const authorApprovalStepNumber = (config: unknown, stepId: string): number => {
+  const index = flattenPipelineSteps(config).findIndex((candidate) => textValue(candidate.id) === stepId);
+  return index >= 0 ? index + 1 : 0;
+};
+
+const authorApprovalOutcome = ({
+  ctx,
+  step,
+  stepId,
+  record,
+}: {
+  ctx: StepExecutionContext;
+  step: PipelineStepLike;
+  stepId: string;
+  record: Record<string, unknown>;
+}): StepExecutionOutcome | null => {
+  if (!authorApprovalRequired(step)) return null;
+  const recordId = getRecordRowId(record);
+  const db = ctx.db as QueryableDb;
+  const existing = db.prepare(`
+    SELECT *
+    FROM drafts
+    WHERE row_id = ? AND step_id = ? AND channel = 'author_step'
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(recordId, stepId) as Record<string, unknown> | undefined;
+  const status = textValue(existing?.status).toLowerCase();
+  if (status === 'ready') return null;
+  if (status === 'pending_approval') {
+    return { passed: false, parked: true, reason: 'Awaiting author step approval.' };
+  }
+  if (status === 'rejected') {
+    return { passed: false, parked: true, reason: 'Author step approval rejected.' };
+  }
+
+  const presentation = resolveReviewPresentation({
+    step,
+    record: stageInputRecord({ step, record }),
+  });
+  insertDraft({
+    db: ctx.db,
+    draft: {
+      draft_id: `approval_${randomUUID()}`,
+      row_id: recordId,
+      sequence_name: stepSubpipelineName(step) || 'pipeline',
+      step_number: authorApprovalStepNumber(ctx.config, stepId),
+      step_id: stepId,
+      channel: 'author_step',
+      status: 'pending_approval',
+      subject: `Approval required: ${stepId}`,
+      body: textValue(step.description, `Author-declared ${textValue(step.kind, 'pipeline')} step.`),
+      reason: 'Author-declared step approval required before invocation.',
+      artifacts: {
+        approval_type: 'author_step',
+        kind: textValue(step.kind),
+        side_effecting: step.side_effecting === true,
+        review_presentation: presentation,
+      },
+    },
+  });
+  return { passed: false, parked: true, reason: 'Awaiting author step approval.' };
+};
+
+const executeWithAuthorApproval = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+): Promise<Map<string, StepExecutionOutcome>> => {
+  const gated = new Map<string, StepExecutionOutcome>();
+  const approvedRows = rows.filter((record) => {
+    const outcome = authorApprovalOutcome({ ctx, step, stepId, record });
+    if (!outcome) return true;
+    gated.set(getRecordRowId(record), outcome);
+    return false;
+  });
+  if (approvedRows.length === 0) return gated;
+  const executed = await executeStepBatchUnchecked(ctx, step, stepId, approvedRows);
+  return new Map(rows.map((record) => {
+    const recordId = getRecordRowId(record);
+    return [recordId, gated.get(recordId) || executed.get(recordId) || {
+      passed: false,
+      errored: true,
+      reason: 'step_outcome_missing',
+    }];
+  }));
+};
 
 export const shouldGuardDeclaredOutputWrites = (outcome: StepExecutionOutcome): boolean => (
   outcome.passed && !outcome.errored && !NON_EXECUTION_REASONS.test(String(outcome.reason || ''))
@@ -1028,11 +1125,11 @@ export const executeStepBatch = async (
 ): Promise<Map<string, StepExecutionOutcome>> => {
   const kind = textValue(step.kind);
   if (!WHEN_GATED_STEP_KINDS.has(kind)) {
-    return guardDeclaredOutputWrites(ctx, step, await executeStepBatchUnchecked(ctx, step, stepId, rows));
+    return guardDeclaredOutputWrites(ctx, step, await executeWithAuthorApproval(ctx, step, stepId, rows));
   }
   const predicate = whenPredicateForStep({ step, stepConfig: stepConfigForWhen(step) });
   if (!predicate) {
-    return guardDeclaredOutputWrites(ctx, step, await executeStepBatchUnchecked(ctx, step, stepId, rows));
+    return guardDeclaredOutputWrites(ctx, step, await executeWithAuthorApproval(ctx, step, stepId, rows));
   }
   const matchingRows: Array<Record<string, unknown>> = [];
   const skippedOutcomes = new Map<string, StepExecutionOutcome>();
@@ -1049,7 +1146,7 @@ export const executeStepBatch = async (
     skippedOutcomes.set(getRecordRowId(row), skippedWhenOutcome(whenOutcome));
   });
   const executed = matchingRows.length > 0
-    ? await executeStepBatchUnchecked(ctx, step, stepId, matchingRows)
+    ? await executeWithAuthorApproval(ctx, step, stepId, matchingRows)
     : new Map<string, StepExecutionOutcome>();
   const outcomes = new Map(rows.map((row) => {
     const recordId = getRecordRowId(row);

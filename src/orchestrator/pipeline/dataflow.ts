@@ -1098,6 +1098,47 @@ export const runPipelineDataflow = async ({
       onStepOutcome: async (recordState, step, outcome) => {
         const recordId = getRecordRowId(recordState.record);
         const now = clockIso(clock);
+        if (outcome.parked) {
+          const reason = String(outcome.reason || 'Awaiting author step approval.');
+          const alreadyParked = Boolean(db.prepare(`
+            SELECT 1 AS ok
+            FROM pipeline_events
+            WHERE record_id = ? AND step_id = ? AND kind = ?
+              AND passed = 0 AND reason = ?
+            LIMIT 1
+          `).get(recordId, step.id, step.kind, reason)?.ok);
+          if (!alreadyParked) {
+            insertPipelineEvent({
+              db,
+              event: {
+                event_id: randomUUID(),
+                record_id: recordId,
+                step_id: step.id,
+                kind: step.kind,
+                passed: false,
+                reason,
+                side_effecting: Boolean(step.step?.side_effecting),
+                occurred_at: now,
+              },
+            });
+          }
+          summary.newly_parked += alreadyParked ? 0 : 1;
+          progressState.done += 1;
+          tickProgress(db, runId, { done: progressState.done, target: rows.length });
+          emitActivity({
+            event: 'step_complete',
+            phase: 'pipeline',
+            step: step.id,
+            kind: step.kind,
+            parked: 1,
+            rows: 1,
+          });
+          return {
+            record: refreshRecord({ db, record: recordState.record }),
+            resolved: false,
+            pending: true,
+          };
+        }
         // enrich + generate both write fields then must refresh so dependents (policy_apply) see them.
         if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'contact_source' || step.kind === 'generate' || step.kind === 'compose' || step.kind === 'score') {
           if (outcome.errored) {
@@ -1137,6 +1178,7 @@ export const runPipelineDataflow = async ({
               kind: step.kind,
               passed: true,
               reason: String(outcome.reason || ''),
+              side_effecting: Boolean(step.step?.side_effecting),
               occurred_at: now,
             },
           });
@@ -1273,6 +1315,7 @@ export const runPipelineDataflow = async ({
                 kind: 'manual_task',
                 passed: false,
                 reason: 'awaiting_manual',
+                side_effecting: Boolean(step.step?.side_effecting),
                 occurred_at: now,
               },
             });

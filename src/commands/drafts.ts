@@ -243,6 +243,12 @@ const pendingDraftContentEquivalence = ({
   draft: Record<string, unknown>;
   record: Record<string, unknown> | undefined;
 }) => {
+  if (String(draft.channel || '').trim().toLowerCase() === 'author_step') {
+    return {
+      status: 'not_applicable',
+      reason: 'Author-declared step approval; the engine does not verify its content or effect.',
+    };
+  }
   if (!config || !record || String(draft.channel || '').trim().toLowerCase() !== 'email') {
     return { status: 'unavailable', reason: 'Current email content cannot be re-rendered.' };
   }
@@ -260,6 +266,31 @@ const pendingDraftContentEquivalence = ({
   return 'reason' in approval
     ? { status: 'changed', reason: approval.reason }
     : { status: 'matches', reason: '' };
+};
+
+const authorStepApprovalDetails = (draft: Record<string, unknown>) => {
+  if (String(draft.channel || '').trim().toLowerCase() !== 'author_step') return null;
+  try {
+    const artifacts = typeof draft.artifacts_json === 'string'
+      ? JSON.parse(draft.artifacts_json || '{}')
+      : draft.artifacts_json;
+    if (!artifacts || typeof artifacts !== 'object' || Array.isArray(artifacts)) return null;
+    const approval = artifacts as Record<string, unknown>;
+    return {
+      type: 'author_step',
+      guarantee: 'author_declared_unverified',
+      side_effecting: approval.side_effecting === true,
+      kind: String(approval.kind || ''),
+      review_presentation: approval.review_presentation || null,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const draftWithApprovalDetails = (draft: Record<string, unknown>) => {
+  const approval = authorStepApprovalDetails(draft);
+  return approval ? { ...draft, author_step_approval: approval } : draft;
 };
 
 export const draftsListCommand = ({ list, status = '', step = 0, cursor = '', limit = 100 }) => {
@@ -294,11 +325,12 @@ export const draftsListCommand = ({ list, status = '', step = 0, cursor = '', li
     });
     const hasMore = rows.length > pageLimit;
     const pageRows = (hasMore ? rows.slice(0, pageLimit) : rows).map((row: Record<string, unknown>) => {
-      if (String(row.status || '') !== 'pending_approval') return row;
+      const withApprovalDetails = draftWithApprovalDetails(row);
+      if (String(row.status || '') !== 'pending_approval') return withApprovalDetails;
       const record = db.prepare('SELECT * FROM records WHERE _row_id = ? LIMIT 1')
         .get(String(row.row_id || '')) as Record<string, unknown> | undefined;
       return {
-        ...row,
+        ...withApprovalDetails,
         content_equivalence: pendingDraftContentEquivalence({ config, draft: row, record }),
       };
     });
@@ -330,7 +362,7 @@ export const draftsShowCommand = ({ list, draftId }) => {
         retryable: false,
       });
     }
-    return { draft: row };
+    return { draft: draftWithApprovalDetails(row as Record<string, unknown>) };
   } finally {
     db.close();
   }
@@ -402,6 +434,20 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
       if (revocationReason) {
         revokeQueuedDraftsForRecord({ db, record });
         failures.push({ draft_id: id, reason: revocationReason });
+        continue;
+      }
+
+      if (String(existing.channel || '').trim().toLowerCase() === 'author_step') {
+        const next = updateDraft({
+          db,
+          draftId: id,
+          patch: { status: 'ready' },
+        });
+        if (!next) {
+          failures.push({ draft_id: id, reason: 'update_failed' });
+          continue;
+        }
+        updated += 1;
         continue;
       }
 
