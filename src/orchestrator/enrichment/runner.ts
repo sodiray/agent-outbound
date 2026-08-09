@@ -37,6 +37,7 @@ import {
 } from '../policy/evidence.js';
 import { evaluateEnrichmentCeilingGate } from '../policy/cost-ledger.js';
 import { loadVerticalTaxonomy } from '../policy/taxonomy.js';
+import { POLICY_APPLY_EXECUTION_VERSION } from '../policy/apply-record.js';
 import type { FitModelConfigInput } from '../policy/scoring.js';
 import { resolvePipelineFitModel } from '../scoring/fit-model.js';
 import type { TreatmentBandLadders } from '../policy/treatment.js';
@@ -321,6 +322,7 @@ export const enrichmentPolicyInputs = (config: Record<string, any> = {}) => {
   const score = config.score || {};
   const { fitModel } = resolvePipelineFitModel(config);
   return {
+    policy_apply_execution_version: POLICY_APPLY_EXECUTION_VERSION,
     fitModel,
     treatmentBands: score.treatment_bands,
     treatmentStrategy: score.treatment,

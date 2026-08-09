@@ -95,6 +95,8 @@ import {
 } from '../../schemas/config.js';
 import { nowIso } from '../lib/record.js';
 
+export const POLICY_APPLY_EXECUTION_VERSION = 'policy-apply-v2';
+
 export type PolicyApplyInput = {
   record: Record<string, unknown>;
   /** Evaluation instant for decision-time policy checks. */

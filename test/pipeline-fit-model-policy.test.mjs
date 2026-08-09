@@ -6,9 +6,19 @@ import test from 'node:test';
 
 import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { runScoreStage } from '../dist/orchestrator/scoring/stage-runner.js';
+import {
+  dependencyValuesForRecord,
+  enrichDependencyHashes,
+  enrichmentStepConfig,
+  executionConfigForEnrichmentStep,
+  isEnrichFresh,
+  readStaleness,
+  writeStaleness,
+} from '../dist/orchestrator/enrichment/runner.js';
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { getRecordDetail } from '../dist/viz/data.js';
 import { assignTreatmentAndMail } from '../dist/orchestrator/policy/treatment.js';
+import { readConfig } from '../dist/orchestrator/lib/config.js';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
@@ -243,7 +253,7 @@ test('pipeline policy_apply explicitly treats a pipeline without a fit stage as 
   assert.equal(record.fit_calculation_json, undefined);
 });
 
-const runGoldenTicketPolicyPipeline = async (recordInput) => {
+const runGoldenTicketPolicyPipeline = async (recordInput, { stalePreRuleVersion = false } = {}) => {
   const root = listDir();
   writeTaxonomy(root);
   const dormantFitStep = {
@@ -257,15 +267,55 @@ const runGoldenTicketPolicyPipeline = async (recordInput) => {
     ...policyStep,
     depends_on: [],
   };
-  writeFileSync(join(root, 'outbound.yaml'), JSON.stringify({
+  const config = {
     pipeline: [dormantFitStep, goldenTicketPolicyStep],
     policy: { fit_rule_version: treasureValleyFitModel.modelVersion },
     score: { treatment: goldenTicketTreatmentStrategy },
-  }));
+  };
+  writeFileSync(join(root, 'outbound.yaml'), JSON.stringify({ ...config, pipeline: [dormantFitStep] }));
   const db = openListDb({ listDir: root, readonly: false });
-  ensureRecordColumns({ db, columns: ['classification_confidence', 'fit_evidence_confidence'] });
+  ensureRecordColumns({
+    db,
+    columns: ['classification_confidence', 'fit_evidence_confidence', 'mail_treatment', 'treatment_tier'],
+  });
   upsertRecord({ db, row: { ...recordInput, skip_fit_stage: false } });
   db.close();
+
+  await runPipelineDataflow({ listDir: root });
+  writeFileSync(join(root, 'outbound.yaml'), JSON.stringify(config));
+
+  const seededDb = openListDb({ listDir: root, readonly: false });
+  if (stalePreRuleVersion) {
+    const loaded = readConfig(root).config;
+    const step = loaded.pipeline.find((candidate) => candidate.id === 'treatment_assignment');
+    const stepConfig = enrichmentStepConfig(step);
+    const record = seededDb.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordInput._row_id);
+    assert.equal(record.treatment_tier, 'A');
+    const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config: loaded, listDir: root });
+    const { policy, ...nonPolicyConfig } = executionConfig;
+    const { policy_apply_execution_version, ...legacyPolicy } = policy;
+    const dependencyHashes = enrichDependencyHashes({
+      stepConfig,
+      depValues: dependencyValuesForRecord({ stepConfig, record }),
+      executionConfig: { policy: legacyPolicy, ...nonPolicyConfig },
+    });
+    writeStaleness({
+      db: seededDb,
+      recordId: recordInput._row_id,
+      stepId: 'treatment_assignment',
+      ...dependencyHashes,
+      cacheTtlSeconds: 0,
+      cacheTtl: '',
+    });
+    const cached = readStaleness({ db: seededDb, recordId: recordInput._row_id, stepId: 'treatment_assignment' });
+    assert.equal(isEnrichFresh({
+      cached,
+      stepConfig,
+      depValues: dependencyValuesForRecord({ stepConfig, record }),
+      executionConfig,
+    }), false);
+  }
+  seededDb.close();
 
   await runPipelineDataflow({ listDir: root });
 
@@ -289,6 +339,16 @@ test('pipeline policy_apply selects Golden Ticket from persisted mail readiness 
     classificationBelowMinimum.treatment_json,
     /mail_program:golden_ticket:classification_confidence_below_85/,
   );
+});
+
+test('pipeline policy_apply invalidates a pre-rule-version fresh cache and persists Golden Ticket', async () => {
+  const record = await runGoldenTicketPolicyPipeline({
+    ...goldenTicketRecord,
+    mail_treatment: 'standard_postcard',
+    treatment_tier: 'A',
+  }, { stalePreRuleVersion: true });
+  assert.equal(record.mail_treatment, 'golden_ticket');
+  assert.match(record.treatment_json, /mail_program:golden_ticket:tier_allows_mail_program/);
 });
 
 test('policy assembly distinguishes an unknown value from an omitted evaluator input', () => {
