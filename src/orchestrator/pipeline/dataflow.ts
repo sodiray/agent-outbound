@@ -18,7 +18,7 @@ import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
-import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides } from '../runtime/db.js';
+import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides, syncPrimaryContactProjection } from '../runtime/db.js';
 import { resolveWorkingDayConfig } from '../lib/working-days.js';
 import {
   flattenPipelineSteps,
@@ -963,7 +963,15 @@ export const runPipelineDataflow = async ({
     const selectedRows = selectedPipeline
       ? reconciledRows.filter((record) => pipelineNameForRecord({ config, record }) === selectedPipeline)
       : reconciledRows;
-    const rows = Number(limit || 0) > 0 ? selectedRows.slice(0, Number(limit)) : selectedRows;
+    const selectedRowsWithLimit = Number(limit || 0) > 0 ? selectedRows.slice(0, Number(limit)) : selectedRows;
+    const rows = dryRun
+      ? selectedRowsWithLimit
+      : selectedRowsWithLimit.map((record) => {
+        const recordId = getRecordRowId(record);
+        if (!recordId) return record;
+        syncPrimaryContactProjection({ db, recordId, contactPolicy: config.contact_policy });
+        return db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId) || record;
+      });
     // Honor human decision overrides only for the canary-scoped set.
     if (!dryRun) {
       reconcileOverrides({

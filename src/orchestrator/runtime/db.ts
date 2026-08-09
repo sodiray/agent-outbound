@@ -1220,7 +1220,7 @@ export const hasPassedStep = ({
   stepId,
   contactId,
 }: {
-  db: any;
+  db: ReturnType<typeof openListDb>;
   recordId: string;
   stepId: string;
   contactId?: string | null;
@@ -2329,7 +2329,7 @@ export const reconcileOverrides = ({
   db,
   recordIds = null,
 }: {
-  db: any;
+  db: ReturnType<typeof openListDb>;
   recordIds?: string[] | null;
 } = {} as any) => {
   const allow = Array.isArray(recordIds) && recordIds.length > 0
@@ -2463,7 +2463,7 @@ export const reconcileFieldOverrides = ({
   db,
   recordIds = null,
 }: {
-  db: any;
+  db: ReturnType<typeof openListDb>;
   recordIds?: string[] | null;
 } = {} as any) => {
   const allow = Array.isArray(recordIds) && recordIds.length > 0
@@ -2785,6 +2785,59 @@ const contactRoleRank = (contact) => (
   String(contact?.role || '').trim().toLowerCase() === 'primary' ? 1 : 0
 );
 
+type PrimaryContactPreference = {
+  title_patterns?: readonly string[];
+  seniority?: readonly string[];
+  excluded_patterns?: readonly string[];
+};
+
+type ContactPolicyForProjection = {
+  primary_contact?: PrimaryContactPreference;
+};
+
+const normalizedPreferencePattern = (value: unknown) => (
+  ` ${normalizeContactIdentityPart(value)} `
+);
+
+const firstPreferenceMatch = ({
+  value,
+  patterns,
+}: {
+  value: unknown;
+  patterns: readonly string[] | undefined;
+}) => {
+  const normalizedValue = normalizedPreferencePattern(value);
+  if (normalizedValue === '  ') return -1;
+  return (patterns || []).findIndex((pattern) => {
+    const normalizedPattern = normalizedPreferencePattern(pattern);
+    return normalizedPattern !== '  ' && normalizedValue.includes(normalizedPattern);
+  });
+};
+
+const contactPreferenceRank = ({
+  contact,
+  contactPolicy,
+}: {
+  contact: Record<string, unknown>;
+  contactPolicy?: ContactPolicyForProjection;
+}) => {
+  const preference = contactPolicy?.primary_contact;
+  if (!preference) return null;
+  const title = String(contact.title || '');
+  const seniority = String(contact.seniority || '');
+  const excluded = firstPreferenceMatch({
+    value: `${title} ${seniority}`,
+    patterns: preference.excluded_patterns,
+  }) >= 0;
+  if (excluded) return null;
+
+  const titleIndex = firstPreferenceMatch({ value: title, patterns: preference.title_patterns });
+  if (titleIndex >= 0) return [0, titleIndex] as const;
+
+  const seniorityIndex = firstPreferenceMatch({ value: seniority, patterns: preference.seniority });
+  return seniorityIndex >= 0 ? [1, seniorityIndex] as const : null;
+};
+
 const stablePrimaryContactKey = (contact) => [
   normalizeContactIdentityPart(contact?.full_name || contact?.name),
   normalizeContactIdentityPart(contact?.title),
@@ -2810,11 +2863,29 @@ const contactByIdForRecord = ({ db, recordId, contactId }) => db.prepare(`
   LIMIT 1
 `).get(recordId, contactId, contactId, contactId) || null;
 
-const primaryContactForRecord = ({ db, recordId }) => {
+const primaryContactForRecord = ({
+  db,
+  recordId,
+  contactPolicy,
+}: {
+  db: ReturnType<typeof openListDb>;
+  recordId: string;
+  contactPolicy?: ContactPolicyForProjection;
+}) => {
   const contacts = db.prepare('SELECT rowid AS contact_rowid, * FROM contacts WHERE row_id = ? ORDER BY rowid ASC').all(recordId);
   return contacts.filter((contact) => !contactIsSuppressedForProjection(contact)).sort((left, right) => {
     const verificationDifference = contactVerificationRank(right) - contactVerificationRank(left);
     if (verificationDifference !== 0) return verificationDifference;
+    const leftPreference = contactPreferenceRank({ contact: left, contactPolicy });
+    const rightPreference = contactPreferenceRank({ contact: right, contactPolicy });
+    if (leftPreference && rightPreference) {
+      const preferenceCategoryDifference = leftPreference[0] - rightPreference[0];
+      if (preferenceCategoryDifference !== 0) return preferenceCategoryDifference;
+      const preferenceIndexDifference = leftPreference[1] - rightPreference[1];
+      if (preferenceIndexDifference !== 0) return preferenceIndexDifference;
+    }
+    if (leftPreference) return -1;
+    if (rightPreference) return 1;
     const roleDifference = contactRoleRank(right) - contactRoleRank(left);
     if (roleDifference !== 0) return roleDifference;
     const seniorityDifference = contactSeniorityRank(right) - contactSeniorityRank(left);
@@ -2830,7 +2901,15 @@ const primaryContactForRecord = ({ db, recordId }) => {
   })[0] || null;
 };
 
-const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
+const syncPrimaryContactProjectionInternal = ({
+  db,
+  recordId,
+  contactPolicy,
+}: {
+  db: any;
+  recordId: string;
+  contactPolicy?: ContactPolicyForProjection;
+}) => {
   const normalizedRecordId = String(recordId || '').trim();
   if (!normalizedRecordId) return null;
   const campaignRecordColumns = new Set(
@@ -2848,7 +2927,7 @@ const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
     ? (plannedContactId
       ? contactByIdForRecord({ db, recordId: normalizedRecordId, contactId: plannedContactId })
       : null)
-    : primaryContactForRecord({ db, recordId: normalizedRecordId });
+    : primaryContactForRecord({ db, recordId: normalizedRecordId, contactPolicy });
   db.prepare(`
     UPDATE contacts
     SET is_primary = CASE WHEN contact_id = ? THEN 1 ELSE 0 END
@@ -2903,9 +2982,17 @@ const syncPrimaryContactProjectionInternal = ({ db, recordId }) => {
   return primaryContact ? String(primaryContact.contact_id || '') : null;
 };
 
-export const syncPrimaryContactProjection = ({ db, recordId }) => {
+export const syncPrimaryContactProjection = ({
+  db,
+  recordId,
+  contactPolicy,
+}: {
+  db: any;
+  recordId: string;
+  contactPolicy?: ContactPolicyForProjection;
+}) => {
   enforceCanaryRecordMutation(db, recordId);
-  return db.transaction(() => syncPrimaryContactProjectionInternal({ db, recordId }))();
+  return db.transaction(() => syncPrimaryContactProjectionInternal({ db, recordId, contactPolicy }))();
 };
 
 /**
@@ -3003,7 +3090,15 @@ export const projectContactOntoRecord = ({ db, recordId, contactId }) => {
   })();
 };
 
-export const upsertContact = ({ db, contact }) => {
+export const upsertContact = ({
+  db,
+  contact,
+  contactPolicy,
+}: {
+  db: any;
+  contact: Record<string, unknown>;
+  contactPolicy?: ContactPolicyForProjection;
+}) => {
   const rowId = String(contact?.row_id || contact?.record_id || '').trim();
   const email = String(contact?.email || '').trim().toLowerCase();
   const linkedinUrn = String(contact?.linkedin_urn || '').trim();
@@ -3134,7 +3229,7 @@ export const upsertContact = ({ db, contact }) => {
       created_at: existing?.created_at || now,
       updated_at: now,
     });
-    syncPrimaryContactProjectionInternal({ db, recordId: rowId });
+    syncPrimaryContactProjectionInternal({ db, recordId: rowId, contactPolicy });
     return contactId;
   })();
 };
@@ -3155,8 +3250,15 @@ export const deleteContact = ({ db, contactId }) => db.transaction(() => {
 export const listContactsByRecord = ({ db, recordId }) =>
   db.prepare('SELECT * FROM contacts WHERE row_id = ? ORDER BY is_primary DESC, created_at ASC, contact_id ASC').all(recordId);
 
-export const getPrimaryContact = ({ db, recordId }) =>
-  primaryContactForRecord({ db, recordId: String(recordId || '') });
+export const getPrimaryContact = ({
+  db,
+  recordId,
+  contactPolicy,
+}: {
+  db: any;
+  recordId: string;
+  contactPolicy?: ContactPolicyForProjection;
+}) => primaryContactForRecord({ db, recordId: String(recordId || ''), contactPolicy });
 
 export const insertDraft = ({ db, draft }) => {
   const now = nowIso();

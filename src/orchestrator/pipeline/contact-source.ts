@@ -35,12 +35,14 @@ export const promoteContactSource = ({
   field,
   role,
   stepId,
+  contactPolicy,
 }: {
   db: ContactSourceDb;
   record: Record<string, unknown>;
   field: string;
   role: unknown;
   stepId: string;
+  contactPolicy?: Parameters<typeof upsertContact>[0]['contactPolicy'];
 }): ContactSourceResult => {
   const recordId = getRecordRowId(record);
   const email = text(record[field]).toLowerCase();
@@ -60,6 +62,7 @@ export const promoteContactSource = ({
 
   upsertContact({
     db,
+    contactPolicy,
     contact: {
       record_id: recordId,
       email,

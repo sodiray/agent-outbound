@@ -13,6 +13,7 @@ type EmailVerificationActionInput = {
   stepId: string;
   stepConfig: Record<string, unknown>;
   record: Record<string, unknown>;
+  contactPolicy?: Parameters<typeof upsertContact>[0]['contactPolicy'];
   emailVerificationProvider?: EmailVerificationProvider;
 };
 
@@ -106,6 +107,7 @@ export const executeEmailVerificationAction = async ({
   stepId,
   stepConfig,
   record,
+  contactPolicy,
   emailVerificationProvider,
 }: EmailVerificationActionInput) => {
   if (!db) throw new Error('The email_verification enrichment action requires a database handle.');
@@ -156,6 +158,7 @@ export const executeEmailVerificationAction = async ({
   const verifiedAt = nowIso();
   upsertContact({
     db,
+    contactPolicy,
     contact: {
       ...(existing || {}),
       record_id: recordId,

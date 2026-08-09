@@ -26,6 +26,7 @@ type DecisionMakerActionInput = {
   stepConfig: Record<string, unknown>;
   record: Record<string, unknown>;
   aiConfig?: Record<string, unknown>;
+  contactPolicy?: Parameters<typeof upsertContact>[0]['contactPolicy'];
   emailVerifier?: EmailVerifier;
   decisionMakerProvider?: DecisionMakerProvider;
 };
@@ -227,6 +228,7 @@ export const persistSupportedDecisionMakerCandidates = async ({
   candidates,
   providerPayloads,
   sourcedAt = new Date().toISOString(),
+  contactPolicy,
   emailVerifier,
 }: {
   db: NonNullable<DecisionMakerActionInput['db']>;
@@ -234,6 +236,7 @@ export const persistSupportedDecisionMakerCandidates = async ({
   candidates: DecisionMakerCandidate[];
   providerPayloads: unknown[];
   sourcedAt?: string;
+  contactPolicy?: Parameters<typeof upsertContact>[0]['contactPolicy'];
   emailVerifier?: EmailVerifier;
 }): Promise<DecisionMakerCandidate[]> => {
   const supported = candidates.filter((candidate) => (
@@ -262,6 +265,7 @@ export const persistSupportedDecisionMakerCandidates = async ({
   verified.forEach(({ candidate, verification }) => {
     upsertContact({
       db,
+      contactPolicy,
       contact: {
         record_id: recordId,
         full_name: candidate.name,
@@ -282,7 +286,7 @@ export const persistSupportedDecisionMakerCandidates = async ({
       },
     });
   });
-  syncPrimaryContactProjection({ db, recordId });
+  syncPrimaryContactProjection({ db, recordId, contactPolicy });
   return verified.map(({ candidate }) => candidate);
 };
 
@@ -354,6 +358,7 @@ export const executeDecisionMakersAction = async ({
   mcp,
   record,
   stepConfig,
+  contactPolicy,
   emailVerifier,
   decisionMakerProvider,
 }: DecisionMakerActionInput): Promise<DecisionMakerActionResult> => {
@@ -405,6 +410,7 @@ export const executeDecisionMakersAction = async ({
     recordId: getRecordRowId(record),
     candidates: reveals.map((reveal) => reveal.result.contact),
     providerPayloads,
+    contactPolicy,
     emailVerifier,
   });
   const usage = mergedUsage([

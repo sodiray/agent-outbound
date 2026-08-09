@@ -615,6 +615,7 @@ const executeContactSourceBatch = (
         field,
         role: step.role,
         stepId,
+        contactPolicy: ctx.config?.contact_policy as Parameters<typeof promoteContactSource>[0]['contactPolicy'],
       });
       outcomes.set(recordId, { passed: true, reason: result.reason });
     } catch (error) {

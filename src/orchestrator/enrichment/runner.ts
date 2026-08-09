@@ -924,6 +924,7 @@ export const executeEnrichmentAction = async ({
       stepId,
       stepConfig,
       record,
+      contactPolicy,
       aiConfig,
     });
   }
@@ -933,6 +934,7 @@ export const executeEnrichmentAction = async ({
       stepId,
       stepConfig,
       record,
+      contactPolicy,
       emailVerificationProvider,
     });
   }

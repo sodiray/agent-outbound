@@ -62,6 +62,11 @@ export const DEFAULT_CONTACT_POLICY = {
   },
   linkedin: {},
   tiers: {},
+  primary_contact: {
+    title_patterns: [],
+    seniority: [],
+    excluded_patterns: [],
+  },
   fallback_wait_days: undefined,
 } as const;
 
@@ -93,6 +98,11 @@ export type ContactPolicyConfig = {
     requires_buyer_affiliation?: boolean;
     requires_buying_center_role?: boolean;
   }>;
+  primary_contact: {
+    title_patterns: readonly string[];
+    seniority: readonly string[];
+    excluded_patterns: readonly string[];
+  };
   fallback_wait_days?: number;
 };
 
@@ -113,6 +123,7 @@ export type ContactPolicyConfigInput = {
   };
   linkedin?: Partial<ContactPolicyConfig['linkedin']>;
   tiers?: ContactPolicyConfig['tiers'];
+  primary_contact?: Partial<ContactPolicyConfig['primary_contact']>;
   fallback_wait_days?: number;
 };
 
@@ -153,6 +164,10 @@ export const resolveContactPolicy = (
     ...(input?.linkedin || {}),
   },
   tiers: { ...(input?.tiers || {}) },
+  primary_contact: {
+    ...DEFAULT_CONTACT_POLICY.primary_contact,
+    ...(input?.primary_contact || {}),
+  },
   fallback_wait_days: input?.fallback_wait_days,
 });
 
@@ -1386,6 +1401,12 @@ const ContactPolicyTierRuleSchema = z.object({
   requires_buying_center_role: z.boolean().optional(),
 }).strict();
 
+const PrimaryContactPreferenceSchema = z.object({
+  title_patterns: z.array(z.string().trim().min(1)).default([]),
+  seniority: z.array(z.string().trim().min(1)).default([]),
+  excluded_patterns: z.array(z.string().trim().min(1)).default([]),
+}).strict().default({});
+
 const ContactPolicySchema = z.object({
   per_contact_allowances: z.record(NonNegativeWholePolicyValueSchema).default({}),
   campaign: z.object({
@@ -1405,6 +1426,7 @@ const ContactPolicySchema = z.object({
     invite_cooldown_hours: NonNegativePolicyValueSchema.optional(),
   }).default({}),
   tiers: z.record(ContactPolicyTierRuleSchema).default({}),
+  primary_contact: PrimaryContactPreferenceSchema,
   fallback_wait_days: NonNegativeWholePolicyValueSchema.optional(),
 }).default({});
 
