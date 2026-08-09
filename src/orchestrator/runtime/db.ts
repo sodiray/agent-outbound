@@ -1168,6 +1168,9 @@ const ensureDraftCompatibility = (db) => {
   try { db.exec("ALTER TABLE drafts ADD COLUMN content_hash TEXT DEFAULT ''"); } catch {}
   try { db.exec("ALTER TABLE drafts ADD COLUMN template_id TEXT DEFAULT ''"); } catch {}
   try { db.exec('ALTER TABLE drafts ADD COLUMN template_version INTEGER'); } catch {}
+  // 'rendered' (the engine produced this text) or 'human_edited' (a person wrote it). The
+  // send-time equivalence check needs this to tell config drift from deliberate intent.
+  try { db.exec("ALTER TABLE drafts ADD COLUMN content_source TEXT DEFAULT 'rendered'"); } catch {}
 };
 
 const ensureLiveInteractionLedgerCompatibility = (db) => {
@@ -3471,12 +3474,12 @@ export const insertDraft = ({ db, draft }) => {
     INSERT INTO drafts (
       draft_id, row_id, sequence_name, step_number, step_id, channel, status,
       subject, body, reason, artifacts_json, content_binding_json,
-      content_hash, template_id, template_version,
+      content_hash, template_id, template_version, content_source,
       created_at, updated_at
     ) VALUES (
       @draft_id, @row_id, @sequence_name, @step_number, @step_id, @channel, @status,
       @subject, @body, @reason, @artifacts_json, @content_binding_json,
-      @content_hash, @template_id, @template_version,
+      @content_hash, @template_id, @template_version, @content_source,
       @created_at, @updated_at
     )
   `).run({
@@ -3495,6 +3498,7 @@ export const insertDraft = ({ db, draft }) => {
     content_hash: contentHash,
     template_id: String(draft?.template_id || ''),
     template_version: draft?.template_version == null ? null : Number(draft.template_version),
+    content_source: String(draft?.content_source || 'rendered'),
     created_at: String(draft?.created_at || now),
     updated_at: String(draft?.updated_at || now),
   });
@@ -3537,6 +3541,12 @@ export const updateDraft = ({ db, draftId, patch }) => {
     content_hash: patch && Object.prototype.hasOwnProperty.call(patch, 'content_hash')
       ? String((patch as any).content_hash || '')
       : (contentChanged ? updatedContentHash : String(existing.content_hash || '')),
+    // Rewriting a draft's subject or body is something only a person does — no engine path
+    // patches draft content. Once written by hand, the text is authoritative and must not be
+    // re-derived from config, or the edit is discarded at send time.
+    content_source: patch && Object.prototype.hasOwnProperty.call(patch, 'content_source')
+      ? String((patch as any).content_source || 'rendered')
+      : (contentChanged ? 'human_edited' : String(existing.content_source || 'rendered')),
     template_id: patch && Object.prototype.hasOwnProperty.call(patch, 'template_id')
       ? String((patch as any).template_id || '')
       : String(existing.template_id || ''),
@@ -3556,6 +3566,7 @@ export const updateDraft = ({ db, draftId, patch }) => {
         content_hash = @content_hash,
         template_id = @template_id,
         template_version = @template_version,
+        content_source = @content_source,
         updated_at = @updated_at
     WHERE draft_id = @draft_id
   `).run({
@@ -3569,6 +3580,7 @@ export const updateDraft = ({ db, draftId, patch }) => {
     content_hash: String(merged.content_hash || ''),
     template_id: String(merged.template_id || ''),
     template_version: merged.template_version == null ? null : Number(merged.template_version),
+    content_source: String(merged.content_source || 'rendered'),
     updated_at: String(merged.updated_at),
   });
   return db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1').get(existing.draft_id);

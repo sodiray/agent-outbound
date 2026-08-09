@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { draftsApproveCommand, draftsListCommand } from '../dist/commands/drafts.js';
+import { draftsApproveCommand, draftsListCommand, draftsEditCommand } from '../dist/commands/drafts.js';
 import { executePipelineSequenceAction } from '../dist/orchestrator/pipeline/sequence-step-runtime.js';
 import { openListDb, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
 import { readConfig } from '../dist/orchestrator/lib/config.js';
@@ -227,6 +227,63 @@ test('a ready draft fails closed when its content can no longer be re-rendered',
     assert.match(String(attempted.reason), /cannot be re-rendered|refusing to send/i);
     assert.equal(readdirSync(sinkDir).filter((file) => file.endsWith('.json')).length, 0);
     assert.equal(db.prepare('SELECT status FROM drafts WHERE draft_id = ?').get(draft.draft_id).status, 'ready');
+    db.close();
+  } finally {
+    if (previousSink === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = previousSink;
+  }
+});
+
+test('a hand-edited draft sends the text the human wrote', async () => {
+  const previousSink = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir, sinkDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    await runStep({ db, listDir, intent: 'draft' });
+    const draft = db.prepare('SELECT draft_id FROM drafts WHERE row_id = ?').get('record_1');
+
+    draftsEditCommand({ list: listDir, draftId: draft.draft_id, body: 'Hand-edited by a human before sending.' });
+
+    // The queue must not present a deliberate edit as drift.
+    const listed = draftsListCommand({ list: listDir, status: 'pending_approval' });
+    assert.equal(listed.rows[0].content_equivalence.status, 'human_edited');
+
+    assert.equal(draftsApproveCommand({ list: listDir, draftId: draft.draft_id }).approved, 1);
+    const sent = await runStep({ db, listDir, intent: 'send' });
+    assert.equal(sent.status, 'sent', JSON.stringify(sent));
+
+    const files = readdirSync(sinkDir).filter((file) => file.endsWith('.json'));
+    assert.equal(files.length, 1);
+    const payload = JSON.parse(readFileSync(join(sinkDir, files[0]), 'utf8'));
+    const body = payload.body ?? payload.args?.body;
+    assert.equal(body, 'Hand-edited by a human before sending.');
+    db.close();
+  } finally {
+    if (previousSink === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = previousSink;
+  }
+});
+
+test('a hand-edited draft altered after approval is still refused', async () => {
+  const previousSink = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir, sinkDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    await runStep({ db, listDir, intent: 'draft' });
+    const draft = db.prepare('SELECT draft_id FROM drafts WHERE row_id = ?').get('record_1');
+    draftsEditCommand({ list: listDir, draftId: draft.draft_id, body: 'Approved wording.' });
+    assert.equal(draftsApproveCommand({ list: listDir, draftId: draft.draft_id }).approved, 1);
+
+    // Tamper with the body after approval without touching the approved hash.
+    db.prepare('UPDATE drafts SET body = ? WHERE draft_id = ?')
+      .run('Substituted after the human approved it.', draft.draft_id);
+
+    const sent = await runStep({ db, listDir, intent: 'send' });
+    assert.equal(sent.status, 'skipped', JSON.stringify(sent));
+    assert.match(String(sent.reason), /changed after approval/i);
+    assert.equal(readdirSync(sinkDir).filter((file) => file.endsWith('.json')).length, 0);
     db.close();
   } finally {
     if (previousSink === undefined) delete process.env.AO_SMTP_SINK;

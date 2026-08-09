@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   buildIdempotencyKey,
   claimIdempotency,
@@ -2128,7 +2128,30 @@ export const executeChannelStep = async ({
           };
         }
       }
-      if (approvedDraft) {
+      // A draft a person wrote by hand is authoritative: re-deriving it from config would
+      // discard the edit and re-queue the very text they rejected. The approval guarantee still
+      // holds, against the right subject — the body that was approved must still be the body on
+      // the draft, so tampering after approval is caught exactly as config drift is.
+      const humanEdited = String((approvedDraft as any)?.content_source || 'rendered') === 'human_edited';
+      if (approvedDraft && humanEdited) {
+        const approvedHash = String((approvedDraft as any).content_hash || '');
+        const currentHash = createHash('sha256')
+          .update(JSON.stringify({
+            subject: String((approvedDraft as any).subject || ''),
+            body: String((approvedDraft as any).body || ''),
+          }))
+          .digest('hex');
+        if (!approvedHash || approvedHash !== currentHash) {
+          return {
+            status: 'skipped',
+            reason: 'Hand-edited draft changed after approval; refusing to send unapproved content.',
+            provider_id: '',
+            auto_skipped_steps: [],
+            readiness_blockers: ['draft_content_changed_after_approval'],
+          };
+        }
+      }
+      if (approvedDraft && !humanEdited) {
         const rendered = renderCurrentEmailDraftContent({
           config: projectConfig || {},
           record: sendRecord,

@@ -249,6 +249,12 @@ const pendingDraftContentEquivalence = ({
       reason: 'Author-declared step approval; the engine does not verify its content or effect.',
     };
   }
+  if (String(draft.content_source || 'rendered') === 'human_edited') {
+    return {
+      status: 'human_edited',
+      reason: 'Body was written by hand; it is authoritative and is not re-derived from config.',
+    };
+  }
   if (!config || !record || String(draft.channel || '').trim().toLowerCase() !== 'email') {
     return { status: 'unavailable', reason: 'Current email content cannot be re-rendered.' };
   }
@@ -654,6 +660,8 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
     }
     patch.status = 'pending_approval';
     patch.content_binding = {};
+    // Hand-written text is authoritative from here on; see updateDraft.
+    patch.content_source = 'human_edited';
 
     const existingDraft = db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1')
       .get(String(draftId || '').trim()) as Record<string, unknown> | undefined;
