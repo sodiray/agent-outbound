@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { nowTimestamp } from './db.js';
+import { deliveryModeForChannel } from './delivery-mode.js';
 
 export type LiveInteractionBudget = {
   max_accounts: number;
@@ -67,18 +68,14 @@ const liveInteractionCounts = (db: any) => {
  * check matched any `AO_*SINK*`/`AO_*FIXTURE*` variable, so simulating
  * physical mail (`AO_MAIL_SINK=1`) silently uncapped live email.
  *
- * Email    — `mailboxes.ts`    `process.env.AO_SMTP_SINK === '1'`
- * LinkedIn — `unipile.ts`      `AO_UNIPILE_FIXTURE` is `'1'` or `'true'`
- * Mail     — `mail-provider.ts` `AO_MAIL_SINK === '1'`
+ * The providers and ledger share `deliveryModeForChannel`, so a live send
+ * cannot be excused from the budget by a diverging sink predicate.
  */
 export const isSinkOrFixtureMode = (
   channel: 'email' | 'linkedin' | 'mail',
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
 ) => {
-  if (channel === 'email') return trim(env.AO_SMTP_SINK) === '1';
-  if (channel === 'mail') return trim(env.AO_MAIL_SINK) === '1';
-  const fixture = trim(env.AO_UNIPILE_FIXTURE).toLowerCase();
-  return fixture === '1' || fixture === 'true';
+  return deliveryModeForChannel(channel, env) === 'sink';
 };
 
 export const reserveLiveInteraction = ({

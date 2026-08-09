@@ -1249,7 +1249,7 @@ export const scoreCommand = async ({ list, where = '', dryRun = false, sample = 
 
 /**
  * Deterministic policy projection (treatment, priority, next-action, readiness)
- * without model calls. Uses score_breakdown grades when present.
+ * without model calls. Uses the persisted score-stage fit projection.
  */
 export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun = false }) => {
   const listDir = resolveListDir(list);
@@ -1293,7 +1293,7 @@ export const policyApplyCommand = async ({ list, where = '', limit = 0, dryRun =
       // the engine used to hide this; removing it exposed that this call site
       // never passed the list directory at all.
       listDir,
-      recomputeFitFromBreakdown: true,
+      recomputeFitFromBreakdown: false,
       contacts: campaignContacts.length ? campaignContacts : undefined,
       campaignId: `camp_${record._row_id}`,
       costLedger: costHydrate.ledger,

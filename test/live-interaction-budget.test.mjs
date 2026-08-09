@@ -225,7 +225,9 @@ test('live interaction budget: sink mode is ledgered but does not consume the li
       budget: { max_accounts: 1, max_interactions: 1 },
     });
     assert.deepEqual(status.usage, { accounts: 1, interactions: 1 });
-    assert.equal(status.items[0].delivery_mode, 'sink');
+    const sinkLedger = status.items.find((item) => item.step_id === 'email_1');
+    assert.ok(sinkLedger, 'expected ledger row for the sink email step');
+    assert.equal(sinkLedger.delivery_mode, 'sink');
     const updated = db.prepare('SELECT email_last_message_id FROM records WHERE _row_id = ?').get(record._row_id);
     assert.equal(updated.email_last_message_id, 'live-outbound@example.com');
     const correlation = correlateInboundEmail({

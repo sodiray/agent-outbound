@@ -7,6 +7,7 @@
  */
 
 import { assertOutboundContent, resolveExplicitProspectText } from '../lib/outbound-content.js';
+import { deliveryModeForChannel } from '../runtime/delivery-mode.js';
 
 export const UNIPILE_ENV_KEYS = [
   'UNIPILE_API_KEY',
@@ -109,8 +110,7 @@ const readUnipileJson = async (response: Response): Promise<unknown> => {
 export function evaluateUnipileReadiness(
   env: NodeJS.ProcessEnv | Record<string, string | undefined> = {},
 ): UnipileReadiness {
-  const fixtureMode = nonBlank(env.AO_UNIPILE_FIXTURE) === '1'
-    || nonBlank(env.AO_UNIPILE_FIXTURE).toLowerCase() === 'true';
+  const fixtureMode = deliveryModeForChannel('linkedin', env) === 'sink';
   if (fixtureMode) {
     return {
       ready: true,
@@ -451,8 +451,7 @@ export async function executeUnipileLinkedinConnect(
   const env = input.env || {};
   // Fixture/contract adapter: when AO_UNIPILE_FIXTURE=1, return deterministic
   // provider success without live HTTP (validation / harness only).
-  const fixtureMode = String(env.AO_UNIPILE_FIXTURE || '').trim() === '1'
-    || String(env.AO_UNIPILE_FIXTURE || '').toLowerCase() === 'true';
+  const fixtureMode = deliveryModeForChannel('linkedin', env) === 'sink';
   if (fixtureMode) {
     const rowId = String(input.record?._row_id || input.record?.id || 'unknown');
     const stepId = String(input.step?.id || 'linkedin_connect');

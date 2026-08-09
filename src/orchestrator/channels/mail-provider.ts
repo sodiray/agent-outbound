@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { nowIso } from '../lib/record.js';
+import { deliveryModeForChannel } from '../runtime/delivery-mode.js';
 
 export type MailProviderStatus = 'allocated' | 'submitted' | 'confirmed' | 'failed' | 'uncertain';
 
@@ -395,7 +396,7 @@ export function resolveMailProvider(opts: {
 }): MailProvider | null {
   const env = opts.env || process.env;
   const name = text(opts.providerName || env.AO_MAIL_PROVIDER || '').toLowerCase();
-  const sinkFlag = text(env.AO_MAIL_SINK) === '1' || text(env.AO_MAIL_SINK).toLowerCase() === 'true';
+  const sinkFlag = deliveryModeForChannel('mail', env) === 'sink';
   if (sinkFlag || name === 'sink' || name === 'mail_sink') {
     const sinkDir = opts.sinkDir
       || (opts.listDir ? join(opts.listDir, 'mail-sink') : join(process.cwd(), 'mail-sink'));

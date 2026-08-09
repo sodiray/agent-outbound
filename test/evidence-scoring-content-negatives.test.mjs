@@ -306,6 +306,7 @@ test('RES-SCORING: zero evidence_ids on all fit components forces enrichment_hol
     { id: 'local_buying_autonomy', grade: 9, reasoning: 'owner', evidence_ids: [] },
   ];
   const out = applyOutboundPolicy({
+    recomputeFitFromBreakdown: true,
     record: {
       _row_id: 'acct_thin_ids',
       is_a_business: true,
@@ -323,8 +324,9 @@ test('RES-SCORING: zero evidence_ids on all fit components forces enrichment_hol
   assert.equal(out.treatment_tier, 'enrichment_hold');
   assert.ok(
     String(out.patch.treatment_reasons || '').includes('thin_evidence')
-    || String(out.patch.treatment_reasons || '').includes('zero_evidence'),
-    `expected thin_evidence reason, got ${out.patch.treatment_reasons}`,
+    || String(out.patch.treatment_reasons || '').includes('zero_evidence')
+    || String(out.patch.treatment_reasons || '').includes('fit_assessable_weight_below'),
+    `expected a fail-closed evidence reason, got ${out.patch.treatment_reasons}`,
   );
 });
 

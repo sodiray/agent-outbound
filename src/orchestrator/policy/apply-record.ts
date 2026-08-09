@@ -99,7 +99,7 @@ export type PolicyApplyInput = {
   record: Record<string, unknown>;
   /** Evaluation instant for decision-time policy checks. */
   asOf?: string;
-  /** When true, recompute fit from score_breakdown grades using the pipeline fit model. */
+  /** Legacy migration-only mode: recompute fit from a flat component breakdown. */
   recomputeFitFromBreakdown?: boolean;
   /**
    * Pipeline-declared fit model from a fit score stage and policy.fit_rule_version.
@@ -213,8 +213,12 @@ type BreakdownItem = {
 const parseBreakdown = (raw: unknown): BreakdownItem[] => {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw || '[]') : raw;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map((item) => {
+    const criteria = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object' && Array.isArray((parsed as { criteria?: unknown }).criteria)
+        ? (parsed as { criteria: unknown[] }).criteria
+        : [];
+    return criteria.map((item) => {
       const gradeRaw = item?.grade;
       const points = item?.points != null && Number.isFinite(Number(item.points))
         ? Number(item.points)
@@ -449,23 +453,25 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     : DEFAULT_SCORE_MIN_COVERAGE;
   const rowId = String(record._row_id || record.id || 'unknown');
   const fitModelConfigured = fitModelComponentIds(input.fitModel).length > 0;
-  // Prefer pipeline-declared fit components; never invent zeros from unrelated legacy score breakdowns.
-  const selected = selectFitBreakdownSource(record, input.fitModel);
+  const recomputeFit = input.recomputeFitFromBreakdown === true;
+  const selected = recomputeFit
+    ? selectFitBreakdownSource(record, input.fitModel)
+    : { breakdown: [], source: 'none' as const, hasCommercialComponents: false };
   const breakdown = selected.breakdown;
   const fitComponents = selected.hasCommercialComponents
     ? fitComponentsFromBreakdown(breakdown, input.fitModel)
     : [];
   const hasCommercialFit = fitComponents.some((c) => !c.missing);
-  const fitCalc = calculateFitScore(fitComponents, input.fitModel);
-  const recoveredLegacyFit = recoverLegacyFitScore(record);
-  const fitNotGraded = input.recomputeFitFromBreakdown === true
+  const fitCalc = recomputeFit ? calculateFitScore(fitComponents, input.fitModel) : null;
+  const recoveredLegacyFit = recomputeFit ? recoverLegacyFitScore(record) : null;
+  const fitNotGraded = recomputeFit
     && fitModelConfigured
-    && fitCalc.reason === 'fit_not_graded'
+    && fitCalc?.reason === 'fit_not_graded'
     && recoveredLegacyFit === null;
-  const derivedFitCoverage = (!input.recomputeFitFromBreakdown && !hasCommercialFit)
+  const derivedFitCoverage = (!recomputeFit && !hasCommercialFit)
     || (!hasCommercialFit && recoveredLegacyFit !== null)
     ? null
-    : fitCalc.assessable_weight;
+    : fitCalc?.assessable_weight ?? null;
   const recordedFitCoverage = num(record.fit_coverage, null);
   const fitCoverage = derivedFitCoverage != null && recordedFitCoverage != null
     ? Math.min(derivedFitCoverage, recordedFitCoverage)
@@ -487,11 +493,13 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   let fitScore = !fitModelConfigured || insufficientFitCoverage || fitNotGraded
     ? null
     : num(record.fit_score, null);
-  if (input.recomputeFitFromBreakdown && fitModelConfigured && hasCommercialFit && !insufficientFitCoverage) {
-    fitScore = fitCalc.fit_score;
+  if (recomputeFit && fitModelConfigured && hasCommercialFit && !insufficientFitCoverage) {
+    fitScore = fitCalc?.fit_score ?? null;
   } else if (
     // Stored fit was wiped to 0 by the prior score_breakdown-only bug, or never set —
     // recover from legacy fit_breakdown points / score grades so treatment stays explainable.
+    recomputeFit
+    &&
     (fitScore == null || fitScore === 0)
     && fitModelConfigured
     && !hasCommercialFit
@@ -507,7 +515,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   // components cited no evidence stored 0, and 0 is a number, so re-scoring it
   // successfully could never lift it back out of enrichment_hold. The comment
   // below already promised "until re-scored" — this makes that true.
-  let fitEvidence = hasCommercialFit && breakdown.length
+  let fitEvidence = recomputeFit && hasCommercialFit && breakdown.length
     ? deriveFitEvidenceConfidence(breakdown, input.fitModel)
     : num(record.fit_evidence_confidence, null);
   // Legacy scores without declared fit components: low evidence until re-scored.
@@ -647,21 +655,25 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const thinEvidenceByConf = fitEvidence != null && Number(fitEvidence) < 40;
   const fitIds = new Set(fitModelComponentIds(input.fitModel));
   const fitBreakdownItems = breakdown.filter((b) => fitIds.has(String(b.id || '')));
-  const thinEvidenceByIds =
+  const thinEvidenceByIds = recomputeFit
+    &&
     fitBreakdownItems.length > 0
     && fitBreakdownItems.every((b) => {
       const ids = Array.isArray(b.evidence_ids) ? b.evidence_ids.filter(Boolean) : [];
       return ids.length === 0 || b.missing || b.unknown;
     });
   // Also when commercial fit was graded but deriveFitEvidenceConfidence is 0 (no ids).
-  const thinEvidenceDerivedZero =
+  const thinEvidenceDerivedZero = recomputeFit
+    &&
     hasCommercialFit
     && breakdown.length > 0
     && deriveFitEvidenceConfidence(breakdown, input.fitModel) === 0;
-  const anyMissingComponent =
+  const anyMissingComponent = recomputeFit
+    &&
     hasCommercialFit
     && fitComponents.some((c) => c.missing || !(c.evidence_ids && c.evidence_ids.length));
-  const allUnknownComponents =
+  const allUnknownComponents = recomputeFit
+    &&
     hasCommercialFit
     && fitComponents.length > 0
     && fitComponents.every((c) => c.missing || !(c.evidence_ids && c.evidence_ids.length));
@@ -1304,8 +1316,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     treatment_tier: treatment.treatment_tier,
     eligibility_outcome: eligibility.outcome,
     missing_inputs: [
-      ...missing_inputs,
-      ...(fitCalc.reason ? [fitCalc.reason] : []),
+      ...(recomputeFit ? missing_inputs : []),
+      ...(recomputeFit && fitCalc?.reason ? [fitCalc.reason] : []),
       ...timingCalc.missing_inputs,
     ],
     contradictions,
@@ -1330,9 +1342,11 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   const patch: Record<string, unknown> = {
     identity_confidence: observationStore.identity_resolution?.identity_confidence ?? 0,
-    fit_score: !fitModelConfigured || insufficientFitCoverage || fitNotGraded ? null : fitScore,
-    fit_coverage: fitCoverage ?? '',
-    fit_evidence_confidence: fitEvidence ?? '',
+    ...(!fitModelConfigured || recomputeFit ? {
+      fit_score: !fitModelConfigured || insufficientFitCoverage || fitNotGraded ? null : fitScore,
+      fit_coverage: fitCoverage ?? '',
+      fit_evidence_confidence: fitEvidence ?? '',
+    } : {}),
     candidate_tier: candidate.candidate_tier,
     treatment_tier: treatment.treatment_tier,
     mail_treatment: treatment.mail_treatment,
@@ -1435,7 +1449,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
 
   // Only overwrite fit_score from deterministic calculator when declared components exist.
   // Never write fit_score=0 from an all-missing calculation while treatment used a high legacy fit.
-  if (input.recomputeFitFromBreakdown && !fitModelConfigured) {
+  if (recomputeFit && !fitModelConfigured) {
     patch.fit_score = null;
     patch.fit_calculation_json = JSON.stringify(fitCalc);
     patch.fit_breakdown_source = 'none';
@@ -1443,7 +1457,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     patch.fit_score = null;
     patch.fit_calculation_json = JSON.stringify(fitCalc);
     patch.fit_breakdown_source = selected.source;
-  } else if (input.recomputeFitFromBreakdown && hasCommercialFit && !insufficientFitCoverage) {
+  } else if (recomputeFit && fitCalc && hasCommercialFit && !insufficientFitCoverage) {
     patch.fit_score = fitCalc.fit_score;
     patch.fit_calculation_json = JSON.stringify(fitCalc);
     patch.fit_breakdown_source = selected.source;
@@ -1451,7 +1465,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
       ...evidenceResolution,
       fit_score: fitCalc.fit_score,
     });
-  } else if (fitModelConfigured && !hasCommercialFit && fitScore != null && (num(record.fit_score, null) === 0 || num(record.fit_score, null) == null)) {
+  } else if (recomputeFit && fitModelConfigured && !hasCommercialFit && fitScore != null && (num(record.fit_score, null) === 0 || num(record.fit_score, null) == null)) {
     // Persist recovered legacy fit so corpus no longer shows fit_score=0 with Tier B treatment.
     patch.fit_score = fitScore;
     patch.fit_breakdown_source = 'legacy_recovery';

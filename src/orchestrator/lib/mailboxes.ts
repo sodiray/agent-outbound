@@ -6,6 +6,7 @@ import {
   type Credentials,
 } from './credentials.js';
 import { nowIso } from './record.js';
+import { deliveryModeForChannel } from '../runtime/delivery-mode.js';
 
 export type MailboxCredentials = Credentials;
 
@@ -46,7 +47,7 @@ const nonBlank = (value: unknown) => String(value ?? '').trim();
 const isObject = (value: unknown): value is Record<string, unknown> => (
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 );
-const isSink = () => process.env.AO_SMTP_SINK === '1';
+const isSink = () => deliveryModeForChannel('email') === 'sink';
 
 const normalizeMailbox = (raw: unknown): Mailbox => {
   const value = isObject(raw) ? raw : {};

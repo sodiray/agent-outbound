@@ -149,8 +149,8 @@ const briefDepHash = ({ record, interactions, briefConfig, business, promptOverr
   prompt_version: BUILTIN_PROMPT_VERSION,
   snapshot: briefSnapshot(record),
   score: recordScore(record),
-  breakdown: String(record.score_breakdown || ''),
-  reasoning: String(record.score_reasoning || ''),
+  breakdown: String(record.fit_breakdown || ''),
+  reasoning: String(record.fit_reasoning || ''),
   business: business || {},
   brief: {
     model: String(briefConfig?.model || ''),
@@ -201,7 +201,7 @@ export const runBriefs = async ({ listDir, where = '', limit = 0, force = false 
         }
         const breakdown = (() => {
           try {
-            return JSON.parse(String(record.score_breakdown || '') || 'null');
+            return JSON.parse(String(record.fit_breakdown || '') || 'null');
           } catch {
             return null;
           }

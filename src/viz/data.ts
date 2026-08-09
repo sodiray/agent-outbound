@@ -989,7 +989,7 @@ export const queryRecords = (listDir: string, params: any = {}) => {
     const total = Number(db.prepare(`SELECT COUNT(*) AS count FROM records${whereSql}`).get(...values)?.count || 0);
     const records = normalizedRows(db.prepare(`SELECT * FROM records${whereSql} ORDER BY ${sortExpr} ${dir}, _row_id ASC LIMIT ? OFFSET ?`).all(...values, limit, offset))
       .map((record: any) => {
-        const verdicts = verdictsFromBreakdown(record.score_breakdown);
+        const verdicts = verdictsFromBreakdown(record.fit_breakdown);
         return {
           ...record,
           __stage: String(record.disqualified_at || '') ? 'dropped' : 'scored',
@@ -1150,10 +1150,10 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
     const minimum = Number(config?.score?.minimum ?? 0);
     const score = {
       value: rank,
-      reasoning: record.score_reasoning || record.fit_reasoning || '',
-      criteria: mergeCriteriaBreakdown(configuredFitCriteria(config), record.fit_breakdown || record.score_breakdown),
+      reasoning: record.fit_reasoning || '',
+      criteria: mergeCriteriaBreakdown(configuredFitCriteria(config), record.fit_breakdown),
       minimum,
-      updated_at: record.score_updated_at || record.fit_score_updated_at || '',
+      updated_at: record.fit_score_updated_at || record.updated_at || '',
       events: scoreEvents,
     };
     const timeline = [

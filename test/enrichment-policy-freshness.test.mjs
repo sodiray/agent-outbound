@@ -11,7 +11,7 @@ import {
   executionConfigForEnrichmentStep,
   isEnrichFresh,
 } from '../dist/orchestrator/enrichment/runner.js';
-import { openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
+import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
@@ -58,6 +58,7 @@ test('policy_apply re-tiers cached records and exposes a policy-triggered rerun 
     fallback_sub_vertical: 'other_local_smb',
   }));
   const db = openListDb({ listDir: root, readonly: false });
+  ensureRecordColumns({ db, columns: ['fit_evidence_confidence'] });
   const breakdown = treasureValleyFitModel.criteria.map((criterion) => ({
     id: criterion.id,
     grade: 7,

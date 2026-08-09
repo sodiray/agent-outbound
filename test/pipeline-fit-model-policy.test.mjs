@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
-import { openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
+import { runScoreStage } from '../dist/orchestrator/scoring/stage-runner.js';
+import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
+import { getRecordDetail } from '../dist/viz/data.js';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
@@ -34,11 +36,10 @@ const aTreatmentStrategy = {
 
 const fitGrades = [8, 8, 7, 7, 8, 8];
 
-const fitBreakdown = JSON.stringify(treasureValleyFitModel.criteria.map((criterion, index) => ({
+const staleScoreBreakdown = JSON.stringify(treasureValleyFitModel.criteria.map((criterion, index) => ({
   id: criterion.id,
   grade: fitGrades[index],
-  evidence_ids: [`evidence-${criterion.id}`],
-  reasoning: 'Durable evidence supports this assessment.',
+  reasoning: 'Retired scoring output.',
 })));
 
 const policyStep = {
@@ -64,11 +65,7 @@ const declaredFitStep = {
   kind: 'score',
   id: 'score_fit',
   key: 'fit',
-  inputs: ['__run_score'],
-  when: {
-    match: 'all',
-    conditions: [{ field: '__run_score', operator: 'eq', value: 'yes' }],
-  },
+  inputs: ['business_name'],
   model: 'openrouter/anthropic/claude-haiku-4.5',
   criteria: fitCriteria,
   outputs: {
@@ -99,9 +96,8 @@ const readyRecord = {
   buyer_affiliation_status: 'confirmed',
   buying_center_role: 'Owner',
   local_buying_authority: true,
-  fit_score: 76.5,
-  fit_evidence_confidence: 100,
-  fit_breakdown: fitBreakdown,
+  fit_evidence_confidence: 75,
+  score_breakdown: staleScoreBreakdown,
   vertical: 'other_local_smb',
   sub_vertical: 'other_local_smb',
   observations_json: JSON.stringify({
@@ -142,7 +138,29 @@ const runPolicyPipeline = async ({ pipeline }) => {
     score: { treatment: aTreatmentStrategy },
   }));
   const db = openListDb({ listDir: root, readonly: false });
+  ensureRecordColumns({ db, columns: ['fit_evidence_confidence', 'score_breakdown'] });
   upsertRecord({ db, row: readyRecord });
+  if (pipeline.some((step) => step.kind === 'score' && step.key === 'fit')) {
+    await runScoreStage({
+      db,
+      listDir: root,
+      config: {},
+      step: declaredFitStep,
+      rows: [readyRecord],
+      generateObject: async () => ({
+        object: {
+          criteria: treasureValleyFitModel.criteria.map((criterion, index) => ({
+            id: criterion.id,
+            grade: fitGrades[index],
+            assessable: true,
+            reasoning: 'Current score-stage evidence assessment.',
+          })),
+          summary_reasoning: 'Current fit-stage score.',
+        },
+        usage: {},
+      }),
+    });
+  }
   db.close();
   await runPipelineDataflow({ listDir: root });
   await runPipelineDataflow({ listDir: root });
@@ -150,13 +168,17 @@ const runPolicyPipeline = async ({ pipeline }) => {
   const record = check.prepare('SELECT * FROM records WHERE _row_id = ?').get(readyRecord._row_id);
   const events = check.prepare('SELECT step_id, reason FROM pipeline_events WHERE record_id = ? ORDER BY occurred_at').all(readyRecord._row_id);
   check.close();
-  return { record, events };
+  return { root, record, events };
 };
 
-test('pipeline policy_apply recomputes the declared fit stage and preserves A treatment on rerun', async () => {
-  const { record: first, events } = await runPolicyPipeline({ pipeline: [declaredFitStep, policyStep] });
+test('pipeline policy_apply bands the persisted kind: score fit without reading a stale score_breakdown', async () => {
+  const { root, record: first, events } = await runPolicyPipeline({ pipeline: [declaredFitStep, policyStep] });
   assert.equal(first.fit_score, 76.5, JSON.stringify({ events, calculation: first.fit_calculation_json }));
-  assert.equal(Number(first.fit_evidence_confidence), 100);
+  assert.equal(Number(first.fit_evidence_confidence), 75);
+  assert.equal(first.score_breakdown, '');
+  assert.deepEqual(Object.keys(JSON.parse(first.fit_breakdown)), ['criteria', 'missing_inputs']);
+  const detail = getRecordDetail(root, readyRecord._row_id);
+  assert.equal(detail.score.criteria[0].grade, fitGrades[0]);
   assert.equal(first.treatment_tier, 'A', JSON.stringify({
     events,
     reasons: first.treatment_reasons,
@@ -165,7 +187,6 @@ test('pipeline policy_apply recomputes the declared fit stage and preserves A tr
     namedBuyer: first.named_buyer_status,
     affiliation: first.buyer_affiliation_status,
   }));
-  assert.equal(JSON.parse(first.fit_calculation_json).fit_model_version, treasureValleyFitModel.modelVersion);
 });
 
 test('pipeline policy_apply explicitly treats a pipeline without a fit stage as unscored', async () => {
@@ -174,5 +195,5 @@ test('pipeline policy_apply explicitly treats a pipeline without a fit stage as 
   assert.equal(record.fit_score, null, JSON.stringify({ events, calculation: record.fit_calculation_json, reasons: record.treatment_reasons }));
   assert.equal(record.treatment_tier, 'enrichment_hold');
   assert.match(record.treatment_reasons, /fit_band=unscored/);
-  assert.equal(JSON.parse(record.fit_calculation_json).reason, 'fit_components_not_configured');
+  assert.equal(record.fit_calculation_json, undefined);
 });

@@ -201,7 +201,7 @@ test('not graded is persisted as null with an explicit reason, never fabricated 
   });
 });
 
-test('score-stage migration clears only fabricated legacy zeros and preserves populated breakdowns', () => {
+test('score-stage migration canonicalizes populated legacy breakdowns and clears their retired column', () => {
   const root = listDir();
   const seed = openListDb({ listDir: root, readonly: false });
   ensureRecordColumns({ db: seed, columns: [{ name: 'score_breakdown', type: 'TEXT' }] });
@@ -222,9 +222,11 @@ test('score-stage migration clears only fabricated legacy zeros and preserves po
   assert.equal(byId.get('fabricated-zero').fit_score, null);
   assert.equal(JSON.parse(byId.get('fabricated-zero').fit_breakdown).reason, 'legacy_fabricated_zero_cleared');
   assert.equal(byId.get('measured-zero').fit_score, 0);
-  assert.equal(byId.get('measured-zero').score_breakdown, '[{"id":"coordination","grade":0}]');
+  assert.equal(byId.get('measured-zero').score_breakdown, '');
+  assert.equal(JSON.parse(byId.get('measured-zero').fit_breakdown).criteria[0].grade, 0);
   assert.equal(byId.get('measured-score').fit_score, 78);
-  assert.equal(byId.get('measured-score').score_breakdown, '[{"id":"coordination","grade":8}]');
+  assert.equal(byId.get('measured-score').score_breakdown, '');
+  assert.equal(JSON.parse(byId.get('measured-score').fit_breakdown).criteria[0].grade, 8);
 });
 
 test('dataflow records score skips and reruns only when a declared input changes', async () => {

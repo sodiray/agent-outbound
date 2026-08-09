@@ -199,6 +199,7 @@ export const persistScoreStageResult = ({
     [scoreField]: calculation.score,
     [breakdownField]: JSON.stringify(calculation.breakdown),
     [reasoningField]: calculation.reasoning,
+    ...(step.key === 'fit' ? { score_breakdown: '' } : {}),
   };
   upsertRecord({ db, row: patch });
   if (calculation.score !== null) {

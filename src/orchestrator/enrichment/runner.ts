@@ -947,7 +947,7 @@ export const executeEnrichmentAction = async ({
     };
     const result = applyOutboundPolicy({
       record: recordForPolicy,
-      recomputeFitFromBreakdown: true,
+      recomputeFitFromBreakdown: false,
       contacts: contacts.length ? contacts : undefined,
       campaignId: rowId ? `camp_${rowId}` : undefined,
       listDir,

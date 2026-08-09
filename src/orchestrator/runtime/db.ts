@@ -1104,7 +1104,18 @@ export const migrateScoreStageData = ({ db }: { db: { exec: (sql: string) => unk
     }),
     'Legacy fabricated zero cleared: no graded breakdown was recorded.',
   );
-  return Number(cleared.changes || 0);
+  if (!columns.has('score_breakdown')) return Number(cleared.changes || 0);
+  const canonicalized = db.prepare(`
+    UPDATE records
+    SET fit_breakdown = CASE
+          WHEN TRIM(COALESCE(fit_breakdown, '')) IN ('', '[]', '{}')
+            THEN '{"criteria":' || score_breakdown || ',"missing_inputs":[],"reason":"legacy_score_breakdown_migrated"}'
+          ELSE fit_breakdown
+        END,
+        score_breakdown = ''
+    WHERE TRIM(COALESCE(score_breakdown, '')) LIKE '[%'
+  `).run();
+  return Number(cleared.changes || 0) + Number(canonicalized.changes || 0);
 };
 
 const ensurePipelineEventCompatibility = (db) => {
