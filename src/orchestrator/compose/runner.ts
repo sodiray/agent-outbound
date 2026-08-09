@@ -155,22 +155,22 @@ const specificTokens = ({ text, discountSentenceInitialCapitalizedWords = true }
     .filter((match) => match[1] === match[1].toLowerCase() && plausibleTopLevelDomains.has(match[1].toLowerCase()))
     .map((match) => match[0])
     .filter((domain) => !urls.some((url) => url.includes(domain)) && !emails.some((email) => email.endsWith(`@${domain}`)));
-  const phoneMatches = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:(?:\+|00)\d{1,3}[\s.-]?)?(?:(?:\(\d{2,4}\)|\d{2,4})[\s.-]?){2,3}\d{3,4}(?![\p{L}\p{N}])/gu));
+  const phoneMatches = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:(?:\+|00)\d{1,3}[ \t.-]?)?(?:(?:\(\d{2,4}\)|\d{2,4})[ \t.-]?){2,3}\d{3,4}(?![\p{L}\p{N}])/gu));
   const phoneNumbers = phoneMatches.map((match) => match[0]);
-  const numbers = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:[$€£¥]\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:k|m|bn?|million|billion|trillion))?|\d+(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s*%|\d+(?:,\d{3})*(?:\.\d+)?\s+(?:people|employees|staff|users|locations|offices|vans|customers|clients|units|properties|dollars?|euros?|pounds?))(?![\p{L}\p{N}])/giu))
+  const numbers = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:[$€£¥][ \t]*\d+(?:,\d{3})*(?:\.\d+)?(?:[ \t]*(?:k|m|bn?|million|billion|trillion))?|\d+(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?[ \t]*%|\d+(?:,\d{3})*(?:\.\d+)?[ \t]+(?:people|employees|staff|users|locations|offices|vans|customers|clients|units|properties|dollars?|euros?|pounds?))(?![\p{L}\p{N}])/giu))
     .filter((match) => !overlaps(match, phoneMatches))
     .map((match) => match[0]);
-  const multiWordNames = Array.from(source.matchAll(/\b\p{Lu}[\p{L}\p{M}'’-]*(?:\s+\p{Lu}[\p{L}\p{M}'’-]*)+\b/gu))
+  const multiWordNames = Array.from(source.matchAll(/\b\p{Lu}[\p{L}\p{M}'’-]*(?:[ \t]+\p{Lu}[\p{L}\p{M}'’-]*)+\b/gu))
     .filter((match) => (
       !discountSentenceInitialCapitalizedWords
       || !isSentenceInitialCapitalizedWord({ source, index: match.index })
     ))
     .filter((match) => Array.from(match[0].matchAll(/\p{Lu}[\p{L}\p{M}'’-]*/gu)).every((word) => isNameLikeWord(word[0])))
     .map((match) => match[0]);
-  const referencedNames = Array.from(source.matchAll(/\b(?:(?:spoke|talked|met|connected|worked)\s+(?:with|to)|(?:with|from|by|for|in|near|around|across|outside|at)|(?:hi|hello|dear))\s+(\p{Lu}[\p{L}\p{M}'’-]*)\b/giu))
+  const referencedNames = Array.from(source.matchAll(/\b(?:(?:spoke|talked|met|connected|worked)[ \t]+(?:with|to)|(?:with|from|by|for|in|near|around|across|outside|at)|(?:hi|hello|dear))[ \t]+(\p{Lu}[\p{L}\p{M}'’-]*)\b/giu))
     .map((match) => match[1])
     .filter((value) => /^\p{Lu}/u.test(value) && isNameLikeWord(value));
-  const serviceLines = Array.from(source.matchAll(/\b(?:you|your\s+(?:company|business|team|firm|organization|organisation))\s+(?:offer|offers|provide|provides|sell|sells|speciali[sz]e\s+in|speciali[sz]es\s+in)\s+([\p{L}\p{M}'’& -]{2,80}?)(?:[.!?\n]|$)/giu))
+  const serviceLines = Array.from(source.matchAll(/\b(?:you|your[ \t]+(?:company|business|team|firm|organization|organisation))[ \t]+(?:offer|offers|provide|provides|sell|sells|speciali[sz]e[ \t]+in|speciali[sz]es[ \t]+in)[ \t]+([\p{L}\p{M}'’& -]{2,80}?)(?:[.!?\n]|$)/giu))
     .map((match) => match[1].trim());
 
   return uniqueSpecifics([

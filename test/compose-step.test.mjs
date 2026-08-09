@@ -199,6 +199,57 @@ test('compose permits ordinary prose without audit metadata', async () => {
   });
 });
 
+test('compose permits a trusted opt-out line after a two-line sign-off', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const optOutStep = {
+      ...liveStep(),
+      rules: ['Reply STOP and I will not contact you again.'],
+    };
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: optOutStep,
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: {
+          outputs: {
+            email_subject: 'Acme',
+            email_body: 'Worth a quick chat?\n\nKind regards, Ray\nMission\n\nReply STOP and I will not contact you again.',
+          },
+        },
+        usage: {},
+      }),
+    });
+    assert.equal(result.failed, 0, JSON.stringify(result.errors));
+  });
+});
+
+test('compose rejects a fabricated multi-word business name', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: {
+          outputs: {
+            headline: 'Hello Ada',
+            message: 'I spoke with Northstar Meridian Holdings.',
+          },
+        },
+        usage: {},
+      }),
+    });
+    assert.equal(result.failed, 1);
+    assert.match(result.errors[0].error, /proper name or place "Northstar Meridian Holdings"/);
+  });
+});
+
 test('compose keeps ordinary sentence boundaries, sentence-openers, granted name parts, and durations out of invented-specifics', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const result = await runComposeStep({
