@@ -106,6 +106,7 @@ test('an arbitrary evidence-gated step refuses records with no business evidence
         id: 'content_for_any_market',
         kind: 'generate',
         requires_evidence: true,
+        on_error: 'empty',
         outputs: {
           preliminary_snapshot: { type: 'string' },
         },

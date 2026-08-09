@@ -203,6 +203,214 @@ test('an empty cached generate result is retried instead of being cached forever
   }
 });
 
+test('a reasoned generate decline honors explicit on_error empty, runs descendants, and is not cached', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-generate-reasoned-decline-'));
+  writeFileSync(join(listDir, 'outbound.yaml'), `
+ai:
+  default_model: openrouter/anthropic/claude-haiku-4.5
+sequences:
+  default: { steps: [] }
+pipeline:
+  - kind: generate
+    id: diagnostic_content_pack
+    model: openrouter/anthropic/claude-haiku-4.5
+    requires_evidence: true
+    on_error: empty
+    inputs: [business_name]
+    outputs:
+      preliminary_snapshot: { type: string, description: A grounded snapshot. }
+  - kind: assign
+    id: downstream_assignment
+    depends_on: [diagnostic_content_pack]
+    inputs: [sequence_status]
+    target: sequence_name
+    fallback: default
+    rules: []
+`);
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    upsertRecord({ db, row: { _row_id: 'reasoned-decline', sequence_status: 'active' } });
+  } finally {
+    db.close();
+  }
+
+  const pipeline = await runPipelineDataflow({ listDir });
+  const check = openListDb({ listDir, readonly: true });
+  try {
+    const asset = check.prepare(`
+      SELECT status, reason FROM assets
+      WHERE row_id = ? AND step_id = ?
+    `).get('reasoned-decline', 'diagnostic_content_pack');
+    const events = check.prepare(`
+      SELECT step_id, passed, reason FROM pipeline_events
+      WHERE record_id = ?
+      ORDER BY rowid ASC
+    `).all('reasoned-decline');
+    const staleness = check.prepare(`
+      SELECT COUNT(*) AS n FROM staleness
+      WHERE record_id = ? AND step_id = ?
+    `).get('reasoned-decline', 'diagnostic_content_pack');
+
+    assert.equal(pipeline.errored, 0);
+    assert.deepEqual(asset, {
+      status: 'empty',
+      reason: 'needs_discovery: no_business_evidence',
+    });
+    assert.deepEqual(events.map((event) => ({ step_id: event.step_id, passed: event.passed })), [
+      { step_id: 'diagnostic_content_pack', passed: 1 },
+      { step_id: 'downstream_assignment', passed: 1 },
+    ]);
+    assert.equal(staleness.n, 0);
+  } finally {
+    check.close();
+  }
+});
+
+test('a reasoned generate decline without on_error empty remains a strict failure', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-generate-strict-decline-'));
+  const db = openListDb({ listDir, readonly: false });
+  const step = {
+    id: 'diagnostic_content_pack',
+    kind: 'generate',
+    on_error: 'fail',
+    outputs: {
+      preliminary_snapshot: { type: 'string' },
+    },
+  };
+  try {
+    upsertRecord({ db, row: { _row_id: 'strict-decline', sequence_status: 'active' } });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('strict-decline');
+    const result = await runGenerateStep({
+      db,
+      listDir,
+      config: {},
+      step,
+      rows: [record],
+      executeAction: async () => ({
+        outputs: {},
+        reason: 'No public evidence supports a grounded snapshot.',
+        usage: {},
+      }),
+    });
+
+    assert.equal(result.failed, 1);
+    assert.match(result.errors[0].error, /could not produce declared output preliminary_snapshot/);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM assets WHERE row_id = ?').get('strict-decline').n, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM staleness WHERE record_id = ?').get('strict-decline').n, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test('a pipeline generate without on_error empty remains strict after config parsing', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-generate-default-strict-'));
+  writeFileSync(join(listDir, 'outbound.yaml'), `
+ai:
+  default_model: openrouter/anthropic/claude-haiku-4.5
+sequences:
+  default: { steps: [] }
+pipeline:
+  - kind: generate
+    id: diagnostic_content_pack
+    model: openrouter/anthropic/claude-haiku-4.5
+    requires_evidence: true
+    inputs: [business_name]
+    outputs:
+      preliminary_snapshot: { type: string, description: A grounded snapshot. }
+  - kind: assign
+    id: downstream_assignment
+    depends_on: [diagnostic_content_pack]
+    inputs: [sequence_status]
+    target: sequence_name
+    fallback: default
+    rules: []
+`);
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    upsertRecord({ db, row: { _row_id: 'default-strict', sequence_status: 'active' } });
+  } finally {
+    db.close();
+  }
+
+  const pipeline = await runPipelineDataflow({ listDir });
+  const check = openListDb({ listDir, readonly: true });
+  try {
+    const downstream = check.prepare(`
+      SELECT passed, reason FROM pipeline_events
+      WHERE record_id = ? AND step_id = ?
+      ORDER BY rowid DESC
+      LIMIT 1
+    `).get('default-strict', 'downstream_assignment');
+
+    assert.equal(pipeline.errored, 1);
+    assert.match(pipeline.errors[0].error, /could not produce declared output preliminary_snapshot/);
+    assert.deepEqual(downstream, {
+      passed: 0,
+      reason: 'skipped:upstream_errored:diagnostic_content_pack',
+    });
+  } finally {
+    check.close();
+  }
+});
+
+test('a model-reasoned generate decline is accepted only by on_error empty and is retried', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-generate-model-decline-'));
+  const db = openListDb({ listDir, readonly: false });
+  const step = {
+    id: 'diagnostic_content_pack',
+    kind: 'generate',
+    on_error: 'empty',
+    outputs: {
+      preliminary_snapshot: { type: 'string' },
+    },
+  };
+  let calls = 0;
+  const executeAction = async () => {
+    calls += 1;
+    return {
+      outputs: {},
+      reason: 'Without public evidence, a grounded preliminary snapshot would require unsupported claims.',
+      usage: {},
+    };
+  };
+  try {
+    upsertRecord({ db, row: { _row_id: 'model-decline', sequence_status: 'active' } });
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('model-decline');
+    const first = await runGenerateStep({
+      db,
+      listDir,
+      config: {},
+      step,
+      rows: [record],
+      executeAction,
+    });
+    const second = await runGenerateStep({
+      db,
+      listDir,
+      config: {},
+      step,
+      rows: [record],
+      executeAction,
+    });
+    const asset = db.prepare(`
+      SELECT status, reason FROM assets
+      WHERE row_id = ? AND step_id = ?
+    `).get('model-decline', step.id);
+
+    assert.equal(first.failed, 0);
+    assert.equal(first.processed, 1);
+    assert.equal(second.skipped_fresh, 0);
+    assert.equal(calls, 2);
+    assert.deepEqual(asset, {
+      status: 'empty',
+      reason: 'Without public evidence, a grounded preliminary snapshot would require unsupported claims.',
+    });
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM staleness WHERE record_id = ?').get('model-decline').n, 0);
+  } finally {
+    db.close();
+  }
+});
+
 test('a generate model result with no usable declared outputs fails without caching', async () => {
   const listDir = mkdtempSync(join(tmpdir(), 'ao-generate-empty-model-output-'));
   const db = openListDb({ listDir, readonly: false });
@@ -215,6 +423,7 @@ test('a generate model result with no usable declared outputs fails without cach
       preliminary_snapshot: { type: 'string' },
     },
   };
+  let calls = 0;
   try {
     upsertRecord({
       db,
@@ -232,7 +441,10 @@ test('a generate model result with no usable declared outputs fails without cach
       config: {},
       step,
       rows: [record],
-      executeAction: async () => ({ outputs: {}, artifacts: {}, usage: {} }),
+      executeAction: async () => {
+        calls += 1;
+        return { outputs: {}, artifacts: {}, usage: {} };
+      },
     });
 
     assert.equal(result.failed, 1);
@@ -250,6 +462,19 @@ test('a generate model result with no usable declared outputs fails without cach
         .get('empty_model_generate', step.id).n,
       0,
     );
+    const retry = await runGenerateStep({
+      db,
+      listDir,
+      config: {},
+      step,
+      rows: [record],
+      executeAction: async () => {
+        calls += 1;
+        return { outputs: {}, artifacts: {}, usage: {} };
+      },
+    });
+    assert.equal(retry.failed, 1);
+    assert.equal(calls, 2);
   } finally {
     db.close();
   }

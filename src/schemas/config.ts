@@ -973,7 +973,7 @@ const PipelineGenerateStepSchema = z.object({
   // semantic output values from a field name.
   fixture_outputs: z.record(z.unknown()).default({}),
   inputs: PipelineEnrichmentStepSchema.shape.inputs,
-  on_error: z.enum(['fail', 'empty']).default('empty'),
+  on_error: z.enum(['fail', 'empty']).default('fail'),
   ...PipelineWhenFields,
   prompt_file: PipelineEnrichmentStepSchema.shape.prompt_file,
   prompt_args: PipelineEnrichmentStepSchema.shape.prompt_args,

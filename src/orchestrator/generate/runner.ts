@@ -29,6 +29,7 @@ import {
   dependencyValuesForRecord,
   emptyOutputsFor,
   enrichDependencyHashes,
+  enrichStepUsesEmptyOnError,
   enrichmentActionNeedsMcp,
   enrichmentStepConfig,
   enrichmentCeilingSkipPatch,
@@ -354,6 +355,14 @@ const persistAsset = ({
     : insertAsset({ db, rowId: recordId, stepId, label, result, outputsJson, isReference, status, reason })
 );
 
+const clearGenerateStaleness = ({ db, recordId, stepId }: {
+  db: DbLike;
+  recordId: string;
+  stepId: string;
+}) => {
+  db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run([recordId, stepId]);
+};
+
 export const runGenerateStep = async ({
   db,
   listDir,
@@ -434,6 +443,19 @@ export const runGenerateStep = async ({
 
     if (stepConfig.requires_evidence === true && !businessEvidenceIsAvailable(currentRecord)) {
       const reason = 'needs_discovery: no_business_evidence';
+      if (!enrichStepUsesEmptyOnError(stepConfig)) {
+        const detail = declaredOutputFailure({
+          stepId: id,
+          outputNames: Object.keys(declaredOutputs),
+          detail: reason,
+        }).message;
+        clearGenerateStaleness({ db, recordId, stepId: id });
+        summary.failed += 1;
+        summary.errors.push({ record_id: recordId, error: detail });
+        summary.record_ids.push(recordId);
+        emit({ logger, event: { event: 'error', phase: 'generate', step: id, row: rowLabel, detail } });
+        return;
+      }
       const emptyOutputs = emptyOutputsFor(outputZod);
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: emptyOutputs });
       ensureRecordColumns({
@@ -460,6 +482,7 @@ export const runGenerateStep = async ({
       if (existing) summary.updated += 1;
       if (!existing) summary.inserted += 1;
       summary.record_ids.push(recordId);
+      summary.non_execution_reasons[recordId] = reason;
       emit({ logger, event: { event: 'row_complete', phase: 'generate', step: id, row: rowLabel, outcome: 'empty', reason } });
       return;
     }
@@ -570,11 +593,58 @@ export const runGenerateStep = async ({
       })();
       const outcome = outputOutcomeFor({ outputs: parsedOutputs, expectedOutputs });
       if (Object.keys(expectedOutputs).length > 0 && outcome === 'empty') {
-        throw declaredOutputFailure({
-          stepId: id,
-          outputNames: Object.keys(expectedOutputs),
-          detail: 'the model returned no usable output',
+        const reason = String(executionResult.reason || '').trim();
+        if (!enrichStepUsesEmptyOnError(stepConfig) || !reason) {
+          throw declaredOutputFailure({
+            stepId: id,
+            outputNames: Object.keys(expectedOutputs),
+            detail: 'the model returned no usable output',
+          });
+        }
+        const outputsJson = stringifyJson(parsedOutputs);
+        summary.declared_output_writes[recordId] = declaredOutputWritesFor({
+          stepConfig,
+          outputs: parsedOutputs,
         });
+        const isReference = isReferenceResult({ toolDriven, resultText: result, executionResult });
+        const referenceAsset = assetResultForReference({
+          isReference,
+          resultText: result,
+          outputs: parsedOutputs,
+          executionResult,
+          reason,
+        });
+        persistAsset({
+          db,
+          existing,
+          recordId,
+          stepId: id,
+          label: String(stepConfig.label || ''),
+          result: referenceAsset.result,
+          outputsJson,
+          isReference,
+          status: 'empty',
+          reason: referenceAsset.reason,
+        });
+        ensureRecordColumns({ db, columns: Object.keys(parsedOutputs) });
+        upsertRecord({ db, row: { ...inputRecord, ...parsedOutputs } });
+        recordCostEvent({
+          db,
+          listDir,
+          recordId,
+          stepId: `generate:${id}`,
+          model: String(executionResult.model || ''),
+          provider: String(executionResult.provider || ''),
+          usage: executionResult.usage,
+        });
+        clearGenerateStaleness({ db, recordId, stepId: id });
+        summary.processed += 1;
+        if (existing) summary.updated += 1;
+        if (!existing) summary.inserted += 1;
+        summary.record_ids.push(recordId);
+        summary.non_execution_reasons[recordId] = reason;
+        emit({ logger, event: { event: 'row_complete', phase: 'generate', step: id, row: rowLabel, outcome: 'empty', reason } });
+        return;
       }
 
       const outputsJson = Object.keys(expectedOutputs).length > 0 ? stringifyJson(parsedOutputs) : '{}';
@@ -641,6 +711,7 @@ export const runGenerateStep = async ({
             detail: rawDetail,
           }).message
           : rawDetail;
+      clearGenerateStaleness({ db, recordId, stepId: id });
       summary.failed += 1;
       summary.errors.push({ record_id: recordId, error: detail });
       summary.record_ids.push(recordId);
