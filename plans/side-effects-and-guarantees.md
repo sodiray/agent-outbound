@@ -205,8 +205,14 @@ Nothing was faked to paper over this — implying protection that does not exist
 promise the design exists to remove — but the gap is real and the plan was wrong to assume
 otherwise. It is the next piece of work.
 
-**The item 5 warning is noisier than it should be.** On a healthy, fully-valid config it produces
-13 warnings, all of them engine-written columns (`enrichment_cost_usd`, `duplicate_reason`,
-`invite_message`, the `policy_apply` confidence family) that the exemption list does not cover.
-A check people learn to ignore is worse than no check — this codebase already has one case where
-ignored warnings let three unenforced safety declarations reach a live pipeline.
+**The item 5 warning was noisier than it should be — now fixed.** On a healthy, fully-valid
+config it produced 13 false warnings from engine-written columns (`enrichment_cost_usd`,
+`duplicate_reason`, `invite_message`, the `policy_apply` confidence family), and a further 5
+from steps declaring exactly the fields their template interpolates, because the check read the
+template *reference* and never the template *body*. Both are closed (`83a8819`, `18a9be0`), each
+with a control proving the check still fires on the real condition rather than being switched
+off. A healthy config now warns zero times about either.
+
+That mattered more than the count suggests. A check people learn to ignore is worse than no
+check, and this codebase already has one case where ignored warnings let three unenforced safety
+declarations reach a live pipeline.
