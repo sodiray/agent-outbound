@@ -28,7 +28,10 @@ import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/to
 import { providerToolUsageFromError } from '../runtime/providers/usage.js';
 import { decisionMakerProviderNeedsMcp } from '../runtime/providers/decision-makers/index.js';
 import { executeDecisionMakersAction } from './actions/decision-makers.js';
-import { executeEmailVerificationAction } from './actions/email-verification.js';
+import {
+  executeEmailVerificationAction,
+  isEmailVerificationNoOpinion,
+} from './actions/email-verification.js';
 import { executeToolCallAction, isRecordScopedProviderToolError } from './actions/tool-call.js';
 import { executeLinkedinCompanyResolutionAction } from './actions/linkedin-company-resolution.js';
 import type { EmailVerificationProvider } from '../runtime/providers/email-verification/index.js';
@@ -557,6 +560,12 @@ export const enrichStepUsesEmptyOnError = (stepConfig: unknown) => {
   const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
   return String(config.on_error || 'fail').trim().toLowerCase() === 'empty';
 };
+
+const providerRetryAfter = (error: unknown) => (
+  error
+  && typeof error === 'object'
+  && String((error as { retry_after?: unknown }).retry_after || '').trim()
+);
 
 export const enrichmentActionNeedsMcp = (stepConfig: unknown) => {
   const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
@@ -1232,6 +1241,15 @@ export const executeEnrichmentStepOnRecords = async ({
         return { outcome: 'skipped', attempt, ceiling: true };
       }
 
+      if (isEmailVerificationNoOpinion(result)) {
+        const reason = `skipped:provider_no_opinion:${result.no_opinion_reason}`;
+        summary.processed += 1;
+        summary.record_ids.push(recordId);
+        summary.non_execution_reasons[recordId] = reason;
+        emitActivity({ event: 'row_complete', phase: 'pipeline', step: id, row: rowLabel, outcome: reason });
+        return { outcome: 'no_opinion', attempt };
+      }
+
       const outputs = result.outputs || {};
       const outcome = outputOutcomeFor({ outputs, expectedOutputs });
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs });
@@ -1342,6 +1360,32 @@ export const executeEnrichmentStepOnRecords = async ({
         summary.handled_errors.push(recordId);
         summary.record_ids.push(recordId);
         emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail });
+        return;
+      }
+      if (providerRetryAfter(error)) {
+        summary.failed += 1;
+        summary.errors.push({ record_id: recordId, error: detail });
+        clearStaleness({ db, recordId, stepId: id });
+        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
+        const evidencePatch = buildEnrichEvidencePatch({
+          record: currentRow,
+          step_id: id,
+          step_config: stepConfig,
+          error: detail,
+          failed: true,
+        });
+        upsertRecord({
+          db,
+          row: {
+            ...currentRow,
+            ...evidencePatch,
+            [statusColumn]: 'failed',
+            retry_count: Number(currentRow.retry_count || 0) + 1,
+            last_error: ownedLastError({ error: detail, stepId: id }),
+          },
+        });
+        summary.record_ids.push(recordId);
+        emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail, retry_deferred: true });
         return;
       }
       emitActivity({ event: 'row_retry', phase: 'pipeline', step: id, row: rowLabel, detail });

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
+import { executeEmailVerificationAction } from '../dist/orchestrator/enrichment/actions/email-verification.js';
 import { evaluateOutboundReadiness } from '../dist/orchestrator/policy/readiness.js';
 import { evaluateReachability } from '../dist/orchestrator/policy/timing-reachability.js';
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
@@ -109,7 +110,7 @@ const execute = async ({ db, root, step, provider, config = {}, force = false })
 ).get('email_verification_record');
 
 test('a declared generic verifier promotes a pipeline-supplied address into permitted email', async () => {
-  const provider = fakeProvider({ status: 'valid', confidence: 96, reason: '' });
+  const provider = fakeProvider({ kind: 'verdict', verification: { status: 'valid', confidence: 96, reason: '' } });
   const config = { pipeline: [contactSourceStep, verificationStep()] };
 
   assert.deepEqual(normalizeConfig(config).errors, []);
@@ -134,11 +135,11 @@ test('a declared generic verifier promotes a pipeline-supplied address into perm
 });
 
 test('a checked negative is durable and distinct from an unchecked pipeline-supplied address', async () => {
-  const provider = fakeProvider({
+  const provider = fakeProvider({ kind: 'verdict', verification: {
     status: 'invalid',
     confidence: 100,
     reason: 'mailbox_does_not_exist',
-  });
+  } });
 
   await withDb({ published_email: 'missing@acme.example' }, async ({ db, root }) => {
     await execute({ db, root, step: contactSourceStep, provider });
@@ -156,7 +157,7 @@ test('a checked negative is durable and distinct from an unchecked pipeline-supp
 });
 
 test('email verification honors the enrichment ceiling and never re-verifies a settled address', async () => {
-  const provider = fakeProvider({ status: 'verified', confidence: 100, reason: '' });
+  const provider = fakeProvider({ kind: 'verdict', verification: { status: 'verified', confidence: 100, reason: '' } });
 
   await withDb({ published_email: 'owner@acme.example' }, async ({ db, root }) => {
     await execute({ db, root, step: contactSourceStep, provider });
@@ -178,7 +179,7 @@ test('email verification honors the enrichment ceiling and never re-verifies a s
     `).get('email_verification_record', 'pipeline_enrich:verify_published_email').total, 0.05);
   });
 
-  const blockedProvider = fakeProvider({ status: 'valid', confidence: 100, reason: '' });
+  const blockedProvider = fakeProvider({ kind: 'verdict', verification: { status: 'valid', confidence: 100, reason: '' } });
   await withDb({
     published_email: 'owner@acme.example',
     candidate_tier: 'A',
@@ -204,6 +205,62 @@ test('email verification honors the enrichment ceiling and never re-verifies a s
     assert.match(outcome.reason, /^skipped:enrichment_ceiling/);
     assert.deepEqual(blockedProvider.calls, []);
     assert.equal(contact.email_verification_status, 'pipeline_supplied');
+  });
+});
+
+test('a quota failure is visible and leaves the prior verification verdict unchanged', async () => {
+  const provider = fakeProvider({
+    kind: 'failure',
+    failure: {
+      cause: 'quota',
+      message: 'Hunter verification quota exhausted for this billing period.',
+      retryable: true,
+      status: 429,
+      retry_after: '3600',
+    },
+  });
+
+  await withDb({ published_email: 'owner@acme.example' }, async ({ db, root }) => {
+    await execute({ db, root, step: contactSourceStep, provider });
+    const outcome = await execute({ db, root, step: verificationStep(), provider });
+    const contact = db.prepare('SELECT * FROM contacts WHERE row_id = ?').get('email_verification_record');
+
+    assert.equal(outcome.passed, false);
+    assert.match(outcome.reason, /provider "test-verifier" failed: quota/i);
+    assert.match(outcome.reason, /HTTP 429/);
+    assert.match(outcome.reason, /Retry-After: 3600/);
+    assert.equal(contact.email_verification_status, 'pipeline_supplied');
+    assert.equal(Number(contact.email_verification_confidence), 0);
+    assert.deepEqual(provider.calls, ['owner@acme.example']);
+  });
+});
+
+test('a provider no-opinion outcome is distinct from a failure and writes no verification verdict', async () => {
+  const provider = fakeProvider({ kind: 'no_opinion', reason: 'provider_has_no_opinion' });
+
+  await withDb({ published_email: 'owner@acme.example' }, async ({ db, root }) => {
+    await execute({ db, root, step: contactSourceStep, provider });
+    const directResult = await executeEmailVerificationAction({
+      db,
+      stepId: verificationStep().id,
+      stepConfig: verificationStep(),
+      record: currentRecord(db),
+      emailVerificationProvider: provider,
+    });
+    const contact = db.prepare('SELECT * FROM contacts WHERE row_id = ?').get('email_verification_record');
+
+    assert.deepEqual(directResult.artifacts, {
+      skipped: true,
+      reason: 'provider_has_no_opinion',
+      email: 'owner@acme.example',
+      provider: 'test-verifier',
+    });
+    const outcome = await execute({ db, root, step: verificationStep(), provider });
+
+    assert.equal(outcome.passed, true);
+    assert.equal(outcome.reason, 'skipped:provider_no_opinion:provider_has_no_opinion');
+    assert.equal(contact.email_verification_status, 'pipeline_supplied');
+    assert.equal(Number(contact.email_verification_confidence), 0);
   });
 });
 

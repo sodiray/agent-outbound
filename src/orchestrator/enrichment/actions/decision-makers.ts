@@ -11,15 +11,12 @@ import {
   type DecisionMakerCandidate,
   type DecisionMakerProvider,
 } from '../../runtime/providers/decision-makers/index.js';
+import {
+  emailVerificationProviderFailureError,
+  type EmailVerificationOutcome,
+} from '../../runtime/providers/email-verification/index.js';
 
-type EmailVerification = {
-  status: string;
-  confidence: number;
-  smtp_check: boolean;
-  disposable: boolean;
-};
-
-type EmailVerifier = (email: string) => Promise<EmailVerification | null>;
+type EmailVerifier = (email: string) => Promise<EmailVerificationOutcome>;
 
 type DecisionMakerActionInput = {
   db?: Parameters<typeof upsertContact>[0]['db'];
@@ -244,12 +241,21 @@ export const persistSupportedDecisionMakerCandidates = async ({
     && hasLiteralEmailSupport({ email: candidate.email, providerPayloads })
   ));
   const verified = await Promise.all(supported.map(async (candidate) => {
-    const verification = candidate.email_verification_status
+    const outcome = candidate.email_verification_status
       ? {
-        status: candidate.email_verification_status,
-        confidence: candidate.email_verification_confidence,
+        kind: 'verdict' as const,
+        verification: {
+          status: candidate.email_verification_status,
+          confidence: candidate.email_verification_confidence,
+        },
       }
-      : (candidate.email && emailVerifier ? await emailVerifier(candidate.email) : null);
+      : (candidate.email && emailVerifier
+        ? await emailVerifier(candidate.email)
+        : { kind: 'no_opinion' as const, reason: 'provider_has_no_opinion' });
+    if (outcome.kind === 'failure') {
+      throw emailVerificationProviderFailureError({ provider: candidate.source || 'email-verification', failure: outcome.failure });
+    }
+    const verification = outcome.kind === 'verdict' ? outcome.verification : null;
     return { candidate, verification };
   }));
 

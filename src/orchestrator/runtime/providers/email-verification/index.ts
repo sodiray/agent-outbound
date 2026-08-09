@@ -1,9 +1,15 @@
 import { HunterEmailVerificationProvider } from './hunter.js';
 import type { EmailVerificationProvider, EmailVerificationProviderFactory } from './types.js';
 
+export { emailVerificationProviderFailureError } from './types.js';
+
 export type {
   EmailVerificationProvider,
   EmailVerificationProviderFactory,
+  EmailVerificationOutcome,
+  EmailVerificationFailure,
+  EmailVerificationFailureCause,
+  EmailVerificationProviderFailureError,
   EmailVerificationResult,
 } from './types.js';
 

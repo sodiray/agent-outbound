@@ -2,7 +2,9 @@ import { getRecordRowId, nowIso } from '../../lib/record.js';
 import { upsertContact } from '../../runtime/db.js';
 import {
   resolveEmailVerificationProvider,
+  emailVerificationProviderFailureError,
   type EmailVerificationProvider,
+  type EmailVerificationOutcome,
   type EmailVerificationResult,
 } from '../../runtime/providers/email-verification/index.js';
 
@@ -12,6 +14,11 @@ type EmailVerificationActionInput = {
   stepConfig: Record<string, unknown>;
   record: Record<string, unknown>;
   emailVerificationProvider?: EmailVerificationProvider;
+};
+
+export type EmailVerificationNoOpinionResult = {
+  no_opinion: true;
+  no_opinion_reason: string;
 };
 
 const text = (value: unknown) => String(value || '').trim();
@@ -64,6 +71,36 @@ const validatedResult = (result: EmailVerificationResult) => {
   };
 };
 
+const providerOutcome = async ({
+  provider,
+  email,
+}: {
+  provider: EmailVerificationProvider;
+  email: string;
+}): Promise<EmailVerificationOutcome> => {
+  try {
+    return await provider.verify({ email });
+  } catch {
+    return {
+      kind: 'failure',
+      failure: {
+        cause: 'transport',
+        message: 'The provider threw before returning an email-verification outcome.',
+        retryable: true,
+      },
+    };
+  }
+};
+
+export const isEmailVerificationNoOpinion = (result: unknown): result is EmailVerificationNoOpinionResult => (
+  Boolean(
+    result
+    && typeof result === 'object'
+    && (result as EmailVerificationNoOpinionResult).no_opinion === true
+    && String((result as EmailVerificationNoOpinionResult).no_opinion_reason || '').trim(),
+  )
+);
+
 export const executeEmailVerificationAction = async ({
   db,
   stepId,
@@ -101,9 +138,21 @@ export const executeEmailVerificationAction = async ({
   const provider = emailVerificationProvider || resolveEmailVerificationProvider({
     provider: text(stepConfig.provider),
   });
-  const providerResult = await provider.verify({ email });
-  if (!providerResult) throw new Error(`Email-verification provider "${provider.id}" returned no result.`);
-  const verification = validatedResult(providerResult);
+  const outcome = await providerOutcome({ provider, email });
+  if (outcome.kind === 'failure') {
+    throw emailVerificationProviderFailureError({ provider: provider.id, failure: outcome.failure });
+  }
+  if (outcome.kind === 'no_opinion') {
+    return {
+      outputs: {},
+      artifacts: { skipped: true, reason: outcome.reason, email, provider: provider.id },
+      usage: verificationUsage({ provider: provider.id, usdCost: 0 }),
+      provider: provider.id,
+      no_opinion: true as const,
+      no_opinion_reason: outcome.reason,
+    };
+  }
+  const verification = validatedResult(outcome.verification);
   const verifiedAt = nowIso();
   upsertContact({
     db,

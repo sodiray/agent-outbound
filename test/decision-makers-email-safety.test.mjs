@@ -72,12 +72,12 @@ test('decision makers: persistence rejects a model-supplied email absent from th
       },
     }],
     sourcedAt: now,
-    emailVerifier: async () => ({
+    emailVerifier: async () => ({ kind: 'verdict', verification: {
       status: 'valid',
       confidence: 91,
       smtp_check: true,
       disposable: false,
-    }),
+    } }),
   });
 
   assert.deepEqual(persisted.map((item) => item.email), [literalEmail]);
@@ -119,14 +119,41 @@ test('Hunter verifier persists provider status and score without exposing its AP
   });
 
   assert.deepEqual(verification, {
-    status: 'valid',
-    confidence: 100,
-    smtp_check: true,
-    disposable: false,
+    kind: 'verdict',
+    verification: {
+      status: 'valid',
+      confidence: 100,
+      smtp_check: true,
+      disposable: false,
+    },
   });
   assert.equal(requests.length, 1);
   assert.match(requests[0], /^https:\/\/api\.hunter\.io\/v2\/email-verifier\?/);
   assert.match(requests[0], /email=owner%40example\.test/);
+});
+
+test('Hunter verifier exposes quota failures with HTTP status and Retry-After', async () => {
+  const verification = await verifyHunterEmail({
+    email: 'owner@example.test',
+    apiKey: 'test-key-not-a-secret',
+    fetchImpl: async () => new Response(JSON.stringify({
+      errors: [{ details: 'You\'ve reached the limit for the number of verifications per billing period included in your plan.' }],
+    }), {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'retry-after': '3600' },
+    }),
+  });
+
+  assert.deepEqual(verification, {
+    kind: 'failure',
+    failure: {
+      cause: 'quota',
+      message: 'Hunter verification quota exhausted for this billing period.',
+      retryable: true,
+      status: 429,
+      retry_after: '3600',
+    },
+  });
 });
 
 test('email reachability: discovery confidence cannot ready an unverified or invalid address', () => {

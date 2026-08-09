@@ -1,8 +1,12 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { getEnv } from '../../env.js';
 import { getMcpClient } from '../../mcp.js';
 import { executeComposioTool } from '../../tools.js';
 import { asArray, asRecord, emptyCandidate, numeric, text } from './shared.js';
+import { verifyHunterEmail } from '../email-verification/hunter.js';
+import {
+  emailVerificationProviderFailureError,
+  type EmailVerificationResult,
+} from '../email-verification/types.js';
 import type {
   DecisionMakerCandidate,
   DecisionMakerProvider,
@@ -13,12 +17,8 @@ import type {
   DecisionMakerSearchResult,
 } from './types.js';
 
-export type HunterEmailVerification = {
-  status: string;
-  confidence: number;
-  smtp_check: boolean;
-  disposable: boolean;
-};
+export type HunterEmailVerification = EmailVerificationResult;
+export { verifyHunterEmail } from '../email-verification/hunter.js';
 
 const payloadFrom = (response: unknown) => {
   const root = asRecord(response);
@@ -64,45 +64,6 @@ const candidatesFrom = ({
   }).filter((candidate) => candidate.name || candidate.email || candidate.title);
 };
 
-const verificationPayload = (payload: unknown): Record<string, unknown> => {
-  const root = asRecord(payload);
-  const data = asRecord(root.data);
-  return Object.keys(data).length > 0 ? data : root;
-};
-
-export const verifyHunterEmail = async ({
-  email,
-  apiKey = getEnv('HUNTER_API_KEY'),
-  fetchImpl = globalThis.fetch,
-}: {
-  email: string;
-  apiKey?: string;
-  fetchImpl?: typeof fetch;
-}): Promise<HunterEmailVerification | null> => {
-  const normalizedEmail = text(email);
-  const normalizedApiKey = text(apiKey);
-  if (!normalizedEmail || !normalizedApiKey || typeof fetchImpl !== 'function') return null;
-
-  const url = new URL('https://api.hunter.io/v2/email-verifier');
-  url.searchParams.set('email', normalizedEmail);
-  url.searchParams.set('api_key', normalizedApiKey);
-  try {
-    const response = await fetchImpl(url, { headers: { accept: 'application/json' } });
-    if (!response.ok) return null;
-    const data = verificationPayload(await response.json());
-    const status = text(data.status).toLowerCase();
-    if (!status) return null;
-    return {
-      status,
-      confidence: Math.max(0, Math.min(100, numeric(data.score))),
-      smtp_check: data.smtp_check === true,
-      disposable: data.disposable === true,
-    };
-  } catch {
-    return null;
-  }
-};
-
 export class HunterDecisionMakerProvider implements DecisionMakerProvider {
   id = 'hunter';
   private mcp: Client | null;
@@ -129,9 +90,13 @@ export class HunterDecisionMakerProvider implements DecisionMakerProvider {
   }
 
   async reveal(input: DecisionMakerRevealInput): Promise<DecisionMakerRevealResult> {
-    const verification = input.candidate.email
+    const outcome = input.candidate.email
       ? await verifyHunterEmail({ email: input.candidate.email })
-      : null;
+      : { kind: 'no_opinion' as const, reason: 'email_missing' };
+    if (outcome.kind === 'failure') {
+      throw emailVerificationProviderFailureError({ provider: this.id, failure: outcome.failure });
+    }
+    const verification = outcome.kind === 'verdict' ? outcome.verification : null;
     return {
       contact: {
         ...input.candidate,
