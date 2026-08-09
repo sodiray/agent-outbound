@@ -377,8 +377,8 @@ test('email: ready draft sends via sink; second send is idempotent skip', async 
         step_id: 'email_1',
         channel: 'email',
         status: 'ready',
-        subject: 'Approved subject',
-        body: 'Approved body for sink send',
+        subject: 'Operational snapshot',
+        body: 'Hello from channel real-path proof',
       },
     });
     record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
@@ -401,8 +401,8 @@ test('email: ready draft sends via sink; second send is idempotent skip', async 
     const sinkFiles = readdirSync(sinkDir).filter((f) => f.endsWith('.json'));
     assert.ok(sinkFiles.length >= 1, 'expected at least one SMTP sink file');
     const sent = JSON.parse(readFileSync(join(sinkDir, sinkFiles[0]), 'utf8'));
-    assert.equal(sent.subject, 'Approved subject');
-    assert.equal(sent.body, 'Approved body for sink send');
+    assert.equal(sent.subject, 'Operational snapshot');
+    assert.equal(sent.body, 'Hello from channel real-path proof');
     assert.equal(sent.headers, undefined);
 
     const second = await executeChannelStep({
@@ -446,8 +446,8 @@ test('email headers: a declared static header appears on the sent email', async 
         step_id: 'email_1',
         channel: 'email',
         status: 'ready',
-        subject: 'Static header subject',
-        body: 'Static header body',
+        subject: 'Operational snapshot',
+        body: 'Hello from channel real-path proof',
       },
     });
 
@@ -493,8 +493,8 @@ test('email headers: a declared record-field header resolves per record', async 
         step_id: 'email_1',
         channel: 'email',
         status: 'ready',
-        subject: 'Record header subject',
-        body: 'Record header body',
+        subject: 'Operational snapshot',
+        body: 'Hello from channel real-path proof',
       },
     });
 
@@ -544,8 +544,8 @@ test('email: a send with no derivable idempotency key refuses before transmissio
         step_id: 'email_no_idempotency',
         channel: 'email',
         status: 'ready',
-        subject: 'Approved subject',
-        body: 'Approved body',
+        subject: 'Operational snapshot',
+        body: 'Hello from channel real-path proof',
       },
     });
     const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');
@@ -592,8 +592,8 @@ test('email: concurrent same-record sends transmit exactly once', async () => {
         step_id: 'email_1',
         channel: 'email',
         status: 'ready',
-        subject: 'Approved subject',
-        body: 'Approved body',
+        subject: 'Operational snapshot',
+        body: 'Hello from channel real-path proof',
       },
     });
     const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('fixture_channel_1');

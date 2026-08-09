@@ -20,6 +20,28 @@ const internalSourceFields = new Set([
 
 const text = (value: unknown): string => String(value ?? '').trim();
 
+export const assertApprovedOutboundContent = ({
+  approvedContentHash,
+  renderedContentHash,
+}: {
+  approvedContentHash: unknown;
+  renderedContentHash: unknown;
+}): { ok: true } | { ok: false; reason: string } => {
+  const approved = text(approvedContentHash);
+  const rendered = text(renderedContentHash);
+  if (!approved) {
+    return {
+      ok: false,
+      reason: 'Approved draft has no rendered-content hash; refusing to send unverifiable content.',
+    };
+  }
+  if (approved === rendered) return { ok: true };
+  return {
+    ok: false,
+    reason: 'Rendered content changed after approval.',
+  };
+};
+
 const isInternalSourceField = (value: unknown): boolean =>
   internalSourceFields.has(text(value).toLowerCase());
 

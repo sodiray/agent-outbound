@@ -470,6 +470,9 @@ const SCHEMA_SQL = `
     reason TEXT DEFAULT '',
     artifacts_json TEXT DEFAULT '{}',
     content_binding_json TEXT DEFAULT '{}',
+    content_hash TEXT DEFAULT '',
+    template_id TEXT DEFAULT '',
+    template_version INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY(row_id) REFERENCES records(_row_id) ON DELETE CASCADE
@@ -1155,6 +1158,9 @@ const ensureScoreEventCompatibility = (db) => {
 
 const ensureDraftCompatibility = (db) => {
   try { db.exec("ALTER TABLE drafts ADD COLUMN content_binding_json TEXT DEFAULT '{}'"); } catch {}
+  try { db.exec("ALTER TABLE drafts ADD COLUMN content_hash TEXT DEFAULT ''"); } catch {}
+  try { db.exec("ALTER TABLE drafts ADD COLUMN template_id TEXT DEFAULT ''"); } catch {}
+  try { db.exec('ALTER TABLE drafts ADD COLUMN template_version INTEGER'); } catch {}
 };
 
 const ensureLiveInteractionLedgerCompatibility = (db) => {
@@ -3377,14 +3383,19 @@ export const insertDraft = ({ db, draft }) => {
   const contentBinding = draft?.content_binding && typeof draft.content_binding === 'object'
     ? draft.content_binding
     : {};
+  const contentHash = String(draft?.content_hash || '') || createHash('sha256')
+    .update(JSON.stringify({ subject: String(draft?.subject || ''), body: String(draft?.body || '') }))
+    .digest('hex');
   db.prepare(`
     INSERT INTO drafts (
       draft_id, row_id, sequence_name, step_number, step_id, channel, status,
       subject, body, reason, artifacts_json, content_binding_json,
+      content_hash, template_id, template_version,
       created_at, updated_at
     ) VALUES (
       @draft_id, @row_id, @sequence_name, @step_number, @step_id, @channel, @status,
       @subject, @body, @reason, @artifacts_json, @content_binding_json,
+      @content_hash, @template_id, @template_version,
       @created_at, @updated_at
     )
   `).run({
@@ -3400,6 +3411,9 @@ export const insertDraft = ({ db, draft }) => {
     reason: String(draft?.reason || ''),
     artifacts_json: safeJson(draft?.artifacts || {}),
     content_binding_json: safeJson(contentBinding),
+    content_hash: contentHash,
+    template_id: String(draft?.template_id || ''),
+    template_version: draft?.template_version == null ? null : Number(draft.template_version),
     created_at: String(draft?.created_at || now),
     updated_at: String(draft?.updated_at || now),
   });
@@ -3411,6 +3425,21 @@ export const updateDraft = ({ db, draftId, patch }) => {
   if (!existing) return null;
   // Draft approve/edit/reject always touches a record — canary gate is mandatory.
   enforceCanaryRecordMutation(db, existing.row_id || (patch as any)?.row_id);
+  const contentChanged = Boolean(
+    patch && (
+      Object.prototype.hasOwnProperty.call(patch, 'subject')
+      || Object.prototype.hasOwnProperty.call(patch, 'body')
+    ),
+  );
+  const updatedSubject = contentChanged && Object.prototype.hasOwnProperty.call(patch, 'subject')
+    ? String((patch as any).subject || '')
+    : String(existing.subject || '');
+  const updatedBody = contentChanged && Object.prototype.hasOwnProperty.call(patch, 'body')
+    ? String((patch as any).body || '')
+    : String(existing.body || '');
+  const updatedContentHash = createHash('sha256')
+    .update(JSON.stringify({ subject: updatedSubject, body: updatedBody }))
+    .digest('hex');
   const merged = {
     ...existing,
     ...patch,
@@ -3424,6 +3453,15 @@ export const updateDraft = ({ db, draftId, patch }) => {
           ? (patch as any).content_binding_json
           : safeJson((patch as any).content_binding_json))
         : existing.content_binding_json),
+    content_hash: patch && Object.prototype.hasOwnProperty.call(patch, 'content_hash')
+      ? String((patch as any).content_hash || '')
+      : (contentChanged ? updatedContentHash : String(existing.content_hash || '')),
+    template_id: patch && Object.prototype.hasOwnProperty.call(patch, 'template_id')
+      ? String((patch as any).template_id || '')
+      : String(existing.template_id || ''),
+    template_version: patch && Object.prototype.hasOwnProperty.call(patch, 'template_version')
+      ? ((patch as any).template_version == null ? null : Number((patch as any).template_version))
+      : existing.template_version,
     updated_at: nowIso(),
   };
   db.prepare(`
@@ -3434,6 +3472,9 @@ export const updateDraft = ({ db, draftId, patch }) => {
         reason = @reason,
         artifacts_json = @artifacts_json,
         content_binding_json = @content_binding_json,
+        content_hash = @content_hash,
+        template_id = @template_id,
+        template_version = @template_version,
         updated_at = @updated_at
     WHERE draft_id = @draft_id
   `).run({
@@ -3444,6 +3485,9 @@ export const updateDraft = ({ db, draftId, patch }) => {
     reason: String(merged.reason || ''),
     artifacts_json: String(merged.artifacts_json || '{}'),
     content_binding_json: String(merged.content_binding_json || '{}'),
+    content_hash: String(merged.content_hash || ''),
+    template_id: String(merged.template_id || ''),
+    template_version: merged.template_version == null ? null : Number(merged.template_version),
     updated_at: String(merged.updated_at),
   });
   return db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1').get(existing.draft_id);

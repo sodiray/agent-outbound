@@ -69,7 +69,8 @@ import {
   applyLinkedinInviteSent,
   evaluateLinkedinConnectGate,
 } from '../policy/linkedin-lifecycle.js';
-import { assertOutboundContent } from '../lib/outbound-content.js';
+import { assertApprovedOutboundContent, assertOutboundContent } from '../lib/outbound-content.js';
+import { hashRenderedOutboundContent, renderCurrentEmailDraftContent } from '../lib/draft-content.js';
 import { resolveEmailHeaders } from '../lib/email-headers.js';
 import { stageInputRecord } from '../lib/stage-inputs.js';
 import { resolveLinkedinInvitationMessage } from './unipile.js';
@@ -2126,6 +2127,80 @@ export const executeChannelStep = async ({
           };
         }
       }
+      if (approvedDraft) {
+        const rendered = renderCurrentEmailDraftContent({
+          config: projectConfig || {},
+          record: sendRecord,
+          sequenceName: String(sequenceName || 'default'),
+          stepId: sequenceStepId,
+          fallbackStep: step,
+        });
+        if ('reason' in rendered) {
+          return {
+            status: 'skipped',
+            reason: `Draft content cannot be re-rendered; refusing to send. ${rendered.reason}`,
+            provider_id: '',
+            auto_skipped_steps: [],
+            readiness_blockers: ['draft_content_rerender_unavailable'],
+          };
+        }
+        const contentApproval = assertApprovedOutboundContent({
+          approvedContentHash: approvedDraft.content_hash,
+          renderedContentHash: rendered.content.contentHash,
+        });
+        if ('reason' in contentApproval) {
+          const freshDraftId = `draft_${randomUUID()}`;
+          try {
+            const supersede = db.transaction(() => {
+              updateDraft({
+                db,
+                draftId: String(approvedDraft.draft_id),
+                patch: {
+                  status: 'superseded',
+                  reason: `${contentApproval.reason} Superseded by ${freshDraftId}.`,
+                  content_binding: {},
+                },
+              });
+              insertDraft({
+                db,
+                draft: {
+                  draft_id: freshDraftId,
+                  row_id: recordId,
+                  sequence_name: String(sequenceName || 'default'),
+                  step_number: Number(stepNumber || 0),
+                  step_id: sequenceStepId,
+                  channel: 'email',
+                  status: 'pending_approval',
+                  subject: rendered.content.subject,
+                  body: rendered.content.body,
+                  reason: `Supersedes ${String(approvedDraft.draft_id)} because rendered content changed after approval.`,
+                  content_hash: rendered.content.contentHash,
+                  template_id: rendered.content.templateId,
+                  template_version: rendered.content.templateVersion,
+                  content_binding: {},
+                  artifacts: { supersedes_draft_id: String(approvedDraft.draft_id) },
+                },
+              });
+            });
+            supersede();
+          } catch {
+            return {
+              status: 'skipped',
+              reason: `${contentApproval.reason} Refusing to send because a replacement draft could not be queued.`,
+              provider_id: '',
+              auto_skipped_steps: [],
+              readiness_blockers: ['draft_content_changed'],
+            };
+          }
+          return {
+            status: 'skipped',
+            reason: `${contentApproval.reason} Draft superseded; fresh approval required.`,
+            provider_id: '',
+            auto_skipped_steps: [],
+            readiness_blockers: ['draft_content_changed'],
+          };
+        }
+      }
       // Exclusive claim immediately before provider side-effect (after all gates).
       const emailSuppression = evaluateTransmitterSuppression({
         db,
@@ -2456,6 +2531,11 @@ export const executeChannelStep = async ({
               subject: draftSubject,
               body: draftBody,
               reason: String(stepResult.reason || (usesAssetId && !assetForStep ? `Asset not found for step ${usesAssetId}` : '')),
+              content_hash: hashRenderedOutboundContent({ subject: draftSubject, body: draftBody }),
+              template_id: String(draftTemplateContext.template_id || ''),
+              template_version: draftTemplateContext.template_version == null
+                ? null
+                : Number(draftTemplateContext.template_version),
               content_binding: {},
               artifacts: {
                 summary: stepResult.summary || '',

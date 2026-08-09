@@ -22,6 +22,8 @@ import { resolveSendMailbox } from '../orchestrator/lib/mailboxes.js';
 import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
 import type { ResolvedReviewPresentation } from '../orchestrator/policy/review-presentation.js';
 import { resolveReviewPresentation } from '../orchestrator/policy/review-presentation.js';
+import { renderCurrentEmailDraftContent } from '../orchestrator/lib/draft-content.js';
+import { assertApprovedOutboundContent } from '../orchestrator/lib/outbound-content.js';
 
 /**
  * Compose the same material asset_version send uses:
@@ -232,10 +234,45 @@ const decodeCursor = (cursor: string) => {
   }
 };
 
+const pendingDraftContentEquivalence = ({
+  config,
+  draft,
+  record,
+}: {
+  config: Record<string, unknown> | null;
+  draft: Record<string, unknown>;
+  record: Record<string, unknown> | undefined;
+}) => {
+  if (!config || !record || String(draft.channel || '').trim().toLowerCase() !== 'email') {
+    return { status: 'unavailable', reason: 'Current email content cannot be re-rendered.' };
+  }
+  const rendered = renderCurrentEmailDraftContent({
+    config,
+    record,
+    sequenceName: String(draft.sequence_name || 'default'),
+    stepId: String(draft.step_id || ''),
+  });
+  if ('reason' in rendered) return { status: 'unavailable', reason: rendered.reason };
+  const approval = assertApprovedOutboundContent({
+    approvedContentHash: draft.content_hash,
+    renderedContentHash: rendered.content.contentHash,
+  });
+  return 'reason' in approval
+    ? { status: 'changed', reason: approval.reason }
+    : { status: 'matches', reason: '' };
+};
+
 export const draftsListCommand = ({ list, status = '', step = 0, cursor = '', limit = 100 }) => {
   const listDir = resolveListDir(list);
   const db = openListDb({ listDir, readonly: true });
   try {
+    const config = (() => {
+      try {
+        return readConfig(listDir).config as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })();
     const clauses = ['1=1'];
     const params: any[] = [];
     if (status) {
@@ -256,7 +293,15 @@ export const draftsListCommand = ({ list, status = '', step = 0, cursor = '', li
       offset,
     });
     const hasMore = rows.length > pageLimit;
-    const pageRows = hasMore ? rows.slice(0, pageLimit) : rows;
+    const pageRows = (hasMore ? rows.slice(0, pageLimit) : rows).map((row: Record<string, unknown>) => {
+      if (String(row.status || '') !== 'pending_approval') return row;
+      const record = db.prepare('SELECT * FROM records WHERE _row_id = ? LIMIT 1')
+        .get(String(row.row_id || '')) as Record<string, unknown> | undefined;
+      return {
+        ...row,
+        content_equivalence: pendingDraftContentEquivalence({ config, draft: row, record }),
+      };
+    });
     return {
       rows: pageRows,
       count: pageRows.length,
