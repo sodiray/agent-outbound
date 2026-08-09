@@ -199,14 +199,39 @@ test('compose permits ordinary prose without audit metadata', async () => {
   });
 });
 
+test('compose keeps ordinary sentence boundaries, sentence-openers, granted name parts, and durations out of invented-specifics', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: liveStep(),
+      rows: [{ ...record, business_name: 'Liberty Asset Group Luxury Property Management' }],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: {
+          outputs: {
+            email_subject: 'A Property management question',
+            email_body: 'Most teams want a read on where the time goes. Worth a quick conversation? It is a practical next step.\n\nWe can take 10 minutes today or follow up in 3 days.\n\nRay\nMission',
+          },
+        },
+        usage: {},
+      }),
+    });
+    assert.equal(result.failed, 0, JSON.stringify(result.errors));
+  });
+});
+
 test('compose rejects invented specifics with an accurate per-record reason', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const claims = [
       { text: 'Acme is based in Boise.', reason: /proper name or place "Boise"/ },
       { text: 'Acme employs 14 people.', reason: /number "14 people"/ },
+      { text: 'Acme reports $2.4 million in annual revenue.', reason: /number "\$2\.4 million"/ },
+      { text: 'Call 208-555-0123 to compare notes.', reason: /phone number "208-555-0123"/ },
       { text: 'Your company offers commercial lending.', reason: /service line "commercial lending"/ },
       { text: 'reach alex@madeup.test.', reason: /email address "alex@madeup\.test"/ },
-      { text: 'visit https://madeup.test/portal.', reason: /URL or domain "https:\/\/madeup\.test\/portal"/ },
+      { text: 'visit madeup.com for details.', reason: /URL or domain "madeup\.com"/ },
     ];
     for (const claim of claims) {
       const result = await runComposeStep({
@@ -229,6 +254,9 @@ test('compose rejects invented specifics with an accurate per-record reason', as
       assert.equal(result.failed, 1, claim.text);
       assert.match(result.errors[0].error, /invented specifics/i);
       assert.match(result.errors[0].error, claim.reason);
+      assert.match(result.errors[0].error, /checked against granted inputs: person=/i);
+      assert.match(result.errors[0].error, /account=/i);
+      assert.match(result.errors[0].error, /friction=/i);
       assert.doesNotMatch(result.errors[0].error, /schema/i);
     }
   });

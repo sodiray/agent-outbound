@@ -43,6 +43,7 @@
     "js-yaml": "^4.1.0",
     "mailparser": "^3.9.14",
     "radash": "^12.0.0",
+    "tlds": "^1.261.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

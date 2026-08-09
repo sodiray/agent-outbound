@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { createRequire } from 'node:module';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
@@ -94,16 +95,12 @@ const sentenceCount = (text: string) => text
 const hasTemplateHole = (text: string) => /\{\{[\s\S]*?\}\}/.test(text);
 
 type SpecificToken = {
-  kind: 'email address' | 'number' | 'proper name or place' | 'service line' | 'URL or domain';
+  kind: 'email address' | 'number' | 'phone number' | 'proper name or place' | 'service line' | 'URL or domain';
   value: string;
 };
 
-const ordinaryCapitalizedWords = new Set([
-  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'best', 'but', 'can', 'could', 'dear', 'every', 'for', 'from',
-  'hello', 'hey', 'hi', 'how', 'i', 'if', 'in', 'is', 'it', 'may', 'of', 'on', 'our', 'please', 'regards',
-  'should', 'thank', 'thanks', 'the', 'this', 'to', 'we', 'what', 'when', 'where', 'will', 'with', 'worth',
-  'would', 'you', 'your',
-]);
+const tlds = createRequire(import.meta.url)('tlds') as string[];
+const plausibleTopLevelDomains = new Set([...tlds, 'example', 'invalid', 'localhost', 'test']);
 
 const normalizedSpecific = (value: string) => value
   .normalize('NFKC')
@@ -114,6 +111,16 @@ const normalizedSpecific = (value: string) => value
 const isSentenceInitialCapitalizedWord = ({ source, index }: { source: string; index: number }) => {
   const prefix = source.slice(0, index);
   return /(?:^|[.!?\r\n])(?:[\p{Z}\t"“”'‘’()[\]{}]*|[\p{Z}\t"“”'‘’()[\]{}]*(?:[-*•]|\d+[.)])[\p{Z}\t]*)$/u.test(prefix);
+};
+
+const overlaps = (match: RegExpMatchArray, otherMatches: RegExpMatchArray[]) => {
+  const start = match.index || 0;
+  const end = start + match[0].length;
+  return otherMatches.some((otherMatch) => {
+    const otherStart = otherMatch.index || 0;
+    const otherEnd = otherStart + otherMatch[0].length;
+    return start < otherEnd && otherStart < end;
+  });
 };
 
 const uniqueSpecifics = (tokens: SpecificToken[]) => {
@@ -134,18 +141,21 @@ const specificTokens = ({ text, discountSentenceInitialCapitalizedWords = true }
   const urls = Array.from(source.matchAll(/\b(?:https?:\/\/|www\.)[^\s<>()]+/giu))
     .map((match) => match[0].replace(/[.,!?;:]+$/u, ''));
   const emails = Array.from(source.matchAll(/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/giu)).map((match) => match[0]);
-  const domains = Array.from(source.matchAll(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b/giu))
+  const domains = Array.from(source.matchAll(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,63})\b/giu))
+    .filter((match) => match[1] === match[1].toLowerCase() && plausibleTopLevelDomains.has(match[1].toLowerCase()))
     .map((match) => match[0])
     .filter((domain) => !urls.some((url) => url.includes(domain)) && !emails.some((email) => email.endsWith(`@${domain}`)));
-  const numbers = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:[$€£¥]\s*)?\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:%|people|employees|staff|users|locations|offices|vans))?(?![\p{L}\p{N}])/giu))
+  const phoneMatches = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:(?:\+|00)\d{1,3}[\s.-]?)?(?:(?:\(\d{2,4}\)|\d{2,4})[\s.-]?){2,3}\d{3,4}(?![\p{L}\p{N}])/gu));
+  const phoneNumbers = phoneMatches.map((match) => match[0]);
+  const numbers = Array.from(source.matchAll(/(?<![\p{L}\p{N}])(?:[$€£¥]\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:k|m|bn?|million|billion|trillion))?|\d+(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s*%|\d+(?:,\d{3})*(?:\.\d+)?\s+(?:people|employees|staff|users|locations|offices|vans|customers|clients|units|properties|dollars?|euros?|pounds?))(?![\p{L}\p{N}])/giu))
+    .filter((match) => !overlaps(match, phoneMatches))
     .map((match) => match[0]);
   const names = Array.from(source.matchAll(/\p{Lu}[\p{L}\p{M}'’-]*/gu))
     .filter((match) => (
       !discountSentenceInitialCapitalizedWords
       || !isSentenceInitialCapitalizedWord({ source, index: match.index })
     ))
-    .map((match) => match[0])
-    .filter((word) => !ordinaryCapitalizedWords.has(normalizedSpecific(word)));
+    .map((match) => match[0]);
   const serviceLines = Array.from(source.matchAll(/\b(?:you|your\s+(?:company|business|team|firm|organization|organisation))\s+(?:offer|offers|provide|provides|sell|sells|speciali[sz]e\s+in|speciali[sz]es\s+in)\s+([\p{L}\p{M}'’& -]{2,80}?)(?:[.!?\n]|$)/giu))
     .map((match) => match[1].trim());
 
@@ -153,6 +163,7 @@ const specificTokens = ({ text, discountSentenceInitialCapitalizedWords = true }
     ...urls.map((value) => ({ kind: 'URL or domain' as const, value })),
     ...emails.map((value) => ({ kind: 'email address' as const, value })),
     ...domains.map((value) => ({ kind: 'URL or domain' as const, value })),
+    ...phoneNumbers.map((value) => ({ kind: 'phone number' as const, value })),
     ...numbers.map((value) => ({ kind: 'number' as const, value })),
     ...names.map((value) => ({ kind: 'proper name or place' as const, value })),
     ...serviceLines.map((value) => ({ kind: 'service line' as const, value })),
@@ -175,12 +186,19 @@ const inventedSpecifics = ({ step, outputs, inputs }: {
     discountSentenceInitialCapitalizedWords: false,
   }).map((token) => normalizedSpecific(token.value)));
   const normalizedGrantedText = normalizedSpecific(grantedText);
+  const grantedNameParts = new Set(Array.from(grantedText.matchAll(/[\p{L}\p{M}'’-]+/gu))
+    .map((match) => normalizedSpecific(match[0])));
   const outputTokens = specificTokens({ text: Object.values(outputs).join('\n') });
   return outputTokens.filter((token) => (
     !allowed.has(normalizedSpecific(token.value))
+    && !(token.kind === 'proper name or place' && grantedNameParts.has(normalizedSpecific(token.value)))
     && !(token.kind === 'service line' && normalizedGrantedText.includes(normalizedSpecific(token.value)))
   ));
 };
+
+const describeGrantedInputs = (inputs: Record<string, string>) => Object.entries(inputs)
+  .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+  .join(', ');
 
 const repairKnownMojibake = (text: string) => text
   .replaceAll('â€”', '—')
@@ -247,7 +265,7 @@ const validateResult = ({ step, object, inputs }: {
     const detail = ungrantedSpecifics
       .map((token) => `${token.kind} "${token.value}"`)
       .join(', ');
-    throw new ComposeStepError(`Compose invented specifics not granted by inputs or trusted structure/rules: ${detail}.`);
+    throw new ComposeStepError(`Compose invented specifics not granted by inputs or trusted structure/rules: ${detail}. Checked against granted inputs: ${describeGrantedInputs(inputs)}; trusted structure/rules: ${JSON.stringify(trustedComposeText(step))}.`);
   }
   const complete = Object.values(outputs).join('\n');
   if (step.length?.max_words !== undefined && wordCount(complete) > step.length.max_words) {
