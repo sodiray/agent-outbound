@@ -369,6 +369,30 @@ const INBOUND_RECORD_FIELDS = new Set([
   'suppressed_contact_ids', 'suppressed_contact_ids_json',
 ]);
 
+/**
+ * These values are owned by engine lifecycle code rather than a configured
+ * pipeline output. Keep this allowlist narrow: an unknown record field should
+ * warn until its writer is made explicit here.
+ */
+const ENGINE_MANAGED_RECORD_FIELDS = new Set([
+  // Near-duplicate sourcing writes the deduplication decision onto the record.
+  'duplicate_reason',
+  // Scoring persists its coverage and legacy JSON compatibility projection.
+  'fit_coverage', 'fit_breakdown_json',
+  // Policy application and the cost ledger persist deterministic readiness state.
+  'identity_confidence', 'phone_confidence', 'buyer_confidence', 'mail_confidence',
+  'mail_address_ready', 'timing_score', 'strong_signal_strength', 'strong_signal_count',
+  'enrichment_cost_usd',
+]);
+
+const EMPTY_FIELD_SET = new Set<string>();
+const LINKEDIN_ENGINE_RESOLVED_FIELDS = new Set(['invite_message', 'message', 'connection_note', 'body']);
+
+const engineResolvedFieldsForStep = (step: Record<string, unknown>): ReadonlySet<string> => {
+  const kind = String(step?.kind || '').trim().toLowerCase();
+  return kind === 'linkedin_connect' ? LINKEDIN_ENGINE_RESOLVED_FIELDS : EMPTY_FIELD_SET;
+};
+
 const configuredRecordFields = (config: any, options: PipelineGraphOptions = {}) => {
   const source = config?.source || {};
   const searches = Array.isArray(source?.searches) ? source.searches : [];
@@ -408,10 +432,17 @@ export const abandonedStateReadWarnings = (config: any, options: PipelineGraphOp
     const id = stepId(step);
     if (!id) return [];
     const kind = String(step?.kind || '').trim();
+    const engineResolved = engineResolvedFieldsForStep(step);
     const references = stageInputReferences(step, options);
     const byField = new Map<string, string[]>();
     references.forEach(({ field, source }) => {
-      if (!field || produced.has(field) || supplied.has(field)) return;
+      if (
+        !field
+        || produced.has(field)
+        || supplied.has(field)
+        || ENGINE_MANAGED_RECORD_FIELDS.has(field)
+        || engineResolved.has(field)
+      ) return;
       byField.set(field, [...(byField.get(field) || []), source]);
     });
     return Array.from(byField.entries()).map(([field, sources]) => (
