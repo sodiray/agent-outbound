@@ -1074,6 +1074,11 @@ const ComposeStructureSchema = z.record(z.union([
   z.array(z.string().min(1)).min(1),
 ])).refine((structure) => Object.keys(structure).length > 0, 'compose structure must not be empty.');
 
+const ComposeOutputDefSchema = EnrichmentOutputDefSchema.extend({
+  type: z.literal('string'),
+  append: z.string().min(1).optional(),
+});
+
 const PipelineComposeStepSchema = z.object({
   kind: z.literal('compose'),
   id: z.string().min(1),
@@ -1094,7 +1099,7 @@ const PipelineComposeStepSchema = z.object({
     (length) => length.max_words !== undefined || length.max_sentences !== undefined,
     'compose length must declare max_words or max_sentences.',
   ),
-  outputs: z.record(EnrichmentOutputDefSchema.extend({ type: z.literal('string') })).refine(
+  outputs: z.record(ComposeOutputDefSchema).refine(
     (outputs) => Object.keys(outputs).length > 0,
     'compose outputs must not be empty.',
   ),

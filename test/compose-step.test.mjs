@@ -226,6 +226,105 @@ test('compose permits a trusted opt-out line after a two-line sign-off', async (
   });
 });
 
+test('compose appends declared literal output text verbatim after model composition', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const literal = '\n\nRay\nMission\n\nReply STOP and I will not contact you again.';
+    const appendStep = {
+      ...liveStep(),
+      length: { max_words: 12, max_sentences: 2 },
+      structure: {
+        email_subject: 'Account name.',
+        email_body: ['Greeting.', 'One short call to action.'],
+      },
+      outputs: {
+        email_subject: { type: 'string', description: 'Subject.' },
+        email_body: { type: 'string', description: 'Body.', append: literal },
+      },
+    };
+    const modelBody = 'Hi there, worth a quick conversation?';
+    const prompts = [];
+
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: appendStep,
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async (request) => {
+        prompts.push(request.prompt);
+        return {
+          object: {
+            outputs: { email_subject: 'Acme', email_body: modelBody },
+          },
+          usage: {},
+        };
+      },
+    });
+
+    assert.equal(result.failed, 0, JSON.stringify(result.errors));
+    assert.equal(result.declared_output_writes[record._row_id].email_body.value, `${modelBody}${literal}`);
+    assert.equal(db.prepare('SELECT email_body FROM records WHERE _row_id = ?').get(record._row_id).email_body, `${modelBody}${literal}`);
+    assert.equal(prompts[0].includes(literal), false);
+    assert.deepEqual(normalizeConfig({ pipeline: [appendStep] }).errors, []);
+    const [asset] = getAssetsForRow({ db, rowId: record._row_id });
+    assert.deepEqual(JSON.parse(asset.outputs_json).appends, { email_body: literal });
+  });
+});
+
+test('compose checks only model text for invented specifics before appending declared literal output text', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const literal = '\n\nRay Mission Reply STOP and I will not contact you again.';
+    const appendedStep = {
+      ...liveStep(),
+      outputs: {
+        email_subject: { type: 'string', description: 'Subject.' },
+        email_body: { type: 'string', description: 'Body.', append: literal },
+      },
+    };
+    const accepted = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: appendedStep,
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject: async () => ({
+        object: {
+          outputs: {
+            email_subject: 'Acme',
+            email_body: 'Hi there, worth a quick conversation?',
+          },
+        },
+        usage: {},
+      }),
+    });
+    assert.equal(accepted.failed, 0, JSON.stringify(accepted.errors));
+    assert.equal(accepted.declared_output_writes[record._row_id].email_body.value, `Hi there, worth a quick conversation?${literal}`);
+
+    const rejected = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: appendedStep,
+      rows: [record],
+      stepId: 'channel_copy',
+      force: true,
+      generateObject: async () => ({
+        object: {
+          outputs: {
+            email_subject: 'Acme',
+            email_body: 'Hi there, Ray Vision Holdings can help.',
+          },
+        },
+        usage: {},
+      }),
+    });
+    assert.equal(rejected.failed, 1);
+    assert.match(rejected.errors[0].error, /invented specifics.*Ray Vision Holdings/i);
+  });
+});
+
 test('compose rejects a fabricated multi-word business name', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const result = await runComposeStep({
