@@ -167,17 +167,22 @@ sequences:
   }
 });
 
-test('enrichment idempotency is rejected instead of silently ignored', () => {
+// This declaration used to be rejected outright, which left an author-built
+// step that spends money with no duplicate-execution protection at all. It is
+// now carried through to the runtime rather than accepted and ignored.
+test('enrichment idempotency is honoured instead of silently ignored', () => {
   const result = normalizeConfig({
     pipeline: [{
       kind: 'enrich',
       id: 'lookup',
       idempotency: { key_source: ['_row_id'], scope: 'list' },
+      inputs: ['business_name'],
       outputs: { lookup_result: { type: 'string', description: 'Lookup result' } },
     }],
   });
 
-  assert.ok(result.errors.some((error) => /idempotency/i.test(error)));
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.config.pipeline[0].idempotency, { key_source: ['_row_id'], scope: 'list' });
 });
 
 test('unsupported traditional-sequencer step config is rejected instead of silently ignored', () => {

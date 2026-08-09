@@ -7,6 +7,12 @@ import { getRecordRowId } from '../lib/record.js';
 import { randomUUID } from 'node:crypto';
 import { insertDraft, upsertRecord } from '../runtime/db.js';
 import {
+  buildIdempotencyKey,
+  claimIdempotency,
+  completeIdempotency,
+  failIdempotency,
+} from '../runtime/idempotency.js';
+import {
   flattenPipelineSteps,
   PIPELINE_ROUTE_TARGET,
   stepSubpipelineName,
@@ -259,6 +265,137 @@ const authorApprovalOutcome = ({
   return { passed: false, parked: true, reason: 'Awaiting author step approval.' };
 };
 
+/**
+ * The author's duplicate-execution declaration, if any.
+ *
+ * Steps whose transmission the engine owns claim their own key inside the send
+ * path (`config.idempotency`); guarding them here too would open a second,
+ * unrelated key for the same effect.
+ */
+const authorIdempotency = (
+  step: PipelineStepLike,
+): { keySource: string[]; scope: string } | null => {
+  const kind = textValue(step.kind);
+  if (kind.startsWith('send_') || kind === 'linkedin_connect') return null;
+  const declared = (step as Record<string, unknown>).idempotency;
+  if (!declared || typeof declared !== 'object' || Array.isArray(declared)) return null;
+  const spec = declared as Record<string, unknown>;
+  return {
+    keySource: Array.isArray(spec.key_source) ? spec.key_source.map((field) => String(field)) : [],
+    scope: textValue(spec.scope, 'list'),
+  };
+};
+
+/**
+ * Execute rows under author-declared idempotency: one completed execution per
+ * key, ever. A failure leaves the claim retryable; an execution whose outcome
+ * was never observed becomes `uncertain` and requires a human, because the
+ * engine cannot ask an author's tool whether it already spent the money.
+ */
+const executeWithIdempotency = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+  spec: { keySource: string[]; scope: string },
+): Promise<Map<string, StepExecutionOutcome>> => {
+  const outcomes = new Map<string, StepExecutionOutcome>();
+  const claimed: Array<{
+    record: Record<string, unknown>;
+    idemKey: string;
+    claimId: string;
+  }> = [];
+
+  for (const record of rows) {
+    const recordId = getRecordRowId(record);
+    const idemKey = buildIdempotencyKey({
+      keySource: spec.keySource,
+      record,
+      scope: spec.scope,
+      context: { step_id: stepId },
+    });
+    const claim = claimIdempotency({
+      db: ctx.db,
+      idemKey,
+      scope: spec.scope,
+      payload: { step_id: stepId, kind: textValue(step.kind) },
+    });
+    if (claim.claimed) {
+      claimed.push({ record, idemKey, claimId: claim.claim_id });
+      continue;
+    }
+    if (claim.status === 'sent') {
+      outcomes.set(recordId, { passed: true, reason: 'skipped_idempotent_already_executed' });
+      continue;
+    }
+    if (claim.status === 'uncertain') {
+      outcomes.set(recordId, {
+        passed: false,
+        errored: true,
+        reason: `idempotency_requires_reconcile:${claim.reason}`,
+      });
+      continue;
+    }
+    outcomes.set(recordId, { passed: false, reason: `skipped_idempotency_${claim.reason}` });
+  }
+
+  if (claimed.length === 0) return outcomes;
+
+  let executed: Map<string, StepExecutionOutcome>;
+  try {
+    executed = await executeStepBatchUnchecked(ctx, step, stepId, claimed.map((entry) => entry.record));
+  } catch (error) {
+    // The batch died mid-flight: we cannot tell which effects landed. Never
+    // silently re-run an author's effect on the strength of a thrown error.
+    for (const entry of claimed) {
+      failIdempotency({
+        db: ctx.db,
+        idemKey: entry.idemKey,
+        scope: spec.scope,
+        claimId: entry.claimId,
+        payload: { provider_uncertain: true, error: String((error as Error)?.message || error) },
+      });
+    }
+    throw error;
+  }
+
+  for (const entry of claimed) {
+    const recordId = getRecordRowId(entry.record);
+    const outcome = executed.get(recordId) || {
+      passed: false,
+      errored: true,
+      reason: 'step_outcome_missing',
+    };
+    const ran = outcome.passed && !outcome.errored;
+    if (ran) {
+      completeIdempotency({
+        db: ctx.db,
+        idemKey: entry.idemKey,
+        scope: spec.scope,
+        claimId: entry.claimId,
+        payload: { reason: textValue(outcome.reason) },
+      });
+    } else {
+      // A failing step the author declared world-touching did not necessarily
+      // fail to touch the world — the engine cannot ask an author's tool
+      // whether the money left. Recording `failed` would assert it did not and
+      // hand the next run a licence to do it again, so this stays `uncertain`
+      // until a person reconciles it. Steps that touch nothing retry freely.
+      failIdempotency({
+        db: ctx.db,
+        idemKey: entry.idemKey,
+        scope: spec.scope,
+        claimId: entry.claimId,
+        payload: step.side_effecting === true
+          ? { provider_uncertain: true, reason: textValue(outcome.reason) }
+          : { reason: textValue(outcome.reason) },
+      });
+    }
+    outcomes.set(recordId, outcome);
+  }
+  return outcomes;
+};
+
 const executeWithAuthorApproval = async (
   ctx: StepExecutionContext,
   step: PipelineStepLike,
@@ -273,7 +410,10 @@ const executeWithAuthorApproval = async (
     return false;
   });
   if (approvedRows.length === 0) return gated;
-  const executed = await executeStepBatchUnchecked(ctx, step, stepId, approvedRows);
+  const idempotency = authorIdempotency(step);
+  const executed = idempotency
+    ? await executeWithIdempotency(ctx, step, stepId, approvedRows, idempotency)
+    : await executeStepBatchUnchecked(ctx, step, stepId, approvedRows);
   return new Map(rows.map((record) => {
     const recordId = getRecordRowId(record);
     return [recordId, gated.get(recordId) || executed.get(recordId) || {

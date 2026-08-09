@@ -1364,7 +1364,14 @@ export const executeEnrichmentStepOnRecords = async ({
         emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail });
         return;
       }
-      if (providerRetryAfter(error)) {
+      // A step the author declared world-touching is never retried automatically.
+      // The engine cannot tell a call that failed before it did anything from one
+      // that failed after it did everything, so the same reasoning that stops the
+      // provider waterfall advancing on an external send stops a second attempt
+      // here: a silent retry of a purchase is a second purchase. The failure is
+      // recorded and left for a deliberate, observable re-run instead.
+      const authorDeclaredSideEffect = (step as { side_effecting?: unknown })?.side_effecting === true;
+      if (providerRetryAfter(error) || authorDeclaredSideEffect) {
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: detail });
         clearStaleness({ db, recordId, stepId: id });

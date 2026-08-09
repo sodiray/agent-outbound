@@ -811,6 +811,11 @@ const PipelineAuthorStepVocabulary = {
   side_effecting: z.boolean().optional(),
   draft_approval_required: z.boolean().optional(),
   review: ReviewPresentationSchema,
+  // Duplicate-execution protection for effects the engine cannot inspect or
+  // undo. Approval decides whether an effect happens at all; this is what keeps
+  // it from happening twice. Steps whose transmission the engine owns
+  // (send_*, linkedin_connect) claim their own key on the send path instead.
+  idempotency: IdempotencySchema.optional(),
 };
 
 // Deterministic pre-insert exclusion: a sourced row matching ANY rule is never
@@ -950,12 +955,6 @@ const PipelineEnrichmentStepSchema = z.object({
   ...PipelineWhenFields,
   prompt_file: z.string().default(''),
   prompt_args: z.record(z.any()).default({}),
-  idempotency: z.unknown().superRefine((_value, context) => {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: 'idempotency is only supported by external side-effect steps',
-    });
-  }).optional(),
 }).partial({
   description: true,
   depends_on: true,
