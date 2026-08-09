@@ -5,7 +5,7 @@ import { avgStepCostUsd } from '../lib/costs.js';
 import { getRecordRowId, nowIso } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { prepareFieldCheckValueFiles } from '../lib/field-check-values.js';
-import { countEnrichWorkForStep, enrichmentStepNeedsMcp, readStaleness, writeStaleness } from '../enrichment/runner.js';
+import { enrichmentStepNeedsMcp, readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { closeMcpClient, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
@@ -66,6 +66,7 @@ type RecordState = {
   record: DataflowRecord;
   resolved: Set<string>;
   pending: Set<string>;
+  attempted: Set<string>;
   errored: Set<string>;
   status: { dropped: boolean };
 };
@@ -90,6 +91,7 @@ type DataflowCoreOptions = {
   isApplicable?: (recordState: RecordState, step: DataflowStep) => boolean;
   isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
   onStepOutcome: (recordState: RecordState, step: DataflowStep, outcome: StepExecutionOutcome) => Promise<{ record?: DataflowRecord; dropped?: boolean; resolved?: boolean; errored?: boolean }>;
+  onStepNotAttempted?: (recordState: RecordState, step: DataflowStep, reason: string) => Promise<void>;
   loadStep: (step: DataflowStep, record: DataflowRecord, inFlight: () => number) => Promise<StepExecutionOutcome>;
 };
 
@@ -340,6 +342,29 @@ const nextStep = ({
   }))
   .sort(compareCost)[0] || null;
 
+const notAttemptedReason = ({
+  recordState,
+  step,
+  applicable,
+  isTimeReady,
+}: {
+  recordState: RecordState;
+  step: DataflowStep;
+  applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
+}) => {
+  if (recordState.status.dropped) return 'skipped:record_dropped';
+  if (recordState.errored.size > 0) return `skipped:upstream_errored:${[...recordState.errored].join(',')}`;
+  if (!step.executable) return `skipped:unsupported_step_kind:${step.kind || 'unknown'}`;
+  if (recordState.resolved.has(step.id)) return 'skipped:already_resolved';
+  if (recordState.pending.has(step.id)) return 'skipped:pending';
+  const unmet = step.deps.filter((dep) => !recordState.resolved.has(dep));
+  if (unmet.length > 0) return `skipped:unresolved_dependencies:${unmet.join(',')}`;
+  if (!applicable(recordState, step)) return 'skipped:not_applicable';
+  if (!isTimeReady(recordState, step)) return 'skipped:not_time_ready';
+  return 'skipped:not_scheduled';
+};
+
 const withAdvancePermit = async <T>(state: SchedulerState, limit: number, task: () => Promise<T>): Promise<T> => {
   const release = await acquireAdvancePermit(state, limit);
   try {
@@ -386,6 +411,7 @@ export const runDataflowCore = async ({
   isApplicable = defaultApplicable,
   isTimeReady,
   onStepOutcome,
+  onStepNotAttempted,
   loadStep,
 }: DataflowCoreOptions): Promise<DataflowCoreSummary> => {
   const state: SchedulerState = {
@@ -396,6 +422,7 @@ export const runDataflowCore = async ({
   };
   const resolvedByRecord = new Map<string, Set<string>>();
   const pendingByRecord = new Map<string, Set<string>>();
+  const attemptedByRecord = new Map<string, Set<string>>();
   const erroredByRecord = new Map<string, Set<string>>();
   const statusByRecord = new Map<string, { dropped: boolean }>();
   const sharedSet = (sets: Map<string, Set<string>>, id: string, initial?: Set<string>) => {
@@ -416,6 +443,7 @@ export const runDataflowCore = async ({
     record,
     resolved: sharedSet(resolvedByRecord, getRecordRowId(record), initialResolvedByRecord.get(getRecordRowId(record))),
     pending: sharedSet(pendingByRecord, getRecordRowId(record)),
+    attempted: sharedSet(attemptedByRecord, getRecordRowId(record)),
     errored: sharedSet(erroredByRecord, getRecordRowId(record)),
     status: sharedStatus(getRecordRowId(record)),
   }));
@@ -431,6 +459,16 @@ export const runDataflowCore = async ({
       return candidate;
     });
     if (!selected) {
+      if (onStepNotAttempted) {
+        await Promise.all(steps
+          .filter((step) => !recordState.attempted.has(step.id))
+          .map((step) => onStepNotAttempted(recordState, step, notAttemptedReason({
+            recordState,
+            step,
+            applicable: isApplicable,
+            isTimeReady,
+          }))));
+      }
       if (process.env.AO_DATAFLOW_DEBUG === '1') {
         const rid = getRecordRowId(recordState.record);
         const why = steps.map((candidate) => {
@@ -449,6 +487,7 @@ export const runDataflowCore = async ({
       state.completedOrder = [...state.completedOrder, getRecordRowId(recordState.record)];
       return;
     }
+    recordState.attempted.add(selected.id);
     const outcomePromise = await withAdvancePermitImmediate(state, concurrency, () => loadStep(selected, recordState.record, () => state.activeAdvancers));
     const persisted = await withAdvancePermit(state, concurrency, async () => onStepOutcome(recordState, selected, outcomePromise));
     recordState.pending.delete(selected.id);
@@ -601,10 +640,6 @@ const makeTimeReadiness = ({
   return new Date(wakeAt).getTime() <= new Date(now).getTime();
 };
 
-const enrichWork = ({ db, listDir, config, step, stepId, record, force }: { db: any; listDir: string; config: Record<string, unknown>; step: any; stepId: string; record: DataflowRecord; force: boolean }) => (
-  countEnrichWorkForStep({ db, listDir, config, step, stepId, rows: [record], force })
-);
-
 const hasAwaitingReviewEvent = ({ db, recordId, stepId }: { db: any; recordId: string; stepId: string }) => Boolean(db.prepare(`
   SELECT 1
   FROM pipeline_events
@@ -706,12 +741,6 @@ const initializeResolved = ({
         .map((entry) => entry.id);
       kept.forEach((id) => initial.add(id));
     }
-    steps
-      .filter((entry) => entry.kind === 'enrich' && !initial.has(entry.id))
-      .forEach((entry) => {
-        const work = enrichWork({ db, listDir, config, step: entry.step, stepId: entry.id, record: row, force });
-        if (Number(work.would_enrich || 0) === 0) initial.add(entry.id);
-      });
     return [recordId, initial] as [string, Set<string>];
   }));
 };
@@ -754,9 +783,7 @@ const makeApplicable = ({ db, listDir, config, force }: { db: any; listDir: stri
       `).get(recordId, step.id)?.ok);
       return completed;
     }
-    if (step.kind !== 'enrich') return true;
-    const work = enrichWork({ db, listDir, config: config as Record<string, unknown>, step: step.step, stepId: step.id, record: recordState.record, force });
-    return Number(work.would_enrich || 0) > 0;
+    return true;
   };
 };
 
@@ -857,7 +884,9 @@ export const runPipelineDataflow = async ({
     // Keep generates required by a non-generate policy step.
     // Non-critical generate stays deferred unless AO_RUN_GENERATE=1 or run_in_pipeline.
     // Fixture mode still includes the full generate graph for deterministic dry runs.
-    const steps = selectDataflowSteps(buildSteps({ db, steps: rawSteps }));
+    const declaredSteps = buildSteps({ db, steps: rawSteps });
+    const steps = selectDataflowSteps(declaredSteps);
+    const deferredSteps = declaredSteps.filter((step) => !steps.some((selected) => selected.id === step.id));
     // Select canary-allowed in-play set FIRST. A declared contact writer must
     // run before reachability reconciliation: an unreachable record can carry
     // the field or provider result that repairs its delivery state.
@@ -909,6 +938,7 @@ export const runPipelineDataflow = async ({
       records_in: rows.length,
       by_step: byStep,
       survivors: rows.length,
+      declared_steps: declaredSteps.length,
       steps: steps.length,
       processed: 0,
       failed: 0,
@@ -917,6 +947,8 @@ export const runPipelineDataflow = async ({
       awaiting_review: 0,
       newly_parked: 0,
       skipped_passed: 0,
+      deferred: 0,
+      not_attempted: 0,
       errors: unsupportedStepErrors(steps) as any[],
     };
     const resolvedByRecord = initializeResolved({ db, listDir, config, rows, steps, force, reapply, overridesByRecord });
@@ -935,6 +967,24 @@ export const runPipelineDataflow = async ({
     const runId = beginRun(db, { phase: 'pipeline', target: rows.length, message: `Filtering ${rows.length} records` });
     const progressState = { done: 0 };
     const heartbeatTimer = setInterval(() => heartbeat(db, runId), 3000);
+    for (const row of rows) {
+      const recordId = getRecordRowId(row);
+      for (const step of deferredSteps) {
+        insertPipelineEvent({
+          db,
+          event: {
+            event_id: randomUUID(),
+            record_id: recordId,
+            step_id: step.id,
+            kind: step.kind,
+            passed: false,
+            reason: 'skipped:deferred_generate',
+            occurred_at: clockIso(clock),
+          },
+        });
+        summary.deferred += 1;
+      }
+    }
     const contextFor = createLazyExecutionContext({
       db,
       listDir,
@@ -1259,6 +1309,23 @@ export const runPipelineDataflow = async ({
           record: refreshRecord({ db, record: recordState.record }),
           dropped: action === 'dropped',
         };
+      },
+      onStepNotAttempted: async (recordState, step, reason) => {
+        const recordId = getRecordRowId(recordState.record);
+        insertPipelineEvent({
+          db,
+          event: {
+            event_id: randomUUID(),
+            record_id: recordId,
+            step_id: step.id,
+            kind: step.kind,
+            passed: false,
+            reason,
+            occurred_at: clockIso(clock),
+          },
+        });
+        summary.not_attempted += 1;
+        emitActivity({ event: 'row_skipped', phase: 'pipeline', step: step.id, kind: step.kind, row: recordId, reason });
       },
     }).finally(async () => {
       clearInterval(heartbeatTimer);
