@@ -2006,7 +2006,7 @@ const run = async () => {
       const step = consumeFlag(argv, '--step', '');
       if (!step) throw new Error('manual complete/skip requires --step STEP_ID');
       const note = consumeFlag(argv, '--note', '');
-      print(manualCompleteCommand({ list, record, step, note, skip: sub === 'skip' }));
+      print(await manualCompleteCommand({ list, record, step, note, skip: sub === 'skip' }));
       return;
     }
     throw new Error(`Unknown manual subcommand: ${sub}`);
