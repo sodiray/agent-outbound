@@ -74,6 +74,12 @@ const CLAIM_ENGINE_OUTPUT_FIELDS = new Set([
   'catalog_evidence_json',
 ]);
 
+/** Engine-owned pipeline outcome when a generate step produces no usable declared outputs. */
+export const EMPTY_DECLARED_OUTPUTS_REASON = 'empty_declared_outputs';
+
+/** Engine-owned pipeline outcome when requires_evidence blocks the model call. */
+export const NEEDS_DISCOVERY_NO_BUSINESS_EVIDENCE_REASON = 'needs_discovery: no_business_evidence';
+
 const stringifyJson = (value: unknown) => {
   try {
     return JSON.stringify(value ?? {});
@@ -413,6 +419,8 @@ export const runGenerateStep = async ({
     record_ids: [] as string[],
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
     non_execution_reasons: {} as Record<string, string>,
+    /** Structural non-success completions (on_error: empty) — not hard failures, not passes. */
+    recorded_non_success: {} as Record<string, string>,
   };
 
   await mapWithConcurrency<GenerateRecord, void>(rows || [], async (record) => {
@@ -442,7 +450,7 @@ export const runGenerateStep = async ({
     }
 
     if (stepConfig.requires_evidence === true && !businessEvidenceIsAvailable(currentRecord)) {
-      const reason = 'needs_discovery: no_business_evidence';
+      const reason = NEEDS_DISCOVERY_NO_BUSINESS_EVIDENCE_REASON;
       if (!enrichStepUsesEmptyOnError(stepConfig)) {
         const detail = declaredOutputFailure({
           stepId: id,
@@ -483,6 +491,7 @@ export const runGenerateStep = async ({
       if (!existing) summary.inserted += 1;
       summary.record_ids.push(recordId);
       summary.non_execution_reasons[recordId] = reason;
+      summary.recorded_non_success[recordId] = reason;
       emit({ logger, event: { event: 'row_complete', phase: 'generate', step: id, row: rowLabel, outcome: 'empty', reason } });
       return;
     }
@@ -593,14 +602,18 @@ export const runGenerateStep = async ({
       })();
       const outcome = outputOutcomeFor({ outputs: parsedOutputs, expectedOutputs });
       if (Object.keys(expectedOutputs).length > 0 && outcome === 'empty') {
-        const reason = String(executionResult.reason || '').trim();
-        if (!enrichStepUsesEmptyOnError(stepConfig) || !reason) {
+        // Structural emptiness alone decides non-success. on_error chooses hard-fail vs
+        // recorded non-pass — never whether emptiness counts, and never whether the model
+        // wrote prose into `reason`.
+        if (!enrichStepUsesEmptyOnError(stepConfig)) {
           throw declaredOutputFailure({
             stepId: id,
             outputNames: Object.keys(expectedOutputs),
             detail: 'the model returned no usable output',
           });
         }
+        const engineReason = EMPTY_DECLARED_OUTPUTS_REASON;
+        const modelReason = String(executionResult.reason || '').trim();
         const outputsJson = stringifyJson(parsedOutputs);
         summary.declared_output_writes[recordId] = declaredOutputWritesFor({
           stepConfig,
@@ -612,7 +625,8 @@ export const runGenerateStep = async ({
           resultText: result,
           outputs: parsedOutputs,
           executionResult,
-          reason,
+          // Model prose stays on the asset as human context; pipeline outcome uses engineReason.
+          reason: modelReason,
         });
         persistAsset({
           db,
@@ -624,7 +638,7 @@ export const runGenerateStep = async ({
           outputsJson,
           isReference,
           status: 'empty',
-          reason: referenceAsset.reason,
+          reason: referenceAsset.reason || engineReason,
         });
         ensureRecordColumns({ db, columns: Object.keys(parsedOutputs) });
         upsertRecord({ db, row: { ...inputRecord, ...parsedOutputs } });
@@ -642,8 +656,20 @@ export const runGenerateStep = async ({
         if (existing) summary.updated += 1;
         if (!existing) summary.inserted += 1;
         summary.record_ids.push(recordId);
-        summary.non_execution_reasons[recordId] = reason;
-        emit({ logger, event: { event: 'row_complete', phase: 'generate', step: id, row: rowLabel, outcome: 'empty', reason } });
+        summary.non_execution_reasons[recordId] = engineReason;
+        summary.recorded_non_success[recordId] = engineReason;
+        emit({
+          logger,
+          event: {
+            event: 'row_complete',
+            phase: 'generate',
+            step: id,
+            row: rowLabel,
+            outcome: 'empty',
+            reason: engineReason,
+            model_reason: modelReason || undefined,
+          },
+        });
         return;
       }
 

@@ -256,10 +256,13 @@ pipeline:
       status: 'empty',
       reason: 'needs_discovery: no_business_evidence',
     });
+    // Structural empty under on_error: empty is recorded non-success (passed: 0), not a pass.
+    // Descendants still run because the step resolves without errored.
     assert.deepEqual(events.map((event) => ({ step_id: event.step_id, passed: event.passed })), [
-      { step_id: 'diagnostic_content_pack', passed: 1 },
+      { step_id: 'diagnostic_content_pack', passed: 0 },
       { step_id: 'downstream_assignment', passed: 1 },
     ]);
+    assert.equal(events[0].reason, 'needs_discovery: no_business_evidence');
     assert.equal(staleness.n, 0);
   } finally {
     check.close();

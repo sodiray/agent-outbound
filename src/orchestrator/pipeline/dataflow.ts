@@ -1169,6 +1169,10 @@ export const runPipelineDataflow = async ({
             emitActivity({ event: 'error', phase: 'pipeline', step: step.id, row: recordId, detail: error, errored: true });
             return { record: refreshRecord({ db, record: recordState.record }), resolved: false, errored: true };
           }
+          // Persist the step's own pass verdict. For generate, structural emptiness under
+          // on_error: empty is passed:false + errored:false; we still resolve so dependents
+          // unlock, while hasPassedStep remains false. Enrich soft-handled tool failures
+          // already set passed:false here (was previously overwritten to true).
           insertPipelineEvent({
             db,
             event: {
@@ -1176,7 +1180,7 @@ export const runPipelineDataflow = async ({
               record_id: recordId,
               step_id: step.id,
               kind: step.kind,
-              passed: true,
+              passed: Boolean(outcome.passed),
               reason: String(outcome.reason || ''),
               side_effecting: Boolean(step.step?.side_effecting),
               occurred_at: now,
@@ -1188,6 +1192,7 @@ export const runPipelineDataflow = async ({
           progressState.done += 1;
           tickProgress(db, runId, { done: progressState.done, target: rows.length });
           emitActivity({ event: 'step_complete', phase: 'pipeline', step: step.id, kind: step.kind, processed: outcome.passed ? 1 : 0, failed: outcome.passed ? 0 : 1 });
+          // Resolve even when !passed so the graph continues; not errored so no strand.
           return { record: refreshRecord({ db, record: recordState.record }) };
         }
 

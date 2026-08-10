@@ -586,6 +586,10 @@ const executeGenerateBatch = async (
   rows: Array<Record<string, unknown>>,
 ) => {
   const { runGenerateStep } = await import('../generate/runner.js');
+  // Tests inject a model result via step.__executeAction (same seam pattern as enrich __tryTool).
+  const injectedExecute = typeof (step as { __executeAction?: unknown }).__executeAction === 'function'
+    ? (step as { __executeAction: typeof import('../enrichment/runner.js').executeEnrichmentAction }).__executeAction
+    : undefined;
   const result = await runGenerateStep({
     db: ctx.db as any,
     listDir: ctx.listDir,
@@ -596,6 +600,7 @@ const executeGenerateBatch = async (
     rows,
     stepId,
     force: Boolean(ctx.force),
+    ...(injectedExecute ? { executeAction: injectedExecute } : {}),
   });
   const failures = new Map((Array.isArray(result.errors) ? result.errors : []).map((error) => [
     String(error.record_id || '').trim(),
@@ -607,17 +612,34 @@ const executeGenerateBatch = async (
   const nonExecutionReasons = result.non_execution_reasons && typeof result.non_execution_reasons === 'object'
     ? result.non_execution_reasons as Record<string, string>
     : {};
+  const recordedNonSuccess = result.recorded_non_success && typeof result.recorded_non_success === 'object'
+    ? result.recorded_non_success as Record<string, string>
+    : {};
   const outcomes = new Map<string, StepExecutionOutcome>();
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     const failure = failures.get(recordId);
-    outcomes.set(recordId, failure
-      ? { passed: false, reason: failure, errored: true }
-      : {
-        passed: true,
-        reason: nonExecutionReasons[recordId] || '',
+    if (failure) {
+      outcomes.set(recordId, { passed: false, reason: failure, errored: true });
+      return;
+    }
+    // Structural emptiness under on_error: empty is recorded non-success: not a pass,
+    // not a hard error. Dependents still resolve; hasPassedStep is false.
+    const nonSuccessReason = String(recordedNonSuccess[recordId] || '').trim();
+    if (nonSuccessReason) {
+      outcomes.set(recordId, {
+        passed: false,
+        reason: nonSuccessReason,
+        errored: false,
         declaredOutputWrites: declaredOutputWrites[recordId],
       });
+      return;
+    }
+    outcomes.set(recordId, {
+      passed: true,
+      reason: nonExecutionReasons[recordId] || '',
+      declaredOutputWrites: declaredOutputWrites[recordId],
+    });
   });
   return outcomes;
 };
