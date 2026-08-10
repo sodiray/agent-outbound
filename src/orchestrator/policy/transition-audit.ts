@@ -663,23 +663,27 @@ export function authorizeStageReview(input: {
   );
 
   // Already-terminal reviews cannot be re-authorized.
+  // Do not rewrite stage_review_json: a refused authorize must not erase the
+  // prior decision's actor/notes (history / reopen audit trail).
   const prior = input.existing?.status;
   const alreadyTerminal = prior === 'authorized' || prior === 'rejected' || prior === 'invalidated';
   if (alreadyTerminal && input.decision === 'authorize') {
-    const authorization: StageReviewAuthorization = {
-      review_id: input.review_id,
-      stage_id: input.stage_id,
-      asset_version: input.asset_version,
-      status: prior!,
-      account_id,
-      contact_id: input.contact_id ?? input.existing?.contact_id ?? null,
-      authorized_by: input.existing?.authorized_by ?? null,
-      authorized_at: input.existing?.authorized_at ?? null,
-      notes: input.notes || `refused: review already ${prior}`,
-      policy_version: STAGE_REVIEW_POLICY_VERSION,
-      presentation: input.existing?.presentation ?? null,
-      pending_action_snapshot: input.existing?.pending_action_snapshot ?? null,
-    };
+    const authorization: StageReviewAuthorization = input.existing && isReviewObject(input.existing)
+      ? { ...input.existing, status: prior! }
+      : {
+        review_id: input.review_id,
+        stage_id: input.stage_id,
+        asset_version: input.asset_version,
+        status: prior!,
+        account_id,
+        contact_id: input.contact_id ?? input.existing?.contact_id ?? null,
+        authorized_by: input.existing?.authorized_by ?? null,
+        authorized_at: input.existing?.authorized_at ?? null,
+        notes: input.existing?.notes,
+        policy_version: STAGE_REVIEW_POLICY_VERSION,
+        presentation: input.existing?.presentation ?? null,
+        pending_action_snapshot: input.existing?.pending_action_snapshot ?? null,
+      };
     const audit = createTransitionAudit({
       account_id,
       kind: 'human_decision',
@@ -693,10 +697,7 @@ export function authorizeStageReview(input: {
       authorization,
       allowed: false,
       reason: `review_already_${prior}`,
-      patch: {
-        stage_review_json: writeReviewJson(authorization),
-        related_review_id: input.review_id,
-      },
+      patch: {},
       audit,
     };
   }
@@ -808,6 +809,13 @@ export function authorizeStageReview(input: {
 
   const status = statusMap[input.decision] || 'pending';
   const now = new Date().toISOString();
+  // Decision actor/timestamp: authorize, reject, and hold are human decisions that
+  // must survive in history when a later reopen supersedes them. Status is the
+  // authorization discriminator (isAuthorizedForStep requires status===authorized).
+  const recordsDecisionActor =
+    input.decision === 'authorize'
+    || input.decision === 'reject'
+    || input.decision === 'hold';
   const authorization: StageReviewAuthorization = {
     review_id: input.review_id,
     stage_id: input.stage_id,
@@ -817,8 +825,10 @@ export function authorizeStageReview(input: {
     contact_id: input.contact_id ?? input.existing?.contact_id ?? null,
     channel: input.existing?.channel ?? null,
     action_type: input.existing?.action_type ?? null,
-    authorized_by: input.decision === 'authorize' ? (input.actor || 'human') : null,
-    authorized_at: input.decision === 'authorize' ? now : null,
+    authorized_by: recordsDecisionActor
+      ? (input.actor || (input.decision === 'authorize' ? 'human' : null))
+      : null,
+    authorized_at: recordsDecisionActor ? now : null,
     notes: input.notes,
     policy_version: STAGE_REVIEW_POLICY_VERSION,
     presentation: input.existing?.presentation ?? null,
@@ -1054,6 +1064,158 @@ export function authorizeStageReview(input: {
       || input.decision === 'invalidate',
     reason,
     patch,
+    audit,
+  };
+}
+
+/**
+ * Re-open a rejected stage review for a fresh human decision.
+ *
+ * Reject is terminal for authorize (cannot flip reject → authorized). Reopen is
+ * the supported undo: the rejected packet moves to `history` (actor, notes,
+ * timestamp retained) and a new **pending** review is opened for the same stage.
+ * Never auto-authorizes. Sequence returns to paused_review so the account is on
+ * the stage-review queue again (not left in human_review_repair / paused_repair).
+ *
+ * Does not reopen authorized, pending, invalidated, or edited reviews — only
+ * rejected. Does not touch sibling stages. Callers must refuse suppressed /
+ * terminal-sequence records before invoking this helper.
+ */
+export function reopenStageReview(input: {
+  account_id: string;
+  stage_id: string;
+  /** Full records.stage_review_json (multi-review bag). */
+  existing_json: unknown;
+  actor?: string;
+  notes?: string;
+  lifecycle_stage?: LifecycleStage | string;
+  /**
+   * Material fingerprint for the new pending review. Defaults to the rejected
+   * review's asset_version so re-decision is about the same sendable content
+   * unless the operator (or caller) rebinds after a content fix.
+   */
+  asset_version?: string;
+  presentation?: ResolvedReviewPresentation | null;
+  contact_id?: string | null;
+  channel?: string | null;
+  action_type?: string | null;
+  pending_action?: Partial<NextAction> | Record<string, unknown> | null;
+}): {
+  allowed: boolean;
+  reason: string;
+  /** Fresh pending review (null when refused). */
+  authorization: StageReviewAuthorization | null;
+  /** The rejected review that was archived to history (null when refused). */
+  prior: StageReviewAuthorization | null;
+  patch: StageReviewApplyResult['patch'];
+  audit: TransitionAuditRecord;
+} {
+  const stage = String(input.stage_id || '').trim();
+  const store = parseStageReviewStore(input.existing_json);
+  const prior = findStageReviewInStore(store, stage ? [stage] : []);
+
+  const refuse = (
+    reason: string,
+    fromState: string | null = prior?.status ?? null,
+  ) => {
+    const audit = createTransitionAudit({
+      account_id: input.account_id,
+      kind: 'human_decision',
+      from_state: fromState,
+      to_state: fromState,
+      reason: `reopen refused: ${reason}`,
+      evidence_ids: prior ? [prior.review_id, stage] : [stage],
+      actor: 'human',
+    });
+    return {
+      allowed: false,
+      reason,
+      authorization: null as StageReviewAuthorization | null,
+      prior: prior && String(prior.status).toLowerCase() === 'rejected' ? prior : null,
+      patch: {} as StageReviewApplyResult['patch'],
+      audit,
+    };
+  };
+
+  if (!prior) {
+    return refuse('no_stage_review_for_stage');
+  }
+  const priorStatus = String(prior.status || '').trim().toLowerCase();
+  if (priorStatus !== 'rejected') {
+    return refuse(`review_not_rejected:${priorStatus}`, priorStatus);
+  }
+
+  const assetVersion = String(input.asset_version || prior.asset_version || '').trim();
+  if (!assetVersion) {
+    return refuse('asset_version_required');
+  }
+
+  const paused = pauseForStageReview({
+    account_id: input.account_id,
+    stage_id: String(prior.stage_id || stage),
+    asset_version: assetVersion,
+    contact_id: input.contact_id ?? prior.contact_id ?? null,
+    channel: input.channel ?? prior.channel ?? null,
+    action_type: input.action_type ?? prior.action_type ?? null,
+    pending_action:
+      input.pending_action
+      ?? prior.pending_action_snapshot
+      ?? null,
+    lifecycle_stage: input.lifecycle_stage || 'contacted',
+    reason:
+      input.notes
+      || `Reopened after rejection (prior review ${prior.review_id})`,
+    presentation: input.presentation !== undefined
+      ? input.presentation
+      : (prior.presentation ?? null),
+    existing_json: input.existing_json,
+  });
+
+  if (!paused.allowed) {
+    return {
+      allowed: false,
+      reason: paused.reason,
+      authorization: null,
+      prior,
+      patch: {},
+      audit: createTransitionAudit({
+        account_id: input.account_id,
+        kind: 'human_decision',
+        from_state: 'rejected',
+        to_state: 'rejected',
+        reason: `reopen refused: ${paused.reason}`,
+        evidence_ids: [prior.review_id, stage],
+        actor: 'human',
+      }),
+    };
+  }
+
+  // pauseForStageReview archives the terminal prior into history when the new
+  // pending has a distinct review_id (always true for a fresh open).
+  const storeAfter = parseStageReviewStore(paused.patch.stage_review_json);
+  const priorInHistory = storeAfter.history.find(
+    (r) => normalizeStageKey(r.review_id) === normalizeStageKey(prior.review_id),
+  ) || prior;
+
+  const audit = createTransitionAudit({
+    account_id: input.account_id,
+    kind: 'human_decision',
+    from_state: 'rejected',
+    to_state: 'pending',
+    reason:
+      `reopened_rejected_review prior=${prior.review_id} `
+      + `new=${paused.authorization.review_id} stage=${stage}`
+      + (input.actor ? ` actor=${input.actor}` : ''),
+    evidence_ids: [prior.review_id, paused.authorization.review_id, assetVersion],
+    actor: 'human',
+  });
+
+  return {
+    allowed: true,
+    reason: 'reopened_pending',
+    authorization: paused.authorization,
+    prior: priorInHistory,
+    patch: paused.patch,
     audit,
   };
 }

@@ -1,10 +1,15 @@
 /**
- * Production operator boundary: authorize or reject non-email stage reviews
- * (LinkedIn, mail). Email can use drafts_approve as an interim; this command
- * is the explicit gate for channels without a draft interim.
+ * Production operator boundary: authorize, reject, or reopen non-email stage
+ * reviews (LinkedIn, mail). Email can use drafts_approve as an interim; this
+ * command is the explicit gate for channels without a draft interim.
  *
  * Persists stage_review_json and, on authorize, resumes account_sequence_state
  * via authorizeStageReview (exact-version bound).
+ *
+ * `reopen` is the supported undo for a mistaken or provisional rejection: the
+ * rejected packet moves to history and a fresh **pending** review is opened.
+ * Never auto-authorizes. Distinct from `review clear` (declared review: stages
+ * like sourced_review), which is a different subsystem.
  *
  * Also exposes list-pending for the stage-review operator queue.
  */
@@ -25,6 +30,7 @@ import {
   listStageReviews,
   parseStageReviewJson,
   parseStageReviewStore,
+  reopenStageReview,
   type StageReviewApplyResult,
 } from '../orchestrator/policy/transition-audit.js';
 import {
@@ -32,8 +38,35 @@ import {
   resolveStageReviewPresentationForRead,
 } from '../orchestrator/policy/review-presentation.js';
 import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
+import { isAffirmativeFlag } from '../orchestrator/policy/booleanish.js';
 
 const ALLOWED_DECISIONS = new Set(['authorize', 'reject'] as const);
+
+/** Suppressed, dropped, or terminal-sequence records cannot re-enter review. */
+const stageReviewRecordBlockedReason = (
+  record: Record<string, unknown>,
+): string | null => {
+  if (isAffirmativeFlag(record.suppressed, { failClosed: true })) {
+    return 'record_suppressed';
+  }
+  const disqualifiedAt = normalize(record.disqualified_at);
+  if (disqualifiedAt) {
+    return 'record_disqualified';
+  }
+  const lifecycle = normalizeKey(record.lifecycle_stage);
+  if (['won', 'lost', 'disqualified'].includes(lifecycle)) {
+    return `record_terminal_lifecycle:${lifecycle}`;
+  }
+  const sequence = normalizeKey(record.sequence_status || record.sequence_state);
+  if (['completed', 'cancelled', 'opted_out', 'bounced'].includes(sequence)) {
+    return `record_terminal_sequence:${sequence}`;
+  }
+  const accountSequence = normalizeKey(record.account_sequence_state);
+  if (['completed', 'cancelled'].includes(accountSequence)) {
+    return `record_terminal_account_sequence:${accountSequence}`;
+  }
+  return null;
+};
 
 /** List pending (or filtered) stage reviews for a list — canary ops queue. */
 export const stageReviewListCommand = ({
@@ -280,6 +313,189 @@ export const stageReviewAuthorizeCommand = ({
       asset_version: boundAssetVersion,
       review_id: existing.review_id,
       authorization: review,
+      account_sequence_state:
+        String(persisted?.account_sequence_state ?? patch.account_sequence_state ?? record.account_sequence_state ?? ''),
+      work_state: String(persisted?.work_state ?? patch.work_state ?? record.work_state ?? ''),
+      next_action_json: String(persisted?.next_action_json ?? patch.next_action_json ?? record.next_action_json ?? ''),
+      stage_review_json: String(persisted?.stage_review_json ?? patch.stage_review_json ?? ''),
+    };
+  } finally {
+    db.close();
+  }
+};
+
+/**
+ * Re-open a rejected channel stage review as a fresh pending decision.
+ * Prior rejection is retained in stage-reviews-v2 history (never erased).
+ * Never auto-authorizes. Distinct from `review clear` (sourced_review stages).
+ */
+export const stageReviewReopenCommand = ({
+  list,
+  recordId = '',
+  row = '',
+  stage_id = '',
+  stageId = '',
+  asset_version = '',
+  assetVersion = '',
+  actor = '',
+  notes = '',
+}: {
+  list: string;
+  recordId?: string;
+  row?: string;
+  stage_id?: string;
+  stageId?: string;
+  asset_version?: string;
+  assetVersion?: string;
+  actor?: string;
+  notes?: string;
+}) => {
+  const listDir = resolveListDir(list);
+  const rid = normalize(recordId || row);
+  const stage = normalize(stage_id || stageId);
+  const assetVersionInput = normalize(asset_version || assetVersion);
+  const actorName = normalize(actor) || 'operator';
+  const noteText = normalize(notes);
+
+  if (!rid) {
+    throw new AgentOutboundError({
+      code: 'INVALID_ARGUMENT',
+      message: 'recordId (or row) is required.',
+      retryable: false,
+    });
+  }
+  assertRecordAccessForMutation({ listDir, recordId: rid });
+  if (!stage) {
+    throw new AgentOutboundError({
+      code: 'INVALID_ARGUMENT',
+      message: 'stage_id is required.',
+      retryable: false,
+    });
+  }
+
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    const record = getRecordById({ db, id: rid }) as Record<string, unknown> | undefined;
+    if (!record) {
+      throw new AgentOutboundError({
+        code: 'NOT_FOUND',
+        message: `Record not found: ${rid}`,
+        retryable: false,
+      });
+    }
+
+    const blocked = stageReviewRecordBlockedReason(record);
+    if (blocked) {
+      return {
+        ok: false,
+        allowed: false,
+        reason: blocked,
+        decision: 'reopen',
+        record_id: String(record._row_id || rid),
+        stage_id: stage,
+        review_id: null,
+        authorization: null,
+        prior: null,
+        account_sequence_state: String(record.account_sequence_state || ''),
+        work_state: String(record.work_state || ''),
+        next_action_json: String(record.next_action_json || ''),
+        stage_review_json: String(record.stage_review_json || ''),
+      };
+    }
+
+    const existing =
+      findStageReview(record.stage_review_json, [stage])
+      || parseStageReviewJson(record.stage_review_json);
+    if (!existing) {
+      throw new AgentOutboundError({
+        code: 'NOT_FOUND',
+        message: `No stage_review_json on record ${rid}.`,
+        retryable: false,
+        hint: 'A pending stage review is created when policy.review_required_for pauses the sequence.',
+      });
+    }
+    if (!stageMatches(existing, stage)) {
+      const known = listStageReviews(record.stage_review_json)
+        .map((r) => r.stage_id)
+        .filter(Boolean)
+        .join(', ');
+      throw new AgentOutboundError({
+        code: 'INVALID_ARGUMENT',
+        message:
+          `stage_id "${stage}" does not match any review on this record `
+          + `(known stage_ids: ${known || 'none'}; `
+          + `matched stage_id=${existing.stage_id}, action_type=${existing.action_type || ''}).`,
+        retryable: false,
+      });
+    }
+
+    const accountId = normalize(record._row_id || record.id || existing.account_id || rid);
+    const result = reopenStageReview({
+      account_id: accountId,
+      stage_id: normalize(existing.stage_id) || stage,
+      existing_json: record.stage_review_json,
+      asset_version: assetVersionInput || normalize(existing.asset_version),
+      actor: actorName,
+      notes: noteText || undefined,
+      contact_id: existing.contact_id ?? null,
+      channel: existing.channel ?? null,
+      action_type: existing.action_type ?? null,
+      pending_action: existing.pending_action_snapshot ?? null,
+      presentation: existing.presentation ?? null,
+      lifecycle_stage: String(record.lifecycle_stage || 'contacted'),
+    });
+
+    if (!result.allowed) {
+      return {
+        ok: false,
+        allowed: false,
+        reason: result.reason,
+        decision: 'reopen',
+        record_id: String(record._row_id || rid),
+        stage_id: stage,
+        review_id: existing.review_id,
+        authorization: existing,
+        prior: result.prior,
+        account_sequence_state: String(record.account_sequence_state || ''),
+        work_state: String(record.work_state || ''),
+        next_action_json: String(record.next_action_json || ''),
+        stage_review_json: String(record.stage_review_json || ''),
+      };
+    }
+
+    const patch = result.patch || {};
+    const next: Record<string, unknown> = {
+      ...record,
+      ...patch,
+      transition_audit_json: appendTransitionAudit(record.transition_audit_json, result.audit),
+    };
+
+    ensureRecordColumns({
+      db,
+      columns: [...Object.keys(patch), 'transition_audit_json'],
+    });
+    upsertRecord({ db, row: next });
+
+    const persisted = getRecordById({ db, id: String(record._row_id || rid) }) as
+      | Record<string, unknown>
+      | undefined;
+    const review =
+      findStageReview(persisted?.stage_review_json ?? next.stage_review_json, [stage, existing.stage_id])
+      || result.authorization;
+    const store = parseStageReviewStore(persisted?.stage_review_json ?? next.stage_review_json);
+
+    return {
+      ok: true,
+      allowed: true,
+      reason: result.reason,
+      decision: 'reopen',
+      record_id: String(record._row_id || rid),
+      stage_id: stage,
+      asset_version: String(review?.asset_version || result.authorization?.asset_version || ''),
+      review_id: review?.review_id || result.authorization?.review_id || null,
+      authorization: review,
+      prior: result.prior,
+      history_count: store.history.length,
       account_sequence_state:
         String(persisted?.account_sequence_state ?? patch.account_sequence_state ?? record.account_sequence_state ?? ''),
       work_state: String(persisted?.work_state ?? patch.work_state ?? record.work_state ?? ''),

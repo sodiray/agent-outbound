@@ -104,6 +104,7 @@ export { interruptCommand } from './interrupt.js';
 export {
   stageReviewAuthorizeCommand,
   stageReviewListCommand,
+  stageReviewReopenCommand,
 } from './stage-review.js';
 export {
   followupsCommand,

@@ -58,6 +58,7 @@ import {
   WORK_QUEUE_NAMES,
   stageReviewAuthorizeCommand,
   stageReviewListCommand,
+  stageReviewReopenCommand,
   sequencesBoardCommand,
   sequencesListCommand,
   rejectedListCommand,
@@ -407,6 +408,7 @@ const printHelp = () => {
   process.stdout.write(`  stage-review list <list> [--status open|pending|all] [--limit N]              # pending stage reviews (LI/mail)\n`);
   process.stdout.write(`  stage-review authorize <list> <record> --stage STAGE --decision authorize|reject [--asset-version V] [--actor NAME] [--notes TEXT]\n`);
   process.stdout.write(`  stage-review reject <list> <record> --stage STAGE [--asset-version V] [--actor NAME] [--notes TEXT]\n`);
+  process.stdout.write(`  stage-review reopen <list> <record> --stage STAGE [--asset-version V] [--actor NAME] [--notes TEXT]  # re-open a rejected review as pending\n`);
   process.stdout.write(`  call-board <list> [--capacity N] [--limit N]                                  # capacity-ranked human call board\n`);
   process.stdout.write(`  call-board claim <list> <record> [--owner NAME]\n`);
   process.stdout.write(`  call-board dispose <list> <record> --disposition D [--note TEXT]\n`);
@@ -2155,7 +2157,27 @@ const run = async () => {
       }));
       return;
     }
-    throw new Error(`Unknown stage-review subcommand: ${sub || '(none)'}. Use list|authorize|reject.`);
+    if (sub === 'reopen') {
+      const list = String(argv.shift() || '');
+      const record = String(argv.shift() || '');
+      const stage = consumeFlag(argv, '--stage', '') || consumeFlag(argv, '--stage-id', '');
+      const assetVersion = consumeFlag(argv, '--asset-version', '')
+        || consumeFlag(argv, '--asset_version', '');
+      const actor = consumeFlag(argv, '--actor', 'operator');
+      const notes = consumeFlag(argv, '--notes', '') || consumeFlag(argv, '--note', '');
+      if (!stage) throw new Error('stage-review reopen requires --stage STAGE_ID');
+      setResponseContext({ command: 'stage-review reopen', list });
+      out()(stageReviewReopenCommand({
+        list,
+        recordId: record,
+        stage_id: stage,
+        asset_version: assetVersion,
+        actor,
+        notes,
+      }));
+      return;
+    }
+    throw new Error(`Unknown stage-review subcommand: ${sub || '(none)'}. Use list|authorize|reject|reopen.`);
   }
 
   if (command === 'audit') {
