@@ -298,14 +298,26 @@ export const configValidateCommand = async ({ list, filePath = '' }: { list: str
   };
 };
 
+const TRANSMIT_REVERT_WARNING =
+  'this step transmits; reverting only clears pipeline state, it does not undo anything that was sent';
+
+const isTransmitStep = (step: { kind?: unknown; side_effecting?: unknown }) => {
+  const kind = String(step?.kind || '').trim();
+  if (kind.startsWith('send_')) return true;
+  return step?.side_effecting === true;
+};
+
 export const recordRevertStepCommand = ({ list, rowId, stepId }: { list: string; rowId: string; stepId: string }) => {
   const listDir = resolveListDir(list);
   const { config } = readConfig(listDir);
-  const step: any = flattenPipelineSteps(config).find((item: any) => String(item?.id || '').trim() === String(stepId || '').trim() && String(item?.kind || '') === 'enrich');
+  const normalizedStepId = String(stepId || '').trim();
+  const step: any = flattenPipelineSteps(config).find(
+    (item: any) => String(item?.id || '').trim() === normalizedStepId,
+  );
   if (!step) {
     throw new AgentOutboundError({
       code: 'NOT_FOUND',
-      message: `Enrichment step not found: ${stepId}`,
+      message: `Step not found: ${stepId}`,
       retryable: false,
     });
   }
@@ -320,16 +332,31 @@ export const recordRevertStepCommand = ({ list, rowId, stepId }: { list: string;
     if (!row) {
       throw new AgentOutboundError({ code: 'NOT_FOUND', message: `Record not found: ${rowId}`, retryable: false });
     }
+    const recordId = String(row._row_id || row.id || '');
     const patch: Record<string, any> = { ...row, last_error: '' };
     for (const column of targetColumns) patch[column] = '';
     upsertRecord({ db, row: patch });
-    db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(String(row._row_id || row.id || ''), String(stepId || ''));
-    return {
+    // Clear all three resolution bookkeeping surfaces so the step can re-run.
+    // Do not touch drafts, live_interaction_ledger, interactions, or suppression —
+    // a revert is not an unsend.
+    const stalenessDeleted = db
+      .prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?')
+      .run(recordId, normalizedStepId).changes;
+    const eventsDeleted = db
+      .prepare('DELETE FROM pipeline_events WHERE record_id = ? AND step_id = ? AND passed = 1')
+      .run(recordId, normalizedStepId).changes;
+    const result: Record<string, unknown> = {
       status: 'reverted',
-      row_id: String(row._row_id || row.id || ''),
-      step_id: String(stepId || ''),
+      row_id: recordId,
+      step_id: normalizedStepId,
       cleared_columns: targetColumns,
+      staleness_rows_deleted: stalenessDeleted,
+      events_deleted: eventsDeleted,
     };
+    if (isTransmitStep(step)) {
+      result.warning = TRANSMIT_REVERT_WARNING;
+    }
+    return result;
   } finally {
     db.close();
   }

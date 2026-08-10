@@ -602,12 +602,26 @@ const CATALOG: CommandDefinition[] = [
   },
   {
     name: 'record revert',
-    description: 'Clear one enrichment step for one record.',
+    description: 'Clear one resolved pipeline step for one record (outputs, staleness, and passed events). Does not unsend.',
     mutating: true,
-    flags: [{ name: '--step', type: 'string', required: true, description: 'Enrichment step id.' }],
+    flags: [{ name: '--step', type: 'string', required: true, description: 'Flattened pipeline step id (e.g. hiring-check, tier_b.email_1).' }],
     input_schema: { list: 'string', row_id: 'string', step: 'string' },
-    output_schema: { ...COMMON_OUTPUT, result: { status: 'string', row_id: 'string', step_id: 'string' } },
-    examples: ['agent-outbound record revert my-list rec_123 --step hiring-check'],
+    output_schema: {
+      ...COMMON_OUTPUT,
+      result: {
+        status: 'string',
+        row_id: 'string',
+        step_id: 'string',
+        cleared_columns: 'string[]',
+        staleness_rows_deleted: 'number',
+        events_deleted: 'number',
+        warning: 'string?',
+      },
+    },
+    examples: [
+      'agent-outbound record revert my-list rec_123 --step hiring-check',
+      'agent-outbound record revert my-list rec_123 --step tier_b.email_1',
+    ],
   },
   {
     name: 'record revert-score',
