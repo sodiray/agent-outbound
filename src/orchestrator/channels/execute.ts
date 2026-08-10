@@ -71,6 +71,7 @@ import {
 } from '../policy/linkedin-lifecycle.js';
 import { assertApprovedOutboundContent, assertOutboundContent } from '../lib/outbound-content.js';
 import { hashRenderedOutboundContent, renderCurrentEmailDraftContent } from '../lib/draft-content.js';
+import { supersedeDraftWithRenderedContent } from '../lib/draft-supersede.js';
 import { resolveEmailHeaders } from '../lib/email-headers.js';
 import { stageInputRecord } from '../lib/stage-inputs.js';
 import { resolveLinkedinInvitationMessage } from './unipile.js';
@@ -2173,40 +2174,28 @@ export const executeChannelStep = async ({
           renderedContentHash: rendered.content.contentHash,
         });
         if ('reason' in contentApproval) {
-          const freshDraftId = `draft_${randomUUID()}`;
           try {
-            const supersede = db.transaction(() => {
-              updateDraft({
-                db,
-                draftId: String(approvedDraft.draft_id),
-                patch: {
-                  status: 'superseded',
-                  reason: `${contentApproval.reason} Superseded by ${freshDraftId}.`,
-                  content_binding: {},
-                },
-              });
-              insertDraft({
-                db,
-                draft: {
-                  draft_id: freshDraftId,
-                  row_id: recordId,
-                  sequence_name: String(sequenceName || 'default'),
-                  step_number: Number(stepNumber || 0),
-                  step_id: sequenceStepId,
-                  channel: 'email',
-                  status: 'pending_approval',
-                  subject: rendered.content.subject,
-                  body: rendered.content.body,
-                  reason: `Supersedes ${String(approvedDraft.draft_id)} because rendered content changed after approval.`,
-                  content_hash: rendered.content.contentHash,
-                  template_id: rendered.content.templateId,
-                  template_version: rendered.content.templateVersion,
-                  content_binding: {},
-                  artifacts: { supersedes_draft_id: String(approvedDraft.draft_id) },
-                },
-              });
+            supersedeDraftWithRenderedContent({
+              db,
+              draft: {
+                ...(approvedDraft as Record<string, unknown>),
+                row_id: recordId,
+                sequence_name: String(sequenceName || 'default'),
+                step_number: Number(stepNumber || 0),
+                step_id: sequenceStepId,
+                channel: 'email',
+              },
+              rendered: {
+                subject: rendered.content.subject,
+                body: rendered.content.body,
+                contentHash: rendered.content.contentHash,
+                templateId: rendered.content.templateId,
+                templateVersion: rendered.content.templateVersion,
+              },
+              changeReason: contentApproval.reason,
+              newDraftReason:
+                `Supersedes ${String(approvedDraft.draft_id)} because rendered content changed after approval.`,
             });
-            supersede();
           } catch {
             return {
               status: 'skipped',

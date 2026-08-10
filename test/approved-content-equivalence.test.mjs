@@ -5,7 +5,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
-import { draftsApproveCommand, draftsListCommand, draftsEditCommand } from '../dist/commands/drafts.js';
+import {
+  draftsApproveCommand,
+  draftsListCommand,
+  draftsEditCommand,
+  draftsRefreshCommand,
+} from '../dist/commands/drafts.js';
 import { executePipelineSequenceAction } from '../dist/orchestrator/pipeline/sequence-step-runtime.js';
 import { openListDb, ensureRecordColumns } from '../dist/orchestrator/runtime/db.js';
 import { readConfig } from '../dist/orchestrator/lib/config.js';
@@ -284,6 +289,160 @@ test('a hand-edited draft altered after approval is still refused', async () => 
     assert.equal(sent.status, 'skipped', JSON.stringify(sent));
     assert.match(String(sent.reason), /changed after approval/i);
     assert.equal(readdirSync(sinkDir).filter((file) => file.endsWith('.json')).length, 0);
+    db.close();
+  } finally {
+    if (previousSink === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = previousSink;
+  }
+});
+
+test('drafts refresh supersedes a diverged rendered draft and queues current content as pending_approval', async () => {
+  const previousSink = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    const drafted = await runStep({ db, listDir, intent: 'draft' });
+    assert.equal(drafted.status, 'drafted', JSON.stringify(drafted));
+    const draft = db.prepare('SELECT draft_id, body FROM drafts WHERE row_id = ?').get('record_1');
+    assert.equal(draft.body, 'Old approved copy.');
+
+    writeFileSync(join(listDir, 'outbound.yaml'), outboundYaml('New compliance copy.', 2));
+    assert.equal(
+      draftsListCommand({ list: listDir, status: 'pending_approval' }).rows[0].content_equivalence.status,
+      'changed',
+    );
+
+    const result = draftsRefreshCommand({ list: listDir, draftId: draft.draft_id });
+    assert.equal(result.refreshed, 1, JSON.stringify(result));
+    assert.equal(result.results[0].outcome, 'refreshed');
+    assert.equal(result.results[0].draft_id, draft.draft_id);
+    assert.ok(result.results[0].new_draft_id);
+    assert.notEqual(result.results[0].new_draft_id, draft.draft_id);
+
+    const oldDraft = db.prepare('SELECT status FROM drafts WHERE draft_id = ?').get(draft.draft_id);
+    assert.equal(oldDraft.status, 'superseded');
+
+    const fresh = db.prepare('SELECT * FROM drafts WHERE draft_id = ?')
+      .get(result.results[0].new_draft_id);
+    assert.equal(fresh.status, 'pending_approval', 'refreshed draft must not inherit approval');
+    assert.equal(fresh.body, 'New compliance copy.');
+    assert.equal(fresh.content_source, 'rendered');
+    assert.equal(fresh.template_id, 'outreach');
+    assert.equal(fresh.template_version, 2);
+    assert.ok(fresh.content_hash);
+
+    const listed = draftsListCommand({ list: listDir, status: 'pending_approval' });
+    assert.equal(listed.rows.length, 1);
+    assert.equal(listed.rows[0].draft_id, fresh.draft_id);
+    assert.equal(listed.rows[0].content_equivalence.status, 'matches');
+    db.close();
+  } finally {
+    if (previousSink === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = previousSink;
+  }
+});
+
+test('drafts refresh refuses a human_edited draft and leaves the body intact', async () => {
+  const previousSink = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    await runStep({ db, listDir, intent: 'draft' });
+    const draft = db.prepare('SELECT draft_id FROM drafts WHERE row_id = ?').get('record_1');
+    const humanBody = 'Hand-written copy the human intends to keep.';
+    draftsEditCommand({ list: listDir, draftId: draft.draft_id, body: humanBody });
+
+    writeFileSync(join(listDir, 'outbound.yaml'), outboundYaml('Config moved on.', 2));
+    const result = draftsRefreshCommand({ list: listDir, draftId: draft.draft_id });
+    assert.equal(result.refused, 1, JSON.stringify(result));
+    assert.equal(result.refreshed, 0);
+    assert.equal(result.results[0].outcome, 'refused');
+    assert.match(String(result.results[0].reason), /human-edited|hand-written|discard/i);
+
+    const after = db.prepare('SELECT status, body, content_source FROM drafts WHERE draft_id = ?')
+      .get(draft.draft_id);
+    assert.equal(after.status, 'pending_approval');
+    assert.equal(after.body, humanBody);
+    assert.equal(after.content_source, 'human_edited');
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS n FROM drafts WHERE row_id = ?').get('record_1').n,
+      1,
+      'refresh must not supersede or queue a replacement for human-edited content',
+    );
+    db.close();
+  } finally {
+    if (previousSink === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = previousSink;
+  }
+});
+
+test('drafts refresh is a no-op when content already matches', async () => {
+  const previousSink = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    await runStep({ db, listDir, intent: 'draft' });
+    const draft = db.prepare('SELECT draft_id, status FROM drafts WHERE row_id = ?').get('record_1');
+    assert.equal(
+      draftsListCommand({ list: listDir, status: 'pending_approval' }).rows[0].content_equivalence.status,
+      'matches',
+    );
+
+    const result = draftsRefreshCommand({ list: listDir, draftId: draft.draft_id });
+    assert.equal(result.unchanged, 1, JSON.stringify(result));
+    assert.equal(result.refreshed, 0);
+    assert.equal(result.results[0].outcome, 'unchanged');
+    assert.equal(result.results[0].draft_id, draft.draft_id);
+
+    const after = db.prepare('SELECT draft_id, status FROM drafts WHERE draft_id = ?').get(draft.draft_id);
+    assert.equal(after.draft_id, draft.draft_id);
+    assert.equal(after.status, 'pending_approval');
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS n FROM drafts WHERE row_id = ?').get('record_1').n,
+      1,
+      'matching draft must not be superseded',
+    );
+    db.close();
+  } finally {
+    if (previousSink === undefined) delete process.env.AO_SMTP_SINK;
+    else process.env.AO_SMTP_SINK = previousSink;
+  }
+});
+
+test('CONTROL: after refresh, the send path accepts the new draft once approved', async () => {
+  const previousSink = process.env.AO_SMTP_SINK;
+  process.env.AO_SMTP_SINK = '1';
+  try {
+    const { listDir, sinkDir } = createList();
+    const db = openListDb({ listDir, readonly: false });
+    const drafted = await runStep({ db, listDir, intent: 'draft' });
+    assert.equal(drafted.status, 'drafted', JSON.stringify(drafted));
+    const draft = db.prepare('SELECT draft_id FROM drafts WHERE row_id = ?').get('record_1');
+
+    writeFileSync(join(listDir, 'outbound.yaml'), outboundYaml('New compliance copy.', 2));
+    assert.equal(
+      draftsListCommand({ list: listDir, status: 'pending_approval' }).rows[0].content_equivalence.status,
+      'changed',
+    );
+
+    const refreshed = draftsRefreshCommand({ list: listDir, draftId: draft.draft_id });
+    assert.equal(refreshed.refreshed, 1, JSON.stringify(refreshed));
+    const newDraftId = refreshed.results[0].new_draft_id;
+    assert.ok(newDraftId);
+
+    const fresh = db.prepare('SELECT status FROM drafts WHERE draft_id = ?').get(newDraftId);
+    assert.equal(fresh.status, 'pending_approval', 'refresh must not carry approval forward');
+
+    assert.equal(draftsApproveCommand({ list: listDir, draftId: newDraftId }).approved, 1);
+    const sent = await runStep({ db, listDir, intent: 'send' });
+    assert.equal(sent.status, 'sent', JSON.stringify(sent));
+    assert.equal(readdirSync(sinkDir).filter((file) => file.endsWith('.json')).length, 1);
+    const payload = JSON.parse(readFileSync(join(sinkDir, readdirSync(sinkDir)[0]), 'utf8'));
+    assert.equal(payload.body, 'New compliance copy.');
+    assert.equal(db.prepare('SELECT status FROM drafts WHERE draft_id = ?').get(newDraftId).status, 'sent');
     db.close();
   } finally {
     if (previousSink === undefined) delete process.env.AO_SMTP_SINK;

@@ -25,6 +25,7 @@ import {
   draftsApproveCommand,
   draftsEditCommand,
   draftsListCommand,
+  draftsRefreshCommand,
   draftsRejectCommand,
   draftsShowCommand,
   duplicatesBreakCommand,
@@ -350,6 +351,7 @@ const printHelp = () => {
   process.stdout.write(`  drafts approve <list> --id DRAFT_ID | --all --where SQL\n`);
   process.stdout.write(`  drafts reject <list> --id DRAFT_ID [--reason TEXT]\n`);
   process.stdout.write(`  drafts edit <list> --id DRAFT_ID [--subject TEXT] [--body TEXT]\n`);
+  process.stdout.write(`  drafts refresh <list> --id DRAFT_ID | --all                                  # re-queue diverged draft from current config\n`);
   process.stdout.write(`  assets list <list> [--label X] [--step ID] [--row ID] [--status S]\n`);
   process.stdout.write(`  assets show <list> <row_id> [--step ID]\n`);
   process.stdout.write(`  assets open <list> <row_id> --step ID\n`);
@@ -1554,6 +1556,21 @@ const run = async () => {
         return;
       }
       print(draftsEditCommand({ list, draftId, subject, body }));
+      return;
+    }
+    if (sub === 'refresh') {
+      const list = String(argv.shift() || '');
+      const draftId = consumeFlag(argv, '--id', '');
+      const all = hasFlag(argv, '--all');
+      setResponseContext({ command: 'drafts refresh', list });
+      const delegated = await callServeAction('drafts_refresh', {
+        list, draftId, all,
+      }, list);
+      if (delegated) {
+        print(delegated);
+        return;
+      }
+      print(draftsRefreshCommand({ list, draftId, all }));
       return;
     }
     throw new Error(`Unknown drafts subcommand: ${sub}`);

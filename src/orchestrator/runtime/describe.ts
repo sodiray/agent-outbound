@@ -529,6 +529,30 @@ const CATALOG: CommandDefinition[] = [
     examples: ['agent-outbound drafts edit my-list --id draft_123 --subject "Re: quick note"'],
   },
   {
+    name: 'drafts refresh',
+    description: 'Re-queue a diverged draft from current config (supersede + fresh pending_approval).',
+    mutating: true,
+    flags: [
+      { name: '--id', type: 'string', required: false, description: 'Single draft id.' },
+      { name: '--all', type: 'boolean', required: false, description: 'Refresh every pending draft that reports changed.' },
+    ],
+    input_schema: { list: 'string', id: 'optional string', all: 'optional boolean' },
+    output_schema: {
+      ...COMMON_OUTPUT,
+      result: {
+        results: 'array',
+        refreshed: 'number',
+        unchanged: 'number',
+        refused: 'number',
+        requested: 'number',
+      },
+    },
+    examples: [
+      'agent-outbound drafts refresh my-list --id draft_123',
+      'agent-outbound drafts refresh my-list --all',
+    ],
+  },
+  {
     name: 'templates list',
     description: 'List named templates and latest versions.',
     mutating: false,

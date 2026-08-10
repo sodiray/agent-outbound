@@ -2253,6 +2253,7 @@ export {
   draftsApproveCommand,
   draftsEditCommand,
   draftsListCommand,
+  draftsRefreshCommand,
   draftsRejectCommand,
   draftsShowCommand,
 } from './drafts.js';

@@ -23,6 +23,7 @@ import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
 import type { ResolvedReviewPresentation } from '../orchestrator/policy/review-presentation.js';
 import { resolveReviewPresentation } from '../orchestrator/policy/review-presentation.js';
 import { renderCurrentEmailDraftContent } from '../orchestrator/lib/draft-content.js';
+import { supersedeDraftWithRenderedContent } from '../orchestrator/lib/draft-supersede.js';
 import { assertApprovedOutboundContent } from '../orchestrator/lib/outbound-content.js';
 
 /**
@@ -614,6 +615,196 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
       });
     }
     return { approved: updated, requested: ids.length, failures };
+  } finally {
+    db.close();
+  }
+};
+
+type DraftRefreshOutcome = {
+  draft_id: string;
+  outcome: 'refreshed' | 'unchanged' | 'refused';
+  reason?: string;
+  new_draft_id?: string;
+  superseded_draft_id?: string;
+};
+
+/**
+ * Re-queue a diverged draft from current config. Engine mechanism only — no
+ * opinion about when a pipeline *should* refresh; performs it on request.
+ *
+ * - pending_approval only
+ * - human_edited is refused (would discard a person's words; no force flag)
+ * - matches → no-op (unchanged)
+ * - changed → supersede + queue fresh pending_approval from current render
+ *   (approval is never inherited)
+ */
+export const draftsRefreshCommand = ({ list, draftId = '', all = false }) => {
+  const listDir = resolveListDir(list);
+  const db = openListDb({ listDir, readonly: false });
+  try {
+    let projectConfig: Record<string, unknown> = {};
+    try {
+      projectConfig = (readConfig(listDir).config || {}) as Record<string, unknown>;
+    } catch {
+      throw new AgentOutboundError({
+        code: 'INVALID_ARGUMENT',
+        message: 'Config unavailable; cannot re-render drafts for refresh.',
+        retryable: false,
+      });
+    }
+
+    let ids: string[] = [];
+    if (all) {
+      const pending = db.prepare(`
+        SELECT *
+        FROM drafts
+        WHERE status = 'pending_approval'
+        ORDER BY created_at ASC
+      `).all() as Record<string, unknown>[];
+      for (const draft of pending) {
+        const record = db.prepare('SELECT * FROM records WHERE _row_id = ? LIMIT 1')
+          .get(String(draft.row_id || '')) as Record<string, unknown> | undefined;
+        const equivalence = pendingDraftContentEquivalence({
+          config: projectConfig,
+          draft,
+          record,
+        });
+        if (equivalence.status === 'changed') {
+          ids.push(String(draft.draft_id || ''));
+        }
+      }
+    } else if (draftId) {
+      ids = [String(draftId).trim()];
+    } else {
+      throw new AgentOutboundError({
+        code: 'INVALID_ARGUMENT',
+        message: 'Provide --id <draft_id> or --all.',
+        retryable: false,
+      });
+    }
+
+    const results: DraftRefreshOutcome[] = [];
+    let refreshed = 0;
+    let unchanged = 0;
+    let refused = 0;
+
+    for (const id of ids) {
+      const existing = db.prepare('SELECT * FROM drafts WHERE draft_id = ? LIMIT 1').get(id) as
+        | Record<string, unknown>
+        | undefined;
+      if (!existing) {
+        throw new AgentOutboundError({
+          code: 'NOT_FOUND',
+          message: `Draft not found: ${id}`,
+          retryable: false,
+        });
+      }
+
+      const status = String(existing.status || '').trim();
+      if (status !== 'pending_approval') {
+        throw new AgentOutboundError({
+          code: 'INVALID_ARGUMENT',
+          message: `Draft cannot be refreshed: status is '${status}' (only pending_approval may be refreshed).`,
+          retryable: false,
+          fields: { draft_id: id, status },
+        });
+      }
+
+      if (String(existing.content_source || 'rendered') === 'human_edited') {
+        const outcome: DraftRefreshOutcome = {
+          draft_id: id,
+          outcome: 'refused',
+          reason: 'Refreshing would discard human-edited content. The hand-written body is authoritative; edit or reject the draft instead.',
+        };
+        results.push(outcome);
+        refused += 1;
+        continue;
+      }
+
+      const rowId = String(existing.row_id || '').trim();
+      assertRecordAccessForMutation({ listDir, recordId: rowId });
+
+      const record = db.prepare('SELECT * FROM records WHERE _row_id = ? LIMIT 1').get(rowId) as
+        | Record<string, unknown>
+        | undefined;
+      const equivalence = pendingDraftContentEquivalence({
+        config: projectConfig,
+        draft: existing,
+        record,
+      });
+
+      if (equivalence.status === 'matches') {
+        const outcome: DraftRefreshOutcome = {
+          draft_id: id,
+          outcome: 'unchanged',
+          reason: 'Draft content already matches the current render.',
+        };
+        results.push(outcome);
+        unchanged += 1;
+        continue;
+      }
+
+      if (equivalence.status !== 'changed') {
+        const outcome: DraftRefreshOutcome = {
+          draft_id: id,
+          outcome: 'refused',
+          reason: equivalence.reason
+            || `Cannot refresh: content equivalence is '${equivalence.status}'.`,
+        };
+        results.push(outcome);
+        refused += 1;
+        continue;
+      }
+
+      const rendered = renderCurrentEmailDraftContent({
+        config: projectConfig,
+        record: record || {},
+        sequenceName: String(existing.sequence_name || 'default'),
+        stepId: String(existing.step_id || ''),
+      });
+      if ('reason' in rendered) {
+        const outcome: DraftRefreshOutcome = {
+          draft_id: id,
+          outcome: 'refused',
+          reason: `Cannot re-render current content: ${rendered.reason}`,
+        };
+        results.push(outcome);
+        refused += 1;
+        continue;
+      }
+
+      const { superseded_draft_id, new_draft_id } = supersedeDraftWithRenderedContent({
+        db,
+        draft: existing,
+        rendered: {
+          subject: rendered.content.subject,
+          body: rendered.content.body,
+          contentHash: rendered.content.contentHash,
+          templateId: rendered.content.templateId,
+          templateVersion: rendered.content.templateVersion,
+        },
+        changeReason: equivalence.reason || 'Rendered content changed.',
+        newDraftReason:
+          `Supersedes ${id} because rendered content diverged; re-queued from current config.`,
+      });
+
+      results.push({
+        draft_id: id,
+        outcome: 'refreshed',
+        superseded_draft_id,
+        new_draft_id,
+        reason: 'Draft superseded; fresh draft queued from current render (pending_approval).',
+      });
+      refreshed += 1;
+    }
+
+    return {
+      results,
+      refreshed,
+      unchanged,
+      refused,
+      requested: ids.length,
+    };
   } finally {
     db.close();
   }
