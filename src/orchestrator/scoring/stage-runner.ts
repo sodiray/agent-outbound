@@ -52,6 +52,13 @@ export type ScoreStageCalculation = {
     reason?: 'criteria_not_configured' | 'not_graded';
     /** Successful independent grader draws that contributed to the reduced score. */
     samples?: number;
+    /**
+     * Axis score each successful draw would have produced alone (same reduction
+     * as `score`). Present only when more than one draw succeeded — telemetry
+     * for spread; does not affect the reduced grade. Omitted on the common
+     * samples=1 path so stored breakdowns stay byte-identical in spirit.
+     */
+    sample_scores?: Array<number | null>;
   };
   gradedCriterionIds: string[];
 };
@@ -98,19 +105,27 @@ const calculationFor = ({
   criteria: configured,
   result,
   samplesUsed,
+  sampleScores,
 }: {
   criteria: ScoreCriterion[];
   result: z.infer<typeof ScoreResultSchema> | null;
   samplesUsed?: number;
+  /** Per-draw axis scores; recorded only when length > 1. */
+  sampleScores?: Array<number | null>;
 }): ScoreStageCalculation => {
   const samplesField = samplesUsed !== undefined && samplesUsed > 0
     ? { samples: samplesUsed }
     : {};
+  // Spread telemetry only when multi-draw — omit on the default single-draw path.
+  const sampleScoresField = sampleScores !== undefined && sampleScores.length > 1
+    ? { sample_scores: sampleScores }
+    : {};
+  const telemetry = { ...samplesField, ...sampleScoresField };
   if (configured.length === 0) {
     return {
       score: null,
       reasoning: 'Score criteria are not configured.',
-      breakdown: { criteria: [], missing_inputs: [], reason: 'criteria_not_configured', ...samplesField },
+      breakdown: { criteria: [], missing_inputs: [], reason: 'criteria_not_configured', ...telemetry },
       gradedCriterionIds: [],
     };
   }
@@ -140,7 +155,7 @@ const calculationFor = ({
         })),
         missing_inputs: missingInputs,
         reason: 'not_graded',
-        ...samplesField,
+        ...telemetry,
       },
       gradedCriterionIds: [],
     };
@@ -164,7 +179,7 @@ const calculationFor = ({
   return {
     score,
     reasoning: String(result?.summary_reasoning || '').trim() || 'Score computed from declared criteria.',
-    breakdown: { criteria: breakdown, missing_inputs: missingInputs, ...samplesField },
+    breakdown: { criteria: breakdown, missing_inputs: missingInputs, ...telemetry },
     gradedCriterionIds: [...gradedIds],
   };
 };
@@ -424,10 +439,17 @@ export const runScoreStage = async ({
         }),
         summary_reasoning: String(successfulSamples[0]?.summary_reasoning || ''),
       };
+      // Axis score each draw would produce alone — cheap pure math, answers
+      // spread/bimodality from stored data without keeping reasoning or
+      // per-criterion payloads for every sample.
+      const sampleScores = successfulSamples.map(
+        (sample) => calculationFor({ criteria, result: sample }).score,
+      );
       const calculation = calculationFor({
         criteria,
         result: reducedResult,
         samplesUsed: successfulSamples.length,
+        sampleScores,
       });
       const persisted = persistScoreStageResult({ db, record: initialRecord, step, calculation });
       if (calculation.score === null && calculation.breakdown.reason === 'not_graded') {

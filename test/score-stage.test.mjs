@@ -267,6 +267,64 @@ test('score stage with samples: 3 makes three grader calls and stores the median
   });
 });
 
+test('score stage samples: 3 stores per-draw axis scores so spread is recoverable without changing the reduced grade', async () => {
+  await withDb(async ({ db, root, record }) => {
+    // Grades 2, 8, 5 → axis scores 20, 80, 50; lower-median criterion grade is 5 → reduced 50.
+    const grades = [2, 8, 5];
+    let calls = 0;
+    await runScoreStage({
+      db,
+      listDir: root,
+      config: { score: { samples: 3 } },
+      step: scoreStep,
+      rows: [record],
+      generateObject: async () => {
+        const grade = grades[calls];
+        calls += 1;
+        return {
+          object: {
+            criteria: [{
+              id: 'coordination',
+              grade,
+              assessable: true,
+              reasoning: `draw grade ${grade}`,
+            }],
+            summary_reasoning: `sample ${calls}`,
+          },
+          usage: {},
+        };
+      },
+    });
+
+    const stored = db.prepare('SELECT fit_score, fit_breakdown FROM records WHERE _row_id = ?').get(record._row_id);
+    const breakdown = JSON.parse(stored.fit_breakdown);
+    const event = db.prepare(
+      'SELECT score, breakdown_json FROM score_events WHERE row_id = ? AND axis = ? ORDER BY computed_at DESC LIMIT 1',
+    ).get(record._row_id, 'fit');
+    const eventBreakdown = JSON.parse(event.breakdown_json);
+
+    // Existing consumers of breakdown.samples still see the successful-draw count.
+    assert.equal(breakdown.samples, 3);
+    assert.equal(eventBreakdown.samples, 3);
+
+    // Reduced grade is identical to today's median-of-N result (regression lock).
+    assert.equal(stored.fit_score, 50);
+    assert.equal(event.score, 50);
+    assert.equal(breakdown.criteria[0].grade, 5);
+
+    // Actual draw values — not mere presence — so spread is arithmetic from storage.
+    assert.deepEqual(breakdown.sample_scores, [20, 80, 50]);
+    assert.deepEqual(eventBreakdown.sample_scores, [20, 80, 50]);
+    const spread = Math.max(...breakdown.sample_scores) - Math.min(...breakdown.sample_scores);
+    assert.equal(spread, 60);
+
+    // Telemetry budget: the added field is a few dozen bytes, well under 1 KiB.
+    const addedJson = JSON.stringify({ sample_scores: breakdown.sample_scores });
+    assert.ok(addedJson.length < 1024, `sample_scores payload too large: ${addedJson.length} bytes`);
+    assert.ok(addedJson.length < 64, `sample_scores payload unexpectedly large for N=3: ${addedJson.length} bytes`);
+  });
+});
+
 test('CONTROL: undeclared score.samples makes exactly one grader call', async () => {
   await withDb(async ({ db, root, record }) => {
     let calls = 0;
@@ -292,6 +350,33 @@ test('CONTROL: undeclared score.samples makes exactly one grader call', async ()
     const stored = db.prepare('SELECT fit_score, fit_breakdown FROM records WHERE _row_id = ?').get(record._row_id);
     assert.equal(stored.fit_score, 70);
     assert.equal(JSON.parse(stored.fit_breakdown).samples, 1);
+  });
+});
+
+test('score stage samples: 1 omits sample_scores so the common path stays noise-free', async () => {
+  await withDb(async ({ db, root, record }) => {
+    await runScoreStage({
+      db,
+      listDir: root,
+      config: { score: { samples: 1 } },
+      step: scoreStep,
+      rows: [record],
+      generateObject: async () => ({
+        object: {
+          criteria: [{ id: 'coordination', grade: 7, assessable: true, reasoning: 'single draw' }],
+          summary_reasoning: 'one sample',
+        },
+        usage: {},
+      }),
+    });
+
+    const stored = db.prepare('SELECT fit_score, fit_breakdown FROM records WHERE _row_id = ?').get(record._row_id);
+    const breakdown = JSON.parse(stored.fit_breakdown);
+    assert.equal(stored.fit_score, 70);
+    assert.equal(breakdown.samples, 1);
+    assert.equal(Object.hasOwn(breakdown, 'sample_scores'), false);
+    // Shape matches today's single-draw breakdown keys (no extra telemetry keys).
+    assert.deepEqual(Object.keys(breakdown).sort(), ['criteria', 'missing_inputs', 'samples']);
   });
 });
 
@@ -366,6 +451,8 @@ test('score stage reduces over surviving draws when one of three fails and recor
     assert.equal(breakdown.criteria[0].grade, 2);
     assert.equal(breakdown.samples, 2);
     assert.equal(stored.fit_score, 20);
+    // Only successful draws contribute scores; order matches surviving sample order.
+    assert.deepEqual(breakdown.sample_scores, [20, 80]);
   });
 });
 
