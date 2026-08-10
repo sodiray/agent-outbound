@@ -37,6 +37,10 @@ test('sequences.*.on_bounce is rejected and points at structural bounce handling
     errorMentions(result.errors, 'on_bounce', 'bounce'),
     `message must name on_bounce and bounce path: ${JSON.stringify(result.errors)}`,
   );
+  assert.ok(
+    errorMentions(result.errors, 'policy.on_hard_bounce'),
+    `message must point at policy.on_hard_bounce for optional suppression: ${JSON.stringify(result.errors)}`,
+  );
 });
 
 test('sequences.*.on_opt_out is rejected and names the real compliance stop', () => {

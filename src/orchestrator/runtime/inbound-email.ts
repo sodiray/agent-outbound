@@ -328,6 +328,7 @@ export const processInboundEmail = async ({
           email: bouncedAddress,
           contactId: correlation.contactId,
           snippet: parsed.snippet,
+          config: config as { policy?: { on_hard_bounce?: { suppress?: unknown } } } | undefined,
         });
       }
       return { correlation, recordId };
@@ -348,6 +349,7 @@ export const processInboundEmail = async ({
         contactId: result.correlation.contactId,
         classifier: resolvedClassifier,
         aiConfig: aiConfig || {},
+        config: config as { policy?: { on_hard_bounce?: { suppress?: unknown } } } | undefined,
         generate,
       })
       : null;

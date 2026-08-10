@@ -19,6 +19,15 @@ export function processSequenceInterruption(input: {
   email?: string;
   contactId?: string;
   snippet?: string;
+  /** Pipeline config for optional policy.on_hard_bounce.suppress. */
+  config?: {
+    policy?: {
+      on_hard_bounce?: {
+        suppress?: unknown;
+      };
+    };
+  };
+  globalSuppressionDb?: any;
 }): {
   record: Record<string, unknown>;
   kind: InterruptionKind;
@@ -41,6 +50,8 @@ export function processSequenceInterruption(input: {
       contactId: input.contactId,
       snippet: input.snippet,
       bounceAt: input.asOf,
+      config: input.config,
+      globalSuppressionDb: input.globalSuppressionDb,
     });
     return {
       record: bounced.record,

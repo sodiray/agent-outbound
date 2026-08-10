@@ -1809,7 +1809,7 @@ const SequenceSchema = z.object({
     'sequences.*.on_reply is not configurable; inbound reply handling is hard-coded (pause-first) in the inbound policy path (policy/inbound-reply), not sequence config. Remove on_reply.',
   ).optional(),
   on_bounce: unsupportedDeclaredConfigKey(
-    'sequences.*.on_bounce is not configurable; bounce handling is structural in the inbound/bounce policy path (policy/inbound-reply, policy/bounce), not sequence config. Remove on_bounce.',
+    'sequences.*.on_bounce is not configurable; sequence lifecycle on bounce is structural (policy/bounce, processBounceEvent). For optional suppression-list policy on hard bounce, declare policy.on_hard_bounce.suppress (email and/or domain). Remove on_bounce.',
   ).optional(),
   on_opt_out: unsupportedDeclaredConfigKey(
     'sequences.*.on_opt_out is not configurable; opt-out automatically suppresses and is not a sequence-level switch — inbound policy (policy/inbound-reply) owns this compliance stop. Remove on_opt_out.',
@@ -2047,12 +2047,31 @@ const FirstTouchPolicySchema = z.object({
   suppress_sibling_sequence_channels: z.array(z.enum(['email', 'linkedin'])).default([]),
 }).partial().default({});
 
+/**
+ * Pipeline-declared hard-bounce suppression policy.
+ * Omission / empty suppress list = today's behaviour (no suppression-list write).
+ * Soft bounces never consult this block.
+ */
+const OnHardBouncePolicySchema = z.object({
+  /**
+   * Which suppression identifier types to write via addSuppression on a hard bounce.
+   * `email` = the bounced address; `domain` = the part after the last `@`.
+   * Default empty — no automatic suppression.
+   */
+  suppress: z.array(z.enum(['email', 'domain'])).default([]),
+}).partial().default({});
+
 /** Project-level outbound policy (pipeline-declared prohibitions, hard readiness, versions). */
 const PolicySchema = z.object({
   version: z.string().trim().default(''),
   prohibited_channels: z.array(z.string().trim().min(1)).default([]),
   prohibited_task_types: z.array(z.string().trim().min(1)).default([]),
   first_touch: FirstTouchPolicySchema,
+  /**
+   * On hard bounce: optional suppression-list writes (email address and/or domain).
+   * Soft bounces never trigger this. Omission leaves behaviour unchanged (no row).
+   */
+  on_hard_bounce: OnHardBouncePolicySchema,
   /** When true, channel execute hard-blocks non-ready external sends (send_email, linkedin_connect). */
   enforce_readiness: z.boolean().default(false),
   // Consumed by resolvePipelineFitModel (fit-model.ts) as the fit model version.

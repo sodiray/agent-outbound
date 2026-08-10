@@ -40,6 +40,14 @@ export async function processInboundReplyText(input: {
   classifier?: ReplyClassifier;
   aiConfig?: Record<string, unknown>;
   globalSuppressionDb?: any;
+  /** Pipeline config for optional policy.on_hard_bounce.suppress on DSN/bounce path. */
+  config?: {
+    policy?: {
+      on_hard_bounce?: {
+        suppress?: unknown;
+      };
+    };
+  };
   generate?: typeof generateObjectWithTools;
 }): Promise<{
   classification: string;
@@ -67,6 +75,8 @@ export async function processInboundReplyText(input: {
       snippet: replyText,
       contactId: input.contactId,
       bounceAt: input.replyAt || nowIso(),
+      config: input.config,
+      globalSuppressionDb: input.globalSuppressionDb,
     });
     return {
       classification: 'bounce',
@@ -147,6 +157,8 @@ export async function processInboundReplyText(input: {
       snippet: replyText,
       contactId: input.contactId,
       bounceAt: pauseAt,
+      config: input.config,
+      globalSuppressionDb: input.globalSuppressionDb,
     });
     return {
       classification,

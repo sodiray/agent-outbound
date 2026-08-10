@@ -412,3 +412,99 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
     hardened_from_soft,
   };
 }
+
+/** Identifier types the pipeline may declare under policy.on_hard_bounce.suppress. */
+export type HardBounceSuppressIdentifier = 'email' | 'domain';
+
+const HARD_BOUNCE_SUPPRESS_IDENTIFIERS = new Set<HardBounceSuppressIdentifier>(['email', 'domain']);
+
+/**
+ * Read pipeline-declared hard-bounce suppression identifiers.
+ * Omission, non-array, or empty → [] (today's default: write no suppression row).
+ * Unknown tokens are ignored here; config validation rejects them at load time.
+ */
+export function hardBounceSuppressIdentifiers(
+  policy: { on_hard_bounce?: { suppress?: unknown } } | null | undefined,
+): HardBounceSuppressIdentifier[] {
+  const values = policy?.on_hard_bounce?.suppress;
+  if (!Array.isArray(values)) return [];
+  const out: HardBounceSuppressIdentifier[] = [];
+  for (const raw of values) {
+    const token = String(raw || '').trim().toLowerCase() as HardBounceSuppressIdentifier;
+    if (!HARD_BOUNCE_SUPPRESS_IDENTIFIERS.has(token)) continue;
+    if (!out.includes(token)) out.push(token);
+  }
+  return out;
+}
+
+/**
+ * Build addSuppression entries for a hard bounce under declared policy.
+ * Soft bounces must not call this. Empty identifiers or missing email → [].
+ * Domain value is the part after the last `@` (matches hasSuppression domain matching).
+ */
+export function buildHardBounceSuppressionEntries(input: {
+  email: string;
+  identifiers: HardBounceSuppressIdentifier[];
+  recordId: string;
+  createdAt: string;
+  source?: string;
+}): Array<{
+  id: string;
+  value: string;
+  value_type: HardBounceSuppressIdentifier;
+  scope: 'global';
+  reason: 'bounce';
+  source: string;
+  record_id: string;
+  created_at: string;
+}> {
+  const email = String(input.email || '').trim().toLowerCase();
+  if (!email || !input.identifiers.length) return [];
+
+  const source = String(input.source || 'hard_bounce_policy').trim() || 'hard_bounce_policy';
+  const recordId = String(input.recordId || '').trim();
+  const createdAt = String(input.createdAt || nowIso());
+  const entries: Array<{
+    id: string;
+    value: string;
+    value_type: HardBounceSuppressIdentifier;
+    scope: 'global';
+    reason: 'bounce';
+    source: string;
+    record_id: string;
+    created_at: string;
+  }> = [];
+
+  for (const identifier of input.identifiers) {
+    if (identifier === 'email') {
+      entries.push({
+        id: randomUUID(),
+        value: email,
+        value_type: 'email',
+        scope: 'global',
+        reason: 'bounce',
+        source,
+        record_id: recordId,
+        created_at: createdAt,
+      });
+      continue;
+    }
+    if (identifier === 'domain') {
+      const at = email.lastIndexOf('@');
+      if (at < 0 || at >= email.length - 1) continue;
+      const domain = email.slice(at + 1).trim();
+      if (!domain) continue;
+      entries.push({
+        id: randomUUID(),
+        value: domain,
+        value_type: 'domain',
+        scope: 'global',
+        reason: 'bounce',
+        source,
+        record_id: recordId,
+        created_at: createdAt,
+      });
+    }
+  }
+  return entries;
+}

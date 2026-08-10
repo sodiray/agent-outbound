@@ -207,18 +207,31 @@ sequences:
     steps: [ ... ]
 ```
 
-### Inbound handling is not configurable here
+### Inbound handling is not configurable on the sequence
 
 A reply pauses the sequence, an opt-out suppresses the contact, and a bounce is
-handled structurally. That behaviour is fixed in the engine and there is no key
-that changes it.
+handled structurally (terminal sequence / contact rotation / DNE flags). That
+lifecycle behaviour is fixed in the engine; `sequences.*.on_reply`,
+`sequences.*.on_bounce`, and `sequences.*.on_opt_out` are rejected.
+
+Whether a **hard bounce** also writes a suppression-list row is optional pipeline
+policy, not sequence config. Declare it under project policy (default is do
+nothing — same as today):
+
+```yaml
+policy:
+  on_hard_bounce:
+    suppress: [email]          # and/or domain; omit or [] = no suppression row
+```
+
+Soft bounces never consult this block. Suppression always goes through the
+existing `addSuppression` path (`email` / `domain` identifier types).
 
 `on_reply`, `on_bounce` and `on_opt_out` used to appear in this document and were
 accepted by the schema. Nothing read them. An author declaring `on_opt_out: stop`
 was configuring a compliance stop that did not exist — and both shipped example
 configs declared exactly that. The engine now rejects all three with a message
-pointing here. If you need inbound behaviour the engine does not provide, that is
-a change to the engine, not a key.
+pointing here (and, for bounce, at `policy.on_hard_bounce`).
 
 Steps have no `action` type field — the agent reads the `description` to determine what kind of work is required. Conditions and `defer` are natural language, evaluated by the agent against the record's full state. Day offsets and tool config remain structured — those are operational mechanics, not judgment calls. Inbound reactions are neither: they are fixed engine behaviour, not configuration (see above).
 

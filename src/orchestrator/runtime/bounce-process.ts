@@ -1,10 +1,16 @@
 /**
  * Production entrypoint: process one provider bounce / DSN event.
  * Durable + idempotent by provider_message_id on channel_events.
+ *
+ * Optional pipeline policy (config.policy.on_hard_bounce.suppress) may write
+ * suppression-list rows via addSuppression after a hard bounce. Omission leaves
+ * today's behaviour: structural bounce handling only, no suppression row.
  */
 import {
   applyEmailBounce,
+  buildHardBounceSuppressionEntries,
   detectBounceFromText,
+  hardBounceSuppressIdentifiers,
   resolveBounceScope,
   resolveBounceType,
   type BounceSource,
@@ -16,6 +22,7 @@ import {
 } from '../policy/contact-campaign.js';
 import { evaluateReachability } from '../policy/timing-reachability.js';
 import {
+  addSuppression,
   ensureRecordColumns,
   insertChannelEvent,
   projectContactOntoRecord,
@@ -93,6 +100,19 @@ export type ProcessBounceEventInput = {
   scope?: 'contact' | 'account';
   bounceAt?: string;
   softBounceThreshold?: number;
+  /**
+   * Pipeline config. Only policy.on_hard_bounce.suppress is read for optional
+   * suppression-list writes. When omitted, no suppression row is written.
+   */
+  config?: {
+    policy?: {
+      on_hard_bounce?: {
+        suppress?: unknown;
+      };
+    };
+  };
+  /** Optional global suppression DB (same dual-write pattern as opt-out). */
+  globalSuppressionDb?: BounceDb;
 };
 
 export type ProcessBounceEventResult = {
@@ -296,6 +316,18 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
     db: input.db,
     columns: [...Object.keys(applied.patch), 'reachability_json', 'email_bounced_address'],
   });
+
+  // Pipeline-declared hard-bounce suppression only — never implied, never on soft.
+  const suppressEntries = applied.bounce_type === 'hard'
+    ? buildHardBounceSuppressionEntries({
+      email: bouncedEmail || String(applied.patch.email_bounced_address || ''),
+      identifiers: hardBounceSuppressIdentifiers(input.config?.policy),
+      recordId,
+      createdAt: applied.channel_event.occurred_at,
+      source: `hard_bounce_policy:${applied.channel_event.payload?.source || input.source || 'dsn'}`,
+    })
+    : [];
+
   const persisted = input.db.transaction(() => {
     // Durable per-contact DNE only on hard (or soft-hardened) contact-scope bounce.
     if (applied.scope === 'contact' && applied.bounce_type === 'hard' && contactId) {
@@ -333,6 +365,12 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
       });
     }
     insertChannelEvent({ db: input.db, event: applied.channel_event });
+    for (const entry of suppressEntries) {
+      addSuppression({ db: input.db, entry });
+      if (input.globalSuppressionDb && input.globalSuppressionDb !== input.db) {
+        addSuppression({ db: input.globalSuppressionDb, entry });
+      }
+    }
     return rotated;
   })();
 
@@ -362,6 +400,8 @@ export function tryProcessBounceFromText(input: {
   messageId?: string;
   threadId?: string;
   source?: BounceSource;
+  config?: ProcessBounceEventInput['config'];
+  globalSuppressionDb?: ProcessBounceEventInput['globalSuppressionDb'];
 }): ProcessBounceEventResult | null {
   const bounceType = detectBounceFromText(input.text);
   if (!bounceType) return null;
@@ -373,5 +413,7 @@ export function tryProcessBounceFromText(input: {
     bounceType,
     source: input.source || 'dsn',
     snippet: input.text,
+    config: input.config,
+    globalSuppressionDb: input.globalSuppressionDb,
   });
 }
