@@ -338,6 +338,28 @@ export const submitMailWithIdempotency = async ({
 };
 
 /**
+ * Whether stage_review_json is authorized for this mail completion identity.
+ *
+ * Accepts the same keys as the positive gate: sequence step id, product type,
+ * or generic mail / manual_task. When assetVersion is supplied, also requires
+ * an exact material fingerprint match (via isAuthorizedForStep).
+ *
+ * Shared by the allow path and the diagnostic mismatch path so "is this review
+ * for this stage?" cannot drift between them.
+ */
+const isMailStageReviewAuthorizedFor = (
+  row: Record<string, unknown>,
+  stepId: string,
+  productType: string,
+  assetVersion?: string | null,
+): boolean => (
+  isAuthorizedForStep(row, stepId, assetVersion)
+  || isAuthorizedForStep(row, productType, assetVersion)
+  || isAuthorizedForStep(row, 'mail', assetVersion)
+  || isAuthorizedForStep(row, 'manual_task', assetVersion)
+);
+
+/**
  * Fail-closed: mail manual complete requires stage_review authorization when
  * policy.review_required_for lists that mail product type (or generic "mail").
  * Operator must stage_review_authorize first.
@@ -436,16 +458,12 @@ const assertMailStageReviewAuthorized = ({
 
   // Accept authorization bound to sequence step id, product type, or generic mail,
   // with exact current material asset_version.
-  const authorized =
-    isAuthorizedForStep(row, stepId, currentAssetVersion)
-    || isAuthorizedForStep(row, productType, currentAssetVersion)
-    || isAuthorizedForStep(row, 'mail', currentAssetVersion)
-    || isAuthorizedForStep(row, 'manual_task', currentAssetVersion);
-  if (authorized) return;
+  if (isMailStageReviewAuthorizedFor(row, stepId, productType, currentAssetVersion)) return;
 
-  // Surface when a review exists but is pending / wrong version.
-  const existing = parseStageReviewJson(row.stage_review_json);
-  if (existing?.status === 'authorized') {
+  // Authorized for this stage identity but wrong material version → mismatch.
+  // An authorization for a *different* stage is not a version drift: fall through
+  // to "stage review required" (there is no mail review to re-check).
+  if (isMailStageReviewAuthorizedFor(row, stepId, productType)) {
     throw new Error(
       `Stage review asset_version mismatch for mail task "${productType}" `
       + `record ${recordId} step ${stepId} (fail-closed).`,

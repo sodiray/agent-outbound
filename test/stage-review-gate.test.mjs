@@ -31,6 +31,8 @@ import {
 } from '../dist/orchestrator/policy/transition-audit.js';
 import { openListDb, ensureRecordColumns, insertDraft, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
+import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
+import { buildContactPlan } from '../dist/orchestrator/policy/contact-campaign.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../dist/orchestrator/policy/lifecycle.js';
 
 /** Mirror execute currentStageAssetVersion composition for seed/authorize parity. */
@@ -904,5 +906,326 @@ test('executeChannelStep: removing linkedin_connect from review_required_for ope
     else process.env.AO_UNIPILE_FIXTURE = prevFixture;
   }
 
+  db.close();
+});
+
+// --- completeManualTask mail stage-review diagnostics (assertMailStageReviewAuthorized) ---
+//
+// The positive gate accepts authorization bound to stepId / productType / 'mail' /
+// 'manual_task'. The refusal diagnostic must use the same identity: authorized for a
+// *different* stage is "stage review required", not "asset_version mismatch".
+
+const mailStageReviewConfig = ({
+  stepId = 'mail_golden',
+  productType = 'golden_ticket',
+  reviewRequiredFor = ['golden_ticket'],
+} = {}) => ({
+  policy: {
+    version: 'tv-pipeline-v1',
+    review_required_for: reviewRequiredFor,
+  },
+  pipeline: [
+    {
+      kind: 'manual_task',
+      id: stepId,
+      config: { task_type: productType, channel: 'mail' },
+    },
+  ],
+  channels: {
+    mail: { template_id: 'postcard_v1' },
+  },
+});
+
+/** Material fingerprint matching assertMailStageReviewAuthorized's resolveStageAssetVersion inputs. */
+const mailCompleteAssetVersion = ({
+  rowId,
+  stepId,
+  address = '1 Main St',
+  activeContactId = 'c1',
+  contactId = 'c1',
+  bodyText = '',
+  policyVersion = 'tv-pipeline-v1',
+} = {}) => resolveStageAssetVersion({
+  accountId: rowId,
+  activeContactId,
+  contactId,
+  recipient: address,
+  stepId,
+  stageId: stepId,
+  bodyText: bodyText || null,
+  policyVersion,
+  reviewPresentation: null,
+});
+
+const seedMailManualComplete = ({
+  rowId = 'mail_stage_review_1',
+  stepId = 'mail_golden',
+  productType = 'golden_ticket',
+  stage_review_json = null,
+  address = '1 Main St',
+  mail_copy = '',
+} = {}) => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-mail-stage-review-'));
+  writeFileSync(join(listDir, 'outbound.yaml'), projectYaml({ reviewRequiredFor: [productType] }));
+  writeFileSync(join(listDir, 'operator.md'), 'test');
+  writeFileSync(join(listDir, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const campaign = buildContactPlan({
+    account_id: rowId,
+    campaign_id: `camp_${rowId}`,
+    treatment_tier: 'A',
+    mail_treatment: productType,
+    contacts: [{ contact_id: 'c1', outbound_disposition: 'eligible_target', outreach_rank: 1 }],
+  });
+  ensureRecordColumns({
+    db,
+    columns: [
+      'lifecycle_stage',
+      'account_sequence_state',
+      'work_state',
+      'next_action_json',
+      'active_contact_id',
+      'contact_id',
+      'treatment_tier',
+      'suppressed',
+      'stage_review_json',
+      'related_review_id',
+      'transition_audit_json',
+      'account_contact_plan_json',
+      'mail_treatment',
+      'mail_allocated',
+      'mail_copy',
+      'address',
+      'city',
+      'state',
+      'zip',
+      'business_name',
+    ],
+  });
+  db.prepare(`
+    INSERT INTO records (
+      _row_id, business_name, sequence_name, sequence_status, sequence_step,
+      contact_email, lifecycle_stage, account_sequence_state, work_state, next_action_json,
+      active_contact_id, treatment_tier, suppressed, stage_review_json,
+      account_contact_plan_json, mail_treatment, mail_allocated, mail_copy,
+      address, city, state, zip,
+      _created_at, _updated_at, created_at, updated_at
+    ) VALUES (
+      ?, 'Mail Review HVAC', 'default', 'active', 0,
+      'owner@example-mail-review.test', 'contacted', 'active', 'executing_external_action', ?,
+      'c1', 'A', 0, ?,
+      ?, ?, 0, ?,
+      ?, 'Boise', 'ID', '83702',
+      ?, ?, ?, ?
+    )
+  `).run(
+    rowId,
+    JSON.stringify(nextAction(rowId, { action_type: 'manual_task' })),
+    stage_review_json,
+    JSON.stringify(campaign),
+    productType,
+    mail_copy,
+    address,
+    now,
+    now,
+    now,
+    now,
+  );
+  try {
+    db.prepare(`
+      INSERT INTO pipeline_events (event_id, record_id, step_id, kind, passed, reason, occurred_at)
+      VALUES (?, ?, ?, 'manual_task', 0, 'awaiting_manual', ?)
+    `).run(`park_${rowId}`, rowId, stepId, now);
+  } catch {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS pipeline_events (
+        event_id TEXT PRIMARY KEY,
+        record_id TEXT,
+        step_id TEXT,
+        kind TEXT,
+        passed INTEGER,
+        reason TEXT,
+        occurred_at TEXT
+      )
+    `);
+    db.prepare(`
+      INSERT INTO pipeline_events (event_id, record_id, step_id, kind, passed, reason, occurred_at)
+      VALUES (?, ?, ?, 'manual_task', 0, 'awaiting_manual', ?)
+    `).run(`park_${rowId}`, rowId, stepId, now);
+  }
+  return { listDir, db, rowId, stepId, productType, address };
+};
+
+test('completeManualTask mail: authorized review for a different stage → stage review required (not asset_version mismatch)', async () => {
+  const stepId = 'mail_golden';
+  const productType = 'golden_ticket';
+  // Real failure mode: LinkedIn authorized, no mail review at all.
+  const paused = pauseForStageReview({
+    account_id: 'mail_wrong_stage',
+    stage_id: 'tier_a.linkedin_1',
+    asset_version: 'av_linkedin_only',
+    contact_id: 'c1',
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+  });
+  const authorized = authorizeStageReview({
+    review_id: paused.authorization.review_id,
+    stage_id: 'tier_a.linkedin_1',
+    asset_version: 'av_linkedin_only',
+    expected_asset_version: 'av_linkedin_only',
+    decision: 'authorize',
+    existing: paused.authorization,
+  });
+  const { db, rowId } = seedMailManualComplete({
+    rowId: 'mail_wrong_stage',
+    stepId,
+    productType,
+    stage_review_json: authorized.patch.stage_review_json,
+  });
+  // Keep sequence active: we are completing mail, not blocked by LI pause state.
+  db.prepare(`UPDATE records SET account_sequence_state = 'active' WHERE _row_id = ?`).run(rowId);
+
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      config: mailStageReviewConfig({ stepId, productType }),
+      recordId: rowId,
+      stepId,
+      note: 'try mail complete',
+    }),
+    (err) => {
+      const msg = String(err?.message || err);
+      assert.match(
+        msg,
+        /Stage review required before completing mail task "golden_ticket"/,
+        `expected "stage review required", got: ${msg}`,
+      );
+      assert.doesNotMatch(
+        msg,
+        /asset_version mismatch/i,
+        `must not report version drift when the only review is a different stage: ${msg}`,
+      );
+      return true;
+    },
+  );
+  db.close();
+});
+
+test('completeManualTask mail: authorized for this stage with drifted asset_version → asset_version mismatch', async () => {
+  const stepId = 'mail_golden';
+  const productType = 'golden_ticket';
+  // Bind identity via product type (not step id) with a stale fingerprint so
+  // invalidateStageReviewIfAssetChanged (stage_id=stepId only) does not absorb
+  // the case — this is the diagnostic branch under test.
+  const paused = pauseForStageReview({
+    account_id: 'mail_version_drift',
+    stage_id: productType,
+    asset_version: 'stale_bound_version_not_current',
+    contact_id: 'c1',
+    channel: 'mail',
+    action_type: productType,
+  });
+  const authorized = authorizeStageReview({
+    review_id: paused.authorization.review_id,
+    stage_id: productType,
+    asset_version: 'stale_bound_version_not_current',
+    expected_asset_version: 'stale_bound_version_not_current',
+    decision: 'authorize',
+    existing: paused.authorization,
+  });
+  const { db, rowId, address } = seedMailManualComplete({
+    rowId: 'mail_version_drift',
+    stepId,
+    productType,
+    stage_review_json: authorized.patch.stage_review_json,
+  });
+  db.prepare(`UPDATE records SET account_sequence_state = 'active' WHERE _row_id = ?`).run(rowId);
+
+  // Sanity: current material version is not the stale bound one (else gate would pass).
+  const current = mailCompleteAssetVersion({ rowId, stepId, address });
+  assert.notEqual(current, 'stale_bound_version_not_current');
+  assert.equal(
+    isAuthorizedForStep(
+      { stage_review_json: authorized.patch.stage_review_json },
+      productType,
+      current,
+    ),
+    false,
+  );
+  assert.equal(
+    isAuthorizedForStep(
+      { stage_review_json: authorized.patch.stage_review_json },
+      productType,
+    ),
+    true,
+  );
+
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      config: mailStageReviewConfig({ stepId, productType }),
+      recordId: rowId,
+      stepId,
+      note: 'try mail complete',
+    }),
+    (err) => {
+      const msg = String(err?.message || err);
+      assert.match(
+        msg,
+        /Stage review asset_version mismatch for mail task "golden_ticket"/,
+        `expected asset_version mismatch, got: ${msg}`,
+      );
+      return true;
+    },
+  );
+  db.close();
+});
+
+test('completeManualTask mail: correctly authorized + versioned review still completes', async () => {
+  const stepId = 'mail_golden';
+  const productType = 'golden_ticket';
+  const rowId = 'mail_auth_ok';
+  const address = '1 Main St';
+  // Seed record first so we can bind authorization to the same material version complete recomputes.
+  const { db } = seedMailManualComplete({
+    rowId,
+    stepId,
+    productType,
+    stage_review_json: null,
+    address,
+  });
+  const current = mailCompleteAssetVersion({ rowId, stepId, address });
+  const paused = pauseForStageReview({
+    account_id: rowId,
+    stage_id: stepId,
+    asset_version: current,
+    contact_id: 'c1',
+    channel: 'mail',
+    action_type: productType,
+  });
+  const authorized = authorizeStageReview({
+    review_id: paused.authorization.review_id,
+    stage_id: stepId,
+    asset_version: current,
+    expected_asset_version: current,
+    decision: 'authorize',
+    existing: paused.authorization,
+  });
+  db.prepare(`
+    UPDATE records
+    SET stage_review_json = ?, account_sequence_state = 'active'
+    WHERE _row_id = ?
+  `).run(authorized.patch.stage_review_json, rowId);
+
+  const result = await completeManualTask({
+    db,
+    config: mailStageReviewConfig({ stepId, productType }),
+    recordId: rowId,
+    stepId,
+    note: 'mailed after authorize',
+  });
+  assert.equal(result.status, 'manual_completed');
+  assert.equal(result.mail_allocated, true);
   db.close();
 });
