@@ -77,13 +77,38 @@ const normalizeToken = (value: string): string => value
   .replace(/^[.]+|[.]+$/g, '')
   .toLowerCase();
 
-const isNameToken = (value: string): boolean => (
-  /^[\p{L}]+(?:['’-][\p{L}]+)*$/u.test(value)
-    && !(value === value.toUpperCase() && value !== value.toLowerCase())
+/** Single letter, optional trailing period — middle initial, not a usable first name. */
+const isInitialToken = (value: string): boolean => /^[\p{L}]\.?$/u.test(value.trim());
+
+/**
+ * Professional credential / designation written in all caps (MC, LPC, CISM, LMFT, …).
+ * Deliberately requires uppercase form so title-case name words are never stripped.
+ */
+const isCredentialToken = (value: string): boolean => {
+  const letters = value.trim().replace(/\./g, '');
+  if (!/^[A-Za-z]{2,8}$/.test(letters)) return false;
+  return letters === letters.toUpperCase() && letters !== letters.toLowerCase();
+};
+
+const isSuffixOrCredential = (value: string): boolean => (
+  SUFFIXES.has(normalizeToken(value)) || isCredentialToken(value)
 );
 
+/**
+ * Person-name token: letters with optional internal apostrophe/hyphen.
+ * Rejects multi-letter ALL-CAPS (acronyms). Allows single-letter initials (with
+ * optional period) so middle initials do not poison first-name derivation.
+ */
+const isNameToken = (value: string): boolean => {
+  if (isInitialToken(value)) return true;
+  return (
+    /^[\p{L}]+(?:['’-][\p{L}]+)*$/u.test(value)
+      && !(value === value.toUpperCase() && value !== value.toLowerCase())
+  );
+};
+
 const hasOnlySuffixes = (tokens: string[]): boolean => (
-  tokens.length > 0 && tokens.every((token) => SUFFIXES.has(normalizeToken(token)))
+  tokens.length > 0 && tokens.every((token) => isSuffixOrCredential(token))
 );
 
 export const deriveContactFirstName = (value: unknown): string => {
@@ -102,10 +127,12 @@ export const deriveContactFirstName = (value: unknown): string => {
   const withoutHonorifics = tokens.slice();
   while (HONORIFICS.has(normalizeToken(withoutHonorifics[0] || ''))) withoutHonorifics.shift();
   const withoutSuffixes = withoutHonorifics.slice();
-  while (SUFFIXES.has(normalizeToken(withoutSuffixes.at(-1) || ''))) withoutSuffixes.pop();
+  while (isSuffixOrCredential(withoutSuffixes.at(-1) || '')) withoutSuffixes.pop();
   if (withoutSuffixes.length === 0 || !withoutSuffixes.every(isNameToken)) return '';
 
   const firstName = withoutSuffixes[0];
+  // Initials-only first token is not a usable greeting name ("Hi J").
+  if (isInitialToken(firstName)) return '';
   if (NON_PERSON_TOKENS.has(normalizeToken(firstName))) return '';
   return firstName;
 };
