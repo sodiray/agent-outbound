@@ -13,7 +13,7 @@ import {
   parseAccountCampaignFromRecord,
 } from '../policy/contact-campaign.js';
 import {
-  isAuthorizedForStep,
+  isAuthorizedForAnyOf,
   isReviewRequired,
   reviewRequiredTokens,
   resolveStageAssetVersion,
@@ -342,21 +342,19 @@ export const submitMailWithIdempotency = async ({
  *
  * Accepts the same keys as the positive gate: sequence step id, product type,
  * or generic mail / manual_task. When assetVersion is supplied, also requires
- * an exact material fingerprint match (via isAuthorizedForStep).
- *
- * Shared by the allow path and the diagnostic mismatch path so "is this review
- * for this stage?" cannot drift between them.
+ * an exact material fingerprint match (via isAuthorizedForAnyOf /
+ * isAuthorizedForStep). Shared by allow and refusal-diagnostic paths so
+ * "is this review for this stage?" cannot drift between them.
  */
 const isMailStageReviewAuthorizedFor = (
   row: Record<string, unknown>,
   stepId: string,
   productType: string,
   assetVersion?: string | null,
-): boolean => (
-  isAuthorizedForStep(row, stepId, assetVersion)
-  || isAuthorizedForStep(row, productType, assetVersion)
-  || isAuthorizedForStep(row, 'mail', assetVersion)
-  || isAuthorizedForStep(row, 'manual_task', assetVersion)
+): boolean => isAuthorizedForAnyOf(
+  row,
+  [stepId, productType, 'mail', 'manual_task'],
+  assetVersion,
 );
 
 /**

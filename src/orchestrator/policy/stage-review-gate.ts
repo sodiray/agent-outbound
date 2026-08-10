@@ -92,6 +92,27 @@ export function isAuthorizedForStep(
   return true;
 }
 
+/**
+ * True when authorized for any of the given stage identity keys.
+ *
+ * When assetVersion is supplied, also requires an exact material fingerprint match
+ * (via isAuthorizedForStep). Shared by allow paths and refusal diagnostics so
+ * "is this review for this stage?" cannot drift between them.
+ */
+export function isAuthorizedForAnyOf(
+  record: Record<string, unknown> | null | undefined,
+  stageKeys: Array<string | null | undefined>,
+  assetVersion?: string | null,
+): boolean {
+  for (const key of stageKeys) {
+    // Empty key would skip stage matching inside isAuthorizedForStep (any
+    // authorized review would match). Never treat blank as an identity key.
+    if (!String(key || '').trim()) continue;
+    if (isAuthorizedForStep(record, key, assetVersion)) return true;
+  }
+  return false;
+}
+
 /** True when a ready draft may stand in as the email authorization artifact (this slice). */
 export function isEmailDraftAuthorization(hasReadyDraft: boolean): boolean {
   return Boolean(hasReadyDraft);
@@ -149,10 +170,9 @@ export function evaluateExternalActionAuthorization(input: {
     };
   }
 
-  const stageAuthorized =
-    isAuthorizedForStep(input.record, input.stageId, input.assetVersion)
-    || isAuthorizedForStep(input.record, kind, input.assetVersion)
-    || (task ? isAuthorizedForStep(input.record, task, input.assetVersion) : false);
+  // Same identity key set for allow and refusal diagnostics (stage id, kind, task).
+  const stageKeys = [input.stageId, kind, task || null];
+  const stageAuthorized = isAuthorizedForAnyOf(input.record, stageKeys, input.assetVersion);
 
   const isEmail =
     kind === 'send_email'
@@ -184,11 +204,22 @@ export function evaluateExternalActionAuthorization(input: {
     ),
   );
 
+  // Authorized for this stage identity but wrong material version → content changed.
+  // An authorization for a *different* stage is not a version drift: fall through
+  // to "stage review required" (there is no review for this stage to re-check).
+  // Only meaningful when a current asset version was supplied for binding.
+  const hasBoundAssetVersion =
+    input.assetVersion != null && String(input.assetVersion).trim() !== '';
+  const authorizedForStageIdentity =
+    hasBoundAssetVersion && isAuthorizedForAnyOf(input.record, stageKeys);
+
   return {
     allowed: false,
-    reason: isEmail
-      ? 'stage_review_or_draft_approval_required'
-      : 'stage_review_required',
+    reason: authorizedForStageIdentity
+      ? 'stage_review_asset_version_mismatch'
+      : isEmail
+        ? 'stage_review_or_draft_approval_required'
+        : 'stage_review_required',
     reviewRequired: true,
     stageAuthorized: false,
     emailDraftAuthorized: false,

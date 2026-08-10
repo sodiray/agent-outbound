@@ -228,6 +228,142 @@ test('evaluateExternalActionAuthorization: send_email no draft/auth blocked; rea
   assert.equal(withDraft.reason, 'email_ready_draft_authorization');
 });
 
+// --- Refusal diagnostics: version drift vs no review (same allow set) ------
+
+/**
+ * Build an authorized stage_review_json for the given stage/version.
+ * Pure evaluate tests only — no DB.
+ */
+const authorizedReviewRecord = ({
+  stageId,
+  assetVersion,
+  actionType = 'linkedin_connect',
+  channel = 'linkedin',
+  accountId = 'acct_eval_diag',
+} = {}) => {
+  const paused = pauseForStageReview({
+    account_id: accountId,
+    stage_id: stageId,
+    asset_version: assetVersion,
+    contact_id: 'c_owner',
+    channel,
+    action_type: actionType,
+    pending_action: {
+      action_type: actionType,
+      account_id: accountId,
+      contact_id: 'c_owner',
+    },
+    lifecycle_stage: 'contacted',
+    reason: 'review for eval diagnostic',
+  });
+  const authorized = authorizeStageReview({
+    review_id: paused.authorization.review_id,
+    stage_id: stageId,
+    asset_version: assetVersion,
+    expected_asset_version: assetVersion,
+    decision: 'authorize',
+    account_id: accountId,
+    existing: paused.authorization,
+    lifecycle_stage: 'contacted',
+    actor: 'operator_diag',
+  });
+  assert.equal(authorized.allowed, true);
+  return { stage_review_json: authorized.patch.stage_review_json };
+};
+
+test('evaluateExternalActionAuthorization: authorized for stage with drifted asset_version → content-changed reason', () => {
+  const stageId = 'linkedin_1';
+  const record = authorizedReviewRecord({
+    stageId,
+    assetVersion: 'av_bound_stale',
+    actionType: 'linkedin_connect',
+  });
+
+  const decision = evaluateExternalActionAuthorization({
+    config: { policy: { review_required_for: ['linkedin_connect'] } },
+    record,
+    stepKind: 'linkedin_connect',
+    stageId,
+    assetVersion: 'av_current_after_edit',
+    channel: 'linkedin',
+  });
+
+  assert.equal(decision.allowed, false, 'drifted version must still refuse');
+  assert.equal(
+    decision.reason,
+    'stage_review_asset_version_mismatch',
+    'must name content/version change so operator re-authorizes the current asset',
+  );
+  assert.notEqual(decision.reason, 'stage_review_required');
+});
+
+test('evaluateExternalActionAuthorization: no review at all → stage_review_required (unchanged)', () => {
+  const decision = evaluateExternalActionAuthorization({
+    config: { policy: { review_required_for: ['linkedin_connect'] } },
+    record: {},
+    stepKind: 'linkedin_connect',
+    stageId: 'linkedin_1',
+    assetVersion: 'av_any',
+    channel: 'linkedin',
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.reason, 'stage_review_required');
+  assert.notEqual(decision.reason, 'stage_review_asset_version_mismatch');
+});
+
+test('evaluateExternalActionAuthorization CONTROL: correct stage + version still PASSES', () => {
+  const stageId = 'linkedin_1';
+  const assetVersion = 'av_current_ok';
+  const record = authorizedReviewRecord({
+    stageId,
+    assetVersion,
+    actionType: 'linkedin_connect',
+  });
+
+  const decision = evaluateExternalActionAuthorization({
+    config: { policy: { review_required_for: ['linkedin_connect'] } },
+    record,
+    stepKind: 'linkedin_connect',
+    stageId,
+    assetVersion,
+    channel: 'linkedin',
+  });
+
+  assert.equal(decision.allowed, true, 'must not change the allow set — only refusal reasons');
+  assert.equal(decision.stageAuthorized, true);
+  assert.equal(decision.reason, 'stage_review_authorized');
+});
+
+test('evaluateExternalActionAuthorization CONTROL: other-stage auth is not version drift', () => {
+  // Authorized only for a LinkedIn stage; evaluating email must not claim
+  // "content changed" — there is no email review to re-check.
+  const record = authorizedReviewRecord({
+    stageId: 'linkedin_1',
+    assetVersion: 'av_li_only',
+    actionType: 'linkedin_connect',
+    channel: 'linkedin',
+  });
+
+  const decision = evaluateExternalActionAuthorization({
+    config: { policy: { review_required_for: ['send_email', 'linkedin_connect'] } },
+    record,
+    stepKind: 'send_email',
+    stageId: 'email_1',
+    assetVersion: 'av_email_current',
+    channel: 'email',
+    hasReadyDraft: false,
+  });
+
+  assert.equal(decision.allowed, false);
+  assert.equal(
+    decision.reason,
+    'stage_review_or_draft_approval_required',
+    'wrong-stage authorization is "create a review", not "content changed"',
+  );
+  assert.notEqual(decision.reason, 'stage_review_asset_version_mismatch');
+});
+
 // --- Material asset_version composition + invalidate helper -----------------
 
 test('resolveStageAssetVersion: material fields change fingerprint; sparse fallback stable', () => {
