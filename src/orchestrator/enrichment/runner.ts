@@ -36,7 +36,13 @@ import {
   executeEmailVerificationAction,
   isEmailVerificationNoOpinion,
 } from './actions/email-verification.js';
-import { executeToolCallAction, isRecordScopedProviderToolError } from './actions/tool-call.js';
+import {
+  executeToolCallAction,
+  isRecordScopedProviderToolError,
+  PROVIDER_RETURNED_NO_CONTENT_REASON,
+} from './actions/tool-call.js';
+
+export { PROVIDER_RETURNED_NO_CONTENT_REASON };
 import { executeLinkedinCompanyResolutionAction } from './actions/linkedin-company-resolution.js';
 import type { EmailVerificationProvider } from '../runtime/providers/email-verification/index.js';
 import {
@@ -727,6 +733,29 @@ export const declaredOutputWritesFor = ({
   }));
 };
 
+/**
+ * Null out declared output columns so they are absent under presence checks.
+ *
+ * SQLite `ensureRecordColumns` adds INTEGER/REAL columns as `DEFAULT 0`, which
+ * otherwise makes unwritten booleans look like confident false. Used only when
+ * a provider returned no usable content — we must not leave schema defaults
+ * masquerading as evidence of absence.
+ */
+export const absentDeclaredOutputsPatch = (stepConfig: Record<string, unknown>): Record<string, null> => {
+  const declaredOutputs = getDeclaredOutputs(stepConfig);
+  const legacyColumns = getLegacyColumns(stepConfig);
+  const patch: Record<string, null> = {};
+  for (const name of Object.keys(declaredOutputs)) {
+    const mappedTarget = String(legacyColumns[name] || '').trim();
+    patch[mappedTarget || name] = null;
+  }
+  for (const target of Object.values(legacyColumns)) {
+    const column = String(target || '').trim();
+    if (column) patch[column] = null;
+  }
+  return patch;
+};
+
 /** Ensure evidence JSON columns + score_status exist on the list records table. */
 const ensureEvidenceColumns = (db: any) => {
   ensureRecordColumns({
@@ -1245,6 +1274,8 @@ export const executeEnrichmentStepOnRecords = async ({
     record_ids: [] as string[],
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
     non_execution_reasons: {} as Record<string, string>,
+    /** Recorded non-pass reasons (not hard errors): empty provider payload, etc. */
+    recorded_non_success: {} as Record<string, string>,
   };
 
   await mapWithConcurrency<any, void>((rows || []) as any[], async (record) => {
@@ -1344,8 +1375,11 @@ export const executeEnrichmentStepOnRecords = async ({
         return { outcome: 'no_opinion', attempt };
       }
 
-      const outputs = result.outputs || {};
-      const outcome = outputOutcomeFor({ outputs, expectedOutputs });
+      const noContentReason = String((result as any)?.reason || '').trim() === PROVIDER_RETURNED_NO_CONTENT_REASON
+        ? PROVIDER_RETURNED_NO_CONTENT_REASON
+        : '';
+      const outputs = noContentReason ? {} : (result.outputs || {});
+      const outcome = noContentReason ? 'empty' : outputOutcomeFor({ outputs, expectedOutputs });
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs });
 
       recordCostEvent({
@@ -1367,7 +1401,9 @@ export const executeEnrichmentStepOnRecords = async ({
 
       const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || currentRecord;
       // Empty success: still do not clobber prior good site_text; record evidence only when material.
-      const isEmptyOutcome = outcome === 'empty';
+      // Provider-no-content: withhold declared outputs (and null schema-default 0s so they
+      // stay absent under d3cbc3e presence checks — see absentDeclaredOutputsPatch).
+      const isEmptyOutcome = outcome === 'empty' || Boolean(noContentReason);
       const failedEmpty = isEmptyOutcome && Object.keys(outputs || {}).every((k) => isBlank(outputs?.[k]));
       const patch = applyOutputsWithEvidence({
         db,
@@ -1378,12 +1414,15 @@ export const executeEnrichmentStepOnRecords = async ({
         record: currentRow,
         provider: String((result as any)?.provider || ''),
         usage: result.usage as Record<string, unknown> | null,
-        failed: failedEmpty,
-        error: isEmptyOutcome ? `enrichment step empty (${id})` : null,
+        failed: failedEmpty || Boolean(noContentReason),
+        error: noContentReason
+          ? noContentReason
+          : (isEmptyOutcome ? `enrichment step empty (${id})` : null),
       });
+      if (noContentReason) Object.assign(patch, absentDeclaredOutputsPatch(stepConfig));
       patch[statusColumn] = outcome;
       // Material retrieval → force next scoring pass (clear score:* staleness).
-      if (!failedEmpty && evidencePatchIsMaterialRetrieval(patch)) {
+      if (!failedEmpty && !noContentReason && evidencePatchIsMaterialRetrieval(patch)) {
         markScoringStale({ db, recordId });
         Object.assign(patch, scoringStaleRecordPatch());
       }
@@ -1396,20 +1435,37 @@ export const executeEnrichmentStepOnRecords = async ({
       if (String(stepConfig.action || '').trim().toLowerCase() !== 'decision_makers') {
         upsertPrimaryContactIfPresent({ db, record: merged });
       }
-      writeStaleness({
-        db,
-        recordId,
-        stepId: id,
-        ...dependencyHashes,
-        cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
-        cacheTtl: String(stepConfig?.cache || ''),
-      });
+      // No-content is not a durable success: leave staleness unset so the step re-runs
+      // on the next pass (same composition as d3cbc3e absent declared outputs).
+      if (!noContentReason) {
+        writeStaleness({
+          db,
+          recordId,
+          stepId: id,
+          ...dependencyHashes,
+          cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
+          cacheTtl: String(stepConfig?.cache || ''),
+        });
+      } else {
+        clearStaleness({ db, recordId, stepId: id });
+      }
       summary.processed += 1;
       summary.record_ids.push(recordId);
-      const rerunReason = enrichRerunReason({ cached, stepConfig, depValues, executionConfig });
-      if (rerunReason) summary.non_execution_reasons[recordId] = rerunReason;
-      emitActivity({ event: 'row_complete', phase: 'pipeline', step: id, row: rowLabel, outcome });
-      return { outcome, attempt };
+      if (noContentReason) {
+        summary.non_execution_reasons[recordId] = noContentReason;
+        summary.recorded_non_success[recordId] = noContentReason;
+      } else {
+        const rerunReason = enrichRerunReason({ cached, stepConfig, depValues, executionConfig });
+        if (rerunReason) summary.non_execution_reasons[recordId] = rerunReason;
+      }
+      emitActivity({
+        event: 'row_complete',
+        phase: 'pipeline',
+        step: id,
+        row: rowLabel,
+        outcome: noContentReason || outcome,
+      });
+      return { outcome: noContentReason || outcome, attempt };
     };
 
     const recordFailure = ({
@@ -1879,10 +1935,14 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               return;
             }
 
-            const outputs = result.outputs || {};
-            const outcome = outputOutcomeFor({ outputs, expectedOutputs });
+            const noContentReason = String((result as any)?.reason || '').trim() === PROVIDER_RETURNED_NO_CONTENT_REASON
+              ? PROVIDER_RETURNED_NO_CONTENT_REASON
+              : '';
+            const outputs = noContentReason ? {} : (result.outputs || {});
+            const outcome = noContentReason ? 'empty' : outputOutcomeFor({ outputs, expectedOutputs });
             if (
-              outcome === 'empty'
+              !noContentReason
+              && outcome === 'empty'
               && !enrichStepUsesEmptyOnError(stepConfig)
               && Object.keys(expectedOutputs).length > 0
               && Object.keys(outputs).length === 0
@@ -1907,7 +1967,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               ensureRecordColumns({ db, columns: Object.keys(outputs) });
             }
 
-            const isEmptyOutcome = outcome === 'empty';
+            const isEmptyOutcome = outcome === 'empty' || Boolean(noContentReason);
             const patch = applyOutputsWithEvidence({
               db,
               step: { ...step, __list_dir: listDir },
@@ -1917,9 +1977,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               record,
               provider: String((result as any)?.provider || ''),
               usage: result.usage as Record<string, unknown> | null,
-              failed: isEmptyOutcome && Object.keys(outputs || {}).every((k) => isBlank(outputs?.[k])),
-              error: isEmptyOutcome ? `enrichment step empty (${id})` : null,
+              failed: Boolean(noContentReason)
+                || (isEmptyOutcome && Object.keys(outputs || {}).every((k) => isBlank(outputs?.[k]))),
+              error: noContentReason
+                ? noContentReason
+                : (isEmptyOutcome ? `enrichment step empty (${id})` : null),
             });
+            if (noContentReason) Object.assign(patch, absentDeclaredOutputsPatch(stepConfig));
             patch[statusColumn] = outcome;
             patches.push({
               recordId,
@@ -1929,6 +1993,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
               cacheTtl: String(stepConfig.cache || ''),
               skippedWhen: false,
+              // No durable cache for empty provider payloads — force re-run.
+              ...(noContentReason ? { failedError: noContentReason, permanentFailure: false } : {}),
             });
           } catch (error) {
             recordErroredProviderToolCost({

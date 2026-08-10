@@ -17,6 +17,9 @@ type ToolCallActionInput = {
   env?: Record<string, string | undefined>;
 };
 
+/** Engine-owned reason when a tool succeeds but the payload has nothing to read. */
+export const PROVIDER_RETURNED_NO_CONTENT_REASON = 'provider_returned_no_content';
+
 type ToolCallActionResult = {
   outputs: Record<string, unknown>;
   usage?: Record<string, unknown>;
@@ -24,6 +27,11 @@ type ToolCallActionResult = {
   provider?: string;
   /** Tools attempted in waterfall order (slug/server labels). */
   waterfall_attempts?: string[];
+  /**
+   * Set when the provider returned a payload with no usable evidence to read.
+   * Declared outputs must not be written; callers record a non-pass with this reason.
+   */
+  reason?: string;
 };
 
 const isBlankValue = (value: unknown) => (
@@ -178,6 +186,53 @@ const mapOutputsFromResult = (
   return outputs;
 };
 
+/**
+ * Whether a provider payload carries anything to read — evidence that structured
+ * fields could have been derived from, not the structured claims themselves.
+ *
+ * Counts as usable: non-empty/non-whitespace strings, finite numbers (including 0).
+ * Does not count: null/undefined, booleans (including false), empty strings,
+ * empty collections. Fail closed: a payload that is only booleans / empties is
+ * treated as no content so confident falsey declared outputs are not written.
+ *
+ * Partial rule (stated for callers): when this returns true, every mapped output
+ * is written as returned — including genuine all-false boolean rows and sparse
+ * subsets. Absence of content is decided on the raw payload, never by whether
+ * the extracted booleans "look plausible".
+ */
+export const providerResultHasUsableContent = (result: unknown, depth = 0): boolean => {
+  if (depth > 12) return false;
+  if (result === null || result === undefined) return false;
+  if (typeof result === 'string') {
+    const trimmed = result.trim();
+    if (!trimmed) return false;
+    // Provider envelopes sometimes stringify JSON; unwrap once and re-check.
+    if (
+      (trimmed.startsWith('{') && trimmed.endsWith('}'))
+      || (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+      try {
+        return providerResultHasUsableContent(JSON.parse(trimmed), depth + 1);
+      } catch {
+        return true; // non-JSON text is still content to read
+      }
+    }
+    return true;
+  }
+  if (typeof result === 'number') return Number.isFinite(result);
+  if (typeof result === 'boolean') return false;
+  if (typeof result === 'bigint') return true;
+  if (Array.isArray(result)) {
+    return result.some((entry) => providerResultHasUsableContent(entry, depth + 1));
+  }
+  if (typeof result === 'object') {
+    return Object.values(result as Record<string, unknown>).some((value) => (
+      providerResultHasUsableContent(value, depth + 1)
+    ));
+  }
+  return false;
+};
+
 const mergeUsage = (
   acc: Record<string, unknown> | null,
   next: Record<string, unknown> | null | undefined,
@@ -314,6 +369,20 @@ export const executeToolCallAction = async ({
     if (!isRecordScopedProviderOutcome({ error, args })) throw error;
     throw recordScopedToolFailure(error);
   });
+
+  // Empty / exhausted provider payloads still "succeed" at the HTTP layer and
+  // often include schema-default falsey extract fields. Mapping those would write
+  // confident false for declared booleans — absence of evidence as evidence of
+  // absence. When the raw payload has nothing to read, withhold outputs entirely.
+  if (!providerResultHasUsableContent(walked.result)) {
+    return {
+      outputs: {},
+      usage: walked.usage || undefined,
+      provider: walked.provider || '',
+      waterfall_attempts: walked.attempts,
+      reason: PROVIDER_RETURNED_NO_CONTENT_REASON,
+    };
+  }
 
   return {
     outputs: mapOutputsFromResult(walked.result, outputMap),

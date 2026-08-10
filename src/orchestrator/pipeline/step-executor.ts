@@ -553,16 +553,37 @@ const executeEnrichBatch = async (
   const nonExecutionReasons = result.non_execution_reasons && typeof result.non_execution_reasons === 'object'
     ? result.non_execution_reasons as Record<string, string>
     : {};
+  const recordedNonSuccess = result.recorded_non_success && typeof result.recorded_non_success === 'object'
+    ? result.recorded_non_success as Record<string, string>
+    : {};
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     const failure = failures.get(recordId);
-    outcomes.set(recordId, failure
-      ? { passed: false, reason: failure, errored: !handledErrors.has(recordId) }
-      : {
-        passed: true,
-        reason: nonExecutionReasons[recordId] || '',
+    if (failure) {
+      outcomes.set(recordId, {
+        passed: false,
+        reason: failure,
+        errored: !handledErrors.has(recordId),
+      });
+      return;
+    }
+    // Soft non-pass (e.g. provider_returned_no_content): not a hard error, not a pass.
+    // Dependents still resolve; hasPassedStep stays false; declared outputs unwritten.
+    const nonSuccessReason = String(recordedNonSuccess[recordId] || '').trim();
+    if (nonSuccessReason) {
+      outcomes.set(recordId, {
+        passed: false,
+        reason: nonSuccessReason,
+        errored: false,
         declaredOutputWrites: declaredOutputWrites[recordId],
       });
+      return;
+    }
+    outcomes.set(recordId, {
+      passed: true,
+      reason: nonExecutionReasons[recordId] || '',
+      declaredOutputWrites: declaredOutputWrites[recordId],
+    });
   });
   return outcomes;
 };
