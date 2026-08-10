@@ -3755,13 +3755,33 @@ export const ensureRecordColumns = ({ db, columns = [] }) => {
 export const hasSuppression = ({ db, value, valueType }) => {
   const normalized = String(value || '').toLowerCase().trim();
   if (!normalized) return false;
+  // Exact match on identifier_* (preferred) or legacy value_* columns.
+  // Uses idx_suppression_value on (identifier_type, identifier_value).
   const row = db.prepare(`
     SELECT entry_id FROM suppression
     WHERE (identifier_value = ? AND identifier_type = ?)
        OR (value = ? AND value_type = ?)
     LIMIT 1
   `).get(normalized, valueType, normalized, valueType);
-  return Boolean(row?.entry_id);
+  if (row?.entry_id) return true;
+
+  // Domain-scoped suppression: an email is suppressed when its bare domain
+  // (everything after the last @) has a domain entry. Exact domain only —
+  // no public-suffix / parent-domain expansion (subdomains are not covered
+  // by a parent domain entry).
+  const normalizedType = String(valueType || '').trim().toLowerCase();
+  if (normalizedType !== 'email') return false;
+  const at = normalized.lastIndexOf('@');
+  if (at < 0 || at >= normalized.length - 1) return false;
+  const domain = normalized.slice(at + 1).trim();
+  if (!domain) return false;
+  const domainRow = db.prepare(`
+    SELECT entry_id FROM suppression
+    WHERE (identifier_value = ? AND identifier_type = 'domain')
+       OR (value = ? AND value_type = 'domain')
+    LIMIT 1
+  `).get(domain, domain);
+  return Boolean(domainRow?.entry_id);
 };
 
 export const getSearchState = ({ db, searchId }) => (
