@@ -415,7 +415,7 @@ const SCHEMA_SQL = `
     done_count INTEGER DEFAULT 0,
     step_index INTEGER DEFAULT 0,
     step_total INTEGER DEFAULT 0,
-    status TEXT NOT NULL,        -- 'running' | 'done' | 'error'
+    status TEXT NOT NULL,        -- 'running' | 'done' | 'incomplete' | 'error' | 'interrupted'
     error TEXT DEFAULT '',
     started_at TEXT NOT NULL,
     updated_at TEXT NOT NULL

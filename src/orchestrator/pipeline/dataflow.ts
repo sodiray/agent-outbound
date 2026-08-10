@@ -18,7 +18,14 @@ import { closeMcpClient, getMcpClient } from '../runtime/mcp.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
-import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
+import {
+  beginRun,
+  endRun,
+  heartbeat,
+  pipelineRunTerminalMessage,
+  pipelineRunTerminalStatus,
+  tickProgress,
+} from '../runtime/progress.js';
 import { findAsset, hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides, revokeInapplicableDraftsForRecord, syncPrimaryContactProjection } from '../runtime/db.js';
 import { closeInapplicableManualParksForRecord } from './manual.js';
 import { resolveWorkingDayConfig } from '../lib/working-days.js';
@@ -973,6 +980,7 @@ export const runPipelineDataflow = async ({
 
   const rawSteps: any[] = flattenPipelineSteps(config);
   const db = openListDb({ listDir, readonly: dryRun });
+  let runId = '';
   try {
     // Keep generates required by a non-generate policy step.
     // Non-critical generate stays deferred unless AO_RUN_GENERATE=1 or run_in_pipeline.
@@ -1065,7 +1073,7 @@ export const runPipelineDataflow = async ({
     )).length, 0);
 
     emitActivity({ event: 'phase_start', phase: 'pipeline', rows: rows.length, steps: steps.length, engine: 'dataflow' });
-    const runId = beginRun(db, { phase: 'pipeline', target: rows.length, message: `Filtering ${rows.length} records` });
+    runId = beginRun(db, { phase: 'pipeline', target: rows.length, message: `Filtering ${rows.length} records` });
     const progressState = { done: 0 };
     const heartbeatTimer = setInterval(() => heartbeat(db, runId), 3000);
     // Revoke drafts / close parks that are no longer applicable before the
@@ -1605,14 +1613,23 @@ export const runPipelineDataflow = async ({
     if (summary.errored > 0) {
       console.warn(`Pipeline completed with ${summary.errored} evaluation/execution errors; errored records remain in play for retry.`);
     }
+    // Terminal status rule (errored dominates awaiting review — see pipelineRunTerminalStatus):
+    //   errored > 0              → error (needs attention; operator error surface still works)
+    //   errored = 0, awaiting > 0 → incomplete (review gate; not a failure)
+    //   both zero                → done
     endRun(db, runId, {
-      status: summary.errored > 0 ? 'error' : 'done',
-      message: summary.errored > 0
-        ? `Pipeline incomplete · ${summary.errored} errored records need retry · ${summary.awaiting_review} awaiting review`
-        : `Pipeline complete · ${summary.survivors} survivors · ${summary.awaiting_review} awaiting review`,
+      status: pipelineRunTerminalStatus(summary),
+      message: pipelineRunTerminalMessage(summary),
     });
     return summary;
   } catch (error) {
+    // Process-level failure: mark the run terminal so it does not stick as running.
+    if (runId) {
+      endRun(db, runId, {
+        status: 'error',
+        error: String((error as any)?.message || error),
+      });
+    }
     throw error;
   } finally {
     db.close();

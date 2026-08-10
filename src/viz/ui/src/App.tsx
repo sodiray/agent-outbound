@@ -1319,7 +1319,7 @@ export const App = () => {
             <span className={`live-dot ${runActive ? 'is-active' : ''}`} aria-hidden="true" />
             {liveStatusLabel}
             <span className="live-pill__card" role="status">
-              <strong>{runActive ? `${runPhaseLabel} running` : (progress && progress.status === 'done' ? `${runPhaseLabel} complete` : 'Idle')}</strong>
+              <strong>{runActive ? `${runPhaseLabel} running` : (progress && progress.status === 'done' ? `${runPhaseLabel} complete` : (progress && progress.status === 'incomplete' ? `${runPhaseLabel} incomplete` : 'Idle'))}</strong>
               <span>{runDetailText}</span>
             </span>
           </span>
