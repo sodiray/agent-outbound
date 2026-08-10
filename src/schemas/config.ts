@@ -471,6 +471,11 @@ const StageInputDefinitionSchema = z.object({
   required: z.boolean().default(true),
   /** Minimum character length of the resolved string value; absent means no minimum. */
   min_chars: z.number().int().min(0).optional(),
+  /**
+   * Maximum character length of the resolved string value; absent means no ceiling.
+   * Oversized strings are truncated (not refused) before they reach the model.
+   */
+  max_chars: z.number().int().min(0).optional(),
 }).strict().superRefine((value, ctx) => {
   const sources = Number(Boolean(value.from)) + Number(value.value !== undefined);
   if (sources !== 1) {
@@ -479,12 +484,30 @@ const StageInputDefinitionSchema = z.object({
       message: 'stage input must declare exactly one of from or value.',
     });
   }
-  // min_chars measures string length. A non-string literal cannot satisfy it.
+  // min_chars / max_chars measure string length. A non-string literal cannot use them.
   if (value.min_chars !== undefined && value.value !== undefined && typeof value.value !== 'string') {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: 'stage input min_chars applies only to string values.',
       path: ['min_chars'],
+    });
+  }
+  if (value.max_chars !== undefined && value.value !== undefined && typeof value.value !== 'string') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'stage input max_chars applies only to string values.',
+      path: ['max_chars'],
+    });
+  }
+  if (
+    value.min_chars !== undefined
+    && value.max_chars !== undefined
+    && value.max_chars < value.min_chars
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'stage input max_chars must be greater than or equal to min_chars.',
+      path: ['max_chars'],
     });
   }
 });
@@ -1098,13 +1121,30 @@ const ComposeInputSchema = z.object({
   required: z.boolean().default(true),
   /** Minimum character length of the resolved string value; absent means no minimum. */
   min_chars: z.number().int().min(0).optional(),
+  /**
+   * Maximum character length of the resolved string value; absent means no ceiling.
+   * Oversized strings are truncated (not refused) before they reach the model.
+   */
+  max_chars: z.number().int().min(0).optional(),
 }).strict().superRefine((value, ctx) => {
   const sources = Number(Boolean(value.from)) + Number(Boolean(value.value));
-  if (sources === 1) return;
-  ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    message: 'compose input must declare exactly one of from or value.',
-  });
+  if (sources !== 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'compose input must declare exactly one of from or value.',
+    });
+  }
+  if (
+    value.min_chars !== undefined
+    && value.max_chars !== undefined
+    && value.max_chars < value.min_chars
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'compose input max_chars must be greater than or equal to min_chars.',
+      path: ['max_chars'],
+    });
+  }
 });
 
 const ComposeStructureSchema = z.record(z.union([

@@ -4,7 +4,11 @@ import { mapWithConcurrency } from '../lib/concurrency.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
-import { requiredInputNonExecutionReason, resolveStageInputs } from '../lib/stage-inputs.js';
+import {
+  inputTruncationReason,
+  requiredInputNonExecutionReason,
+  resolveStageInputs,
+} from '../lib/stage-inputs.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { ensureRecordColumns, insertAsset, upsertRecord } from '../runtime/db.js';
@@ -73,15 +77,6 @@ export const buildComposeResultSchema = (step: ComposeStep) => {
     used_inputs: z.array(z.string().min(1)).default([]),
     grounding: z.array(GroundingEntrySchema).default([]),
   }).strict();
-};
-
-const pathGet = (value: unknown, path: string): unknown => {
-  const keys = String(path || '').split('.').map((key) => key.trim()).filter(Boolean);
-  return keys.reduce<unknown>((current, key) => (
-    current && typeof current === 'object' && !Array.isArray(current)
-      ? (current as Record<string, unknown>)[key]
-      : undefined
-  ), value);
 };
 
 const isBlank = (value: unknown) => value === undefined || value === null || String(value).trim() === '';
@@ -237,9 +232,11 @@ const repairKnownMojibake = (text: string) => text
   .replaceAll('â€\u009d', '”');
 
 const declaredInputs = ({ step, record }: { step: ComposeStep; record: RecordRow }) => {
+  // Use the shared resolver so max_chars clamps (and the same from/value
+  // resolution as the required-input gate) reach the model prompt.
+  const resolved = resolveStageInputs({ step, record });
   const values: Record<string, string> = {};
-  for (const [name, definition] of Object.entries(step.inputs || {})) {
-    const value = definition.value ?? (definition.from ? pathGet(record, definition.from) : undefined);
+  for (const [name, value] of Object.entries(resolved.values)) {
     if (!isBlank(value)) values[name] = String(value).trim();
   }
   return values;
@@ -342,6 +339,11 @@ export const runComposeStep = async ({
       if (requiredSkip) {
         summary.non_execution_reasons[recordId] = requiredSkip;
         return;
+      }
+      // max_chars clamp is not a skip; record it so oversized inputs stay visible.
+      const truncationNote = inputTruncationReason(resolved);
+      if (truncationNote) {
+        summary.non_execution_reasons[recordId] = truncationNote;
       }
       const inputs = declaredInputs({ step, record });
       const depHash = composeDependencyHash({ step, record });

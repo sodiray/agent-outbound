@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   UndeclaredStageInputError,
+  inputTruncationReason,
   requiredInputNonExecutionReason,
   resolveStageInputs,
   stageInputDiagnosticMessages,
   stageInputRecord,
+  truncateInputToMaxChars,
 } from '../dist/orchestrator/lib/stage-inputs.js';
 import { buildModelContext } from '../dist/orchestrator/lib/model-context.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
@@ -462,4 +464,295 @@ test('min_chars: non-string present values fail a positive threshold at resolve 
     requiredInputNonExecutionReason(resolved),
     'skipped_required_input_below_minimum:score',
   );
+});
+
+// --- max_chars: ceiling on declared input (truncate, do not refuse) ----------
+// Boundary: length === max_chars is untouched (no truncation). length > max_chars
+// is clamped; the step may still run. Absent max_chars: byte-identical to today.
+// max_chars: 0 yields the empty string and records the clamp.
+
+test('max_chars: input longer than the threshold is truncated and the step may run', () => {
+  const long = `${'word '.repeat(20)}tail`;
+  const resolved = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, max_chars: 40 },
+    }),
+    record: { site_text: long },
+  });
+  assert.ok(long.length > 40);
+  assert.ok(typeof resolved.values.site_text === 'string');
+  assert.ok(resolved.values.site_text.length <= 40);
+  assert.deepEqual(resolved.missingRequired, []);
+  assert.deepEqual(resolved.belowMinimum, []);
+  // Truncation does not refuse execution.
+  assert.equal(requiredInputNonExecutionReason(resolved), null);
+  assert.equal(resolved.truncated.length, 1);
+  assert.equal(resolved.truncated[0].name, 'site_text');
+  assert.equal(resolved.truncated[0].originalChars, long.length);
+  assert.equal(resolved.truncated[0].keptChars, resolved.values.site_text.length);
+  assert.equal(
+    inputTruncationReason(resolved),
+    `input_truncated:site_text:${long.length}->${resolved.values.site_text.length}`,
+  );
+});
+
+test('max_chars: truncation is recorded naming the input and the sizes', () => {
+  const long = 'x'.repeat(100);
+  const resolved = resolveStageInputs({
+    step: mapStep({
+      evidence: { from: 'site_text', required: true, max_chars: 25 },
+    }),
+    record: { site_text: long },
+  });
+  assert.deepEqual(resolved.truncated, [{
+    name: 'evidence',
+    originalChars: 100,
+    keptChars: 25,
+  }]);
+  assert.equal(inputTruncationReason(resolved), 'input_truncated:evidence:100->25');
+  assert.equal(resolved.values.evidence, 'x'.repeat(25));
+});
+
+test('max_chars: input under the limit is untouched (byte-identical value)', () => {
+  const short = 'exact payload ✨';
+  const resolved = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, max_chars: 400 },
+    }),
+    record: { site_text: short },
+  });
+  assert.equal(resolved.values.site_text, short);
+  assert.equal(resolved.values.site_text, 'exact payload ✨');
+  assert.deepEqual(resolved.truncated, []);
+  assert.equal(inputTruncationReason(resolved), null);
+});
+
+test('max_chars: step with no max_chars declared is completely unaffected', () => {
+  const huge = 'z'.repeat(50_000);
+  const withMap = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true },
+    }),
+    record: { site_text: huge },
+  });
+  assert.equal(withMap.values.site_text, huge);
+  assert.deepEqual(withMap.truncated, []);
+  assert.equal(requiredInputNonExecutionReason(withMap), null);
+
+  const arrayForm = resolveStageInputs({
+    step: { kind: 'filter', id: 'f', inputs: ['site_text'] },
+    record: { site_text: huge },
+  });
+  assert.equal(arrayForm.values.site_text, huge);
+  assert.deepEqual(arrayForm.truncated, []);
+});
+
+test('max_chars: min_chars and max_chars together — floor refuses, ceiling clamps', () => {
+  // Too thin for min_chars: refuse (below minimum), even with a ceiling declared.
+  const thin = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 40, max_chars: 100 },
+    }),
+    record: { site_text: 'short' },
+  });
+  assert.deepEqual(thin.belowMinimum, ['site_text']);
+  assert.equal(
+    requiredInputNonExecutionReason(thin),
+    'skipped_required_input_below_minimum:site_text',
+  );
+
+  // Long enough for min, over max: clamp and may run.
+  const long = 'a'.repeat(250);
+  const clamped = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 40, max_chars: 100 },
+    }),
+    record: { site_text: long },
+  });
+  assert.deepEqual(clamped.belowMinimum, []);
+  assert.equal(requiredInputNonExecutionReason(clamped), null);
+  assert.equal(clamped.values.site_text, 'a'.repeat(100));
+  assert.deepEqual(clamped.truncated, [{
+    name: 'site_text',
+    originalChars: 250,
+    keptChars: 100,
+  }]);
+});
+
+test('max_chars: max_chars < min_chars is rejected at config validation', () => {
+  const scoreBase = {
+    kind: 'score',
+    id: 'score_fit',
+    key: 'fit',
+    model: 'openrouter/anthropic/claude-haiku-4.5',
+    criteria: [{ id: 'c', weight: 1, description: 'criterion' }],
+    outputs: {
+      fit_score: { type: 'number' },
+      fit_breakdown: { type: 'json' },
+      fit_reasoning: { type: 'string' },
+    },
+  };
+
+  const inverted = normalizeConfig({
+    pipeline: [{
+      ...scoreBase,
+      inputs: { evidence: { from: 'site_text', min_chars: 400, max_chars: 100 } },
+    }],
+  });
+  assert.ok(inverted.errors.length > 0, 'max_chars < min_chars must error');
+  assert.ok(
+    inverted.errors.some((error) => /max_chars|min_chars/i.test(error)),
+    inverted.errors.join('\n'),
+  );
+
+  const equal = normalizeConfig({
+    pipeline: [{
+      ...scoreBase,
+      inputs: { evidence: { from: 'site_text', min_chars: 100, max_chars: 100 } },
+    }],
+  });
+  assert.deepEqual(equal.errors, []);
+});
+
+test('max_chars: zero and exact boundary — length > max_chars clamps; length === max_chars untouched', () => {
+  // max_chars: 0 → empty string, recorded, step may still run (not a below-minimum).
+  const zero = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, max_chars: 0 },
+    }),
+    record: { site_text: 'still present originally' },
+  });
+  assert.equal(zero.values.site_text, '');
+  assert.deepEqual(zero.truncated, [{
+    name: 'site_text',
+    originalChars: 'still present originally'.length,
+    keptChars: 0,
+  }]);
+  // Original was present, so required is satisfied; clamp does not invent absence.
+  assert.deepEqual(zero.missingRequired, []);
+  assert.equal(requiredInputNonExecutionReason(zero), null);
+  assert.equal(
+    inputTruncationReason(zero),
+    `input_truncated:site_text:${'still present originally'.length}->0`,
+  );
+
+  // Exact equality is not truncated.
+  const exact = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, max_chars: 5 },
+    }),
+    record: { site_text: '12345' },
+  });
+  assert.equal(exact.values.site_text, '12345');
+  assert.deepEqual(exact.truncated, []);
+  assert.equal(inputTruncationReason(exact), null);
+
+  // One over is truncated.
+  const over = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, max_chars: 5 },
+    }),
+    record: { site_text: '123456' },
+  });
+  assert.equal(over.values.site_text, '12345');
+  assert.deepEqual(over.truncated, [{ name: 'site_text', originalChars: 6, keptChars: 5 }]);
+});
+
+test('max_chars: invalid declarations are rejected by config validation', () => {
+  const scoreBase = {
+    kind: 'score',
+    id: 'score_fit',
+    key: 'fit',
+    model: 'openrouter/anthropic/claude-haiku-4.5',
+    criteria: [{ id: 'c', weight: 1, description: 'criterion' }],
+    outputs: {
+      fit_score: { type: 'number' },
+      fit_breakdown: { type: 'json' },
+      fit_reasoning: { type: 'string' },
+    },
+  };
+
+  const negative = normalizeConfig({
+    pipeline: [{
+      ...scoreBase,
+      inputs: { evidence: { from: 'site_text', max_chars: -1 } },
+    }],
+  });
+  assert.ok(negative.errors.length > 0, 'negative max_chars must error');
+
+  const nonInteger = normalizeConfig({
+    pipeline: [{
+      ...scoreBase,
+      inputs: { evidence: { from: 'site_text', max_chars: 3.5 } },
+    }],
+  });
+  assert.ok(nonInteger.errors.length > 0, 'non-integer max_chars must error');
+
+  const onNumberLiteral = normalizeConfig({
+    pipeline: [{
+      kind: 'generate',
+      id: 'g',
+      inputs: { count: { value: 42, max_chars: 2 } },
+      outputs: { note: { type: 'string', description: 'n' } },
+    }],
+  });
+  assert.ok(onNumberLiteral.errors.length > 0, 'max_chars on non-string value must error');
+  assert.ok(
+    onNumberLiteral.errors.some((error) => /max_chars|string/i.test(error)),
+    onNumberLiteral.errors.join('\n'),
+  );
+
+  const valid = normalizeConfig({
+    pipeline: [{
+      ...scoreBase,
+      inputs: { evidence: { from: 'site_text', required: true, max_chars: 50_000 } },
+    }],
+  });
+  assert.deepEqual(valid.errors, []);
+});
+
+test('max_chars: prefers a whitespace boundary over a mid-word cut', () => {
+  // "hello world" max 8 → hard cut "hello wo" → back up to "hello"
+  assert.equal(truncateInputToMaxChars('hello world', 8), 'hello');
+  // Already on a boundary (next char is space): keep hard cut.
+  assert.equal(truncateInputToMaxChars('hello world', 5), 'hello');
+  // No whitespace in window: hard cut.
+  assert.equal(truncateInputToMaxChars('abcdefghij', 4), 'abcd');
+  // Exact and under: byte-identical.
+  assert.equal(truncateInputToMaxChars('hello', 5), 'hello');
+  assert.equal(truncateInputToMaxChars('hi', 5), 'hi');
+  assert.equal(truncateInputToMaxChars('anything', 0), '');
+});
+
+test('max_chars: map-form model context clamps before the assembled budget check', () => {
+  // Live failure mode: a ~100k+ site_text blows the default assembled budget.
+  // Per-input max_chars on the declared map reduces the contributor so assembly
+  // succeeds — the ceiling is per input, the budget is on the assembled payload.
+  const huge = 'x'.repeat(120_000);
+  assert.throws(() => buildModelContext({
+    record: { site_text: huge, business_name: 'Acme' },
+    inputs: {
+      site_text: { from: 'site_text' },
+      business_name: { from: 'business_name' },
+    },
+    strict: true,
+    budget: { max_chars: 100_000, max_tokens: 25_000 },
+  }), /Model context budget exceeded/);
+
+  const context = buildModelContext({
+    record: { site_text: huge, business_name: 'Acme' },
+    inputs: {
+      site_text: { from: 'site_text', max_chars: 40_000 },
+      business_name: { from: 'business_name' },
+    },
+    strict: true,
+    budget: { max_chars: 100_000, max_tokens: 25_000 },
+  });
+  assert.equal(typeof context.data.site_text, 'string');
+  assert.ok(context.data.site_text.length <= 40_000);
+  assert.equal(context.data.business_name, 'Acme');
+  assert.ok(context.telemetry.truncated_inputs?.length === 1);
+  assert.equal(context.telemetry.truncated_inputs[0].name, 'site_text');
+  assert.equal(context.telemetry.truncated_inputs[0].originalChars, 120_000);
+  assert.ok(context.telemetry.chars <= 100_000);
 });

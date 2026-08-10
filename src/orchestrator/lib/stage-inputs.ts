@@ -157,6 +157,14 @@ export const declaredStageInputs = (stepValue: unknown): string[] => {
   return [...new Set([...explicit, ...contactSourceField])];
 };
 
+export type StageInputTruncation = {
+  /** Declared input name (map key), not the source field path. */
+  name: string;
+  originalChars: number;
+  /** Length after clamp (may be below max_chars when a whitespace boundary backs up). */
+  keptChars: number;
+};
+
 export type ResolvedStageInputs = {
   values: Record<string, unknown>;
   /** Required inputs that are absent (null / undefined / blank string). */
@@ -167,6 +175,12 @@ export type ResolvedStageInputs = {
    * event log can tell "absent" from "too thin to support a conclusion".
    */
   belowMinimum: string[];
+  /**
+   * String inputs clamped by a declared `max_chars`. The step still runs; this
+   * records that the model (or downstream reader) saw a prefix, not the full
+   * value. Empty when nothing was truncated.
+   */
+  truncated: StageInputTruncation[];
 };
 
 const valueAtPath = (source: Record<string, unknown>, path: string): unknown => (
@@ -182,19 +196,47 @@ const absentInputValue = (value: unknown): boolean => (
 );
 
 /**
- * Character length of a resolved input for `min_chars`. Only strings have a
- * character length; non-strings return null so the caller can fail closed.
- * Counts the resolved value as returned (no extra trim) — resolution itself
- * does not normalise text.
+ * Character length of a resolved input for `min_chars` / `max_chars`. Only
+ * strings have a character length; non-strings return null so the caller can
+ * fail closed (min) or leave unchanged (max). Counts the resolved value as
+ * returned (no extra trim) — resolution itself does not normalise text.
  */
 const resolvedInputCharCount = (value: unknown): number | null => (
   typeof value === 'string' ? value.length : null
 );
 
-/** Parse a declared non-negative integer min_chars; absent/invalid → no minimum. */
-const declaredMinChars = (value: unknown): number | undefined => {
+/** Parse a declared non-negative integer min/max_chars; absent/invalid → none. */
+const declaredNonNegativeInt = (value: unknown): number | undefined => {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) return undefined;
   return value;
+};
+
+/**
+ * Clamp a string to at most `maxChars` characters. Prefer a whitespace break
+ * over a mid-word cut when that is cheap; if there is no whitespace in the
+ * kept window, hard-cut at maxChars. Boundary: length === maxChars is kept
+ * byte-identical (no truncation). maxChars 0 yields "".
+ */
+export const truncateInputToMaxChars = (value: string, maxChars: number): string => {
+  if (maxChars < 0) return value;
+  if (value.length <= maxChars) return value;
+  if (maxChars === 0) return '';
+  // Already on a word boundary when the next char is whitespace (or we ended
+  // on whitespace): keep the hard cut as-is.
+  const nextIsBoundary = maxChars >= value.length || /\s/.test(value[maxChars] || '');
+  const endsOnBoundary = /\s/.test(value[maxChars - 1] || '');
+  if (nextIsBoundary || endsOnBoundary) return value.slice(0, maxChars);
+  const hard = value.slice(0, maxChars);
+  const lastWs = Math.max(
+    hard.lastIndexOf(' '),
+    hard.lastIndexOf('\n'),
+    hard.lastIndexOf('\t'),
+    hard.lastIndexOf('\r'),
+  );
+  // No whitespace to break on → hard cut mid-token.
+  if (lastWs <= 0) return hard;
+  // Drop the partial token and the whitespace that preceded it.
+  return hard.slice(0, lastWs);
 };
 
 /**
@@ -213,6 +255,19 @@ export const requiredInputNonExecutionReason = (resolved: ResolvedStageInputs): 
   return parts.length > 0 ? parts.join(';') : null;
 };
 
+/**
+ * Visible record that one or more declared inputs were clamped by max_chars.
+ * Same spirit as skipped_required_input_below_minimum / stage_review_open_failed:
+ * a stable token naming the input and the sizes. Null when nothing was truncated.
+ * Does not prevent execution — truncation is a clamp, not a skip.
+ */
+export const inputTruncationReason = (resolved: ResolvedStageInputs): string | null => {
+  if (!resolved.truncated || resolved.truncated.length === 0) return null;
+  return resolved.truncated
+    .map((entry) => `input_truncated:${entry.name}:${entry.originalChars}->${entry.keptChars}`)
+    .join(';');
+};
+
 /** Resolve the declared capability map without exposing the rest of the record. */
 export const resolveStageInputs = ({
   step: stepValue,
@@ -226,7 +281,7 @@ export const resolveStageInputs = ({
   const inputs = config.inputs;
   if (Array.isArray(inputs)) {
     const values = Object.fromEntries(strings(inputs).map((field) => [field, record[field]]));
-    return { values, missingRequired: [], belowMinimum: [] };
+    return { values, missingRequired: [], belowMinimum: [], truncated: [] };
   }
   const entries = Object.entries(asRecord(inputs)).map(([name, definition]) => {
     const input = asRecord(definition);
@@ -236,7 +291,8 @@ export const resolveStageInputs = ({
       name,
       value,
       required: input.required !== false,
-      minChars: declaredMinChars(input.min_chars),
+      minChars: declaredNonNegativeInt(input.min_chars),
+      maxChars: declaredNonNegativeInt(input.max_chars),
     };
   });
   const missingRequired = entries
@@ -245,6 +301,7 @@ export const resolveStageInputs = ({
   // Present but too thin: same non-execution gate as missing required, distinct reason.
   // Boundary: length === min_chars is viable (not below). min_chars: 0 never fails a string.
   // Non-string present values cannot satisfy a positive min_chars (fail closed).
+  // Measured on the original value before any max_chars clamp.
   const belowMinimum = entries
     .filter(({ value, minChars }) => {
       if (minChars === undefined || absentInputValue(value)) return false;
@@ -253,10 +310,23 @@ export const resolveStageInputs = ({
       return chars < minChars;
     })
     .map(({ name }) => name);
+  // Ceiling: clamp oversize strings. Does not refuse the step — oversized
+  // evidence is still useful as a prefix. Boundary: length === max_chars is
+  // untouched. Non-strings are left as-is (config rejects max_chars on
+  // non-string literals; runtime non-strings have no character length).
+  const truncated: StageInputTruncation[] = [];
+  const values = Object.fromEntries(entries.map(({ name, value, maxChars }) => {
+    if (maxChars === undefined || typeof value !== 'string') return [name, value];
+    if (value.length <= maxChars) return [name, value];
+    const kept = truncateInputToMaxChars(value, maxChars);
+    truncated.push({ name, originalChars: value.length, keptChars: kept.length });
+    return [name, kept];
+  }));
   return {
-    values: Object.fromEntries(entries.map(({ name, value }) => [name, value])),
+    values,
     missingRequired,
     belowMinimum,
+    truncated,
   };
 };
 

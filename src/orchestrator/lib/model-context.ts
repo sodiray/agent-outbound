@@ -1,3 +1,5 @@
+import { resolveStageInputs, type StageInputTruncation } from './stage-inputs.js';
+
 export type ModelContextBudget = {
   max_chars: number;
   max_tokens: number;
@@ -8,10 +10,18 @@ export type ModelContextContributor = {
   chars: number;
 };
 
+export type ModelContextTruncation = {
+  name: string;
+  originalChars: number;
+  keptChars: number;
+};
+
 export type ModelContextTelemetry = {
   chars: number;
   estimated_tokens: number;
   top_contributors: ModelContextContributor[];
+  /** Declared inputs clamped by max_chars before assembly (visible clamp record). */
+  truncated_inputs?: ModelContextTruncation[];
 };
 
 export type ModelContext = {
@@ -188,18 +198,30 @@ export const modelContextBudget = (value: unknown): ModelContextBudget => {
 export const buildModelContextPayload = ({
   data,
   budget,
+  truncatedInputs = [],
 }: {
   data: Record<string, unknown>;
   budget?: unknown;
+  /** Per-input max_chars clamps applied before assembly (for telemetry). */
+  truncatedInputs?: StageInputTruncation[];
 }): ModelContext => {
   const serialized = JSON.stringify(data, null, 2);
-  const telemetry = {
+  const telemetry: ModelContextTelemetry = {
     chars: serialized.length,
     estimated_tokens: Math.ceil(serialized.length / 4),
     top_contributors: Object.entries(data)
       .map(([field, value]) => contributorChars(field, value))
       .sort((left, right) => right.chars - left.chars)
       .slice(0, 5),
+    ...(truncatedInputs.length > 0
+      ? {
+        truncated_inputs: truncatedInputs.map((entry) => ({
+          name: entry.name,
+          originalChars: entry.originalChars,
+          keptChars: entry.keptChars,
+        })),
+      }
+      : {}),
   };
   const resolvedBudget = modelContextBudget(budget);
   if (telemetry.chars > resolvedBudget.max_chars || telemetry.estimated_tokens > resolvedBudget.max_tokens) {
@@ -229,11 +251,26 @@ export const buildModelContext = ({
   const implicitFields = strict
     ? []
     : normalizeFieldNames([...DEFAULT_IDENTITY_FIELDS, ...normalizeFieldNames(identityFields)]);
+  const mapForm = isRecord(inputs) && !Array.isArray(inputs);
+  // Map-form declared inputs go through resolveStageInputs so max_chars clamps
+  // apply before assembly — the live failure mode for oversized page text on
+  // semantic filters. Array form has no per-input options; values are raw.
+  let truncatedInputs: StageInputTruncation[] = [];
+  let declaredEntries: Array<{ name: string; from?: string; value?: unknown }>;
+  if (mapForm) {
+    const resolved = resolveStageInputs({ step: { inputs }, record: source });
+    truncatedInputs = resolved.truncated;
+    declaredEntries = Object.entries(resolved.values).map(([name, value]) => ({ name, value }));
+  } else {
+    declaredEntries = inputEntries(inputs);
+  }
   const entries: Array<{ name: string; from?: string; value?: unknown }> = [
     ...implicitFields.map((field) => ({ name: field, from: field })),
-    ...inputEntries(inputs),
+    ...declaredEntries,
   ];
   const data = entries.reduce<Record<string, unknown>>((context, entry) => {
+    // Map-form resolved entries carry `value` only (already max_chars-clamped).
+    // Array-form / identity entries carry `from` and read the raw record.
     const value = entry.from ? valueAtPath(source, entry.from) : entry.value;
     if (value === undefined) return context;
     return { ...context, [entry.name]: value };
@@ -244,7 +281,7 @@ export const buildModelContext = ({
   const withObservations = observations.length > 0
     ? { ...data, observations_json: observations }
     : data;
-  return buildModelContextPayload({ data: withObservations, budget });
+  return buildModelContextPayload({ data: withObservations, budget, truncatedInputs });
 };
 
 export const businessEvidenceIsAvailable = (record: unknown): boolean => {

@@ -3,7 +3,11 @@ import { z } from 'zod';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
-import { requiredInputNonExecutionReason, resolveStageInputs } from '../lib/stage-inputs.js';
+import {
+  inputTruncationReason,
+  requiredInputNonExecutionReason,
+  resolveStageInputs,
+} from '../lib/stage-inputs.js';
 import { buildModelContext, withModelContextTelemetry } from '../lib/model-context.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { recordCostEvent } from '../lib/costs.js';
@@ -288,6 +292,12 @@ export const runScoreStage = async ({
       outcomes.set(recordId, { passed: true, reason: requiredSkip });
       continue;
     }
+    // Truncation is not a skip — surface it on the run reason so oversized
+    // clamps are visible in the same token spirit as below-minimum skips.
+    const truncationNote = inputTruncationReason(inputs);
+    const withTruncation = (reason: string) => (
+      [truncationNote, reason].filter(Boolean).join(';')
+    );
     const depHash = scoreStageDependencyHash({ step, record: initialRecord, samples: sampleCount });
     const cached = readStaleness({ db, recordId, stepId });
     // Score stages always write key-derived fields; prefer declared outputs when
@@ -311,9 +321,14 @@ export const runScoreStage = async ({
       continue;
     }
     const criteria = normalizedCriteria(step.criteria);
+    // Prefer the step's declared map so max_chars clamps and truncation
+    // telemetry flow through the shared model-context builder. Fall back to
+    // already-resolved values for array-form inputs (no per-input options).
     const modelContext = buildModelContext({
-      record: inputs.values,
-      inputs: Object.keys(inputs.values),
+      record: initialRecord,
+      inputs: step.inputs && !Array.isArray(step.inputs)
+        ? step.inputs
+        : Object.keys(inputs.values),
       strict: true,
       budget: config.model_context,
     });
@@ -329,7 +344,7 @@ export const runScoreStage = async ({
         ]);
         outcomes.set(recordId, {
           passed: true,
-          reason: calculation.breakdown.reason || '',
+          reason: withTruncation(calculation.breakdown.reason || ''),
           declaredOutputWrites,
         });
         continue;
@@ -425,7 +440,11 @@ export const runScoreStage = async ({
         [`${step.key}_breakdown`, { provided: true, value: persisted[`${step.key}_breakdown`] }],
         [`${step.key}_reasoning`, { provided: true, value: persisted[`${step.key}_reasoning`] }],
       ]);
-      outcomes.set(recordId, { passed: true, reason: calculation.breakdown.reason || '', declaredOutputWrites });
+      outcomes.set(recordId, {
+        passed: true,
+        reason: withTruncation(calculation.breakdown.reason || ''),
+        declaredOutputWrites,
+      });
     } catch (error) {
       const reason = String((error as Error)?.message || error);
       const calculation = calculationFor({ criteria, result: null });
