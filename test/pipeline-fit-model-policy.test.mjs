@@ -230,8 +230,16 @@ test('pipeline policy_apply bands the persisted kind: score fit without reading 
   const { root, record: first, events } = await runPolicyPipeline({ pipeline: [declaredFitStep, policyStep] });
   assert.equal(first.fit_score, 76.5, JSON.stringify({ events, calculation: first.fit_calculation_json }));
   assert.equal(Number(first.fit_evidence_confidence), 75);
+  // Retired score_breakdown must be cleared — policy must band the current
+  // score-stage fit, not the stale retired-column payload seeded above.
   assert.equal(first.score_breakdown, '');
-  assert.deepEqual(Object.keys(JSON.parse(first.fit_breakdown)), ['criteria', 'missing_inputs']);
+  const fitBreakdown = JSON.parse(first.fit_breakdown);
+  // Stage-shaped fit_breakdown (criteria + missing_inputs). Extra audit keys
+  // (e.g. samples) are allowed; freeze the required shape, not the whole set.
+  assert.ok(Array.isArray(fitBreakdown.criteria), 'fit_breakdown.criteria must be present');
+  assert.ok(Array.isArray(fitBreakdown.missing_inputs), 'fit_breakdown.missing_inputs must be present');
+  assert.equal(fitBreakdown.criteria.length, fitCriteria.length);
+  assert.equal(fitBreakdown.criteria[0].grade, fitGrades[0]);
   const detail = getRecordDetail(root, readyRecord._row_id);
   assert.equal(detail.score.criteria[0].grade, fitGrades[0]);
   assert.equal(first.treatment_tier, 'A', JSON.stringify({

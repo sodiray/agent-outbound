@@ -229,6 +229,146 @@ test('score-stage migration canonicalizes populated legacy breakdowns and clears
   assert.equal(JSON.parse(byId.get('measured-score').fit_breakdown).criteria[0].grade, 8);
 });
 
+test('score stage with samples: 3 makes three grader calls and stores the median grade', async () => {
+  await withDb(async ({ db, root, record }) => {
+    const grades = [2, 8, 5];
+    let calls = 0;
+    const outcomes = await runScoreStage({
+      db,
+      listDir: root,
+      config: { score: { samples: 3 } },
+      step: scoreStep,
+      rows: [record],
+      generateObject: async () => {
+        const grade = grades[calls];
+        calls += 1;
+        return {
+          object: {
+            criteria: [{
+              id: 'coordination',
+              grade,
+              assessable: true,
+              reasoning: `draw grade ${grade}`,
+            }],
+            summary_reasoning: `sample ${calls}`,
+          },
+          usage: {},
+        };
+      },
+    });
+    assert.equal(outcomes.get(record._row_id).passed, true);
+    assert.equal(calls, 3);
+    const stored = db.prepare('SELECT fit_score, fit_breakdown FROM records WHERE _row_id = ?').get(record._row_id);
+    // Median of 2, 5, 8 is 5 → contribution 50.
+    assert.equal(stored.fit_score, 50);
+    const breakdown = JSON.parse(stored.fit_breakdown);
+    assert.equal(breakdown.criteria[0].grade, 5);
+    assert.equal(breakdown.samples, 3);
+  });
+});
+
+test('CONTROL: undeclared score.samples makes exactly one grader call', async () => {
+  await withDb(async ({ db, root, record }) => {
+    let calls = 0;
+    const outcomes = await runScoreStage({
+      db,
+      listDir: root,
+      config: {},
+      step: scoreStep,
+      rows: [record],
+      generateObject: async () => {
+        calls += 1;
+        return {
+          object: {
+            criteria: [{ id: 'coordination', grade: 7, assessable: true, reasoning: 'single draw' }],
+            summary_reasoning: 'one sample',
+          },
+          usage: {},
+        };
+      },
+    });
+    assert.equal(outcomes.get(record._row_id).passed, true);
+    assert.equal(calls, 1);
+    const stored = db.prepare('SELECT fit_score, fit_breakdown FROM records WHERE _row_id = ?').get(record._row_id);
+    assert.equal(stored.fit_score, 70);
+    assert.equal(JSON.parse(stored.fit_breakdown).samples, 1);
+  });
+});
+
+test('score stage even samples uses the lower-middle grade, not an average', async () => {
+  await withDb(async ({ db, root, record }) => {
+    const grades = [4, 8];
+    let calls = 0;
+    await runScoreStage({
+      db,
+      listDir: root,
+      config: { score: { samples: 2 } },
+      step: scoreStep,
+      rows: [record],
+      generateObject: async () => {
+        const grade = grades[calls];
+        calls += 1;
+        return {
+          object: {
+            criteria: [{ id: 'coordination', grade, assessable: true, reasoning: `draw ${grade}` }],
+            summary_reasoning: 'even pair',
+          },
+          usage: {},
+        };
+      },
+    });
+    assert.equal(calls, 2);
+    const stored = db.prepare('SELECT fit_score, fit_breakdown FROM records WHERE _row_id = ?').get(record._row_id);
+    // Sorted 4, 8 → lower-middle index floor((2-1)/2)=0 → 4, not average 6.
+    assert.equal(JSON.parse(stored.fit_breakdown).criteria[0].grade, 4);
+    assert.equal(stored.fit_score, 40);
+    assert.equal(JSON.parse(stored.fit_breakdown).samples, 2);
+  });
+});
+
+test('score stage reduces over surviving draws when one of three fails and records contributing count', async () => {
+  await withDb(async ({ db, root, record }) => {
+    const responses = [
+      { grade: 2 },
+      new Error('temporary provider failure'),
+      { grade: 8 },
+    ];
+    let calls = 0;
+    const outcomes = await runScoreStage({
+      db,
+      listDir: root,
+      config: { score: { samples: 3 } },
+      step: scoreStep,
+      rows: [record],
+      generateObject: async () => {
+        const response = responses[calls];
+        calls += 1;
+        if (response instanceof Error) throw response;
+        return {
+          object: {
+            criteria: [{
+              id: 'coordination',
+              grade: response.grade,
+              assessable: true,
+              reasoning: `draw ${response.grade}`,
+            }],
+            summary_reasoning: 'partial success',
+          },
+          usage: {},
+        };
+      },
+    });
+    assert.equal(outcomes.get(record._row_id).passed, true);
+    assert.equal(calls, 3);
+    const stored = db.prepare('SELECT fit_score, fit_breakdown FROM records WHERE _row_id = ?').get(record._row_id);
+    // Surviving grades 2, 8 → lower-middle of two is 2.
+    const breakdown = JSON.parse(stored.fit_breakdown);
+    assert.equal(breakdown.criteria[0].grade, 2);
+    assert.equal(breakdown.samples, 2);
+    assert.equal(stored.fit_score, 20);
+  });
+});
+
 test('dataflow records score skips and reruns only when a declared input changes', async () => {
   const root = listDir();
   writeFileSync(join(root, 'outbound.yaml'), `

@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
+import { mapWithConcurrency } from '../lib/concurrency.js';
 import { resolveStageInputs } from '../lib/stage-inputs.js';
 import { buildModelContext, withModelContextTelemetry } from '../lib/model-context.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { ensureRecordColumns, insertScoreEvent, upsertRecord } from '../runtime/db.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
+import { reduceGradedCriteriaSamples, resolvedScoreSamples } from './reduce-samples.js';
 
 type ScoreCriterion = {
   id: string;
@@ -43,6 +45,8 @@ export type ScoreStageCalculation = {
     }>;
     missing_inputs: string[];
     reason?: 'criteria_not_configured' | 'not_graded';
+    /** Successful independent grader draws that contributed to the reduced score. */
+    samples?: number;
   };
   gradedCriterionIds: string[];
 };
@@ -88,15 +92,20 @@ const normalizedWeights = (criteria: ScoreCriterion[]): Map<string, number> => {
 const calculationFor = ({
   criteria: configured,
   result,
+  samplesUsed,
 }: {
   criteria: ScoreCriterion[];
   result: z.infer<typeof ScoreResultSchema> | null;
+  samplesUsed?: number;
 }): ScoreStageCalculation => {
+  const samplesField = samplesUsed !== undefined && samplesUsed > 0
+    ? { samples: samplesUsed }
+    : {};
   if (configured.length === 0) {
     return {
       score: null,
       reasoning: 'Score criteria are not configured.',
-      breakdown: { criteria: [], missing_inputs: [], reason: 'criteria_not_configured' },
+      breakdown: { criteria: [], missing_inputs: [], reason: 'criteria_not_configured', ...samplesField },
       gradedCriterionIds: [],
     };
   }
@@ -126,6 +135,7 @@ const calculationFor = ({
         })),
         missing_inputs: missingInputs,
         reason: 'not_graded',
+        ...samplesField,
       },
       gradedCriterionIds: [],
     };
@@ -149,18 +159,27 @@ const calculationFor = ({
   return {
     score,
     reasoning: String(result?.summary_reasoning || '').trim() || 'Score computed from declared criteria.',
-    breakdown: { criteria: breakdown, missing_inputs: missingInputs },
+    breakdown: { criteria: breakdown, missing_inputs: missingInputs, ...samplesField },
     gradedCriterionIds: [...gradedIds],
   };
 };
 
-export const scoreStageDependencyHash = ({ step, record }: { step: ScoreStage; record: Record<string, unknown> }): string => {
+export const scoreStageDependencyHash = ({
+  step,
+  record,
+  samples = 1,
+}: {
+  step: ScoreStage;
+  record: Record<string, unknown>;
+  samples?: number;
+}): string => {
   const inputs = resolveStageInputs({ step, record });
   return stableHash({
     inputs: inputs.values,
     key: step.key,
     model: step.model,
     criteria: normalizedCriteria(step.criteria),
+    samples: resolvedScoreSamples(samples),
   });
 };
 
@@ -250,6 +269,13 @@ export const runScoreStage = async ({
   force?: boolean;
   generateObject?: GenerateObject;
 }) => {
+  // Authors declare N on global score.samples (default 1). Pipeline score steps
+  // are .strict() and do not accept a per-stage samples key — honour the same
+  // config home the schema already documents for median-of-N grading.
+  const scoreConfig = config.score && typeof config.score === 'object' && !Array.isArray(config.score)
+    ? config.score as Record<string, unknown>
+    : {};
+  const sampleCount = resolvedScoreSamples(scoreConfig.samples);
   const outcomes = new Map<string, { passed: boolean; reason: string; errored?: boolean; declaredOutputWrites?: Record<string, { provided: boolean; value: unknown }> }>();
   for (const initialRecord of rows) {
     const recordId = getRecordRowId(initialRecord);
@@ -258,7 +284,7 @@ export const runScoreStage = async ({
       outcomes.set(recordId, { passed: true, reason: `skipped_required_input_missing:${inputs.missingRequired.join(',')}` });
       continue;
     }
-    const depHash = scoreStageDependencyHash({ step, record: initialRecord });
+    const depHash = scoreStageDependencyHash({ step, record: initialRecord, samples: sampleCount });
     const cached = readStaleness({ db, recordId, stepId });
     if (!force && cached && String((cached as { dep_hash?: unknown }).dep_hash || '') === depHash) {
       outcomes.set(recordId, { passed: true, reason: 'skipped_unchanged_inputs' });
@@ -272,9 +298,25 @@ export const runScoreStage = async ({
       budget: config.model_context,
     });
     try {
-      const result = criteria.length === 0
-        ? null
-        : await generateObject({
+      if (criteria.length === 0) {
+        const calculation = calculationFor({ criteria, result: null });
+        const persisted = persistScoreStageResult({ db, record: initialRecord, step, calculation });
+        writeStaleness({ db, recordId, stepId, depHash, cacheTtl: '', cacheTtlSeconds: 0 });
+        const declaredOutputWrites = Object.fromEntries([
+          [`${step.key}_score`, { provided: true, value: persisted[`${step.key}_score`] }],
+          [`${step.key}_breakdown`, { provided: true, value: persisted[`${step.key}_breakdown`] }],
+          [`${step.key}_reasoning`, { provided: true, value: persisted[`${step.key}_reasoning`] }],
+        ]);
+        outcomes.set(recordId, {
+          passed: true,
+          reason: calculation.breakdown.reason || '',
+          declaredOutputWrites,
+        });
+        continue;
+      }
+
+      const runSample = async () => {
+        const result = await generateObject({
           task: `score-${step.key}`,
           model: step.model,
           role: 'evaluation',
@@ -286,8 +328,7 @@ export const runScoreStage = async ({
           toolSpec: {},
           maxSteps: 2,
         });
-      const parsed = result === null ? null : ScoreResultSchema.parse(result.object);
-      if (result !== null) {
+        const parsed = ScoreResultSchema.parse(result.object);
         const resultRecord = result as unknown as Record<string, unknown>;
         recordCostEvent({
           db,
@@ -298,8 +339,61 @@ export const runScoreStage = async ({
           provider: String(resultRecord.provider || ''),
           usage: withModelContextTelemetry(resultRecord.usage, modelContext.telemetry),
         });
+        return parsed;
+      };
+
+      // Independent draws (concurrent). Partial failures reduce over successes;
+      // total failure falls through to the existing error path.
+      const draws = await mapWithConcurrency(
+        Array.from({ length: sampleCount }),
+        async () => {
+          try {
+            return { result: await runSample(), error: null as Error | null };
+          } catch (error) {
+            return { result: null, error: error as Error };
+          }
+        },
+        sampleCount,
+      );
+      const successfulSamples = draws.flatMap((draw) => (draw.result ? [draw.result] : []));
+      if (successfulSamples.length === 0) {
+        const firstError = draws.find((draw) => draw.error)?.error;
+        throw firstError || new Error('all score samples failed');
       }
-      const calculation = calculationFor({ criteria, result: parsed });
+
+      const reducedById = reduceGradedCriteriaSamples({
+        criteria,
+        samples: successfulSamples.map((sample) => ({
+          criteria: (sample.criteria || []).map((criterion) => ({
+            id: criterion.id,
+            reasoning: String(criterion.reasoning || ''),
+            evidence_ids: [] as string[],
+            assessable: criterion.assessable,
+            grade: criterion.grade,
+          })),
+          summary_reasoning: sample.summary_reasoning,
+        })),
+      });
+      const reducedResult: z.infer<typeof ScoreResultSchema> = {
+        criteria: criteria.map((criterion) => {
+          const reduced = reducedById.get(criterion.id);
+          if (!reduced) {
+            return { id: criterion.id, assessable: false, reasoning: '' };
+          }
+          return {
+            id: criterion.id,
+            grade: reduced.grade,
+            assessable: reduced.assessable,
+            reasoning: String(reduced.reasoning || ''),
+          };
+        }),
+        summary_reasoning: String(successfulSamples[0]?.summary_reasoning || ''),
+      };
+      const calculation = calculationFor({
+        criteria,
+        result: reducedResult,
+        samplesUsed: successfulSamples.length,
+      });
       const persisted = persistScoreStageResult({ db, record: initialRecord, step, calculation });
       if (calculation.score === null && calculation.breakdown.reason === 'not_graded') {
         outcomes.set(recordId, { passed: false, errored: true, reason: 'not_graded' });
