@@ -154,7 +154,7 @@ import { closeMcpClient } from './orchestrator/runtime/mcp.js';
 import { startServeMode } from './serve.js';
 import { getDbPath, getServePidPath, getServePortPath, resolveListDir } from './orchestrator/runtime/paths.js';
 import { getEnv } from './orchestrator/runtime/env.js';
-import { failureEnvelope, successEnvelope, toStructuredError } from './orchestrator/runtime/contract.js';
+import { AgentOutboundError, failureEnvelope, successEnvelope, toStructuredError } from './orchestrator/runtime/contract.js';
 
 const args = process.argv.slice(2);
 const cliState = {
@@ -164,7 +164,70 @@ const cliState = {
   skipMcpClose: false,
 };
 
+/** Flags considered by the active command path (via consumeFlag/hasFlag). */
+const acceptedFlags = new Set<string>();
+
+/** Active argv under parse; set for the duration of `run()`. */
+let activeArgv: string[] | null = null;
+
+const trackAcceptedFlag = (name: string) => {
+  if (name) acceptedFlags.add(String(name));
+};
+
+const isFlagToken = (token: unknown) => {
+  const value = String(token || '');
+  if (!value) return false;
+  if (value === '--') return true;
+  if (value.startsWith('--')) return true;
+  // Short flags like -h / -abc; do not treat negative numbers as flags.
+  if (/^-[A-Za-z]/.test(value)) return true;
+  return false;
+};
+
+/**
+ * After a command path has consumed its recognised flags, any remaining
+ * `--`-prefixed (or short-flag) tokens are unrecognised by definition.
+ * Call before executing the command — never after (and never only inside
+ * `print`, which runs after `await command(...)`).
+ */
+const rejectUnknownFlags = () => {
+  const arr = activeArgv;
+  if (!arr || arr.length === 0) return;
+
+  const unknown: string[] = [];
+  for (const token of arr) {
+    if (isFlagToken(token)) unknown.push(String(token));
+  }
+  if (unknown.length === 0) return;
+
+  const commandLabel = String(cliState.responseCommand || 'unknown').trim() || 'unknown';
+  const accepted = [...acceptedFlags].sort();
+  const acceptedNote = accepted.length > 0
+    ? ` Accepted flags: ${accepted.join(', ')}.`
+    : ' This command does not accept flags.';
+  const extra = unknown.length > 1
+    ? ` Also unknown: ${unknown.slice(1).join(', ')}.`
+    : '';
+
+  throw new AgentOutboundError({
+    code: 'INVALID_ARGUMENT',
+    message: `Unknown flag "${unknown[0]}" for command "${commandLabel}".${acceptedNote}${extra}`,
+    retryable: false,
+    hint: accepted.length > 0
+      ? `Remove "${unknown[0]}" or use one of: ${accepted.join(', ')}.`
+      : `Remove "${unknown[0]}".`,
+    fields: {
+      flag: unknown[0],
+      unknown_flags: unknown,
+      accepted_flags: accepted,
+      command: commandLabel,
+    },
+    status: 400,
+  });
+};
+
 const consumeFlag = (arr, name, fallback = '') => {
+  trackAcceptedFlag(name);
   const idx = arr.indexOf(name);
   if (idx < 0) return fallback;
   const value = arr[idx + 1] ?? '';
@@ -173,6 +236,7 @@ const consumeFlag = (arr, name, fallback = '') => {
 };
 
 const hasFlag = (arr, name) => {
+  trackAcceptedFlag(name);
   const idx = arr.indexOf(name);
   if (idx < 0) return false;
   arr.splice(idx, 1);
@@ -180,6 +244,7 @@ const hasFlag = (arr, name) => {
 };
 
 const consumeFlags = (arr, name) => {
+  trackAcceptedFlag(name);
   const values = [];
   for (;;) {
     const idx = arr.indexOf(name);
@@ -222,6 +287,16 @@ const print = (value) => {
       });
     })();
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+};
+
+/**
+ * Guard then print. Call as `out()(value)` or `out()(await cmd())` so the
+ * unknown-flag check runs before command work: the callee `out()` is
+ * evaluated before the argument expression.
+ */
+const out = () => {
+  rejectUnknownFlags();
+  return print;
 };
 
 const printHelp = () => {
@@ -413,6 +488,8 @@ const getServePortForList = (list: string) => {
 };
 
 const callServeAction = async (action: string, payload: any, listForDiscovery = '') => {
+  // Serve delegation is command execution: refuse unknown flags first.
+  rejectUnknownFlags();
   const port = getServePortForList(listForDiscovery);
   if (!port) return null;
 
@@ -446,6 +523,8 @@ const callServeAction = async (action: string, payload: any, listForDiscovery = 
 
 const run = async () => {
   const argv = [...args];
+  activeArgv = argv;
+  acceptedFlags.clear();
   const format = consumeFlag(argv, '--format', 'json');
   cliState.globalIdemKey = consumeFlag(argv, '--idem-key', '');
   if (format && format !== 'json' && format !== 'summary' && format !== 'markdown') {
@@ -464,11 +543,15 @@ const run = async () => {
     const target = subcommand ? `${command} ${subcommand}` : command;
     setResponseContext({ command: 'describe', list: '' });
     const described = describeCommand({ command: target });
-    print(described.count > 0 ? described : describeCommand({ command }));
+    out()(described.count > 0 ? described : describeCommand({ command }));
     return;
   }
 
+  // Command-path flag accounting (globals already consumed above).
+  acceptedFlags.clear();
+
   if (command === 'onboard') {
+    rejectUnknownFlags();
     await onboardCommand();
     return;
   }
@@ -477,6 +560,7 @@ const run = async () => {
     const anthropicApiKeyFlag = consumeFlag(argv, '--anthropic-api-key', '');
     const deepinfraApiKeyFlag = consumeFlag(argv, '--deepinfra-api-key', '');
     const nonInteractive = hasFlag(argv, '--non-interactive');
+    rejectUnknownFlags();
 
     const ciLike = Boolean(
       process.env.CI
@@ -653,7 +737,7 @@ const run = async () => {
     say('Setup complete.');
     say(`Env: ${result.env_path}`);
     say('');
-    print(result);
+    out()(result);
 
     say('');
     say('Next:');
@@ -671,20 +755,20 @@ const run = async () => {
       const description = consumeFlag(argv, '--description', '');
       const delegated = await callServeAction('list_create', { list, description }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await listCreateCommand({ list, description }));
+      out()(await listCreateCommand({ list, description }));
       return;
     }
     if (sub === 'info') {
       const list = String(argv.shift() || '');
       const delegated = await callServeAction('list_info', { list }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(listInfoCommand({ list }));
+      out()(listInfoCommand({ list }));
       return;
     }
     throw new Error(`Unknown list subcommand: ${sub}`);
@@ -694,36 +778,39 @@ const run = async () => {
     setResponseContext({ command: 'lists', list: '' });
     const delegated = await callServeAction('lists', {}, '.');
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(listsCommand());
+    out()(listsCommand());
     return;
   }
 
   if (command === 'models') {
     const provider = consumeFlag(argv, '--provider', '');
     const search = consumeFlag(argv, '--search', '');
-    const sub = String(argv.shift() || '').trim();
-    if (!sub || sub.startsWith('--')) {
+    const nextTok = String(argv[0] || '').trim();
+    // Do not shift flag tokens as a subcommand — leftover-flag rejection handles them.
+    const sub = !nextTok || isFlagToken(nextTok) ? '' : String(argv.shift() || '').trim();
+    if (!sub) {
       setResponseContext({ command: 'models', list: '' });
-      print(modelsListCommand({ provider, search }));
+      out()(modelsListCommand({ provider, search }));
       return;
     }
     if (sub === 'add') {
       const model = String(argv.shift() || '').trim();
       setResponseContext({ command: 'models add', list: '' });
-      print(await modelsAddCommand({ model }));
+      out()(await modelsAddCommand({ model }));
       return;
     }
     if (sub === 'remove') {
       const model = String(argv.shift() || '').trim();
       setResponseContext({ command: 'models remove', list: '' });
-      print(modelsRemoveCommand({ model }));
+      out()(modelsRemoveCommand({ model }));
       return;
     }
     if (sub === 'refresh') {
       setResponseContext({ command: 'models refresh', list: '' });
+      rejectUnknownFlags();
       const ciLike = Boolean(
         process.env.CI
         || process.env.GITHUB_ACTIONS
@@ -768,12 +855,12 @@ const run = async () => {
                 throw new Error(`DeepInfra model not found: ${modelId}`);
               }
             }
-            print(await modelsRefreshCommand({ deepinfraModels: nextModels, keepExistingDeepinfra: false }));
+            out()(await modelsRefreshCommand({ deepinfraModels: nextModels, keepExistingDeepinfra: false }));
             return;
           }
         }
       }
-      print(await modelsRefreshCommand({ keepExistingDeepinfra: true }));
+      out()(await modelsRefreshCommand({ keepExistingDeepinfra: true }));
       return;
     }
     throw new Error(`Unknown models subcommand: ${sub}`);
@@ -785,7 +872,7 @@ const run = async () => {
     setResponseContext({ command: `mcp ${sub}`, list });
 
     if (sub === 'list') {
-      print(mcpListCommand({ list }));
+      out()(mcpListCommand({ list }));
       return;
     }
     if (sub === 'add') {
@@ -796,7 +883,7 @@ const run = async () => {
       const env = consumeFlags(argv, '--env');
       const cwd = consumeFlag(argv, '--cwd', '');
       const toolsFile = consumeFlag(argv, '--tools-file', '');
-      print(mcpAddCommand({
+      out()(mcpAddCommand({
         list,
         name,
         type,
@@ -810,12 +897,12 @@ const run = async () => {
     }
     if (sub === 'remove') {
       const name = consumeFlag(argv, '--name', '');
-      print(mcpRemoveCommand({ list, name }));
+      out()(mcpRemoveCommand({ list, name }));
       return;
     }
     if (sub === 'test') {
       const name = consumeFlag(argv, '--name', '');
-      print(await mcpTestCommand({ list, name }));
+      out()(await mcpTestCommand({ list, name }));
       return;
     }
     throw new Error(`Unknown mcp subcommand: ${sub}`);
@@ -826,18 +913,18 @@ const run = async () => {
     const list = String(argv.shift() || '');
     setResponseContext({ command: `mailboxes ${sub}`, list });
     if (sub === 'list') {
-      print(mailboxesListCommand({ list }));
+      out()(mailboxesListCommand({ list }));
       return;
     }
     const mailboxId = consumeFlag(argv, '--id', '');
     if (sub === 'show') {
-      print(mailboxesShowCommand({ list, mailboxId }));
+      out()(mailboxesShowCommand({ list, mailboxId }));
       return;
     }
     if (sub === 'test') {
       const to = consumeFlag(argv, '--to', '');
       if (!to) throw new Error('mailboxes test requires --to EMAIL.');
-      print(await mailboxesTestCommand({ list, mailboxId, to }));
+      out()(await mailboxesTestCommand({ list, mailboxId, to }));
       return;
     }
     throw new Error(`Unknown mailboxes subcommand: ${sub}`);
@@ -851,18 +938,18 @@ const run = async () => {
       const status = consumeFlag(argv, '--status', '');
       const classification = consumeFlag(argv, '--classification', '');
       const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
-      print(inboundListCommand({ list, status, classification, limit }));
+      out()(inboundListCommand({ list, status, classification, limit }));
       return;
     }
     if (sub === 'poll') {
-      print(await inboundPollCommand({ list }));
+      out()(await inboundPollCommand({ list }));
       return;
     }
     if (sub === 'resolve') {
       const inboundMessageId = consumeFlag(argv, '--message', '');
       const recordId = consumeFlag(argv, '--record', '') || consumeFlag(argv, '--row', '');
       if (!inboundMessageId || !recordId) throw new Error('inbound resolve requires --message and --record.');
-      print(inboundResolveCommand({ list, inboundMessageId, recordId }));
+      out()(inboundResolveCommand({ list, inboundMessageId, recordId }));
       return;
     }
     throw new Error(`Unknown inbound subcommand: ${sub}`);
@@ -874,7 +961,7 @@ const run = async () => {
     setResponseContext({ command: `budget ${sub}`, list });
     if (sub === 'live') {
       const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
-      print(liveInteractionBudgetCommand({ list, limit }));
+      out()(liveInteractionBudgetCommand({ list, limit }));
       return;
     }
     throw new Error(`Unknown budget subcommand: ${sub}`);
@@ -883,7 +970,7 @@ const run = async () => {
   if (command === 'describe') {
     const targetCommand = consumeFlag(argv, '--command', '');
     setResponseContext({ command: 'describe', list: '' });
-    print(describeCommand({ command: targetCommand }));
+    out()(describeCommand({ command: targetCommand }));
     return;
   }
 
@@ -893,7 +980,7 @@ const run = async () => {
     if (!list) throw new Error('context requires --list LIST.');
     hasFlag(argv, '--json');
     setResponseContext({ command: 'context', list });
-    print(contextCommand({ list }));
+    out()(contextCommand({ list }));
     return;
   }
 
@@ -906,7 +993,7 @@ const run = async () => {
       hasFlag(argv, '--json');
       setResponseContext({ command: `pending ${sub}`, list });
       if (sub === 'show') {
-        print(pendingShowCommand({ list, pendingId }));
+        out()(pendingShowCommand({ list, pendingId }));
         return;
       }
       const owner = consumeFlag(argv, '--owner', '');
@@ -916,7 +1003,7 @@ const run = async () => {
       const leaseMinutes = toNumber(consumeFlag(argv, '--lease-minutes', '60'), 60);
       const evidenceJson = consumeFlag(argv, '--evidence-json', '');
       const actionsJson = consumeFlag(argv, '--actions-json', '');
-      print(pendingActionCommand({
+      out()(pendingActionCommand({
         list,
         pendingId,
         action: sub as 'claim' | 'release' | 'resolve' | 'dismiss' | 'snooze',
@@ -939,7 +1026,7 @@ const run = async () => {
     const priority = consumeFlag(argv, '--priority', '');
     const status = consumeFlag(argv, '--status', '');
     setResponseContext({ command: 'pending', list });
-    print(pendingListCommand({ list, allLists, kind, priority, status, summary }));
+    out()(pendingListCommand({ list, allLists, kind, priority, status, summary }));
     return;
   }
 
@@ -950,7 +1037,7 @@ const run = async () => {
     const list = configuredList || String(argv.shift() || '');
     const intervalSeconds = toNumber(consumeFlag(argv, '--interval-seconds', '15'), 15);
     setResponseContext({ command: 'monitor', list });
-    print(await monitorCommand({ list, allLists, intervalSeconds, once }));
+    out()(await monitorCommand({ list, allLists, intervalSeconds, once }));
     return;
   }
 
@@ -958,7 +1045,7 @@ const run = async () => {
     const out = consumeFlag(argv, '--out', 'contacted-domains.txt');
     const list = consumeFlag(argv, '--list', '');
     setResponseContext({ command: 'attio-domains', list });
-    print(await attioDomainsCommand({ out, list }));
+    out()(await attioDomainsCommand({ out, list }));
     return;
   }
 
@@ -971,10 +1058,10 @@ const run = async () => {
     setResponseContext({ command: 'query', list });
     const delegated = await callServeAction('query', { list, sql, cursor, limit, timeoutMs }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(queryCommand({ list, sql, cursor, limit, timeoutMs }));
+    out()(queryCommand({ list, sql, cursor, limit, timeoutMs }));
     return;
   }
 
@@ -984,10 +1071,10 @@ const run = async () => {
     setResponseContext({ command: 'schema', list });
     const delegated = await callServeAction('schema', { list, table, format }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(schemaCommand({ list, table, format }));
+    out()(schemaCommand({ list, table, format }));
     return;
   }
 
@@ -1005,10 +1092,10 @@ const run = async () => {
       format,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await exportCommand({ list, toFile, select, where, format }));
+    out()(await exportCommand({ list, toFile, select, where, format }));
     return;
   }
 
@@ -1022,10 +1109,10 @@ const run = async () => {
     setResponseContext({ command: 'views save', list });
     const delegated = await callServeAction('views_save', { list, name, select, where }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(viewsSaveCommand({ list, name, select, where }));
+    out()(viewsSaveCommand({ list, name, select, where }));
     return;
   }
 
@@ -1038,7 +1125,7 @@ const run = async () => {
       const step = consumeFlag(argv, '--step', '');
       const reason = consumeFlag(argv, '--reason', '');
       setResponseContext({ command: 'override keep', list });
-      print(overrideKeepCommand({ list, ref, step, allGates, reason }));
+      out()(overrideKeepCommand({ list, ref, step, allGates, reason }));
       return;
     }
     if (sub === 'drop') {
@@ -1046,7 +1133,7 @@ const run = async () => {
       const ref = String(argv.shift() || '');
       const reason = consumeFlag(argv, '--reason', '');
       setResponseContext({ command: 'override drop', list });
-      print(overrideDropCommand({ list, ref, reason }));
+      out()(overrideDropCommand({ list, ref, reason }));
       return;
     }
     if (sub === 'clear') {
@@ -1055,20 +1142,20 @@ const run = async () => {
       const hasStep = argv.indexOf('--step') >= 0;
       const step = consumeFlag(argv, '--step', '');
       setResponseContext({ command: 'override clear', list });
-      print(overrideClearCommand({ list, ref, step: hasStep ? step : null }));
+      out()(overrideClearCommand({ list, ref, step: hasStep ? step : null }));
       return;
     }
     if (sub === 'list') {
       const list = String(argv.shift() || '');
       setResponseContext({ command: 'override list', list });
-      print(overrideListCommand({ list }));
+      out()(overrideListCommand({ list }));
       return;
     }
     if (sub === 'show') {
       const list = String(argv.shift() || '');
       const ref = String(argv.shift() || '');
       setResponseContext({ command: 'override show', list });
-      print(overrideShowCommand({ list, ref }));
+      out()(overrideShowCommand({ list, ref }));
       return;
     }
     throw new Error(`Unknown override subcommand: ${sub}`);
@@ -1079,7 +1166,7 @@ const run = async () => {
     if (sub === 'stages') {
       const list = String(argv.shift() || '');
       setResponseContext({ command: 'review stages', list });
-      print(reviewStagesCommand({ list }));
+      out()(reviewStagesCommand({ list }));
       return;
     }
     if (sub === 'list') {
@@ -1088,7 +1175,7 @@ const run = async () => {
       const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
       const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
       setResponseContext({ command: 'review list', list });
-      print(reviewListCommand({ list, stage, limit, offset }));
+      out()(reviewListCommand({ list, stage, limit, offset }));
       return;
     }
     if (sub === 'approve' || sub === 'pass') {
@@ -1097,7 +1184,7 @@ const run = async () => {
       const stage = consumeFlag(argv, '--stage', '');
       const reason = consumeFlag(argv, '--reason', '');
       setResponseContext({ command: `review ${sub}`, list });
-      print(reviewPassCommand({ list, ref, stage, reason }));
+      out()(reviewPassCommand({ list, ref, stage, reason }));
       return;
     }
     if (sub === 'reject' || sub === 'drop') {
@@ -1106,7 +1193,7 @@ const run = async () => {
       const stage = consumeFlag(argv, '--stage', '');
       const reason = consumeFlag(argv, '--reason', '');
       setResponseContext({ command: `review ${sub}`, list });
-      print(reviewDropCommand({ list, ref, stage, reason }));
+      out()(reviewDropCommand({ list, ref, stage, reason }));
       return;
     }
     if (sub === 'clear') {
@@ -1114,7 +1201,7 @@ const run = async () => {
       const ref = String(argv.shift() || '');
       const stage = consumeFlag(argv, '--stage', '');
       setResponseContext({ command: 'review clear', list });
-      print(reviewClearCommand({ list, ref, stage }));
+      out()(reviewClearCommand({ list, ref, stage }));
       return;
     }
     throw new Error(`Unknown review subcommand: ${sub}`);
@@ -1125,7 +1212,7 @@ const run = async () => {
     if (sub === 'sources') {
       const list = String(argv.shift() || '');
       setResponseContext({ command: 'rejected sources', list });
-      print(rejectedSourcesCommand({ list }));
+      out()(rejectedSourcesCommand({ list }));
       return;
     }
     if (sub === 'list') {
@@ -1134,7 +1221,7 @@ const run = async () => {
       const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
       const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
       setResponseContext({ command: 'rejected list', list });
-      print(rejectedListCommand({ list, source, limit, offset }));
+      out()(rejectedListCommand({ list, source, limit, offset }));
       return;
     }
     if (sub === 'restore') {
@@ -1142,7 +1229,7 @@ const run = async () => {
       const ref = String(argv.shift() || '');
       const reason = consumeFlag(argv, '--reason', '');
       setResponseContext({ command: 'rejected restore', list });
-      print(rejectedRestoreCommand({ list, ref, reason }));
+      out()(rejectedRestoreCommand({ list, ref, reason }));
       return;
     }
     throw new Error(`Unknown rejected subcommand: ${sub}`);
@@ -1157,10 +1244,10 @@ const run = async () => {
       setResponseContext({ command: 'record show', list });
       const delegated = await callServeAction('record_show', { list, rowId, include }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(recordShowCommand({ list, rowId, include }));
+      out()(recordShowCommand({ list, rowId, include }));
       return;
     }
     if (sub === 'revert') {
@@ -1170,10 +1257,10 @@ const run = async () => {
       setResponseContext({ command: 'record revert', list });
       const delegated = await callServeAction('record_revert', { list, rowId, stepId }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(recordRevertStepCommand({ list, rowId, stepId }));
+      out()(recordRevertStepCommand({ list, rowId, stepId }));
       return;
     }
     if (sub === 'revert-score') {
@@ -1182,10 +1269,10 @@ const run = async () => {
       setResponseContext({ command: 'record revert-score', list });
       const delegated = await callServeAction('record_revert_score', { list, rowId }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(recordRevertScoreCommand({ list, rowId }));
+      out()(recordRevertScoreCommand({ list, rowId }));
       return;
     }
     if (sub === 'revert-sequence') {
@@ -1195,10 +1282,10 @@ const run = async () => {
       setResponseContext({ command: 'record revert-sequence', list });
       const delegated = await callServeAction('record_revert_sequence', { list, rowId, toStep }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(recordRevertSequenceCommand({ list, rowId, toStep }));
+      out()(recordRevertSequenceCommand({ list, rowId, toStep }));
       return;
     }
     throw new Error(`Unknown record subcommand: ${sub}`);
@@ -1215,7 +1302,7 @@ const run = async () => {
     const apply = hasFlag(argv, '--apply');
     const declaredPhoneSourceKind = consumeFlag(argv, '--declare-phone-source-kind', '');
     setResponseContext({ command: 'records reevaluate', list });
-    print(recordsReevaluateCommand({
+    out()(recordsReevaluateCommand({
       list, what, where, limit, dryRun, apply, declaredPhoneSourceKind,
     }));
     return;
@@ -1232,7 +1319,7 @@ const run = async () => {
       const dryRun = hasFlag(argv, '--dry-run');
       const max = toNumber(consumeFlag(argv, '--max', '5'), 5);
       setResponseContext({ command: 'lead add', list });
-      print(await leadAddCommand({
+      out()(await leadAddCommand({
         list, name, near, query, run: runLead, dryRun, max,
       }));
       return;
@@ -1245,7 +1332,7 @@ const run = async () => {
       const reason = consumeFlag(argv, '--reason', '');
       const createdBy = consumeFlag(argv, '--by', '');
       setResponseContext({ command: 'lead set', list });
-      print(leadSetCommand({ list, ref, field, value, reason, createdBy }));
+      out()(leadSetCommand({ list, ref, field, value, reason, createdBy }));
       return;
     }
     if (sub === 'unset') {
@@ -1254,14 +1341,14 @@ const run = async () => {
       const field = consumeFlag(argv, '--field', '');
       const clearedBy = consumeFlag(argv, '--by', '');
       setResponseContext({ command: 'lead unset', list });
-      print(leadUnsetCommand({ list, ref, field: field || null, clearedBy }));
+      out()(leadUnsetCommand({ list, ref, field: field || null, clearedBy }));
       return;
     }
     if (sub === 'overrides') {
       const list = String(argv.shift() || '');
       const ref = String(argv.shift() || '');
       setResponseContext({ command: 'lead overrides', list });
-      print(leadOverridesCommand({ list, ref }));
+      out()(leadOverridesCommand({ list, ref }));
       return;
     }
     throw new Error(`Unknown lead subcommand: ${sub}`);
@@ -1273,7 +1360,7 @@ const run = async () => {
       const list = String(argv.shift() || '');
       const ref = String(argv.shift() || '');
       setResponseContext({ command: 'interaction add', list });
-      print(interactionAddCommand({
+      out()(interactionAddCommand({
         list,
         ref,
         kind: consumeFlag(argv, '--kind', 'note'),
@@ -1292,7 +1379,7 @@ const run = async () => {
       const list = String(argv.shift() || '');
       const ref = String(argv[0] || '').startsWith('--') ? '' : String(argv.shift() || '');
       setResponseContext({ command: 'interaction list', list });
-      print(interactionListCommand({
+      out()(interactionListCommand({
         list,
         ref,
         kind: consumeFlag(argv, '--kind', ''),
@@ -1305,7 +1392,7 @@ const run = async () => {
       const list = String(argv.shift() || '');
       const interactionId = String(argv.shift() || '');
       setResponseContext({ command: 'interaction show', list });
-      print(interactionShowCommand({ list, interactionId }));
+      out()(interactionShowCommand({ list, interactionId }));
       return;
     }
     if (sub === 'edit') {
@@ -1322,21 +1409,22 @@ const run = async () => {
         ['occurred_at', consumeFlag(argv, '--occurred-at', undefined as any)],
       ].filter(([, value]) => value !== undefined && value !== ''));
       setResponseContext({ command: 'interaction edit', list });
-      print(interactionEditCommand({ list, interactionId, patch }));
+      out()(interactionEditCommand({ list, interactionId, patch }));
       return;
     }
     if (sub === 'done') {
       const list = String(argv.shift() || '');
       const interactionId = String(argv.shift() || '');
       setResponseContext({ command: 'interaction done', list });
-      print(interactionDoneCommand({ list, interactionId, note: consumeFlag(argv, '--note', '') }));
+      const doneNote = consumeFlag(argv, '--note', '');
+      out()(interactionDoneCommand({ list, interactionId, note: doneNote }));
       return;
     }
     if (sub === 'remove') {
       const list = String(argv.shift() || '');
       const interactionId = String(argv.shift() || '');
       setResponseContext({ command: 'interaction remove', list });
-      print(interactionRemoveCommand({ list, interactionId }));
+      out()(interactionRemoveCommand({ list, interactionId }));
       return;
     }
     throw new Error(`Unknown interaction subcommand: ${sub}`);
@@ -1345,7 +1433,8 @@ const run = async () => {
   if (command === 'followups') {
     const list = String(argv.shift() || '');
     setResponseContext({ command: 'followups', list });
-    print(followupsCommand({ list, dueBy: consumeFlag(argv, '--due-by', '') }));
+    const dueBy = consumeFlag(argv, '--due-by', '');
+    out()(followupsCommand({ list, dueBy }));
     return;
   }
 
@@ -1355,12 +1444,12 @@ const run = async () => {
       const list = String(argv.shift() || '');
       const ref = String(argv.shift() || '');
       setResponseContext({ command: 'brief show', list });
-      print(briefShowCommand({ list, ref }));
+      out()(briefShowCommand({ list, ref }));
       return;
     }
     const list = String(argv.shift() || '');
     setResponseContext({ command: 'brief', list });
-    print(await briefCommand({
+    out()(await briefCommand({
       list,
       where: consumeFlag(argv, '--where', ''),
       limit: toNumber(consumeFlag(argv, '--limit', '0'), 0),
@@ -1375,12 +1464,12 @@ const run = async () => {
       const list = String(argv.shift() || '');
       const ref = String(argv.shift() || '');
       setResponseContext({ command: 'automations show', list });
-      print(automationsShowCommand({ list, ref }));
+      out()(automationsShowCommand({ list, ref }));
       return;
     }
     const list = String(argv.shift() || '');
     setResponseContext({ command: 'automations', list });
-    print(await automationsCommand({
+    out()(await automationsCommand({
       list,
       where: consumeFlag(argv, '--where', ''),
       limit: toNumber(consumeFlag(argv, '--limit', '0'), 0),
@@ -1394,16 +1483,16 @@ const run = async () => {
     const list = String(argv.shift() || '');
     setResponseContext({ command: `territories ${sub}`, list });
     if (sub === 'list') {
-      print(territoriesListCommand({ list }));
+      out()(territoriesListCommand({ list }));
       return;
     }
     if (sub === 'assign') {
-      print(territoriesAssignCommand({ list }));
+      out()(territoriesAssignCommand({ list }));
       return;
     }
     if (sub === 'note') {
       const territoryId = String(argv.shift() || '');
-      print(territoriesNoteCommand({
+      out()(territoriesNoteCommand({
         list,
         territoryId,
         body: consumeFlag(argv, '--body', ''),
@@ -1413,7 +1502,7 @@ const run = async () => {
     }
     if (sub === 'show') {
       const territoryId = String(argv.shift() || '');
-      print(territoriesShowCommand({ list, territoryId }));
+      out()(territoriesShowCommand({ list, territoryId }));
       return;
     }
     throw new Error(`Unknown territories subcommand: ${sub}`);
@@ -1422,7 +1511,8 @@ const run = async () => {
   if (command === 'purge') {
     const list = String(argv.shift() || '');
     setResponseContext({ command: 'purge', list });
-    print(await purgeCommand({ list, dryRun: hasFlag(argv, '--dry-run') }));
+    const purgeDryRun = hasFlag(argv, '--dry-run');
+    out()(await purgeCommand({ list, dryRun: purgeDryRun }));
     return;
   }
 
@@ -1433,7 +1523,7 @@ const run = async () => {
     const delegated = await callServeAction('pipeline_show', { list }, list);
     const result = delegated || pipelineShowCommand({ list });
     if (format === 'summary') {
-      print(successEnvelope({
+      out()(successEnvelope({
         command: 'pipeline show',
         list,
         result,
@@ -1441,7 +1531,7 @@ const run = async () => {
       }));
       return;
     }
-    print(result);
+    out()(result);
     return;
   }
 
@@ -1453,9 +1543,10 @@ const run = async () => {
     setResponseContext({ command: 'pipeline report', list });
     const result = pipelineReportCommand({ list, run });
     if (json) {
-      print(result);
+      out()(result);
       return;
     }
+    rejectUnknownFlags();
     process.stdout.write(`${String(result?.summary || '')}\n`);
     return;
   }
@@ -1475,10 +1566,10 @@ const run = async () => {
       list, recordId, since, until, classification, cursor, limit,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(repliesShowCommand({
+    out()(repliesShowCommand({
       list, recordId, since, until, classification, cursor, limit,
     }));
     return;
@@ -1495,10 +1586,10 @@ const run = async () => {
       setResponseContext({ command: 'drafts list', list });
       const delegated = await callServeAction('drafts_list', { list, status, step, cursor, limit }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(draftsListCommand({ list, status, step, cursor, limit }));
+      out()(draftsListCommand({ list, status, step, cursor, limit }));
       return;
     }
     if (sub === 'show') {
@@ -1507,10 +1598,10 @@ const run = async () => {
       setResponseContext({ command: 'drafts show', list });
       const delegated = await callServeAction('drafts_show', { list, draftId }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(draftsShowCommand({ list, draftId }));
+      out()(draftsShowCommand({ list, draftId }));
       return;
     }
     if (sub === 'approve') {
@@ -1523,10 +1614,10 @@ const run = async () => {
         list, draftId, all, where,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(draftsApproveCommand({ list, draftId, all, where }));
+      out()(draftsApproveCommand({ list, draftId, all, where }));
       return;
     }
     if (sub === 'reject') {
@@ -1536,10 +1627,10 @@ const run = async () => {
       setResponseContext({ command: 'drafts reject', list });
       const delegated = await callServeAction('drafts_reject', { list, draftId, reason }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(draftsRejectCommand({ list, draftId, reason }));
+      out()(draftsRejectCommand({ list, draftId, reason }));
       return;
     }
     if (sub === 'edit') {
@@ -1552,10 +1643,10 @@ const run = async () => {
         list, draftId, subject, body,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(draftsEditCommand({ list, draftId, subject, body }));
+      out()(draftsEditCommand({ list, draftId, subject, body }));
       return;
     }
     if (sub === 'refresh') {
@@ -1567,10 +1658,10 @@ const run = async () => {
         list, draftId, all,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(draftsRefreshCommand({ list, draftId, all }));
+      out()(draftsRefreshCommand({ list, draftId, all }));
       return;
     }
     throw new Error(`Unknown drafts subcommand: ${sub}`);
@@ -1589,10 +1680,10 @@ const run = async () => {
         list, label, step, row, status,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await assetsCommand({
+      out()(await assetsCommand({
         action: sub, list, label, step, row, status,
       }));
       return;
@@ -1604,10 +1695,10 @@ const run = async () => {
       setResponseContext({ command: 'assets show', list });
       const delegated = await callServeAction('assets_show', { list, rowId, step }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await assetsCommand({ action: sub, list, rowId, step }));
+      out()(await assetsCommand({ action: sub, list, rowId, step }));
       return;
     }
     if (sub === 'open') {
@@ -1622,7 +1713,7 @@ const run = async () => {
         process.stdout.write(`${String(result?.result || '')}\n`);
         return;
       }
-      print(result);
+      out()(result);
       return;
     }
     throw new Error(`Unknown assets subcommand: ${sub}`);
@@ -1642,7 +1733,7 @@ const run = async () => {
       list, step, record, period, groupBy,
     });
     if (format === 'summary') {
-      print(successEnvelope({
+      out()(successEnvelope({
         command: 'ai-usage',
         list,
         result,
@@ -1650,7 +1741,7 @@ const run = async () => {
       }));
       return;
     }
-    print(result);
+    out()(result);
     return;
   }
 
@@ -1667,10 +1758,10 @@ const run = async () => {
       list, toolkit, tool, step, record, period, groupBy,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(usageCommand({
+    out()(usageCommand({
       list, toolkit, tool, step, record, period, groupBy,
     }));
     return;
@@ -1683,10 +1774,10 @@ const run = async () => {
     if (sub === 'read') {
       const delegated = await callServeAction('config_read', { list }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(configReadCommand({ list }));
+      out()(configReadCommand({ list }));
       return;
     }
 
@@ -1700,10 +1791,10 @@ const run = async () => {
       }
       const delegated = await callServeAction('config_update', { list, yamlText }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(configUpdateCommand({ list, yamlText }));
+      out()(configUpdateCommand({ list, yamlText }));
       return;
     }
 
@@ -1712,17 +1803,17 @@ const run = async () => {
       const force = hasFlag(argv, '--force');
       const delegated = await callServeAction('config_author', { list, request, force }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await configAuthorCommand({ list, request, force }));
+      out()(await configAuthorCommand({ list, request, force }));
       return;
     }
 
     if (sub === 'infer-deps') {
       const write = hasFlag(argv, '--write');
       setResponseContext({ command: 'config infer-deps', list });
-      print(configInferDepsCommand({ list, write }));
+      out()(configInferDepsCommand({ list, write }));
       return;
     }
 
@@ -1731,10 +1822,10 @@ const run = async () => {
       setResponseContext({ command: 'config validate', list });
       const delegated = await callServeAction('config_validate', { list, filePath }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await configValidateCommand({ list, filePath }));
+      out()(await configValidateCommand({ list, filePath }));
       return;
     }
 
@@ -1744,10 +1835,10 @@ const run = async () => {
       setResponseContext({ command: 'config diff', list });
       const delegated = await callServeAction('config_diff', { list, filePath, snapshotId }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(configDiffCommand({ list, filePath, snapshotId }));
+      out()(configDiffCommand({ list, filePath, snapshotId }));
       return;
     }
 
@@ -1758,10 +1849,10 @@ const run = async () => {
     const list = String(argv.shift() || '');
     const delegated = await callServeAction('refresh_tools', { list }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await refreshToolsCommand({ list }));
+    out()(await refreshToolsCommand({ list }));
     return;
   }
 
@@ -1775,20 +1866,20 @@ const run = async () => {
     if (more > 0) {
       const delegatedMore = await callServeAction('source_more', { list, more }, list);
       if (delegatedMore) {
-        print(delegatedMore);
+        out()(delegatedMore);
         return;
       }
-      print(await sourceMoreCommand({ list, more }));
+      out()(await sourceMoreCommand({ list, more }));
       return;
     }
     const delegated = await callServeAction('source', {
       list, limit, dryRun, sample, redensify,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await sourceCommand({ list, limit, dryRun, sample, redensify }));
+    out()(await sourceCommand({ list, limit, dryRun, sample, redensify }));
     return;
   }
 
@@ -1796,7 +1887,7 @@ const run = async () => {
     const list = String(argv.shift() || '');
     const territoryId = String(argv.shift() || '');
     setResponseContext({ command: 'source-territory', list });
-    print(await sourceTerritoryCommand({
+    out()(await sourceTerritoryCommand({
       list,
       territoryId,
       r0: toNumber(consumeFlag(argv, '--r0', '350'), 350),
@@ -1818,10 +1909,10 @@ const run = async () => {
       list, row, where, keepTop, sortBy,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(removeCommand({
+    out()(removeCommand({
       list, row, where, keepTop, sortBy,
     }));
     return;
@@ -1840,10 +1931,10 @@ const run = async () => {
       list, where, limit, dryRun, sample, force, reapply, concurrency,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await pipelineCommand({
+    out()(await pipelineCommand({
       list, where, limit, dryRun, sample, force, reapply, concurrency,
     }));
     return;
@@ -1859,10 +1950,10 @@ const run = async () => {
       list, where, dryRun, sample, force,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await scoreCommand({
+    out()(await scoreCommand({
       list, where, dryRun, sample, force,
     }));
     return;
@@ -1874,7 +1965,7 @@ const run = async () => {
     const where = consumeFlag(argv, '--where', '');
     const limit = toNumber(consumeFlag(argv, '--limit', '0'), 0);
     const dryRun = hasFlag(argv, '--dry-run');
-    print(await policyApplyCommand({ list, where, limit, dryRun }));
+    out()(await policyApplyCommand({ list, where, limit, dryRun }));
     return;
   }
 
@@ -1889,10 +1980,10 @@ const run = async () => {
       list, where, step, dryRun, sample, force,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await generateCommand({
+    out()(await generateCommand({
       list, where, step, dryRun, sample, force,
     }));
     return;
@@ -1903,10 +1994,10 @@ const run = async () => {
     const more = toNumber(consumeFlag(argv, '--more', '0'), 0);
     const delegated = await callServeAction('run', { list, more }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await runCommand({ list, more }));
+    out()(await runCommand({ list, more }));
     return;
   }
 
@@ -1923,10 +2014,10 @@ const run = async () => {
         list, limit, sequenceName, dryRun, sample,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await launchDraftCommand({
+      out()(await launchDraftCommand({
         list, limit, sequenceName, dryRun, sample,
       }));
       return;
@@ -1936,10 +2027,10 @@ const run = async () => {
         list, limit, dryRun, sample,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await launchSendCommand({ list, limit, dryRun, sample }));
+      out()(await launchSendCommand({ list, limit, dryRun, sample }));
       return;
     }
     throw new Error(`Unknown launch subcommand: ${sub}`);
@@ -1952,10 +2043,10 @@ const run = async () => {
     if (sub !== 'send') throw new Error(`Unknown followup subcommand: ${sub}`);
     const delegated = await callServeAction('followup_send', { list, limit }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await followupSendCommand({ list, limit }));
+    out()(await followupSendCommand({ list, limit }));
     return;
   }
 
@@ -1973,10 +2064,10 @@ const run = async () => {
         }, list)
         : null;
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await sequenceRunCommand({
+      out()(await sequenceRunCommand({
         list, allLists, sequenceName, dryRun, sample,
       }));
       return;
@@ -1985,15 +2076,15 @@ const run = async () => {
       const list = String(argv.shift() || '');
       const delegated = await callServeAction('sequence_status', { list }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(sequenceStatusCommand({ list }));
+      out()(sequenceStatusCommand({ list }));
       return;
     }
     if (sub === 'list') {
       const list = String(argv.shift() || '');
-      print(sequencesListCommand({ list }));
+      out()(sequencesListCommand({ list }));
       return;
     }
     if (sub === 'board') {
@@ -2001,7 +2092,7 @@ const run = async () => {
       const sequence = consumeFlag(argv, '--sequence', '');
       if (!sequence) throw new Error('sequence board requires --sequence NAME');
       const limit = toNumber(consumeFlag(argv, '--limit', '50'), 50);
-      print(sequencesBoardCommand({ list, sequence, limit }));
+      out()(sequencesBoardCommand({ list, sequence, limit }));
       return;
     }
     throw new Error(`Unknown sequence subcommand: ${sub}`);
@@ -2014,7 +2105,7 @@ const run = async () => {
       const taskType = consumeFlag(argv, '--type', '');
       const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
       const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
-      print(manualListCommand({ list, taskType, limit, offset }));
+      out()(manualListCommand({ list, taskType, limit, offset }));
       return;
     }
     if (sub === 'complete' || sub === 'skip') {
@@ -2023,7 +2114,7 @@ const run = async () => {
       const step = consumeFlag(argv, '--step', '');
       if (!step) throw new Error('manual complete/skip requires --step STEP_ID');
       const note = consumeFlag(argv, '--note', '');
-      print(await manualCompleteCommand({ list, record, step, note, skip: sub === 'skip' }));
+      out()(await manualCompleteCommand({ list, record, step, note, skip: sub === 'skip' }));
       return;
     }
     throw new Error(`Unknown manual subcommand: ${sub}`);
@@ -2037,7 +2128,7 @@ const run = async () => {
       const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
       const offset = toNumber(consumeFlag(argv, '--offset', '0'), 0);
       setResponseContext({ command: 'stage-review list', list });
-      print(stageReviewListCommand({ list, status, limit, offset }));
+      out()(stageReviewListCommand({ list, status, limit, offset }));
       return;
     }
     if (sub === 'authorize' || sub === 'reject') {
@@ -2053,7 +2144,7 @@ const run = async () => {
       const notes = consumeFlag(argv, '--notes', '') || consumeFlag(argv, '--note', '');
       if (!stage) throw new Error('stage-review authorize/reject requires --stage STAGE_ID');
       setResponseContext({ command: `stage-review ${sub}`, list });
-      print(stageReviewAuthorizeCommand({
+      out()(stageReviewAuthorizeCommand({
         list,
         recordId: record,
         stage_id: stage,
@@ -2076,7 +2167,7 @@ const run = async () => {
         || consumeFlag(argv, '--record-id', '');
       const limit = toNumber(consumeFlag(argv, '--limit', '500'), 500);
       setResponseContext({ command: 'audit export', list });
-      print(auditExportCommand({ list, record, limit }));
+      out()(auditExportCommand({ list, record, limit }));
       return;
     }
     throw new Error(`Unknown audit subcommand: ${sub || '(none)'}. Use export.`);
@@ -2088,7 +2179,7 @@ const run = async () => {
       const list = String(argv.shift() || '');
       const record = String(argv.shift() || '');
       const owner = consumeFlag(argv, '--owner', 'operator');
-      print(callBoardClaimCommand({ list, record, owner }));
+      out()(callBoardClaimCommand({ list, record, owner }));
       return;
     }
     if (subOrList === 'dispose') {
@@ -2097,20 +2188,20 @@ const run = async () => {
       const disposition = consumeFlag(argv, '--disposition', '');
       if (!disposition) throw new Error('call-board dispose requires --disposition');
       const note = consumeFlag(argv, '--note', '');
-      print(callBoardDisposeCommand({ list, record, disposition, note }));
+      out()(callBoardDisposeCommand({ list, record, disposition, note }));
       return;
     }
     const list = subOrList;
     const capacity = toNumber(consumeFlag(argv, '--capacity', '25'), 25);
     const limit = toNumber(consumeFlag(argv, '--limit', '50'), 50);
-    print(callBoardCommand({ list, capacity, limit }));
+    out()(callBoardCommand({ list, capacity, limit }));
     return;
   }
 
   if (command === 'health') {
     const list = String(argv.shift() || '');
     const limit = toNumber(consumeFlag(argv, '--limit', '500'), 500);
-    print(healthCheckCommand({ list, limit }));
+    out()(healthCheckCommand({ list, limit }));
     return;
   }
 
@@ -2118,20 +2209,20 @@ const run = async () => {
     const list = String(argv.shift() || '');
     const record = String(argv.shift() || '');
     const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
-    print(timelineCommand({ list, record, limit }));
+    out()(timelineCommand({ list, record, limit }));
     return;
   }
 
   if (command === 'decision') {
     const list = String(argv.shift() || '');
     const record = String(argv.shift() || '');
-    print(decisionViewCommand({ list, record }));
+    out()(decisionViewCommand({ list, record }));
     return;
   }
 
   if (command === 'metrics') {
     const list = String(argv.shift() || '');
-    print(metricsCommand({ list }));
+    out()(metricsCommand({ list }));
     return;
   }
 
@@ -2162,7 +2253,7 @@ const run = async () => {
         );
       }
     }
-    print(workQueuesCommand({ list, queue, limit, offset, status, taskType }));
+    out()(workQueuesCommand({ list, queue, limit, offset, status, taskType }));
     return;
   }
 
@@ -2179,10 +2270,10 @@ const run = async () => {
     }
     const delegated = !allLists ? await callServeAction('dashboard', { list, allLists, alerts }, list) : null;
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await dashboardCommand({ list, allLists, alerts }));
+    out()(await dashboardCommand({ list, allLists, alerts }));
     return;
   }
 
@@ -2192,20 +2283,20 @@ const run = async () => {
       const list = String(argv.shift() || '');
       const status = consumeFlag(argv, '--status', 'needs_review');
       const limit = toNumber(consumeFlag(argv, '--limit', '100'), 100);
-      print(duplicatesListCommand({ list, status, limit }));
+      out()(duplicatesListCommand({ list, status, limit }));
       return;
     }
     if (sub === 'confirm') {
       const list = String(argv.shift() || '');
       const rowId = consumeFlag(argv, '--row', '');
       const canonicalRowId = consumeFlag(argv, '--canonical', '');
-      print(duplicatesConfirmCommand({ list, rowId, canonicalRowId }));
+      out()(duplicatesConfirmCommand({ list, rowId, canonicalRowId }));
       return;
     }
     if (sub === 'break') {
       const list = String(argv.shift() || '');
       const rowId = consumeFlag(argv, '--row', '');
-      print(duplicatesBreakCommand({ list, rowId }));
+      out()(duplicatesBreakCommand({ list, rowId }));
       return;
     }
     throw new Error(`Unknown duplicates subcommand: ${sub}`);
@@ -2219,10 +2310,10 @@ const run = async () => {
     const list = allLists ? '' : String(argv.shift() || '');
     const delegated = await callServeAction('visits_today', { list, allLists, date }, list || '.');
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(visitsTodayCommand({ list, allLists, date }));
+    out()(visitsTodayCommand({ list, allLists, date }));
     return;
   }
 
@@ -2234,10 +2325,10 @@ const run = async () => {
       setResponseContext({ command: 'route plan', list });
       const delegated = await callServeAction('route_plan', { list, date }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(await routePlanCommand({ list, date }));
+      out()(await routePlanCommand({ list, date }));
       return;
     }
     if (sub === 'show') {
@@ -2251,10 +2342,10 @@ const run = async () => {
         list, date, include, cursor, limit,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(routeShowCommand({
+      out()(routeShowCommand({
         list, date, include, cursor, limit,
       }));
       return;
@@ -2269,10 +2360,10 @@ const run = async () => {
       setResponseContext({ command: 'templates list', list });
       const delegated = await callServeAction('templates_list', { list }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(templatesListCommand({ list }));
+      out()(templatesListCommand({ list }));
       return;
     }
     if (sub === 'show') {
@@ -2281,10 +2372,10 @@ const run = async () => {
       setResponseContext({ command: 'templates show', list });
       const delegated = await callServeAction('templates_show', { list, templateId }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(templatesShowCommand({ list, templateId }));
+      out()(templatesShowCommand({ list, templateId }));
       return;
     }
     if (sub === 'create') {
@@ -2299,10 +2390,10 @@ const run = async () => {
         list, templateId, channelHint, subject, body, variablesJson,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(templatesCreateCommand({
+      out()(templatesCreateCommand({
         list, templateId, channelHint, subject, body, variablesJson,
       }));
       return;
@@ -2319,10 +2410,10 @@ const run = async () => {
         list, templateId, subject, body, variablesJson, note,
       }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(templatesUpdateCommand({
+      out()(templatesUpdateCommand({
         list, templateId, subject, body, variablesJson, note,
       }));
       return;
@@ -2338,10 +2429,10 @@ const run = async () => {
       setResponseContext({ command: 'snapshot create', list });
       const delegated = await callServeAction('snapshot_create', { list, label }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(snapshotCreateCommand({ list, label }));
+      out()(snapshotCreateCommand({ list, label }));
       return;
     }
     if (sub === 'list') {
@@ -2349,10 +2440,10 @@ const run = async () => {
       setResponseContext({ command: 'snapshot list', list });
       const delegated = await callServeAction('snapshot_list', { list }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(snapshotListCommand({ list }));
+      out()(snapshotListCommand({ list }));
       return;
     }
     if (sub === 'restore') {
@@ -2361,10 +2452,10 @@ const run = async () => {
       setResponseContext({ command: 'snapshot restore', list });
       const delegated = await callServeAction('snapshot_restore', { list, snapshotId }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(snapshotRestoreCommand({ list, snapshotId }));
+      out()(snapshotRestoreCommand({ list, snapshotId }));
       return;
     }
     if (sub === 'delete') {
@@ -2373,10 +2464,10 @@ const run = async () => {
       setResponseContext({ command: 'snapshot delete', list });
       const delegated = await callServeAction('snapshot_delete', { list, snapshotId }, list);
       if (delegated) {
-        print(delegated);
+        out()(delegated);
         return;
       }
-      print(snapshotDeleteCommand({ list, snapshotId }));
+      out()(snapshotDeleteCommand({ list, snapshotId }));
       return;
     }
     throw new Error(`Unknown snapshot subcommand: ${sub}`);
@@ -2393,10 +2484,10 @@ const run = async () => {
       list, prospect, action, note, transition, followUpIn,
     }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(logCommand({
+    out()(logCommand({
       list, prospect, action, note, transition, followUpIn,
     }));
     return;
@@ -2409,10 +2500,10 @@ const run = async () => {
     const reason = consumeFlag(argv, '--reason', 'manual_suppress');
     const delegated = await callServeAction('suppress', { list, value, valueType, reason }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(suppressCommand({ list, value, valueType, reason }));
+    out()(suppressCommand({ list, value, valueType, reason }));
     return;
   }
 
@@ -2422,10 +2513,10 @@ const run = async () => {
     const phone = consumeFlag(argv, '--phone', '');
     const delegated = await callServeAction('forget', { list, email, phone }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(forgetCommand({ list, email, phone }));
+    out()(forgetCommand({ list, email, phone }));
     return;
   }
 
@@ -2436,27 +2527,27 @@ const run = async () => {
     if (sub !== 'sync') throw new Error(`Unknown crm subcommand: ${sub}`);
     const delegated = await callServeAction('crm_sync', { list, limit }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(await crmSyncCommand({ list, limit }));
+    out()(await crmSyncCommand({ list, limit }));
     return;
   }
 
   if (command === 'auth') {
     if (hasFlag(argv, '--list')) {
-      print(await authListCommand());
+      out()(await authListCommand());
       return;
     }
     const sub = String(argv[0] || '').trim();
     if (sub === 'login') {
       argv.shift();
-      print(await authLoginCommand());
+      out()(await authLoginCommand());
       return;
     }
     const toolkit = String(argv.shift() || '').trim();
     if (!toolkit) throw new Error('Toolkit is required.');
-    print(await authConnectCommand({ toolkit }));
+    out()(await authConnectCommand({ toolkit }));
     return;
   }
 
@@ -2464,6 +2555,7 @@ const run = async () => {
     const list = String(argv.shift() || '.');
     const port = toNumber(consumeFlag(argv, '--port', '49391'), 49391);
     cliState.skipMcpClose = true;
+    rejectUnknownFlags();
     startServeMode({ list, port });
     process.stdout.write(`serve mode started on port ${port}\n`);
     return;
@@ -2510,6 +2602,7 @@ const run = async () => {
       await runBuildCommand('asset copy', process.execPath, ['scripts/copy-assets.mjs'], rootDir);
     }
 
+    rejectUnknownFlags();
     const { startViewServer } = await import('./viz/server.js');
     await startViewServer({ listDir, port, open: !noOpen });
     return;
@@ -2520,16 +2613,17 @@ const run = async () => {
     const staleMinutes = toNumber(consumeFlag(argv, '--stale-minutes', '30'), 30);
     const delegated = await callServeAction('reconcile', { list, staleMinutes }, list);
     if (delegated) {
-      print(delegated);
+      out()(delegated);
       return;
     }
-    print(reconcileCommand({ list, staleMinutes }));
+    out()(reconcileCommand({ list, staleMinutes }));
     return;
   }
 
   if (command === 'watch') {
     const listPath = String(argv.shift() || '.');
     const showAllHistory = hasFlag(argv, '--history');
+    rejectUnknownFlags();
     const { runWatch } = await import('./watch.js');
     await runWatch({ listPath, showAllHistory });
     return;
@@ -2552,7 +2646,7 @@ const run = async () => {
       .filter(Boolean) as Array<{ dir: string; pid: number }>;
 
     if (pids.length === 0) {
-      print({ status: 'ok', message: 'No running serve processes discovered in current working directory lists.' });
+      out()({ status: 'ok', message: 'No running serve processes discovered in current working directory lists.' });
       return;
     }
 
@@ -2566,7 +2660,7 @@ const run = async () => {
       }
     }
 
-    print({ status: 'ok', result });
+    out()({ status: 'ok', result });
     return;
   }
 
