@@ -409,10 +409,13 @@ pipeline:
     ORDER BY occurred_at ASC
   `).all('score-dataflow-1', 'score_unconfigured').map((row) => row.reason);
   check.close();
+  // criteria_not_configured leaves fit_score null. Null is absent under the
+  // declared-output presence gate, so unchanged inputs still re-run (fail closed;
+  // no model call when criteria are empty). A non-null score (including 0) would skip.
   assert.deepEqual(events, [
     'criteria_not_configured',
-    'skipped_unchanged_inputs',
-    'skipped_unchanged_inputs',
+    'criteria_not_configured',
+    'criteria_not_configured',
     'criteria_not_configured',
   ]);
 });

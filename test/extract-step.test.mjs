@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { extractFromRecord } from '../dist/orchestrator/extract/runner.js';
+import {
+  executeExtractStepOnRecords,
+  extractDependencyHash,
+  extractFromRecord,
+} from '../dist/orchestrator/extract/runner.js';
+import { writeStaleness } from '../dist/orchestrator/enrichment/runner.js';
 import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
@@ -155,6 +160,88 @@ test('extract cannot write a protected primary-contact projection column', async
   });
 });
 
+test('extract skips unchanged inputs only when every declared output is present', async () => {
+  await withDb({
+    domain: 'acme.com',
+    site_text: 'Email sales@acme.com for help.',
+  }, async ({ db, listDir: root, record }) => {
+    const configuredStep = step();
+    const first = await execute({ db, root, configuredStep, record });
+    assert.equal(first.passed, true);
+    assert.match(first.reason, /^extracted:email:1/);
+    assert.equal(first.declaredOutputWrites.site_published_email.provided, true);
+    assert.equal(first.declaredOutputWrites.site_published_email.value, 'sales@acme.com');
+
+    const afterFirst = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('extract_record');
+    const skipped = await execute({ db, root, configuredStep, record: afterFirst });
+    assert.equal(skipped.reason, 'skipped_unchanged_inputs');
+    assert.equal(skipped.declaredOutputWrites.site_published_email.provided, true);
+    assert.ok(String(skipped.declaredOutputWrites.site_published_email.value || '').trim() !== '');
+
+    // Empty string output → must re-run, not claim provided:true for a blank field.
+    upsertRecord({ db, row: { ...afterFirst, site_published_email: '' } });
+    const emptyRow = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('extract_record');
+    const reEmpty = await execute({ db, root, configuredStep, record: emptyRow });
+    assert.match(reEmpty.reason, /^extracted:email:1/);
+    assert.notEqual(reEmpty.reason, 'skipped_unchanged_inputs');
+
+    // Missing output entirely (null) → re-run.
+    const afterRe = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('extract_record');
+    upsertRecord({ db, row: { ...afterRe, site_published_email: null } });
+    const missingRow = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('extract_record');
+    const reMissing = await execute({ db, root, configuredStep, record: missingRow });
+    assert.match(reMissing.reason, /^extracted:email:1/);
+    assert.notEqual(reMissing.reason, 'skipped_unchanged_inputs');
+  });
+});
+
+test('extract treats 0 and false declared outputs as present for unchanged skip', () => {
+  const root = listDir();
+  const db = openListDb({ listDir: root });
+  ensureRecordColumns({ db, columns: ['site_text', 'rank_count', 'is_active'] });
+  const configuredStep = {
+    kind: 'extract',
+    id: 'numeric_extract',
+    from: 'site_text',
+    using: 'email',
+    select: 'first',
+    outputs: {
+      rank_count: { type: 'string', description: 'Count.' },
+      is_active: { type: 'string', description: 'Active.' },
+    },
+  };
+  // SQLite cannot bind booleans; store false as 0 (engine storage for INTEGER flags).
+  const row = {
+    _row_id: 'extract_numeric',
+    business_name: 'Acme',
+    site_text: 'no emails here',
+    rank_count: 0,
+    is_active: 0,
+  };
+  upsertRecord({ db, row });
+  writeStaleness({
+    db,
+    recordId: 'extract_numeric',
+    stepId: 'numeric_extract',
+    depHash: extractDependencyHash({ step: configuredStep, record: row }),
+    cacheTtl: '',
+    cacheTtlSeconds: 0,
+  });
+  const outcomes = executeExtractStepOnRecords({
+    db,
+    step: configuredStep,
+    rows: [db.prepare('SELECT * FROM records WHERE _row_id = ?').get('extract_numeric')],
+  });
+  const outcome = outcomes.get('extract_numeric');
+  assert.equal(outcome.reason, 'skipped_unchanged_inputs');
+  assert.equal(outcome.declaredOutputWrites.rank_count.provided, true);
+  // SQLite may surface numeric zeros as 0 or "0"/"0.0"; presence is what matters.
+  assert.equal(Number(outcome.declaredOutputWrites.rank_count.value), 0);
+  assert.equal(outcome.declaredOutputWrites.is_active.provided, true);
+  assert.equal(Number(outcome.declaredOutputWrites.is_active.value), 0);
+  db.close();
+});
+
 test('extract is deterministic for identical input', () => {
   const configuredStep = step({ select: 'all', outputs: { all: { type: 'string[]', description: 'All matches.' } } });
   const record = { domain: 'acme.com', site_text: 'a@gmail.com help@acme.com billing@vendor.co' };
@@ -236,9 +323,12 @@ pipeline:
   check.close();
 
   assert.equal(record.site_published_email, 'sales@acme.example');
+  // First pass finds nothing (empty string output). Empty declared outputs are
+  // not preserved by the unchanged-inputs skip, so the second pass re-extracts
+  // rather than claiming success with provided:true for a blank field.
   assert.deepEqual(reasons, [
     'extracted:email:0',
-    'skipped_unchanged_inputs',
+    'extracted:email:0',
     'extracted:email:1:site_text',
     'extracted:email:1:site_text',
   ]);

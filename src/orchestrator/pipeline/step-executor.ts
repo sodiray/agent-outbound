@@ -3,6 +3,7 @@ import { executeExtractStepOnRecords } from '../extract/runner.js';
 import type { ComposeGenerator } from '../compose/runner.js';
 import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/conditions.js';
 import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
+import { isPresentDeclaredOutputValue } from '../lib/declared-outputs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { randomUUID } from 'node:crypto';
 import { insertDraft, upsertRecord } from '../runtime/db.js';
@@ -115,11 +116,7 @@ const declaredOutputNames = (step: PipelineStepLike): string[] => {
   });
 };
 
-const isPersistedOutputValue = (value: unknown): boolean => {
-  if (value === null || value === undefined) return false;
-  if (typeof value === 'string') return value.trim() !== '';
-  return true;
-};
+const isPersistedOutputValue = isPresentDeclaredOutputValue;
 
 export const declaredOutputsUnwritten = ({
   outputNames,

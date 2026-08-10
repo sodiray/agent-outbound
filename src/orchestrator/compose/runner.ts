@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { createRequire } from 'node:module';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { recordCostEvent } from '../lib/costs.js';
+import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { resolveStageInputs } from '../lib/stage-inputs.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
@@ -343,9 +344,22 @@ export const runComposeStep = async ({
       const inputs = declaredInputs({ step, record });
       const depHash = composeDependencyHash({ step, record });
       const cached = readStaleness({ db, recordId, stepId });
-      if (!force && String(cached?.dep_hash || '') === depHash) {
+      const outputKeys = Object.keys(step.outputs || {});
+      // Presence is judged on the durable row (DB wins over a stale in-memory
+      // batch row). Unchanged inputs only justify a skip when prior outputs
+      // still exist to preserve.
+      const persistedForSkip = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1')
+        .get(recordId, recordId);
+      const durableRecord = persistedForSkip && typeof persistedForSkip === 'object' && !Array.isArray(persistedForSkip)
+        ? { ...record, ...(persistedForSkip as RecordRow) }
+        : record;
+      if (
+        !force
+        && String(cached?.dep_hash || '') === depHash
+        && hasAllDeclaredOutputs({ record: durableRecord, outputKeys })
+      ) {
         summary.declared_output_writes[recordId] = Object.fromEntries(
-          Object.keys(step.outputs || {}).map((key) => [key, { provided: true, value: record[key] }]),
+          outputKeys.map((key) => [key, { provided: true, value: durableRecord[key] }]),
         );
         summary.non_execution_reasons[recordId] = 'skipped_unchanged_inputs';
         return;

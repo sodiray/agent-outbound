@@ -6,6 +6,10 @@ import test from 'node:test';
 import { zodSchema } from 'ai';
 import { normalizeConfig } from '../dist/schemas/config.js';
 import { buildComposeResultSchema, composeDependencyHash, runComposeStep } from '../dist/orchestrator/compose/runner.js';
+import {
+  hasAllDeclaredOutputs,
+  isPresentDeclaredOutputValue,
+} from '../dist/orchestrator/lib/declared-outputs.js';
 import { resolveStepTemplate } from '../dist/orchestrator/lib/templates.js';
 import { getAssetsForRow, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 
@@ -833,3 +837,99 @@ test('compose invalidates declared inputs and records unchanged skips', async ()
     assert.equal(calls.length, 2);
   });
 });
+
+test('declared output presence treats 0 and false as present, empty strings as absent', () => {
+  assert.equal(isPresentDeclaredOutputValue(0), true);
+  assert.equal(isPresentDeclaredOutputValue(false), true);
+  assert.equal(isPresentDeclaredOutputValue('ok'), true);
+  assert.equal(isPresentDeclaredOutputValue(''), false);
+  assert.equal(isPresentDeclaredOutputValue('   '), false);
+  assert.equal(isPresentDeclaredOutputValue(null), false);
+  assert.equal(isPresentDeclaredOutputValue(undefined), false);
+  assert.equal(hasAllDeclaredOutputs({
+    record: { score: 0, flag: false, label: 'x' },
+    outputKeys: ['score', 'flag', 'label'],
+  }), true);
+  assert.equal(hasAllDeclaredOutputs({
+    record: { score: 0, flag: false, label: '' },
+    outputKeys: ['score', 'flag', 'label'],
+  }), false);
+});
+
+test('compose skips unchanged inputs only when every declared output is present', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    const calls = [];
+    const generateObject = async () => {
+      calls.push(1);
+      return { object: validObject, usage: {} };
+    };
+    const first = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject,
+    });
+    assert.equal(first.processed, 1);
+    assert.equal(calls.length, 1);
+
+    // Unchanged inputs + all declared outputs present → still skips (no model call).
+    const skipped = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
+      generateObject,
+    });
+    assert.equal(skipped.non_execution_reasons[record._row_id], 'skipped_unchanged_inputs');
+    assert.equal(calls.length, 1);
+    const skipWrites = skipped.declared_output_writes[record._row_id];
+    for (const [key, write] of Object.entries(skipWrites)) {
+      assert.equal(write.provided, true, key);
+      assert.ok(String(write.value || '').trim() !== '', `skip must not claim provided for empty ${key}`);
+    }
+
+    // Unchanged inputs + declared output empty string → does NOT skip.
+    // Keep fixture inputs authoritative: the records table may have blank
+    // contact_first_name columns that would overwrite the fixture on spread.
+    const rowWithInputs = () => ({
+      ...db.prepare('SELECT * FROM records WHERE _row_id = ?').get(record._row_id),
+      contact_first_name: record.contact_first_name,
+      business_name: record.business_name,
+    });
+    const afterEmpty = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(record._row_id);
+    upsertRecord({ db, row: { ...afterEmpty, headline: '   ' } });
+    const wipedEmpty = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [rowWithInputs()],
+      stepId: 'channel_copy',
+      generateObject,
+    });
+    assert.equal(wipedEmpty.processed, 1);
+    assert.equal(wipedEmpty.non_execution_reasons[record._row_id], undefined);
+    assert.equal(calls.length, 2);
+
+    // Unchanged inputs + declared output missing entirely → does NOT skip.
+    const afterOk = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(record._row_id);
+    upsertRecord({ db, row: { ...afterOk, headline: null } });
+    const wipedMissing = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [rowWithInputs()],
+      stepId: 'channel_copy',
+      generateObject,
+    });
+    assert.equal(wipedMissing.processed, 1);
+    assert.equal(calls.length, 3);
+  });
+});
+

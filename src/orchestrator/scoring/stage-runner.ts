@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
+import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
 import { resolveStageInputs } from '../lib/stage-inputs.js';
 import { buildModelContext, withModelContextTelemetry } from '../lib/model-context.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
@@ -286,7 +287,23 @@ export const runScoreStage = async ({
     }
     const depHash = scoreStageDependencyHash({ step, record: initialRecord, samples: sampleCount });
     const cached = readStaleness({ db, recordId, stepId });
-    if (!force && cached && String((cached as { dep_hash?: unknown }).dep_hash || '') === depHash) {
+    // Score stages always write key-derived fields; prefer declared outputs when
+    // authors list them, else the three fields persistScoreStageResult writes.
+    const outputKeys = Object.keys(step.outputs || {}).length > 0
+      ? Object.keys(step.outputs || {})
+      : [`${step.key}_score`, `${step.key}_breakdown`, `${step.key}_reasoning`];
+    const persistedForSkip = recordValue(
+      db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId),
+    );
+    const durableRecord = Object.keys(persistedForSkip).length > 0
+      ? { ...initialRecord, ...persistedForSkip }
+      : initialRecord;
+    if (
+      !force
+      && cached
+      && String((cached as { dep_hash?: unknown }).dep_hash || '') === depHash
+      && hasAllDeclaredOutputs({ record: durableRecord, outputKeys })
+    ) {
       outcomes.set(recordId, { passed: true, reason: 'skipped_unchanged_inputs' });
       continue;
     }

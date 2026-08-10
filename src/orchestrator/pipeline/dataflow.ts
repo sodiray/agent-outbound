@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readConfig } from '../lib/config.js';
 import { validatePipelineGraph } from '../lib/pipeline-graph.js';
 import { avgStepCostUsd } from '../lib/costs.js';
+import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
 import { getRecordRowId, nowIso } from '../lib/record.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
 import { prepareFieldCheckValueFiles } from '../lib/field-check-values.js';
@@ -573,10 +574,14 @@ const unchangedGenerateOutcome = ({
   const outputs = stepConfig.outputs && typeof stepConfig.outputs === 'object'
     ? stepConfig.outputs as Record<string, unknown>
     : {};
+  const outputKeys = Object.keys(outputs);
+  // isGenerateFresh uses has-any empty detection; require every declared output
+  // before claiming a successful unchanged skip with provided:true bookkeeping.
+  if (!hasAllDeclaredOutputs({ record: current, outputKeys })) return null;
   return {
     passed: true,
     reason: 'skipped_unchanged_inputs',
-    declaredOutputWrites: Object.fromEntries(Object.keys(outputs).map((name) => [name, {
+    declaredOutputWrites: Object.fromEntries(outputKeys.map((name) => [name, {
       provided: true,
       value: current[name],
     }])),

@@ -11,6 +11,7 @@ import {
 } from '../runtime/db.js';
 import { EVIDENCE_RECORD_COLUMNS } from '../policy/evidence.js';
 import { readConfig } from '../lib/config.js';
+import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
 import { getRecordRowId, nowIso } from '../lib/record.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
@@ -503,17 +504,29 @@ export const runGenerateStep = async ({
       executionConfig,
     });
     const cached = readStaleness({ db, recordId, stepId: id });
-    if (existing && isGenerateFresh({
-      cached,
-      step,
-      record: currentRecord,
-      assetOutputs: outputsFromAsset(existing),
-      executionConfig,
-      force,
-    })) {
+    const assetOutputs = outputsFromAsset(existing);
+    // Merge asset + record so outputs that landed only on one side still count.
+    const preservedOutputs = { ...currentRecord, ...assetOutputs };
+    const freshnessOutputKeys = Object.keys(
+      Object.fromEntries(
+        Object.entries(getDeclaredOutputs(stepConfig)).filter(([key]) => !CLAIM_ENGINE_OUTPUT_FIELDS.has(key)),
+      ),
+    );
+    if (
+      existing
+      && isGenerateFresh({
+        cached,
+        step,
+        record: currentRecord,
+        assetOutputs,
+        executionConfig,
+        force,
+      })
+      && hasAllDeclaredOutputs({ record: preservedOutputs, outputKeys: freshnessOutputKeys })
+    ) {
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({
         stepConfig,
-        outputs: outputsFromAsset(existing),
+        outputs: assetOutputs,
       });
       summary.skipped_fresh += 1;
       summary.non_execution_reasons[recordId] = 'skipped_unchanged_inputs';

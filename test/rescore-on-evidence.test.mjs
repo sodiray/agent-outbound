@@ -201,12 +201,15 @@ test('fresh generate assets carry write metadata through the live batch guard', 
   };
   try {
     ensureRecordColumns({ db, columns: ['proof_match_ids', 'preliminary_snapshot', 'classification_confidence'] });
+    // Unchanged-input skip requires every declared output present. Seed both
+    // diagnostic fields non-empty so the fresh-asset path still exercises the
+    // skip + declared-output guard (blank-as-valid is covered elsewhere).
     db.prepare(`
       INSERT INTO records (
         _row_id, business_name, proof_match_ids, preliminary_snapshot, classification_confidence,
         sequence_name, sequence_status, _created_at, _updated_at, created_at, updated_at
       ) VALUES
-        ('fresh_diagnostic', 'Fresh diagnostic', '', 'No approved proof matches.', NULL, 'default', 'idle', ?, ?, ?, ?),
+        ('fresh_diagnostic', 'Fresh diagnostic', 'none', 'No approved proof matches.', NULL, 'default', 'idle', ?, ?, ?, ?),
         ('fresh_intelligence', 'Fresh intelligence', '', '', NULL, 'default', 'idle', ?, ?, ?, ?)
     `).run(now, now, now, now, now, now, now, now);
 
@@ -214,7 +217,10 @@ test('fresh generate assets carry write metadata through the live batch guard', 
       db,
       rowId: 'fresh_diagnostic',
       stepId: diagnosticStep.id,
-      outputsJson: JSON.stringify({ preliminary_snapshot: 'No approved proof matches.' }),
+      outputsJson: JSON.stringify({
+        proof_match_ids: 'none',
+        preliminary_snapshot: 'No approved proof matches.',
+      }),
     });
     insertAsset({
       db,

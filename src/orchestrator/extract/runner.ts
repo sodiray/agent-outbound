@@ -1,4 +1,5 @@
 import { ensureRecordColumns, upsertRecord } from '../runtime/db.js';
+import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
@@ -280,13 +281,26 @@ export const executeExtractStepOnRecords = ({
     try {
       const depHash = extractDependencyHash({ step: config, record: row });
       const cached = readStaleness({ db, recordId, stepId: String(config.id || '') });
-      if (!force && String(cached?.dep_hash || '') === depHash) {
+      const outputKeys = Object.keys(outputs);
+      // Presence is judged on the durable row so a stale batch snapshot cannot
+      // force a false re-run or a false skip. Empty outputs mean re-run.
+      const persistedForSkip = (db as { prepare: (sql: string) => { get: (...params: unknown[]) => unknown } })
+        .prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1')
+        .get(recordId, recordId);
+      const durableRow = persistedForSkip && typeof persistedForSkip === 'object' && !Array.isArray(persistedForSkip)
+        ? { ...row, ...(persistedForSkip as Record<string, unknown>) }
+        : row;
+      if (
+        !force
+        && String(cached?.dep_hash || '') === depHash
+        && hasAllDeclaredOutputs({ record: durableRow, outputKeys })
+      ) {
         outcomes.set(recordId, {
           passed: true,
           reason: 'skipped_unchanged_inputs',
-          declaredOutputWrites: Object.fromEntries(Object.keys(outputs).map((name) => [name, {
+          declaredOutputWrites: Object.fromEntries(outputKeys.map((name) => [name, {
             provided: true,
-            value: row[name],
+            value: durableRow[name],
           }])),
         });
         return;
