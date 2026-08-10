@@ -225,6 +225,158 @@ test('masked discovery never invents an identity or makes email reachable', asyn
   assert.equal(email.ready, false);
 });
 
+// Live provider candidate shape (source_organization already present in the blob).
+const liveRevealCandidateShape = (overrides = {}) => candidate({
+  provider_candidate_id: 'person_host_1',
+  first_name: 'Kaja',
+  last_name: 'Perina',
+  name: 'Kaja Perina',
+  title: 'Editor in Chief',
+  email: 'kaja@psychologytoday.com',
+  phone: '',
+  seniority: 'executive',
+  department: 'editorial',
+  linkedin: 'https://linkedin.com/in/kaja',
+  confidence: 95,
+  source_domain: 'psychologytoday.com',
+  source_organization: 'Psychology Today',
+  source: 'apollo',
+  source_query: 'psychologytoday.com',
+  email_verification_status: 'verified',
+  email_verification_confidence: 100,
+  ...overrides,
+});
+
+test('reveal promotes candidate source_organization to decision_maker_organization and leaves the rest of the family unchanged', async () => {
+  const { db, listDir } = createListDb();
+  const revealed = liveRevealCandidateShape();
+  const provider = {
+    id: 'test-provider',
+    search: async () => ({ candidates: [], provider_payloads: [] }),
+    reveal: async () => ({
+      contact: revealed,
+      provider_payloads: [{ person: { email: revealed.email, organization: { name: revealed.source_organization } } }],
+    }),
+  };
+
+  const result = await executeDecisionMakersAction({
+    db,
+    listDir,
+    stepId: 'decision_maker_reveal',
+    stepConfig: {
+      action: 'decision_makers',
+      mode: 'reveal',
+      // Mirror pipeline remapping used for decision_maker_reveal_* declared outputs.
+      output_fields: {
+        decision_maker_name: 'decision_maker_reveal_name',
+        decision_maker_title: 'decision_maker_reveal_title',
+        decision_maker_email: 'decision_maker_reveal_email',
+        decision_maker_organization: 'decision_maker_reveal_organization',
+        decision_maker_seniority: 'decision_maker_reveal_seniority',
+        decision_maker_linkedin: 'decision_maker_reveal_linkedin',
+      },
+    },
+    record: {
+      _row_id: 'provider_record_1',
+      domain: 'psychologytoday.com',
+      business_name: 'Anchor Counseling LLC',
+      decision_maker_candidates: JSON.stringify([liveRevealCandidateShape({
+        email: '',
+        email_verification_status: '',
+        email_verification_confidence: 0,
+      })]),
+    },
+    decisionMakerProvider: provider,
+  });
+
+  // Additive: organization is a first-class declared output (remapped like title).
+  assert.equal(result.outputs.decision_maker_reveal_organization, 'Psychology Today');
+  // CONTROL: existing family fields land exactly as before.
+  assert.equal(result.outputs.decision_maker_reveal_name, 'Kaja Perina');
+  assert.equal(result.outputs.decision_maker_reveal_title, 'Editor in Chief');
+  assert.equal(result.outputs.decision_maker_reveal_email, 'kaja@psychologytoday.com');
+  assert.equal(result.outputs.decision_maker_reveal_seniority, 'executive');
+  assert.equal(result.outputs.decision_maker_reveal_linkedin, 'https://linkedin.com/in/kaja');
+  db.close();
+});
+
+test('reveal leaves decision_maker_organization empty when the candidate has no source_organization (no domain fallback)', async () => {
+  const { db, listDir } = createListDb();
+  const revealed = liveRevealCandidateShape({
+    first_name: 'Avery',
+    last_name: 'Nguyen',
+    name: 'Avery Nguyen',
+    title: 'Owner',
+    email: 'avery@example.test',
+    source_domain: 'example.test',
+    source_organization: '',
+    source_query: 'example.test',
+  });
+  const provider = {
+    id: 'test-provider',
+    search: async () => ({ candidates: [], provider_payloads: [] }),
+    reveal: async () => ({
+      contact: revealed,
+      provider_payloads: [{ person: { email: revealed.email } }],
+    }),
+  };
+
+  const result = await executeDecisionMakersAction({
+    db,
+    listDir,
+    stepId: 'decision_maker_reveal',
+    stepConfig: { action: 'decision_makers', mode: 'reveal' },
+    record: {
+      _row_id: 'provider_record_1',
+      domain: 'example.test',
+      business_name: 'Example Test',
+      decision_maker_candidates: JSON.stringify([candidate({
+        source_organization: '',
+        email: '',
+      })]),
+    },
+    decisionMakerProvider: provider,
+  });
+
+  assert.equal(result.outputs.decision_maker_organization, '');
+  // CONTROL: name/title/email still land.
+  assert.equal(result.outputs.decision_maker_name, 'Avery Nguyen');
+  assert.equal(result.outputs.decision_maker_title, 'Owner');
+  assert.equal(result.outputs.decision_maker_email, 'avery@example.test');
+  // Must not invent organization from domain.
+  assert.notEqual(result.outputs.decision_maker_organization, 'example.test');
+  db.close();
+});
+
+test('discovery surfaces source_organization on decision_maker_organization from the first candidate', async () => {
+  const discovered = liveRevealCandidateShape({
+    email: '',
+    email_verification_status: '',
+    email_verification_confidence: 0,
+    confidence: 0,
+  });
+  const result = await executeDecisionMakersAction({
+    listDir: '',
+    stepId: 'decision_maker_discovery',
+    stepConfig: { action: 'decision_makers', mode: 'discovery' },
+    record: { domain: 'psychologytoday.com', business_name: 'Anchor Counseling LLC' },
+    decisionMakerProvider: {
+      id: 'test-provider',
+      search: async () => ({
+        candidates: [discovered],
+        provider_payloads: [{ people: [{ title: discovered.title, organization: { name: 'Psychology Today' } }] }],
+      }),
+      reveal: async () => ({ contact: discovered, provider_payloads: [] }),
+    },
+  });
+
+  assert.equal(result.outputs.decision_maker_organization, 'Psychology Today');
+  // Discovery still does not invent a name/email; organization is the only identity-adjacent fact.
+  assert.equal(result.outputs.decision_maker_name, '');
+  assert.equal(result.outputs.decision_maker_email, '');
+  assert.equal(result.outputs.decision_maker_title, 'Editor in Chief');
+});
+
 test('Hunter continues to satisfy the same provider interface', async () => {
   const mcp = {
     callTool: async () => ({

@@ -54,6 +54,7 @@ const emptyDecisionMakerOutputs = (candidates: DecisionMakerCandidate[] = []) =>
   decision_maker_name: '',
   decision_maker_title: candidates[0]?.title || '',
   decision_maker_seniority: candidates[0]?.seniority || '',
+  decision_maker_organization: text(candidates[0]?.source_organization),
   decision_maker_email: '',
   decision_maker_linkedin: '',
   decision_maker_confidence: 0,
@@ -290,6 +291,30 @@ export const persistSupportedDecisionMakerCandidates = async ({
   return verified.map(({ candidate }) => candidate);
 };
 
+const organizationFromCandidates = ({
+  primaryContact,
+  candidates,
+}: {
+  primaryContact?: Record<string, unknown>;
+  candidates: DecisionMakerCandidate[];
+}) => {
+  // source_organization lives on the provider candidate, not the contacts row.
+  // Prefer the candidate that matches the selected primary contact; otherwise the first.
+  if (primaryContact && candidates.length > 0) {
+    const primaryEmail = text(primaryContact.email).toLowerCase();
+    const primaryName = text(primaryContact.full_name)
+      || text(primaryContact.name)
+      || [text(primaryContact.first_name), text(primaryContact.last_name)].filter(Boolean).join(' ');
+    const matched = candidates.find((candidate) => {
+      if (primaryEmail && text(candidate.email).toLowerCase() === primaryEmail) return true;
+      if (primaryName && text(candidate.name).toLowerCase() === primaryName.toLowerCase()) return true;
+      return false;
+    });
+    if (matched) return text(matched.source_organization);
+  }
+  return text(candidates[0]?.source_organization);
+};
+
 const primaryContactOutputs = ({
   primaryContact,
   candidates,
@@ -306,6 +331,7 @@ const primaryContactOutputs = ({
     decision_maker_name: fullName,
     decision_maker_title: text(primaryContact.title),
     decision_maker_seniority: text(primaryContact.seniority),
+    decision_maker_organization: organizationFromCandidates({ primaryContact, candidates }),
     decision_maker_email: text(primaryContact.email).toLowerCase(),
     decision_maker_linkedin: text(primaryContact.linkedin_url),
     decision_maker_confidence: Number.isFinite(confidence)
