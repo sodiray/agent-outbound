@@ -298,6 +298,45 @@ const applyStageReviewMaterialInvalidation = ({
   };
 };
 
+
+/**
+ * Read the immutable provider envelope frozen on an approved draft.
+ *
+ * Parse failure is a hard error (not a missing envelope): a malformed
+ * content_binding_json must not silently degrade to a rebuilt send envelope.
+ * Missing / empty binding with no provider_envelope is not an error — callers
+ * keep the intentional rebuild path for drafts that never froze an envelope.
+ */
+const parseApprovedDraftEnvelope = (
+  approvedDraft: {
+    content_binding_json?: unknown;
+    content_binding?: unknown;
+  } | null | undefined,
+): { envelope: Record<string, unknown> | null; error: string | null } => {
+  if (!approvedDraft) return { envelope: null, error: null };
+  try {
+    const raw = approvedDraft.content_binding_json;
+    const cb = typeof raw === 'string'
+      ? JSON.parse(raw || '{}')
+      : ((approvedDraft as { content_binding?: unknown }).content_binding || {});
+    if (cb && typeof cb === 'object' && !Array.isArray(cb)
+      && (cb as any).provider_envelope
+      && typeof (cb as any).provider_envelope === 'object') {
+      return {
+        envelope: (cb as any).provider_envelope as Record<string, unknown>,
+        error: null,
+      };
+    }
+    return { envelope: null, error: null };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err || 'parse_failed');
+    return {
+      envelope: null,
+      error: `approved_envelope_unreadable:${detail}`,
+    };
+  }
+};
+
 /**
  * Material-invalidation for email / linkedin / mail send kinds, evaluated
  * ahead of shouldExecuteSequenceOutbound so a stale review on paused_review
@@ -475,17 +514,17 @@ const evaluateEarlyStageReviewMaterialInvalidation = async ({
     ? String(earlyMailbox.id || '')
     : String(record.assigned_mailbox_id || '');
 
-  let draftEnvelope: Record<string, unknown> | null = null;
-  if (approvedDraft) {
-    try {
-      const cb = typeof approvedDraft.content_binding_json === 'string'
-        ? JSON.parse(approvedDraft.content_binding_json || '{}')
-        : (approvedDraft.content_binding || {});
-      if (cb?.provider_envelope && typeof cb.provider_envelope === 'object') {
-        draftEnvelope = cb.provider_envelope as Record<string, unknown>;
-      }
-    } catch { /* */ }
+  // Prefer the IMMUTABLE envelope the human approved. Unreadable binding is
+  // fail-closed: a rebuilt fingerprint would not match what was authorized.
+  const parsedEarly = parseApprovedDraftEnvelope(approvedDraft);
+  if (parsedEarly.error) {
+    return {
+      record,
+      blocked: true,
+      reason: `${parsedEarly.error}; refusing material check on a rebuilt envelope.`,
+    };
   }
+  const draftEnvelope = parsedEarly.envelope;
 
   const stepCfgEarly = (step?.config && typeof step.config === 'object') ? step.config as any : {};
   const argsEarly = resolveToolCallArguments({
@@ -1116,10 +1155,28 @@ export const executeChannelStep = async ({
     if (priorIdem && (priorIdem.status === 'pending' || priorIdem.status === 'failed')) {
       const priorPid = String(priorIdem.provider_id || '').trim();
       let priorPayloadPid = '';
+      let payloadUnreadable = false;
       try {
         const p = JSON.parse(String(priorIdem.payload_json || '{}'));
         priorPayloadPid = String(p?.provider_id || p?.message_id || '').trim();
-      } catch { /* */ }
+      } catch (err) {
+        // Fail closed when the column has no provider_id: an unreadable payload
+        // may hide a prior acceptance, and falling through would re-claim / re-send.
+        payloadUnreadable = true;
+        const detail = err instanceof Error ? err.message : String(err || 'parse_failed');
+        if (!priorPid) {
+          return {
+            ok: false,
+            result: {
+              status: 'failed',
+              reason: `idempotency_payload_unreadable:${detail}; cannot verify prior provider acceptance; refusing resend.`,
+              provider_id: '',
+              auto_skipped_steps: [],
+              readiness_blockers: ['idempotency_payload_unreadable'],
+            },
+          };
+        }
+      }
       const knownPid = priorPid || priorPayloadPid;
       if (knownPid) {
         const reconciled = reconcileIdempotencyProviderAccepted({
@@ -1127,14 +1184,20 @@ export const executeChannelStep = async ({
           idemKey,
           scope: idemConfig?.scope || 'list',
           providerId: knownPid,
-          payload: { reconciled_from: priorIdem.status, source: 'pre_claim_provider_id' },
+          payload: {
+            reconciled_from: priorIdem.status,
+            source: 'pre_claim_provider_id',
+            ...(payloadUnreadable ? { payload_parse_failed: true } : {}),
+          },
         });
         if (reconciled.reconciled || reconciled.reason === 'already_sent') {
           return {
             ok: false,
             result: {
               status: 'skipped',
-              reason: 'Already sent (reconciled provider acceptance).',
+              reason: payloadUnreadable
+                ? 'Already sent (reconciled provider acceptance; idempotency_payload_unreadable on prior payload).'
+                : 'Already sent (reconciled provider acceptance).',
               provider_id: knownPid,
               auto_skipped_steps: [],
             },
@@ -2037,17 +2100,18 @@ export const executeChannelStep = async ({
 
       // Prefer the IMMUTABLE envelope the human approved (stored on the draft).
       // Never rebuild authorization solely from this send invocation.
-      let draftEnvelope: Record<string, unknown> | null = null;
-      if (approvedDraft) {
-        try {
-          const cb = typeof approvedDraft.content_binding_json === 'string'
-            ? JSON.parse(approvedDraft.content_binding_json || '{}')
-            : (approvedDraft.content_binding || {});
-          if (cb?.provider_envelope && typeof cb.provider_envelope === 'object') {
-            draftEnvelope = cb.provider_envelope as Record<string, unknown>;
-          }
-        } catch { /* */ }
+      // Unreadable binding is fail-closed: a rebuilt envelope is not what was authorized.
+      const parsedEnvelope = parseApprovedDraftEnvelope(approvedDraft);
+      if (parsedEnvelope.error) {
+        return {
+          status: 'failed',
+          reason: `${parsedEnvelope.error}; refusing to send a rebuilt envelope.`,
+          provider_id: '',
+          auto_skipped_steps: [],
+          readiness_blockers: ['approved_envelope_unreadable'],
+        };
       }
+      const draftEnvelope = parsedEnvelope.envelope;
 
       const emailRecipient = resolveActiveContactEmailForSend({ record: sendRecord }).email
         || String(sendRecord.contact_email || sendRecord.email || '');
