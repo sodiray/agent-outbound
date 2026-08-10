@@ -194,7 +194,8 @@ const WHEN_GATED_STEP_KINDS = new Set([
   'exit',
 ]);
 
-const ENGINE_OWNED_TRANSMITTER_KINDS = new Set(['send_email', 'send_sms', 'linkedin_connect']);
+/** Engine-owned send steps: must never re-run after a prior pass (double-contact guard). */
+export const ENGINE_OWNED_TRANSMITTER_KINDS = new Set(['send_email', 'send_sms', 'linkedin_connect']);
 
 const authorApprovalRequired = (step: PipelineStepLike): boolean => (
   step.draft_approval_required === true

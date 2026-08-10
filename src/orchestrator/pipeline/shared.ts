@@ -13,6 +13,40 @@ import { pipelineNameForRecord } from '../lib/sequence-resolution.js';
 
 const MATERIAL_FILTER_FIELDS = ['type', 'match', 'condition', 'conditions', 'value', 'operator', 'field', 'on_fail', 'model', 'when'] as const;
 
+const asRecord = (value: unknown): Record<string, unknown> => (
+  value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+);
+
+const stringArray = (value: unknown): string[] => (
+  Array.isArray(value)
+    ? value.map((entry) => String(entry || '').trim()).filter(Boolean)
+    : []
+);
+
+const conditionFieldNames = (value: unknown): string[] => {
+  const conditions = Array.isArray(value) ? value : [];
+  return conditions
+    .map((condition) => String(asRecord(condition).field || '').trim())
+    .filter(Boolean);
+};
+
+/**
+ * Fields whose current values participate in a filter/exit freshness hash.
+ * Declared `inputs` plus any field referenced by conditions / when / single-field checks.
+ */
+export const filterInputFields = (stepConfig: any): string[] => {
+  const cfg = asRecord(stepConfig);
+  const when = asRecord(cfg.when);
+  return [...new Set([
+    ...stringArray(cfg.inputs),
+    ...conditionFieldNames(cfg.conditions),
+    ...conditionFieldNames(when.conditions),
+    String(cfg.field || '').trim(),
+  ].filter(Boolean))];
+};
+
 export const filterMaterialConfig = (stepConfig: any, { listDir = '' }: { listDir?: string } = {}): Record<string, any> => {
   const cfg = stepConfig && typeof stepConfig === 'object' ? stepConfig : {};
   const material: Record<string, any> = {};
@@ -30,15 +64,54 @@ export const filterMaterialConfig = (stepConfig: any, { listDir = '' }: { listDi
   return material;
 };
 
+/** Definition-only hash (config material). Prefer filterDepHash when a record is available. */
 export const filterDefHash = (stepConfig: any, { listDir = '' }: { listDir?: string } = {}) => (
   stableHash({ config: filterMaterialConfig(stepConfig, { listDir }) })
 );
 
+/**
+ * Full filter/exit dependency hash: material config + current declared-input values.
+ * Same staleness table / dep_hash column as before — inputs are folded into the hash so
+ * a regenerated field invalidates a prior pass without a second freshness system.
+ */
+export const filterDepHash = ({
+  stepConfig,
+  record,
+  listDir = '',
+}: {
+  stepConfig: any;
+  record?: Record<string, unknown> | null;
+  listDir?: string;
+}) => {
+  const row = record && typeof record === 'object' ? record : {};
+  const inputs = Object.fromEntries(
+    filterInputFields(stepConfig).map((field) => [field, row[field]]),
+  );
+  return stableHash({
+    config: filterMaterialConfig(stepConfig, { listDir }),
+    inputs,
+  });
+};
+
 export const filterStalenessStepId = (stepId: string) => `filter:${stepId}`;
 
-export const isFilterDefFresh = ({ cached, stepConfig, listDir = '' }: { cached: any; stepConfig: any; listDir?: string }) => (
-  !cached || String(cached.dep_hash || '') === filterDefHash(stepConfig, { listDir })
-);
+export const isFilterDefFresh = ({
+  cached,
+  stepConfig,
+  listDir = '',
+  record,
+}: {
+  cached: any;
+  stepConfig: any;
+  listDir?: string;
+  record?: Record<string, unknown> | null;
+}) => {
+  if (!cached) return false;
+  const expected = record
+    ? filterDepHash({ stepConfig, record, listDir })
+    : filterDefHash(stepConfig, { listDir });
+  return String(cached.dep_hash || '') === expected;
+};
 
 export const pipelineStepId = (step: any, index: number) => (
   String(step?.id || '').trim() || `pipeline_step_${index + 1}`
@@ -254,7 +327,7 @@ export const simulatePipeline = ({ db, listDir, config, steps, baseRows, force, 
       const contactId = String((record as any).active_contact_id || (record as any).contact_id || '') || null;
       if (!hasPassedStep({ db, recordId, stepId, contactId })) return true;
       const cached = readStaleness({ db, recordId, stepId: filterStalenessStepId(stepId) });
-      return !isFilterDefFresh({ cached, stepConfig: step, listDir });
+      return !isFilterDefFresh({ cached, stepConfig: step, listDir, record });
     });
     const skippedPassed = active.length - evalRows.length;
 

@@ -37,7 +37,7 @@ import { computeWaitWakeAt } from './sequence-step-runtime.js';
 import { countAwaitingReviewRecords } from './review.js';
 import {
   pipelineStepId,
-  filterDefHash,
+  filterDepHash,
   filterStalenessStepId,
   isFilterDefFresh,
   readInPlayRows,
@@ -49,12 +49,31 @@ import {
   assignmentStalenessStepId,
   isAssignmentFresh,
 } from './assignment-staleness.js';
+import { ENGINE_OWNED_TRANSMITTER_KINDS } from './step-executor.js';
 import {
   assertListAccessForMutation,
   filterRecordsForCanary,
   loadCanaryConfig,
 } from '../policy/canary-isolation.js';
 import { reconcileSequenceReachability } from '../policy/sequence-reachability-reconcile.js';
+
+/** Reason recorded when a prior pass is re-executed because declared inputs moved. */
+export const REEXAMINED_INPUTS_CHANGED_REASON = 'reexamined:inputs_changed';
+
+/**
+ * Steps that must stay resolved forever after a pass.
+ * Fail closed: engine-owned transmitters always; author-declared side_effecting;
+ * manual_task defaults to side-effecting unless explicitly side_effecting: false.
+ */
+const mustRemainResolvedForever = (step: DataflowStep): boolean => {
+  if (ENGINE_OWNED_TRANSMITTER_KINDS.has(step.kind)) return true;
+  const declared = step.step && typeof step.step === 'object'
+    ? (step.step as { side_effecting?: unknown }).side_effecting
+    : undefined;
+  if (declared === true) return true;
+  if (step.kind === 'manual_task' && declared !== false) return true;
+  return false;
+};
 
 type DataflowRecord = Record<string, any>;
 
@@ -775,22 +794,25 @@ const initializeResolved = ({
           force,
         });
       }
-      if (step.kind !== 'filter' && step.kind !== 'exit') return true;
-      if (reapply) return false;
-      const staleStepId = filterStalenessStepId(step.id);
-      const cached = readStaleness({ db, recordId, stepId: staleStepId });
-      if (!cached) {
-        writeStaleness({
-          db,
-          recordId,
-          stepId: staleStepId,
-          depHash: filterDefHash(step.step, { listDir }),
-          cacheTtl: '',
-          cacheTtlSeconds: 0,
+      // Transmitters / side-effecting steps: a prior pass is permanent. Re-running
+      // a send because an input moved would contact a real business twice.
+      if (mustRemainResolvedForever(step)) return true;
+      // filter/exit gates: re-open only when the existing dep-hash (config + declared
+      // inputs) is missing or stale. Never stamp-and-skip without verifying inputs.
+      if (step.kind === 'filter' || step.kind === 'exit') {
+        if (reapply) return false;
+        const staleStepId = filterStalenessStepId(step.id);
+        const cached = readStaleness({ db, recordId, stepId: staleStepId });
+        if (!cached) return false;
+        return isFilterDefFresh({
+          cached,
+          stepConfig: step.step,
+          listDir,
+          record: row,
         });
-        return true;
       }
-      return isFilterDefFresh({ cached, stepConfig: step.step, listDir });
+      // No safe input-aware re-open path for other kinds → leave resolved.
+      return true;
     }));
     // Force-resolve gates the human has chosen to keep this record past, even under
     // --reapply. Review gates execute once so their pass event is persisted.
@@ -1405,10 +1427,17 @@ export const runPipelineDataflow = async ({
         const keptHere = step.dropGate && !outcome.passed && Boolean(keep && (keep.keepAll || keep.keepSteps.has(step.id)));
         const effectivePassed = outcome.passed || keptHere;
         const skippedByWhen = isSkippedWhenOutcome(outcome);
+        const currentRecord = refreshRecord({ db, record: recordState.record });
+        const hadPriorPass = hasPassedStep({ db, recordId, stepId: step.id });
         const reason = effectivePassed
           ? (keptHere
             ? `override: kept (auto-verdict was: ${String(outcome.reason || '').trim() || 'failed'})`
-            : (skippedByWhen ? String(outcome.reason || '') : ''))
+            : (skippedByWhen
+              ? String(outcome.reason || '')
+              : (hadPriorPass
+                // Distinct from skipped:already_resolved so operators can see a gate was re-examined.
+                ? REEXAMINED_INPUTS_CHANGED_REASON
+                : String(outcome.reason || ''))))
           : (String(outcome.reason || '').trim() || 'failed');
         insertPipelineEvent({
           db,
@@ -1426,7 +1455,11 @@ export const runPipelineDataflow = async ({
           db,
           recordId,
           stepId: filterStalenessStepId(step.id),
-          depHash: filterDefHash(step.step, { listDir }),
+          depHash: filterDepHash({
+            stepConfig: step.step,
+            record: currentRecord,
+            listDir,
+          }),
           cacheTtl: '',
           cacheTtlSeconds: 0,
         });
