@@ -60,7 +60,16 @@ const assignStep = {
 const waitStep = { kind: 'wait', id: 'wait_one_day', after: '1d', inputs: ['tier'], when: whenTierA };
 const manualTaskStep = { kind: 'manual_task', id: 'phone_1', config: { task_type: 'human_phone' }, inputs: ['tier'], when: whenTierA };
 const sendEmailStep = { kind: 'send_email', id: 'email_1', side_effecting: true, inputs: ['tier'], when: whenTierA };
+const sendSmsStep = { kind: 'send_sms', id: 'sms_1', side_effecting: true, inputs: ['tier'], when: whenTierA };
 const linkedinStep = { kind: 'linkedin_connect', id: 'linkedin_1', side_effecting: true, inputs: ['tier'], when: whenTierA };
+const exitStep = {
+  kind: 'exit',
+  id: 'exit_not_a',
+  type: 'field_check',
+  inputs: ['tier'],
+  conditions: [{ field: 'tier', operator: 'eq', value: 'A' }],
+  when: whenTierA,
+};
 
 const supportedSteps = [
   { kind: 'enrich', id: 'enrich_one', inputs: ['tier'], when: whenTierA },
@@ -73,7 +82,9 @@ const supportedSteps = [
   waitStep,
   manualTaskStep,
   sendEmailStep,
+  sendSmsStep,
   linkedinStep,
+  exitStep,
 ];
 
 const malformedWhen = { conditionz: [] };
@@ -182,7 +193,7 @@ test('newly gated kinds execute matches and return the shared skip outcome for n
         usage: {},
       }),
     };
-    const cases = [composeStep, extractStep, assignStep, waitStep, manualTaskStep, sendEmailStep, linkedinStep];
+    const cases = [composeStep, extractStep, assignStep, waitStep, manualTaskStep, sendEmailStep, sendSmsStep, linkedinStep, exitStep];
     for (const step of cases) {
       const currentRecords = db.prepare('SELECT * FROM records WHERE _row_id IN (?, ?) ORDER BY _row_id').all('tier_a', 'tier_b');
       const outcomes = await executeStepBatch(context, step, step.id, currentRecords);

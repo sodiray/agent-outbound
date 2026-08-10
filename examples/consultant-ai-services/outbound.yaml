@@ -185,8 +185,9 @@ rubric_config:
   cache: 30d
 sequences:
   default:
-    on_reply: pause
-    on_bounce: pause
+    # Inbound handling is not configurable here: a reply pauses the sequence and
+    # a bounce is handled structurally. The on_reply/on_bounce keys this block
+    # used to declare were accepted by the schema and read by nothing.
     steps:
       - day: 0
         description: >-

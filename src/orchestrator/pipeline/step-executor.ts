@@ -190,9 +190,11 @@ const WHEN_GATED_STEP_KINDS = new Set([
   'review',
   'wait',
   'send_email',
+  'send_sms',
   'linkedin_connect',
   'manual_task',
   'score',
+  'exit',
 ]);
 
 const ENGINE_OWNED_TRANSMITTER_KINDS = new Set(['send_email', 'send_sms', 'linkedin_connect']);

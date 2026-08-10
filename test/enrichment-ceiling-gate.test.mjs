@@ -30,6 +30,7 @@ import {
 import { treasureValleyEnrichmentBudget, treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
 const ENRICHMENT_COST_CEILINGS = treasureValleyEnrichmentBudget.ceilings;
+const TIER_CEILINGS = ENRICHMENT_COST_CEILINGS.tiers;
 import {
   executeEnrichmentAction,
   executeEnrichmentStepOnRecords,
@@ -72,17 +73,17 @@ const underCeilingRecord = (tier = 'C', enrichmentUsd = 0.1) => ({
 
 test('withinEnrichmentCeiling: tier table (at/under/over + golden floor)', () => {
   const cases = [
-    { name: 'A under', tier: 'A', spend: 2.99, within: true, ceiling: ENRICHMENT_COST_CEILINGS.A },
-    { name: 'A at ceiling', tier: 'A', spend: 3, within: true, ceiling: ENRICHMENT_COST_CEILINGS.A },
-    { name: 'A over', tier: 'A', spend: 3.01, within: false, ceiling: ENRICHMENT_COST_CEILINGS.A },
-    { name: 'B under', tier: 'B', spend: 0.99, within: true, ceiling: ENRICHMENT_COST_CEILINGS.B },
-    { name: 'B over', tier: 'B', spend: 1.01, within: false, ceiling: ENRICHMENT_COST_CEILINGS.B },
-    { name: 'C under', tier: 'C', spend: 0.3, within: true, ceiling: ENRICHMENT_COST_CEILINGS.C },
-    { name: 'C over', tier: 'C', spend: 0.31, within: false, ceiling: ENRICHMENT_COST_CEILINGS.C },
-    { name: 'D over', tier: 'D', spend: 0.16, within: false, ceiling: ENRICHMENT_COST_CEILINGS.D },
-    { name: 'enrichment_hold over', tier: 'enrichment_hold', spend: 0.31, within: false, ceiling: ENRICHMENT_COST_CEILINGS.enrichment_hold },
+    { name: 'A under', tier: 'A', spend: 2.99, within: true, ceiling: TIER_CEILINGS.A },
+    { name: 'A at ceiling', tier: 'A', spend: 3, within: true, ceiling: TIER_CEILINGS.A },
+    { name: 'A over', tier: 'A', spend: 3.01, within: false, ceiling: TIER_CEILINGS.A },
+    { name: 'B under', tier: 'B', spend: 0.99, within: true, ceiling: TIER_CEILINGS.B },
+    { name: 'B over', tier: 'B', spend: 1.01, within: false, ceiling: TIER_CEILINGS.B },
+    { name: 'C under', tier: 'C', spend: 0.3, within: true, ceiling: TIER_CEILINGS.C },
+    { name: 'C over', tier: 'C', spend: 0.31, within: false, ceiling: TIER_CEILINGS.C },
+    { name: 'D over', tier: 'D', spend: 0.16, within: false, ceiling: TIER_CEILINGS.D },
+    { name: 'enrichment_hold over', tier: 'enrichment_hold', spend: 0.31, within: false, ceiling: TIER_CEILINGS.enrichment_hold },
     { name: 'foundational default', tier: '', spend: 0.16, within: false, ceiling: ENRICHMENT_COST_CEILINGS.foundational },
-    { name: 'candidate_tier preferred when treatment empty', candidate: 'B', spend: 1.01, within: false, ceiling: ENRICHMENT_COST_CEILINGS.B },
+    { name: 'candidate_tier preferred when treatment empty', candidate: 'B', spend: 1.01, within: false, ceiling: TIER_CEILINGS.B },
     {
       name: 'declared mail program raises floor to 8',
       tier: 'C',
@@ -155,7 +156,7 @@ test('gate: tool_call over ceiling → apply, !within_budget, reason enrichment_
   assert.equal(gate.within_budget, false);
   assert.equal(gate.reason, 'enrichment_ceiling');
   assert.ok(gate.enrichment_usd >= 5);
-  assert.equal(gate.ceiling, ENRICHMENT_COST_CEILINGS.C);
+  assert.equal(gate.ceiling, TIER_CEILINGS.C);
   assert.match(String(gate.detail || ''), /enrichment_ceiling/);
 });
 
@@ -168,7 +169,7 @@ test('gate: model enrich (empty action) over ceiling → blocked same as tool_ca
   assert.equal(gate.apply, true);
   assert.equal(gate.within_budget, false);
   assert.equal(gate.reason, 'enrichment_ceiling');
-  assert.equal(gate.ceiling, ENRICHMENT_COST_CEILINGS.B);
+  assert.equal(gate.ceiling, TIER_CEILINGS.B);
 });
 
 test('gate: same action under ceiling → proceeds (apply + within_budget)', () => {
@@ -180,7 +181,7 @@ test('gate: same action under ceiling → proceeds (apply + within_budget)', () 
   assert.equal(gate.apply, true);
   assert.equal(gate.within_budget, true);
   assert.equal(gate.reason, undefined);
-  assert.equal(gate.ceiling, ENRICHMENT_COST_CEILINGS.C);
+  assert.equal(gate.ceiling, TIER_CEILINGS.C);
   assert.ok(gate.enrichment_usd <= 0.1);
 });
 

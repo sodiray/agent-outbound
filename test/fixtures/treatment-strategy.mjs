@@ -101,11 +101,8 @@ export const treasureValleyPostcard = {
 export const treasureValleyEnrichmentBudget = {
   ceilings: {
     foundational: 0.15,
-    A: 3,
-    B: 1,
-    C: 0.3,
-    D: 0.15,
-    enrichment_hold: 0.3,
+    // Per-tier limits live only under ceilings.tiers — letter keys as direct
+    // children of ceilings are rejected at config validation (decoy form).
     golden_ticket_total: 8,
     tiers: {
       A: 3,

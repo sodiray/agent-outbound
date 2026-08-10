@@ -1256,6 +1256,14 @@ const unsupportedSequenceStepConfig = (name: string) => z.unknown().superRefine(
   });
 });
 
+/** Declared-but-inert keys: accept-and-ignore is the defect; refuse with a remedy. */
+const unsupportedDeclaredConfigKey = (message: string) => z.unknown().superRefine((_value, context) => {
+  context.addIssue({
+    code: z.ZodIssueCode.custom,
+    message,
+  });
+});
+
 export const SequenceStepSchema = z.preprocess((value) => {
   if (!value || typeof value !== 'object') return value;
   const step: any = { ...(value as any) };
@@ -1538,14 +1546,21 @@ const EnrichmentRepairConfigSchema = z.object({
   minimums: { ...DEFAULT_SCORE_ENRICHMENT_REPAIR.minimums },
 }));
 
+const unsupportedEnrichmentCeilingDirectTier = (tier: string) => unsupportedDeclaredConfigKey(
+  `score.enrichment_budget.ceilings.${tier} is not read; declare score.enrichment_budget.ceilings.tiers.${tier} instead (withinEnrichmentCeiling reads ceilings.tiers, ceilings.foundational, and ceilings.mail_programs).`,
+);
+
 const EnrichmentBudgetConfigSchema = z.object({
   ceilings: z.object({
     foundational: NonNegativePolicyValueSchema,
-    A: NonNegativePolicyValueSchema,
-    B: NonNegativePolicyValueSchema,
-    C: NonNegativePolicyValueSchema,
-    D: NonNegativePolicyValueSchema,
-    enrichment_hold: NonNegativePolicyValueSchema,
+    // Letter keys as direct children of ceilings are a decoy: the engine reads
+    // ceilings.tiers.<TIER>, not ceilings.<TIER>. Refuse so authors cannot
+    // believe a spend limit is set when it is not.
+    A: unsupportedEnrichmentCeilingDirectTier('A').optional(),
+    B: unsupportedEnrichmentCeilingDirectTier('B').optional(),
+    C: unsupportedEnrichmentCeilingDirectTier('C').optional(),
+    D: unsupportedEnrichmentCeilingDirectTier('D').optional(),
+    enrichment_hold: unsupportedEnrichmentCeilingDirectTier('enrichment_hold').optional(),
     tiers: z.record(NonNegativePolicyValueSchema),
     mail_programs: z.record(NonNegativePolicyValueSchema),
   }).partial(),
@@ -1696,7 +1711,10 @@ const ScoreSchema = z.object({
 }).partial().default({});
 
 const SuppressionSchema = z.object({
-  global_list: z.string().default(''),
+  // Never loaded. Suppression is the database + evaluateTransmitterSuppression.
+  global_list: unsupportedDeclaredConfigKey(
+    'suppression.global_list is not loaded; a do-not-contact file path here does nothing. Use the suppress command / suppression table (and evaluateTransmitterSuppression on send) instead.',
+  ).optional(),
 }).partial().default({});
 
 const TerritorySchema = z.object({
@@ -1729,11 +1747,22 @@ const CrmSchema = z.object({
 
 const SequenceSchema = z.object({
   manual: z.boolean().default(false),
-  start_when: z.string().default(''),
+  // Membership comes from assign / sequence_name — start_when has zero readers.
+  start_when: unsupportedDeclaredConfigKey(
+    'sequences.*.start_when is not read; sequence membership comes from assign steps / sequence_name, not a start_when gate. Remove start_when.',
+  ).optional(),
   reply_check: ReplyCheckConfigSchema.optional(),
-  on_reply: z.enum(['pause', 'continue', 'stop']).default('pause'),
-  on_bounce: z.enum(['pause', 'continue', 'stop']).default('stop'),
-  on_opt_out: z.enum(['pause', 'continue', 'stop']).default('stop'),
+  // Inbound behaviour is hard-coded (pause-first, opt-out suppresses, bounce is structural).
+  // Declaring these keys looks like a compliance control that does not exist.
+  on_reply: unsupportedDeclaredConfigKey(
+    'sequences.*.on_reply is not configurable; inbound reply handling is hard-coded (pause-first) in the inbound policy path (policy/inbound-reply), not sequence config. Remove on_reply.',
+  ).optional(),
+  on_bounce: unsupportedDeclaredConfigKey(
+    'sequences.*.on_bounce is not configurable; bounce handling is structural in the inbound/bounce policy path (policy/inbound-reply, policy/bounce), not sequence config. Remove on_bounce.',
+  ).optional(),
+  on_opt_out: unsupportedDeclaredConfigKey(
+    'sequences.*.on_opt_out is not configurable; opt-out automatically suppresses and is not a sequence-level switch — inbound policy (policy/inbound-reply) owns this compliance stop. Remove on_opt_out.',
+  ).optional(),
   working_days: WorkingDaysSchema,
   non_working_day_policy: z.enum(NON_WORKING_DAY_POLICY_VALUES).default('shift_forward'),
   timezone: TimeZoneSchema.optional(),
