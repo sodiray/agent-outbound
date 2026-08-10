@@ -640,7 +640,21 @@ export const listAwaitingManualTasks = ({
   };
 };
 
-/** Mark a parked manual_task complete so the pipeline can advance past it. */
+/**
+ * Mark a parked manual_task complete or skipped.
+ *
+ * Complete (skip=false): fail-closed act path — sequence outbound gate, stage-review
+ * authorization when required, and channel submit (mail allocate/provider). Must not
+ * run when the record is suppressed, sequence-paused/terminal, or lacking send auth.
+ *
+ * Skip (skip=true): decline path only. Requires a legitimate park for this
+ * record+step (and contact scope when present); records the operator note; writes a
+ * passed event that clears the park from operator queues. Does NOT require stage
+ * review, drafts, or channel authorization; does NOT allocate/submit; does NOT
+ * advance the sequence cursor, unpause, unsuppress, or rotate contacts. Suppressed /
+ * paused / terminal records remain skippable so the queue can be tidied without
+ * external action.
+ */
 export const completeManualTask = async ({
   db,
   config,
@@ -675,9 +689,6 @@ export const completeManualTask = async ({
     ? suppliedDate.getTime()
     : Date.parse(nowIso());
 
-  // Campaign pause / cancel / inbound: refuse outbound manual complete (mail allocate,
-  // phone close-out). Residual RES-CAMPAIGN-ORCHESTRATION — sequencer + channel execute
-  // + manual complete must all honor account_sequence_state blocks.
   let recordRow: Record<string, unknown> | undefined;
   try {
     recordRow = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rid) as
@@ -718,6 +729,7 @@ export const completeManualTask = async ({
   }
 
   // Prefer exact contact park; fall back to unscoped legacy park only when no contact-scoped row.
+  // Both complete and skip require a legitimate park for this record+step.
   const parked = activeContactId
     ? (db.prepare(`
         SELECT event_id FROM pipeline_events
@@ -754,50 +766,60 @@ export const completeManualTask = async ({
   const configuredMailTask = isMailManualTask({ config, configured: configuredStep || null });
   const mailProduct = configuredMailProduct
     || (recordMailTreatment && recordMailTreatment !== 'none' ? recordMailTreatment : null);
-  if (!configuredStep && config?.channels?.mail && recordMailTreatment === 'none') {
-    throw new Error(`Manual task ${sid} has no declared mail product and mail_treatment is none.`);
-  }
   const configuredChannel = text(
     (configuredStep?.config as Record<string, unknown> | undefined)?.channel || configuredStep?.channel,
   ).toLowerCase();
-  if (recordRow) {
-    const channelHint = mailProduct ? 'mail' : configuredChannel || 'manual';
-    const gate = shouldExecuteSequenceOutbound(recordRow, new Date(effectiveNowMs), {
-      channel: channelHint,
-      stepKind: 'manual_task',
-      taskType: mailProduct || channelHint,
-      timeZone: config?.operations?.timezone,
-    });
-    if (!gate.execute) {
-      throw new Error(
-        `Cannot complete outbound manual task for record ${rid} step ${sid}: ${gate.reason}`,
-      );
-    }
-  }
 
-  // Guard: only complete steps that are configured as manual_task when config is present.
-  if (config) {
-    if (configuredStep && text(configuredStep.kind) !== 'manual_task') {
-      throw new Error(`Step "${sid}" is not a manual_task (kind=${text(configuredStep.kind)}).`);
-    }
-
-    // Refuse complete without stage_review authorization when the step declares
-    // review: or policy.review_required_for includes this product/type (fail closed).
-    const stepTaskType = text(
-      (configuredStep?.config as Record<string, unknown> | undefined)?.task_type
-      || (configuredStep?.config as Record<string, unknown> | undefined)?.taskType,
-    );
-    const hasDeclaredReview = Boolean(reviewPresentationForStep(configuredStep));
-    if (configuredMailTask || mailProduct || hasDeclaredReview) {
-      assertManualTaskStageReviewAuthorized({
-        db,
-        config,
-        recordId: rid,
-        stepId: sid,
-        productType: mailProduct || stepTaskType || 'mail',
-        channel: configuredChannel || (mailProduct || configuredMailTask ? 'mail' : ''),
-        configuredStep: configuredStep || null,
+  // ── Act path only (complete). Skip is a negative decision: no send-auth, no
+  // sequence-outbound gate, no product-eligibility gate. Those protect external
+  // action; declining is the safe response when they fail.
+  if (!skip) {
+    // Campaign pause / cancel / inbound / suppressed / terminal: refuse outbound
+    // complete (mail allocate, phone close-out). Residual RES-CAMPAIGN-ORCHESTRATION
+    // — sequencer + channel execute + manual complete must honor these blocks.
+    if (recordRow) {
+      const channelHint = mailProduct ? 'mail' : configuredChannel || 'manual';
+      const gate = shouldExecuteSequenceOutbound(recordRow, new Date(effectiveNowMs), {
+        channel: channelHint,
+        stepKind: 'manual_task',
+        taskType: mailProduct || channelHint,
+        timeZone: config?.operations?.timezone,
       });
+      if (!gate.execute) {
+        throw new Error(
+          `Cannot complete outbound manual task for record ${rid} step ${sid}: ${gate.reason}`,
+        );
+      }
+    }
+
+    if (!configuredStep && config?.channels?.mail && recordMailTreatment === 'none') {
+      throw new Error(`Manual task ${sid} has no declared mail product and mail_treatment is none.`);
+    }
+
+    // Guard: only complete steps that are configured as manual_task when config is present.
+    if (config) {
+      if (configuredStep && text(configuredStep.kind) !== 'manual_task') {
+        throw new Error(`Step "${sid}" is not a manual_task (kind=${text(configuredStep.kind)}).`);
+      }
+
+      // Refuse complete without stage_review authorization when the step declares
+      // review: or policy.review_required_for includes this product/type (fail closed).
+      const stepTaskType = text(
+        (configuredStep?.config as Record<string, unknown> | undefined)?.task_type
+        || (configuredStep?.config as Record<string, unknown> | undefined)?.taskType,
+      );
+      const hasDeclaredReview = Boolean(reviewPresentationForStep(configuredStep));
+      if (configuredMailTask || mailProduct || hasDeclaredReview) {
+        assertManualTaskStageReviewAuthorized({
+          db,
+          config,
+          recordId: rid,
+          stepId: sid,
+          productType: mailProduct || stepTaskType || 'mail',
+          channel: configuredChannel || (mailProduct || configuredMailTask ? 'mail' : ''),
+          configuredStep: configuredStep || null,
+        });
+      }
     }
   }
 
