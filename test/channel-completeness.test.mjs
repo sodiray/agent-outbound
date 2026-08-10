@@ -489,6 +489,189 @@ test('bounce: rotation preserves quiet period and per-contact allowance gates', 
 });
 
 // ---------------------------------------------------------------------------
+// Bounce address + durable DNE (hard vs soft; multi-contact; no global suppress)
+// ---------------------------------------------------------------------------
+
+test('bounce: multi-contact hard bounce records the bounced address and contact DNE, not another contact', () => {
+  const plan = buildContactPlan({
+    account_id: 'bounce_addr',
+    campaign_id: 'bounce_addr_campaign',
+    treatment_tier: 'A',
+    contacts: [
+      { contact_id: 'c_owner', outbound_disposition: 'eligible_target', outreach_rank: 1 },
+      { contact_id: 'c_mgr', outbound_disposition: 'eligible_target', outreach_rank: 2 },
+    ],
+  });
+  const { db } = createList({
+    _row_id: 'bounce_addr',
+    active_contact_id: 'c_owner',
+    contact_id: 'c_owner',
+    // Deliberately different primary so a naive email_primary guess would be wrong.
+    email_primary: 'primary-projection@example.test',
+    contact_email: 'owner-bounced@example.test',
+    account_contact_plan_json: JSON.stringify(plan),
+  });
+  seedContact({
+    db, rowId: 'bounce_addr', contactId: 'c_owner',
+    email: 'owner-bounced@example.test', title: 'Owner', primary: true,
+  });
+  seedContact({
+    db, rowId: 'bounce_addr', contactId: 'c_mgr',
+    email: 'manager-ok@example.test', title: 'Manager',
+  });
+
+  const applied = processBounceEvent({
+    db,
+    recordId: 'bounce_addr',
+    messageId: 'bounce_addr_hard_1',
+    bounceType: 'hard',
+    snippet: '550 5.1.1 User unknown',
+    // Explicit DSN Final-Recipient evidence — not the primary projection.
+    email: 'owner-bounced@example.test',
+    contactId: 'c_owner',
+  });
+
+  assert.equal(applied.scope, 'contact');
+  assert.equal(applied.bounce_type, 'hard');
+  assert.equal(String(applied.record.email_bounced_address || '').toLowerCase(), 'owner-bounced@example.test');
+  // Contact-scoped: account email channel stays open for other contacts.
+  assert.equal(Number(applied.record.email_bounced || 0), 0);
+  assert.notEqual(String(applied.record.email_bounced_address || ''), 'manager-ok@example.test');
+  assert.notEqual(String(applied.record.email_bounced_address || ''), 'primary-projection@example.test');
+  // Durable DNE is per-contact for contact-scoped hard bounce.
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_owner').dne_email), 1);
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_mgr').dne_email), 0);
+  // Sequence stays active so the next eligible contact can be reached.
+  assert.equal(applied.sequence_status, 'active');
+  assert.equal(applied.rotated, true);
+
+  // No automatic global suppression write — policy stays with the pipeline.
+  const suppressions = db.prepare('SELECT COUNT(*) AS n FROM suppression').get();
+  assert.equal(Number(suppressions.n), 0);
+  db.close();
+});
+
+test('bounce: soft bounce does not set hard-bounce address or durable DNE', () => {
+  const plan = buildContactPlan({
+    account_id: 'bounce_soft_addr',
+    campaign_id: 'bounce_soft_addr_campaign',
+    treatment_tier: 'A',
+    contacts: [
+      { contact_id: 'c_soft', outbound_disposition: 'eligible_target', outreach_rank: 1 },
+    ],
+  });
+  const { db } = createList({
+    _row_id: 'bounce_soft_addr',
+    active_contact_id: 'c_soft',
+    contact_id: 'c_soft',
+    contact_email: 'soft@example.test',
+    account_contact_plan_json: JSON.stringify(plan),
+  });
+  seedContact({
+    db, rowId: 'bounce_soft_addr', contactId: 'c_soft',
+    email: 'soft@example.test', title: 'Owner', primary: true,
+  });
+
+  const applied = processBounceEvent({
+    db,
+    recordId: 'bounce_soft_addr',
+    messageId: 'bounce_soft_addr_1',
+    bounceType: 'soft',
+    snippet: 'mailbox full temporary failure 4.2.2',
+    email: 'soft@example.test',
+    contactId: 'c_soft',
+  });
+
+  assert.equal(applied.bounce_type, 'soft');
+  assert.equal(applied.hardened_from_soft, false);
+  assert.equal(String(applied.record.email_bounced_address || ''), '');
+  assert.equal(Number(applied.record.email_bounced || 0), 0);
+  assert.equal(Number(applied.record.dne_email || 0), 0);
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_soft').dne_email), 0);
+  assert.equal(applied.sequence_status, 'active');
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM suppression').get().n), 0);
+  db.close();
+});
+
+test('bounce: account-scope hard bounce sets record dne_email and bounced address', () => {
+  const { db } = createList({
+    _row_id: 'bounce_acct_addr',
+    contact_email: 'acct@example.test',
+    email_primary: 'acct@example.test',
+  });
+  seedContact({
+    db, rowId: 'bounce_acct_addr', contactId: 'c1',
+    email: 'acct@example.test', title: 'Owner', primary: true,
+  });
+
+  const applied = processBounceEvent({
+    db,
+    recordId: 'bounce_acct_addr',
+    messageId: 'bounce_acct_addr_1',
+    bounceType: 'hard',
+    snippet: '550 relay denied: no MX record for recipient domain',
+    email: 'acct@example.test',
+  });
+
+  assert.equal(applied.scope, 'account');
+  assert.equal(applied.bounce_type, 'hard');
+  assert.equal(applied.sequence_status, 'bounced');
+  assert.equal(Number(applied.record.email_bounced), 1);
+  assert.equal(String(applied.record.email_status), 'account_bounced');
+  assert.equal(String(applied.record.email_bounced_address || '').toLowerCase(), 'acct@example.test');
+  // Account-scope hard bounce: durable record-level DNE is set.
+  assert.equal(Number(applied.record.dne_email), 1);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM suppression').get().n), 0);
+  db.close();
+});
+
+test('bounce: contact-scoped hard bounce resolves address from the bounced contact, not email_primary', () => {
+  const plan = buildContactPlan({
+    account_id: 'bounce_resolve',
+    campaign_id: 'bounce_resolve_campaign',
+    treatment_tier: 'A',
+    contacts: [
+      { contact_id: 'c_a', outbound_disposition: 'eligible_target', outreach_rank: 1 },
+      { contact_id: 'c_b', outbound_disposition: 'eligible_target', outreach_rank: 2 },
+    ],
+  });
+  const { db } = createList({
+    _row_id: 'bounce_resolve',
+    active_contact_id: 'c_a',
+    contact_id: 'c_a',
+    email_primary: 'wrong-primary@example.test',
+    contact_email: 'contact-a@example.test',
+    account_contact_plan_json: JSON.stringify(plan),
+  });
+  seedContact({
+    db, rowId: 'bounce_resolve', contactId: 'c_a',
+    email: 'contact-a@example.test', title: 'A', primary: true,
+  });
+  seedContact({
+    db, rowId: 'bounce_resolve', contactId: 'c_b',
+    email: 'contact-b@example.test', title: 'B',
+  });
+
+  // No email: passed — process layer must resolve from the bounced contact.
+  const applied = processBounceEvent({
+    db,
+    recordId: 'bounce_resolve',
+    messageId: 'bounce_resolve_1',
+    bounceType: 'hard',
+    snippet: '550 5.1.1 user unknown',
+    contactId: 'c_a',
+  });
+
+  assert.equal(String(applied.record.email_bounced_address || '').toLowerCase(), 'contact-a@example.test');
+  assert.notEqual(String(applied.record.email_bounced_address || ''), 'wrong-primary@example.test');
+  assert.notEqual(String(applied.record.email_bounced_address || ''), 'contact-b@example.test');
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_a').dne_email), 1);
+  assert.equal(Number(db.prepare('SELECT dne_email FROM contacts WHERE contact_id = ?').get('c_b').dne_email), 0);
+  assert.equal(Number(db.prepare('SELECT COUNT(*) AS n FROM suppression').get().n), 0);
+  db.close();
+});
+
+// ---------------------------------------------------------------------------
 // 2. Phone leases
 // ---------------------------------------------------------------------------
 

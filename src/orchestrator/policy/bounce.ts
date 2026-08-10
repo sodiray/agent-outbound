@@ -312,12 +312,18 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
 
   const isHard = bounceType === 'hard';
   const existingSuppressedContactIds = parseSuppressedContactIds(record);
-  const suppressed_contact_ids = scope === 'contact' && contactId && !existingSuppressedContactIds.includes(contactId)
+  const suppressed_contact_ids = scope === 'contact' && contactId && isHard
+    && !existingSuppressedContactIds.includes(contactId)
     ? [...existingSuppressedContactIds, contactId]
     : existingSuppressedContactIds;
 
+  // Prefer explicit bounce evidence (DSN Final-Recipient / process-resolved
+  // contact email). Do not guess email_primary for contact scope — a record can
+  // hold several contacts and the point is knowing which address failed.
   const emailAddress = String(
-    input.email || record.contact_email || record.email_primary || '',
+    input.email
+    || (scope === 'contact' ? record.contact_email : (record.contact_email || record.email_primary))
+    || '',
   ).trim().toLowerCase();
 
   const nextAction = JSON.stringify({
@@ -332,18 +338,25 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
     policy_version: NEXT_ACTION_POLICY_VERSION,
   });
 
+  // Account-scope softs only accumulate soft_bounce_count until they harden.
+  // Hard account bounce closes the account email channel (email_bounced / dne_email).
+  // Contact-scope hard bounce does NOT set record-level email_bounced / dne_email
+  // so other contacts on the same account remain mailable; durable DNE is
+  // contacts.dne_email (written by the process layer) plus email_bounced_address.
   const patch: Record<string, unknown> = {
     ...record,
     ...(scope === 'account' ? {
-      email_bounced: 1,
-      email_status: 'account_bounced',
+      ...(isHard ? {
+        email_bounced: 1,
+        email_status: 'account_bounced',
+      } : {}),
       email_bounce_type: bounceType,
       email_bounce_at: bounceAt,
       email_bounce_source: source,
       email_soft_bounce_count: softCount,
       email_last_bounce_message_id: messageId,
     } : {}),
-    dne_email: scope === 'account'
+    dne_email: scope === 'account' && isHard
       ? 1
       : Number(isAffirmativeFlag(record.dne_email, { failClosed: true })),
     suppressed_contact_ids,
@@ -356,12 +369,14 @@ export function applyEmailBounce(input: ApplyEmailBounceInput): ApplyEmailBounce
     next_action_date: scope === 'account' && isHard ? '' : record.next_action_date,
   };
 
-  if (emailAddress && scope === 'account') {
+  // Durable "which address bounced" — hard only, both scopes. Soft must not
+  // populate the hard-bounce address field.
+  if (isHard && emailAddress) {
     patch.email_bounced_address = emailAddress;
   }
 
   // Hard bounce does not set suppressed=1 (account DNC) — only email channel flags.
-  // Optional future: global suppression list write lives in process layer.
+  // Global suppression-list write is outbound policy for the pipeline, not structural.
 
   const channel_event: BounceChannelEvent = {
     id: randomUUID(),

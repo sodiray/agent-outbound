@@ -135,6 +135,42 @@ const resolvedContactIdForBounce = ({
   }
 };
 
+/** Resolve the address that bounced from evidence, not by guessing email_primary. */
+const resolvedEmailForBounce = ({
+  db,
+  recordId,
+  record,
+  contactId,
+  email,
+}: {
+  db: BounceDb;
+  recordId: string;
+  record: Record<string, unknown>;
+  contactId?: string;
+  email?: string;
+}) => {
+  const explicit = String(email || '').trim().toLowerCase();
+  if (explicit) return explicit;
+  const cid = String(contactId || '').trim();
+  if (cid) {
+    try {
+      const contact = db.prepare(`
+        SELECT email
+        FROM contacts
+        WHERE row_id = ? AND (contact_id = ? OR id = ?)
+        ORDER BY CASE WHEN contact_id = ? THEN 0 ELSE 1 END
+        LIMIT 1
+      `).get(recordId, cid, cid, cid);
+      const fromContact = String(contact?.email || '').trim().toLowerCase();
+      if (fromContact) return fromContact;
+    } catch {
+      /* contacts table may be missing in pure in-memory harnesses */
+    }
+  }
+  // Active-contact projection only — not email_primary (multi-contact records).
+  return String(record.contact_email || '').trim().toLowerCase();
+};
+
 const persistContactBounceRotation = ({
   db,
   record,
@@ -222,6 +258,13 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
     record,
     contactId: input.contactId,
   });
+  const bouncedEmail = resolvedEmailForBounce({
+    db: input.db,
+    recordId,
+    record,
+    contactId,
+    email: input.email,
+  });
   const scope = resolveBounceScope({
     scope: input.scope,
     contactId,
@@ -241,7 +284,7 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
     bounceAt: input.bounceAt,
     messageId,
     threadId: input.threadId,
-    email: input.email,
+    email: bouncedEmail,
     contactId,
     snippet: input.snippet,
     scope,
@@ -251,17 +294,18 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
 
   ensureRecordColumns({
     db: input.db,
-    columns: [...Object.keys(applied.patch), 'reachability_json'],
+    columns: [...Object.keys(applied.patch), 'reachability_json', 'email_bounced_address'],
   });
   const persisted = input.db.transaction(() => {
-    if (applied.scope === 'contact') {
+    // Durable per-contact DNE only on hard (or soft-hardened) contact-scope bounce.
+    if (applied.scope === 'contact' && applied.bounce_type === 'hard' && contactId) {
       input.db.prepare(`
         UPDATE contacts
         SET dne_email = 1, updated_at = ?
         WHERE row_id = ? AND (contact_id = ? OR id = ?)
       `).run(applied.channel_event.occurred_at, recordId, contactId, contactId);
     }
-    const rotated = applied.scope === 'contact'
+    const rotated = applied.scope === 'contact' && applied.bounce_type === 'hard'
       ? persistContactBounceRotation({
           db: input.db,
           record,

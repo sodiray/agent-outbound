@@ -313,6 +313,10 @@ export const processInboundEmail = async ({
       insertInboundMessage({ db, mailboxId, uid, parsed, correlation, receivedAt });
       const recordId = trim(correlation.record?._row_id || correlation.record?.id);
       if (correlation.status === 'matched' && recordId && parsed.classification === 'bounce') {
+        // Prefer RFC 3464 Final-Recipient (the address that actually bounced)
+        // over the active contact projection / email_primary.
+        const bouncedAddress = lower(parsed.recipientEmail)
+          || emailForContact(db, recordId, correlation.contactId, correlation.record);
         processSequenceInterruption({
           db,
           recordId,
@@ -321,7 +325,7 @@ export const processInboundEmail = async ({
           asOf: receivedAt,
           bounceType: parsed.bounceType,
           messageId: parsed.messageId || inboundMessageId(mailboxId, uid),
-          email: emailForContact(db, recordId, correlation.contactId, correlation.record),
+          email: bouncedAddress,
           contactId: correlation.contactId,
           snippet: parsed.snippet,
         });
