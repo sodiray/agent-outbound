@@ -17,6 +17,10 @@ import {
 import { deriveContactFirstName } from '../policy/contact-name.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
 import { parseAccountCampaignFromRecord } from '../policy/contact-campaign.js';
+import {
+  draftInapplicabilityReason,
+  recordTerminalWorkReason,
+} from '../lib/work-item-applicability.js';
 
 const require = createRequire(import.meta.url);
 
@@ -1974,17 +1978,21 @@ const withFieldOverrides = ({ db, recordId, row }) => {
   return { ...row, ...Object.fromEntries(overrides) };
 };
 
-export const draftRevocationReason = (record: Record<string, unknown> | null | undefined): string | null => {
-  const disqualifiedAt = String(record?.disqualified_at || '').trim();
-  const lifecycle = String(record?.lifecycle_stage || '').trim().toLowerCase();
-  if (disqualifiedAt || lifecycle === 'disqualified') return 'record_disqualified';
-  if (!isAffirmativeFlag(record?.suppressed, { failClosed: true })) return null;
-  const suppressionReason = String(record?.suppressed_reason || '').trim().toLowerCase();
-  if (suppressionReason.includes('opt_out') || suppressionReason.includes('opt-out')) return 'record_opted_out';
-  if (suppressionReason.includes('dnc') || suppressionReason.includes('do_not_contact')) return 'record_dnc';
-  return 'record_suppressed';
-};
+/**
+ * Record-level draft revocation reasons (suppression / disqualification /
+ * cancelled sequence). Does not treat sequence `completed` as revocation —
+ * that races the successful-send path that still needs to mark drafts sent.
+ */
+export const draftRevocationReason = (record: Record<string, unknown> | null | undefined): string | null => (
+  recordTerminalWorkReason(record, { includeCompletedSequence: false })
+);
 
+/**
+ * Revoke every pending_approval / ready draft for a record when the *record*
+ * itself is no longer actionable (suppressed, disqualified, terminal sequence).
+ * Prefer {@link revokeInapplicableDraftsForRecord} when sequence membership
+ * may also have changed.
+ */
 export const revokeQueuedDraftsForRecord = ({
   db,
   record,
@@ -2002,6 +2010,53 @@ export const revokeQueuedDraftsForRecord = ({
     WHERE row_id = ? AND status IN ('pending_approval', 'ready')
   `).run(reason, nowIso(), rowId);
   return { revoked: Number(result?.changes || 0), reason };
+};
+
+/**
+ * Revoke queued drafts that are no longer applicable: record-terminal reasons
+ * *or* drafts bound to a sequence/pipeline the record has left.
+ * Each draft is stamped with its own reason. Never deletes.
+ */
+export const revokeInapplicableDraftsForRecord = ({
+  db,
+  record,
+}: {
+  db: any;
+  record: Record<string, unknown> | null | undefined;
+}): { revoked: number; reasons: Array<{ draft_id: string; reason: string }> } => {
+  const rowId = String(record?._row_id || record?.id || '').trim();
+  if (!rowId || !record) return { revoked: 0, reasons: [] };
+  ensureDraftCompatibility(db);
+
+  let drafts: Array<Record<string, unknown>> = [];
+  try {
+    drafts = db.prepare(`
+      SELECT draft_id, sequence_name, channel, status, step_id
+      FROM drafts
+      WHERE row_id = ? AND status IN ('pending_approval', 'ready')
+    `).all(rowId) as Array<Record<string, unknown>>;
+  } catch {
+    return { revoked: 0, reasons: [] };
+  }
+
+  const reasons: Array<{ draft_id: string; reason: string }> = [];
+  for (const draft of drafts) {
+    const reason = draftInapplicabilityReason({ draft, record });
+    if (!reason) continue;
+    const draftId = String(draft.draft_id || '').trim();
+    if (!draftId) continue;
+    try {
+      updateDraft({
+        db,
+        draftId,
+        patch: { status: 'revoked', reason },
+      });
+      reasons.push({ draft_id: draftId, reason });
+    } catch {
+      // Leave alone if update fails.
+    }
+  }
+  return { revoked: reasons.length, reasons };
 };
 
 export const revokeQueuedDraftsForSuppression = ({
@@ -2156,7 +2211,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     if (row.account_contact_plan_json !== undefined) {
       syncPrimaryContactProjectionInternal({ db, recordId: String(current._row_id || current.id || rowId) });
     }
-    revokeQueuedDraftsForRecord({
+    revokeInapplicableDraftsForRecord({
       db,
       record: {
         ...row,
@@ -2363,7 +2418,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
       updated_at: timestamp,
     });
   }
-  revokeQueuedDraftsForRecord({ db, record: { ...row, _row_id: row._row_id || rowId } });
+  revokeInapplicableDraftsForRecord({ db, record: { ...row, _row_id: row._row_id || rowId } });
 };
 
 export const listRecords = ({ db, whereSql = '1=1', params = [], limit = 1000, orderBy = 'updated_at DESC' }) =>

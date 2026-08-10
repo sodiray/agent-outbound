@@ -708,6 +708,8 @@ export function listManualQueue(input: {
   limit?: number;
   offset?: number;
   taskType?: string;
+  listDir?: string;
+  reconcile?: boolean;
 }): WorkQueueResult {
   const limit = Math.max(1, Number(input.limit) || 100);
   const offset = Math.max(0, Number(input.offset) || 0);
@@ -717,6 +719,8 @@ export function listManualQueue(input: {
     taskType: input.taskType || '',
     limit,
     offset,
+    listDir: input.listDir || '',
+    reconcile: Boolean(input.reconcile),
   });
   const items: WorkQueueItem[] = (listed.tasks || []).map((t) => ({
     record_id: text(t.record_id),
@@ -846,6 +850,8 @@ const QUEUE_FNS: Record<WorkQueueName, (input: {
   status?: string;
   taskType?: string;
   now?: string;
+  listDir?: string;
+  reconcile?: boolean;
 }) => WorkQueueResult> = {
   repair: listRepairQueue,
   enrichment_hold: listEnrichmentHoldQueue,
@@ -871,6 +877,8 @@ export function listWorkQueue(input: {
   status?: string;
   taskType?: string;
   now?: string;
+  listDir?: string;
+  reconcile?: boolean;
 }): WorkQueueResult {
   const name = text(input.queue).toLowerCase().replace(/-/g, '_') as WorkQueueName;
   const fn = QUEUE_FNS[name];

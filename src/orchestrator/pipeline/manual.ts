@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { flattenPipelineSteps } from '../lib/subpipelines.js';
 import {
+  manualParkCloseReason,
+  manualParkInapplicabilityReason,
+} from '../lib/work-item-applicability.js';
+import {
   insertPipelineEvent,
   insertChannelEvent,
   logOutboundSuppressionRefusal,
@@ -550,6 +554,173 @@ const manualTaskLabels = (
   };
 };
 
+export type ManualParkCloseResult = {
+  closed: number;
+  reasons: Array<{ record_id: string; step_id: string; reason: string; event_id: string }>;
+};
+
+/**
+ * Close open awaiting_manual parks that are no longer applicable for one record.
+ * Writes a later passed event (reason `skipped:not_applicable:…`). The original
+ * park event is retained for audit. Never deletes.
+ */
+export const closeInapplicableManualParksForRecord = ({
+  db,
+  config,
+  record,
+  listDir = '',
+  now,
+}: {
+  db: any;
+  config?: unknown;
+  record: Record<string, unknown> | null | undefined;
+  listDir?: string;
+  now?: string;
+}): ManualParkCloseResult => {
+  const recordId = text(record?._row_id || record?.id);
+  if (!recordId || !record) return { closed: 0, reasons: [] };
+
+  const declaredSteps = new Map<string, Record<string, unknown>>();
+  if (config != null) {
+    for (const step of flattenPipelineSteps(config as any) as Array<Record<string, unknown>>) {
+      const id = text((step as any)?.id);
+      if (id) declaredSteps.set(id, step);
+    }
+  }
+
+  let parks: Array<Record<string, unknown>> = [];
+  try {
+    parks = db.prepare(`
+      SELECT e.event_id AS event_id, e.step_id AS step_id, e.occurred_at AS parked_at
+      FROM pipeline_events e
+      WHERE e.record_id = ?
+        AND e.kind = 'manual_task'
+        AND e.passed = 0
+        AND e.reason = 'awaiting_manual'
+        AND NOT EXISTS (
+          SELECT 1 FROM pipeline_events done
+          WHERE done.record_id = e.record_id
+            AND done.step_id = e.step_id
+            AND done.kind = 'manual_task'
+            AND done.passed = 1
+            AND done.occurred_at > e.occurred_at
+        )
+    `).all(recordId) as Array<Record<string, unknown>>;
+  } catch {
+    return { closed: 0, reasons: [] };
+  }
+
+  const occurredAtBase = text(now) || nowIso();
+  const reasons: ManualParkCloseResult['reasons'] = [];
+
+  for (const park of parks) {
+    const stepId = text(park.step_id);
+    if (!stepId) continue;
+    const step = config != null ? (declaredSteps.get(stepId) || null) : undefined;
+    const reason = manualParkInapplicabilityReason({
+      record,
+      step,
+      config,
+      listDir,
+    });
+    if (!reason) continue;
+
+    const parkMs = Date.parse(text(park.parked_at));
+    const baseMs = Date.parse(occurredAtBase);
+    const closeMs = Number.isFinite(parkMs)
+      ? Math.max(Number.isFinite(baseMs) ? baseMs : Date.now(), parkMs + 1)
+      : (Number.isFinite(baseMs) ? baseMs : Date.now());
+    const occurredAt = new Date(closeMs).toISOString();
+    const eventId = `park_close_${randomUUID()}`;
+    const fullReason = manualParkCloseReason(reason);
+
+    try {
+      insertPipelineEvent({
+        db,
+        event: {
+          event_id: eventId,
+          record_id: recordId,
+          step_id: stepId,
+          kind: 'manual_task',
+          passed: true,
+          reason: fullReason,
+          occurred_at: occurredAt,
+        },
+      });
+      reasons.push({
+        record_id: recordId,
+        step_id: stepId,
+        reason: fullReason,
+        event_id: eventId,
+      });
+    } catch {
+      // Leave park alone if insert fails.
+    }
+  }
+
+  return { closed: reasons.length, reasons };
+};
+
+/**
+ * Close inapplicable parks for every record that currently has one open.
+ * Used by operator list surfaces so the queue self-heals with an audit trail.
+ */
+export const closeInapplicableManualParks = ({
+  db,
+  config,
+  listDir = '',
+  now,
+}: {
+  db: any;
+  config?: unknown;
+  listDir?: string;
+  now?: string;
+}): ManualParkCloseResult => {
+  let recordIds: string[] = [];
+  try {
+    recordIds = (db.prepare(`
+      SELECT DISTINCT e.record_id AS record_id
+      FROM pipeline_events e
+      WHERE e.kind = 'manual_task'
+        AND e.passed = 0
+        AND e.reason = 'awaiting_manual'
+        AND NOT EXISTS (
+          SELECT 1 FROM pipeline_events done
+          WHERE done.record_id = e.record_id
+            AND done.step_id = e.step_id
+            AND done.kind = 'manual_task'
+            AND done.passed = 1
+            AND done.occurred_at > e.occurred_at
+        )
+    `).all() as Array<{ record_id?: string }>).map((row) => text(row.record_id)).filter(Boolean);
+  } catch {
+    return { closed: 0, reasons: [] };
+  }
+
+  const aggregate: ManualParkCloseResult = { closed: 0, reasons: [] };
+  for (const recordId of recordIds) {
+    let record: Record<string, unknown> | undefined;
+    try {
+      record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId) as
+        | Record<string, unknown>
+        | undefined;
+    } catch {
+      record = undefined;
+    }
+    if (!record) continue;
+    const result = closeInapplicableManualParksForRecord({
+      db,
+      config,
+      record,
+      listDir,
+      now,
+    });
+    aggregate.closed += result.closed;
+    aggregate.reasons.push(...result.reasons);
+  }
+  return aggregate;
+};
+
 /** Records currently parked on a manual_task step (reason awaiting_manual). */
 export const listAwaitingManualTasks = ({
   db,
@@ -557,6 +728,13 @@ export const listAwaitingManualTasks = ({
   taskType = '',
   limit = 100,
   offset = 0,
+  listDir = '',
+  /**
+   * When true and config is available, close inapplicable parks (with audit
+   * reasons) before listing so the operator queue is not full of dead work.
+   * Callers with a write-capable db should pass true.
+   */
+  reconcile = false,
 }: {
   db: any;
   /** The pipeline, so a task is labelled with the author's own words for it. */
@@ -564,7 +742,17 @@ export const listAwaitingManualTasks = ({
   taskType?: string;
   limit?: number;
   offset?: number;
+  listDir?: string;
+  reconcile?: boolean;
 }): { total: number; tasks: ManualTaskRow[] } => {
+  if (reconcile && config != null) {
+    try {
+      closeInapplicableManualParks({ db, config, listDir });
+    } catch {
+      // Listing must still work if reconcile fails (e.g. readonly db).
+    }
+  }
+
   const typeFilter = text(taskType).toLowerCase();
   const configSupplied = config != null;
   const declaredSteps = new Map<string, Record<string, unknown>>();
@@ -602,15 +790,42 @@ export const listAwaitingManualTasks = ({
     ORDER BY e.occurred_at ASC
   `).all();
 
+  const fullRecordById = new Map<string, Record<string, unknown>>();
+  const loadRecord = (recordId: string): Record<string, unknown> | null => {
+    if (fullRecordById.has(recordId)) return fullRecordById.get(recordId) || null;
+    try {
+      const full = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId) as
+        | Record<string, unknown>
+        | undefined;
+      if (full) fullRecordById.set(recordId, full);
+      return full || null;
+    } catch {
+      return null;
+    }
+  };
+
   // Filtering happens on labels the database does not hold, so the page is cut
   // after the filter rather than before it. A `total` counted separately from
   // the rows it describes is how `--type mail` came to report three tasks and
   // list one.
+  //
+  // Also drop parks that are no longer applicable (left pipeline, when: fails,
+  // suppressed/terminal). Prefer reconcile=true so the close is durable; the
+  // filter is defense-in-depth for readonly list paths.
   const matched: ManualTaskRow[] = rows.map((row: any) => {
     const stepId = text(row.step_id);
-    const labels = manualTaskLabels(declaredSteps.get(stepId), stepId, { configSupplied });
+    const recordId = text(row.record_id);
+    const step = declaredSteps.get(stepId);
+    const labels = manualTaskLabels(step, stepId, { configSupplied });
+    const fullRecord = loadRecord(recordId) || (row as Record<string, unknown>);
+    const inapplicable = manualParkInapplicabilityReason({
+      record: fullRecord,
+      step: configSupplied ? (step || null) : undefined,
+      config: configSupplied ? config : undefined,
+      listDir,
+    });
     return {
-      record_id: text(row.record_id),
+      record_id: recordId,
       step_id: stepId,
       task_type: labels.taskType,
       channel: labels.channel,
@@ -624,8 +839,10 @@ export const listAwaitingManualTasks = ({
       reason: text(row.reason),
       declared: labels.declared,
       __inferred: labels.inferred,
-    } as ManualTaskRow & { __inferred: string };
+      __inapplicable: inapplicable,
+    } as ManualTaskRow & { __inferred: string; __inapplicable: string | null };
   }).filter((task) => {
+    if ((task as ManualTaskRow & { __inapplicable: string | null }).__inapplicable) return false;
     if (!typeFilter) return true;
     // Ghost parks (config present, step removed) never match a type filter —
     // even when their step id would have substring-guessed into that bucket.
@@ -637,7 +854,10 @@ export const listAwaitingManualTasks = ({
       || task.channel.toLowerCase() === typeFilter
       || inferred === typeFilter;
   }).map((task) => {
-    const { __inferred, ...rest } = task as ManualTaskRow & { __inferred: string };
+    const { __inferred, __inapplicable, ...rest } = task as ManualTaskRow & {
+      __inferred: string;
+      __inapplicable: string | null;
+    };
     return rest;
   });
 

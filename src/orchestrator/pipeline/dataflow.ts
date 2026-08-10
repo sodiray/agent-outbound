@@ -19,7 +19,8 @@ import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
-import { findAsset, hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides, syncPrimaryContactProjection } from '../runtime/db.js';
+import { findAsset, hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides, revokeInapplicableDraftsForRecord, syncPrimaryContactProjection } from '../runtime/db.js';
+import { closeInapplicableManualParksForRecord } from './manual.js';
 import { resolveWorkingDayConfig } from '../lib/working-days.js';
 import {
   flattenPipelineSteps,
@@ -1062,6 +1063,23 @@ export const runPipelineDataflow = async ({
     const runId = beginRun(db, { phase: 'pipeline', target: rows.length, message: `Filtering ${rows.length} records` });
     const progressState = { done: 0 };
     const heartbeatTimer = setInterval(() => heartbeat(db, runId), 3000);
+    // Revoke drafts / close parks that are no longer applicable before the
+    // scheduler runs — operator queues must not keep offering dead work while
+    // the engine correctly skips the underlying step.
+    for (const row of rows) {
+      try {
+        revokeInapplicableDraftsForRecord({ db, record: row });
+        closeInapplicableManualParksForRecord({
+          db,
+          config,
+          record: row,
+          listDir,
+          now: clockIso(clock),
+        });
+      } catch {
+        // Reconcile must not abort the pipeline run.
+      }
+    }
     for (const row of rows) {
       const recordId = getRecordRowId(row);
       for (const step of deferredSteps) {

@@ -6,6 +6,7 @@ import {
   ensureRecordColumns,
   draftRevocationReason,
   revokeQueuedDraftsForRecord,
+  revokeInapplicableDraftsForRecord,
   upsertRecord,
 } from '../orchestrator/runtime/db.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
@@ -343,7 +344,9 @@ const draftWithApprovalDetails = (draft: Record<string, unknown>) => {
 
 export const draftsListCommand = ({ list, status = '', step = 0, cursor = '', limit = 100 }) => {
   const listDir = resolveListDir(list);
-  const db = openListDb({ listDir, readonly: true });
+  // Writeable so drafts for sequences the record has left can be revoked with
+  // an audit reason before the queue is returned.
+  const db = openListDb({ listDir, readonly: false });
   try {
     const config = (() => {
       try {
@@ -352,6 +355,25 @@ export const draftsListCommand = ({ list, status = '', step = 0, cursor = '', li
         return null;
       }
     })();
+
+    // Reconcile inapplicable queued drafts (left sequence / terminal record).
+    try {
+      const pendingOwners = db.prepare(`
+        SELECT DISTINCT row_id FROM drafts
+        WHERE status IN ('pending_approval', 'ready')
+      `).all() as Array<{ row_id?: string }>;
+      for (const owner of pendingOwners) {
+        const rowId = String(owner.row_id || '').trim();
+        if (!rowId) continue;
+        const record = db.prepare('SELECT * FROM records WHERE _row_id = ? LIMIT 1')
+          .get(rowId) as Record<string, unknown> | undefined;
+        if (!record) continue;
+        revokeInapplicableDraftsForRecord({ db, record });
+      }
+    } catch {
+      // Listing must still work if reconcile fails.
+    }
+
     const clauses = ['1=1'];
     const params: any[] = [];
     if (status) {

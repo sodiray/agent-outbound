@@ -266,18 +266,30 @@ export const workQueuesCommand = ({
 }) => {
   const listDir = resolveListDir(list);
   const q = String(queue || '').trim().toLowerCase().replace(/-/g, '_');
-  const db = openListDb({ listDir, readonly: true });
+  // Manual queue may close inapplicable parks; open write when serving it.
+  const needsWrite = q === 'manual';
+  const config = (() => {
+    try {
+      return readConfig(listDir).config;
+    } catch {
+      return undefined;
+    }
+  })();
+  const db = openListDb({ listDir, readonly: !needsWrite });
   try {
     if (!q || q === 'all' || q === 'counts') {
       return listAllWorkQueueCounts({ db, limit: 0 });
     }
     return listWorkQueue({
       db,
+      config,
       queue: q,
       limit: Number(limit) || 100,
       offset: Number(offset) || 0,
       status,
       taskType: taskType || type || '',
+      listDir,
+      reconcile: needsWrite,
     });
   } finally {
     db.close();

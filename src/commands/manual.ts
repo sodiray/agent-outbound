@@ -17,9 +17,19 @@ export const manualListCommand = ({
 }) => {
   const listDir = resolveListDir(list);
   const { config } = readConfig(listDir);
-  const db = openListDb({ listDir, readonly: true });
+  // Writeable so inapplicable parks can be closed with an audit reason before
+  // the queue is returned (stale work is not merely filtered out).
+  const db = openListDb({ listDir, readonly: false });
   try {
-    return listAwaitingManualTasks({ db, config, taskType, limit, offset });
+    return listAwaitingManualTasks({
+      db,
+      config,
+      taskType,
+      limit,
+      offset,
+      listDir,
+      reconcile: true,
+    });
   } finally {
     db.close();
   }
