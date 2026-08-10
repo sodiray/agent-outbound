@@ -21,7 +21,6 @@ import {
 import {
   appendTransitionAudit,
   invalidateStageReviewIfAssetChanged,
-  parseStageReviewJson,
 } from '../policy/transition-audit.js';
 import {
   applyMailSubmitted,
@@ -51,7 +50,10 @@ import {
   type LiveInteractionBudget,
 } from '../runtime/live-interaction-budget.js';
 import { evaluateTransmitterSuppression } from '../policy/transmitter-suppression.js';
-import { resolveReviewPresentation } from '../policy/review-presentation.js';
+import {
+  resolveReviewPresentation,
+  reviewPresentationForStep,
+} from '../policy/review-presentation.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
 
 const text = (value: unknown) => String(value || '').trim();
@@ -338,77 +340,76 @@ export const submitMailWithIdempotency = async ({
 };
 
 /**
- * Whether stage_review_json is authorized for this mail completion identity.
- *
- * Accepts the same keys as the positive gate: sequence step id, product type,
- * or generic mail / manual_task. When assetVersion is supplied, also requires
- * an exact material fingerprint match (via isAuthorizedForAnyOf /
- * isAuthorizedForStep). Shared by allow and refusal-diagnostic paths so
- * "is this review for this stage?" cannot drift between them.
- */
-const isMailStageReviewAuthorizedFor = (
-  row: Record<string, unknown>,
-  stepId: string,
-  productType: string,
-  assetVersion?: string | null,
-): boolean => isAuthorizedForAnyOf(
-  row,
-  [stepId, productType, 'mail', 'manual_task'],
-  assetVersion,
-);
-
-/**
- * Fail-closed: mail manual complete requires stage_review authorization when
- * policy.review_required_for lists that mail product type (or generic "mail").
- * Operator must stage_review_authorize first.
+ * Fail-closed: manual complete requires stage_review authorization when
+ * - the parked step declares a review: block, or
+ * - policy.review_required_for lists that product/task type (or generic "mail").
+ * Operator must stage_review_authorize first. Never auto-authorizes.
  *
  * Recomputes material asset_version (account / contact / recipient / content / step).
  * Authorized reviews bound to a different fingerprint are invalidated + re-paused;
  * complete is refused.
  */
-const assertMailStageReviewAuthorized = ({
+const assertManualTaskStageReviewAuthorized = ({
   db,
   config,
   recordId,
   stepId,
   productType,
+  channel = '',
+  configuredStep = null,
 }: {
   db: any;
   config: any;
   recordId: string;
   stepId: string;
   productType: string;
+  channel?: string;
+  configuredStep?: Record<string, unknown> | null;
 }) => {
   const tokens = reviewRequiredTokens(config);
-  if (tokens.size === 0) return;
-
-  // Match product type, manual_task+taskType, or generic "mail" token for any mail product.
+  const ch = text(channel).toLowerCase();
+  const product = text(productType);
+  const hasDeclaredReview = Boolean(reviewPresentationForStep(configuredStep));
+  // Match product type, manual_task+taskType, generic "mail", or a declared review: block.
   const reviewRequired =
-    isReviewRequired(config, 'manual_task', productType)
-    || isReviewRequired(config, productType, productType)
-    || tokens.has(productType)
-    || tokens.has('mail');
+    hasDeclaredReview
+    || isReviewRequired(config, 'manual_task', product)
+    || isReviewRequired(config, product, product)
+    || (product && tokens.has(product.toLowerCase()))
+    || (ch === 'mail' && tokens.has('mail'));
   if (!reviewRequired) return;
+
+  // Keep "mail task" wording for mail channel so existing operator diagnostics
+  // and tests stay stable; other channels use step/task identity.
+  const label = ch === 'mail' || Boolean(product && declaredMailProduct(config, product))
+    ? `mail task "${product || 'mail'}"`
+    : `manual task "${product || stepId}"`;
 
   let row = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId) as
     | Record<string, unknown>
     | undefined;
   if (!row) {
     throw new Error(
-      `Stage review required before completing mail task "${productType}" `
+      `Stage review required before completing ${label} `
       + `(record ${recordId} not found; fail-closed).`,
     );
   }
 
-  const mailBody = mailContent({ row, definition: declaredMailProduct(config, productType) });
-  const configuredStep = flattenPipelineSteps(config)
-    .find((step) => text(step.id) === stepId);
-  const reviewPresentation = resolveReviewPresentation({ step: configuredStep, record: row });
+  const step = configuredStep
+    || flattenPipelineSteps(config).find((s) => text(s.id) === stepId)
+    || null;
+  const mailBody = mailContent({ row, definition: declaredMailProduct(config, product) });
+  const reviewPresentation = resolveReviewPresentation({ step, record: row });
+  const recipient = text(
+    ch === 'mail' || !ch
+      ? (row.address || row.contact_email || row.email)
+      : (row.contact_email || row.email || row.address || row.linkedin_url),
+  );
   const currentAssetVersion = resolveStageAssetVersion({
     accountId: String(row._row_id || row.id || recordId),
     activeContactId: text(row.active_contact_id) || null,
     contactId: text(row.contact_id) || null,
-    recipient: text(row.address || row.contact_email || row.email) || null,
+    recipient: recipient || null,
     stepId,
     stageId: stepId,
     bodyText: mailBody || null,
@@ -422,8 +423,8 @@ const assertMailStageReviewAuthorized = ({
     current_asset_version: currentAssetVersion,
     account_id: String(row._row_id || row.id || recordId),
     contact_id: text(row.active_contact_id || row.contact_id) || null,
-    channel: 'mail',
-    action_type: productType,
+    channel: ch || null,
+    action_type: product || 'manual_task',
     lifecycle_stage: text(row.lifecycle_stage) || 'contacted',
     re_pause: true,
     presentation: reviewPresentation,
@@ -448,28 +449,29 @@ const assertMailStageReviewAuthorized = ({
     });
     upsertRecord({ db, row: next });
     throw new Error(
-      `Stage review invalidated: asset changed for mail task "${productType}" `
+      `Stage review invalidated: asset changed for ${label} `
       + `record ${recordId} step ${stepId} (bound version no longer matches current asset). `
       + 'Re-authorize after reviewing the updated asset (fail-closed).',
     );
   }
 
-  // Accept authorization bound to sequence step id, product type, or generic mail,
-  // with exact current material asset_version.
-  if (isMailStageReviewAuthorizedFor(row, stepId, productType, currentAssetVersion)) return;
+  // Accept authorization bound to sequence step id, product type, channel, or
+  // generic mail / manual_task — with exact current material asset_version.
+  const stageKeys = [stepId, product, ch, 'mail', 'manual_task'];
+  if (isAuthorizedForAnyOf(row, stageKeys, currentAssetVersion)) return;
 
   // Authorized for this stage identity but wrong material version → mismatch.
   // An authorization for a *different* stage is not a version drift: fall through
-  // to "stage review required" (there is no mail review to re-check).
-  if (isMailStageReviewAuthorizedFor(row, stepId, productType)) {
+  // to "stage review required" (there is no review for this stage to re-check).
+  if (isAuthorizedForAnyOf(row, stageKeys)) {
     throw new Error(
-      `Stage review asset_version mismatch for mail task "${productType}" `
+      `Stage review asset_version mismatch for ${label} `
       + `record ${recordId} step ${stepId} (fail-closed).`,
     );
   }
 
   throw new Error(
-    `Stage review required before completing mail task "${productType}" `
+    `Stage review required before completing ${label} `
     + `for record ${recordId} step ${stepId}. `
     + 'Authorize with stage_review_authorize first (fail-closed).',
   );
@@ -779,15 +781,22 @@ export const completeManualTask = async ({
       throw new Error(`Step "${sid}" is not a manual_task (kind=${text(configuredStep.kind)}).`);
     }
 
-    // Mail product types: refuse complete without stage_review authorization when
-    // policy.review_required_for includes that type (fail closed).
-    if (configuredMailTask || mailProduct) {
-      assertMailStageReviewAuthorized({
+    // Refuse complete without stage_review authorization when the step declares
+    // review: or policy.review_required_for includes this product/type (fail closed).
+    const stepTaskType = text(
+      (configuredStep?.config as Record<string, unknown> | undefined)?.task_type
+      || (configuredStep?.config as Record<string, unknown> | undefined)?.taskType,
+    );
+    const hasDeclaredReview = Boolean(reviewPresentationForStep(configuredStep));
+    if (configuredMailTask || mailProduct || hasDeclaredReview) {
+      assertManualTaskStageReviewAuthorized({
         db,
         config,
         recordId: rid,
         stepId: sid,
-        productType: mailProduct || 'mail',
+        productType: mailProduct || stepTaskType || 'mail',
+        channel: configuredChannel || (mailProduct || configuredMailTask ? 'mail' : ''),
+        configuredStep: configuredStep || null,
       });
     }
   }

@@ -28,6 +28,7 @@ import {
   authorizeStageReview,
   parseStageReviewJson,
   invalidateStageReviewIfAssetChanged,
+  listPendingStageReviews,
 } from '../dist/orchestrator/policy/transition-audit.js';
 import { openListDb, ensureRecordColumns, insertDraft, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
@@ -1786,5 +1787,451 @@ test('completeManualTask mail: correctly authorized + versioned review still com
   });
   assert.equal(result.status, 'manual_completed');
   assert.equal(result.mail_allocated, true);
+  db.close();
+});
+
+// --- Declared review: on manual_task park materializes pending stage review ---
+//
+// A parked manual_task with a review: block must produce a pending stage review
+// addressable by stage-review list/authorize. Policy.review_required_for alone
+// is not the only door — the author declares review: on the step.
+
+const declaredMailReviewBlock = {
+  purpose: 'Physical mail costs real money per piece and cannot be recalled.',
+  present: [
+    { field: 'business_name', label: 'Business' },
+    { field: 'address', label: 'Delivery address' },
+  ],
+  require_non_empty: ['address', 'business_name'],
+};
+
+const seedDeclaredManualMail = ({
+  rowId = 'acct_declared_mail_review',
+  stepId = 'mail_standard',
+  taskType = 'standard_postcard',
+  productType = 'golden_ticket',
+  reviewRequiredFor = [],
+  address = '1 Main St',
+  businessName = 'Declared Review HVAC',
+  stage_review_json = null,
+} = {}) => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-declared-manual-review-'));
+  writeFileSync(join(listDir, 'outbound.yaml'), projectYaml({ reviewRequiredFor }));
+  writeFileSync(join(listDir, 'operator.md'), 'test');
+  writeFileSync(join(listDir, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const campaign = buildContactPlan({
+    account_id: rowId,
+    campaign_id: `camp_${rowId}`,
+    treatment_tier: 'A',
+    mail_treatment: productType,
+    contacts: [{ contact_id: 'c1', outbound_disposition: 'eligible_target', outreach_rank: 1 }],
+  });
+  ensureRecordColumns({
+    db,
+    columns: [
+      'lifecycle_stage',
+      'account_sequence_state',
+      'work_state',
+      'next_action_json',
+      'active_contact_id',
+      'contact_id',
+      'treatment_tier',
+      'suppressed',
+      'stage_review_json',
+      'related_review_id',
+      'transition_audit_json',
+      'account_contact_plan_json',
+      'mail_treatment',
+      'mail_allocated',
+      'mail_copy',
+      'address',
+      'city',
+      'state',
+      'zip',
+      'business_name',
+    ],
+  });
+  db.prepare(`
+    INSERT INTO records (
+      _row_id, business_name, sequence_name, sequence_status, sequence_step,
+      contact_email, lifecycle_stage, account_sequence_state, work_state, next_action_json,
+      active_contact_id, treatment_tier, suppressed, stage_review_json,
+      account_contact_plan_json, mail_treatment, mail_allocated, mail_copy,
+      address, city, state, zip,
+      _created_at, _updated_at, created_at, updated_at
+    ) VALUES (
+      ?, ?, 'default', 'active', 0,
+      'owner@example-declared-review.test', 'contacted', 'active', 'executing_external_action', ?,
+      'c1', 'A', 0, ?,
+      ?, ?, 0, '',
+      ?, 'Boise', 'ID', '83702',
+      ?, ?, ?, ?
+    )
+  `).run(
+    rowId,
+    businessName,
+    JSON.stringify(nextAction(rowId, { action_type: 'manual_task' })),
+    stage_review_json,
+    JSON.stringify(campaign),
+    productType,
+    address,
+    now,
+    now,
+    now,
+    now,
+  );
+  const step = {
+    kind: 'manual_task',
+    id: stepId,
+    config: { task_type: taskType, channel: 'mail' },
+    review: declaredMailReviewBlock,
+  };
+  const config = {
+    policy: {
+      version: 'tv-pipeline-v1',
+      review_required_for: reviewRequiredFor,
+    },
+    pipeline: [step],
+    channels: { mail: { template_id: 'postcard_v1' } },
+  };
+  return { listDir, db, rowId, stepId, taskType, productType, step, config, address };
+};
+
+test('declared review: parking manual_task opens pending stage review listable by step id', async () => {
+  const { listDir, db, rowId, stepId, step, config } = seedDeclaredManualMail({
+    rowId: 'acct_park_opens_review',
+    // Policy empty — door must open from the step's review: block alone.
+    reviewRequiredFor: [],
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const out = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Declared Review Test',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step,
+    sequence: { steps: [step] },
+    channelHint: 'mail',
+    intent: 'send',
+    dryRun: false,
+  });
+  assert.equal(out.status, 'skipped');
+  assert.equal(out.reason, 'awaiting_manual');
+  assert.equal(out.parked, true);
+
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const review = parseStageReviewJson(after.stage_review_json);
+  assert.ok(review, 'expected pending stage_review_json after park');
+  assert.equal(review.status, 'pending');
+  assert.equal(String(review.stage_id), stepId);
+  assert.equal(String(review.action_type || ''), 'standard_postcard');
+  assert.equal(String(review.channel || ''), 'mail');
+  assert.ok(review.presentation, 'bound presentation from declared review:');
+  assert.equal(review.presentation.purpose, declaredMailReviewBlock.purpose);
+
+  const listed = listPendingStageReviews({ db, status: 'open', config });
+  assert.ok(listed.total >= 1, 'stage-review list must surface the parked mail review');
+  const match = listed.reviews.find((r) => r.record_id === rowId && r.stage_id === stepId);
+  assert.ok(match, 'list must include this record+step');
+  assert.equal(match.status, 'pending');
+  assert.equal(match.channel, 'mail');
+  db.close();
+});
+
+test('declared review: authorize by step id then complete succeeds; without authorize complete refuses', async () => {
+  const productType = 'golden_ticket';
+  const { listDir, db, rowId, stepId, step, config, address } = seedDeclaredManualMail({
+    rowId: 'acct_authorize_then_complete',
+    productType,
+    reviewRequiredFor: [productType],
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Declared Review Test',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step,
+    sequence: { steps: [step] },
+    channelHint: 'mail',
+    intent: 'send',
+    dryRun: false,
+  });
+
+  // Leave pending stage review; restore outbound next_action + active sequence so
+  // complete reaches the stage-review gate (not sequence/non-outbound action gates).
+  const outboundNa = JSON.stringify(nextAction(rowId, { action_type: 'manual_task' }));
+  db.prepare(`
+    UPDATE records
+    SET account_sequence_state = 'active',
+        work_state = 'executing_external_action',
+        next_action_json = ?
+    WHERE _row_id = ?
+  `).run(outboundNa, rowId);
+
+  // Gate not weakened: complete still refuses without authorization.
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      config,
+      recordId: rowId,
+      stepId,
+      note: 'try without authorize',
+    }),
+    /Stage review required before completing mail task/,
+  );
+
+  const pending = parseStageReviewJson(
+    db.prepare('SELECT stage_review_json FROM records WHERE _row_id = ?').get(rowId).stage_review_json,
+  );
+  assert.equal(pending.status, 'pending');
+  assert.equal(String(pending.stage_id), stepId);
+
+  const authorized = authorizeStageReview({
+    review_id: pending.review_id,
+    stage_id: stepId,
+    asset_version: pending.asset_version,
+    expected_asset_version: pending.asset_version,
+    decision: 'authorize',
+    account_id: rowId,
+    existing: pending,
+    lifecycle_stage: 'contacted',
+    actor: 'operator',
+  });
+  assert.equal(authorized.allowed, true, authorized.reason);
+  assert.equal(authorized.authorization.status, 'authorized');
+  db.prepare(`
+    UPDATE records
+    SET stage_review_json = ?,
+        account_sequence_state = 'active',
+        work_state = 'executing_external_action',
+        next_action_json = ?
+    WHERE _row_id = ?
+  `).run(
+    authorized.patch.stage_review_json,
+    authorized.patch.next_action_json || outboundNa,
+    rowId,
+  );
+
+  const result = await completeManualTask({
+    db,
+    config,
+    recordId: rowId,
+    stepId,
+    note: 'mailed after authorize',
+  });
+  assert.equal(result.status, 'manual_completed');
+  assert.equal(result.mail_allocated, true);
+  // address retained for material fingerprint parity checks
+  assert.equal(address, '1 Main St');
+  db.close();
+});
+
+test('declared review: reject prevents manual complete', async () => {
+  const productType = 'golden_ticket';
+  const { listDir, db, rowId, stepId, step, config } = seedDeclaredManualMail({
+    rowId: 'acct_reject_blocks_complete',
+    productType,
+    reviewRequiredFor: [productType],
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Declared Review Test',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step,
+    sequence: { steps: [step] },
+    channelHint: 'mail',
+    intent: 'send',
+    dryRun: false,
+  });
+
+  const pending = parseStageReviewJson(
+    db.prepare('SELECT stage_review_json FROM records WHERE _row_id = ?').get(rowId).stage_review_json,
+  );
+  const rejected = authorizeStageReview({
+    review_id: pending.review_id,
+    stage_id: stepId,
+    asset_version: pending.asset_version,
+    expected_asset_version: pending.asset_version,
+    decision: 'reject',
+    account_id: rowId,
+    existing: pending,
+    lifecycle_stage: 'contacted',
+    actor: 'operator',
+  });
+  // Decision applied successfully; status is rejected (not authorized).
+  assert.equal(rejected.authorization.status, 'rejected');
+  // Restore outbound next_action so complete hits the stage-review gate.
+  const outboundNa = JSON.stringify(nextAction(rowId, { action_type: 'manual_task' }));
+  db.prepare(`
+    UPDATE records
+    SET stage_review_json = ?,
+        account_sequence_state = 'active',
+        work_state = 'executing_external_action',
+        next_action_json = ?
+    WHERE _row_id = ?
+  `).run(rejected.patch.stage_review_json, outboundNa, rowId);
+
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      config,
+      recordId: rowId,
+      stepId,
+      note: 'try after reject',
+    }),
+    /Stage review required before completing mail task/,
+  );
+  db.close();
+});
+
+test('declared review: require_non_empty empty fields cannot be authorized', async () => {
+  const { listDir, db, rowId, stepId, step } = seedDeclaredManualMail({
+    rowId: 'acct_empty_required_fields',
+    // Empty business_name + address so require_non_empty fails at authorize.
+    address: '',
+    businessName: '',
+    reviewRequiredFor: [],
+  });
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Declared Review Test',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step,
+    sequence: { steps: [step] },
+    channelHint: 'mail',
+    intent: 'send',
+    dryRun: false,
+  });
+
+  const pending = parseStageReviewJson(
+    db.prepare('SELECT stage_review_json FROM records WHERE _row_id = ?').get(rowId).stage_review_json,
+  );
+  assert.ok(pending, 'park must still open a pending review when fields are empty');
+  assert.equal(pending.status, 'pending');
+
+  const blocked = authorizeStageReview({
+    review_id: pending.review_id,
+    stage_id: stepId,
+    asset_version: pending.asset_version,
+    expected_asset_version: pending.asset_version,
+    decision: 'authorize',
+    account_id: rowId,
+    existing: pending,
+    lifecycle_stage: 'contacted',
+    actor: 'operator',
+  });
+  assert.equal(blocked.allowed, false);
+  assert.match(String(blocked.reason || ''), /required review field/i);
+  db.close();
+});
+
+test('manual_task without declared review: park does not invent a stage review (no behavior change)', async () => {
+  const rowId = 'acct_no_declared_review';
+  const stepId = 'mail_plain';
+  // Policy empty and no review: block — same as today: park only, no stage_review_json.
+  const { listDir, db } = seedDeclaredManualMail({
+    rowId,
+    stepId,
+    reviewRequiredFor: [],
+  });
+  const step = {
+    kind: 'manual_task',
+    id: stepId,
+    config: { task_type: 'standard_postcard', channel: 'mail' },
+    // no review: block
+  };
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const out = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'No Declared Review Test',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step,
+    sequence: { steps: [step] },
+    channelHint: 'mail',
+    intent: 'send',
+    dryRun: false,
+  });
+  assert.equal(out.status, 'skipped');
+  assert.equal(out.reason, 'awaiting_manual');
+
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  assert.equal(
+    parseStageReviewJson(after.stage_review_json),
+    null,
+    'without review: and without policy.review_required_for, park must not open a stage review',
+  );
+  const listed = listPendingStageReviews({ db, status: 'open' });
+  assert.equal(
+    listed.reviews.filter((r) => r.record_id === rowId).length,
+    0,
+  );
+  db.close();
+});
+
+test('policy product mismatch: park still opens review when campaign product is review-required', async () => {
+  // Real failure mode: step task_type=standard_postcard, campaign product=golden_ticket
+  // listed in review_required_for — complete demands auth for golden_ticket; park
+  // must open the door even though task_type alone does not match the policy token.
+  const { listDir, db, rowId, stepId, productType } = seedDeclaredManualMail({
+    rowId: 'acct_policy_product_mismatch',
+    taskType: 'standard_postcard',
+    productType: 'golden_ticket',
+    reviewRequiredFor: ['golden_ticket'],
+  });
+  // Step without review: block — policy+campaign product alone must open.
+  const step = {
+    kind: 'manual_task',
+    id: stepId,
+    config: { task_type: 'standard_postcard', channel: 'mail' },
+  };
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Policy Product Mismatch',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 1,
+    step,
+    sequence: { steps: [step] },
+    channelHint: 'mail',
+    intent: 'send',
+    dryRun: false,
+  });
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const review = parseStageReviewJson(after.stage_review_json);
+  assert.ok(review, `park must open pending review when policy lists campaign product ${productType}`);
+  assert.equal(review.status, 'pending');
+  assert.equal(String(review.stage_id), stepId);
   db.close();
 });

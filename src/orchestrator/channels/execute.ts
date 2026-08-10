@@ -54,6 +54,8 @@ import {
   evaluateExternalActionAuthorization,
   resolveStageAssetVersion,
   isReviewRequired,
+  isAuthorizedForAnyOf,
+  reviewRequiredTokens,
   pauseForStageReview,
   invalidateStageReviewIfAssetChanged,
   parseStageReviewJson,
@@ -1466,61 +1468,116 @@ export const executeChannelStep = async ({
               },
             });
           }
-          // When review is required for this mail task type, open a pending stage review
-          // so sequence state coordinates with A4 (paused_review) without auto-sending.
-          if (
+          // Open a pending stage review when the step declares review: or policy
+          // requires review for this park — mirrors linkedin_connect's applyStageReviewPause
+          // path so stage-review list/authorize can address the parked manual task.
+          // Drive from declared config (review.present / purpose / require_non_empty);
+          // do not hardcode product/task types. Never auto-authorizes.
+          const manualReviewPresentation = resolveReviewPresentation({
+            step,
+            record: sendRecord,
+          });
+          const hasDeclaredReview = Boolean(manualReviewPresentation);
+          const policyTokens = reviewRequiredTokens(projectConfig);
+          const taskKey = String(taskType || '').trim().toLowerCase();
+          const channelKey = String(channel || '').trim().toLowerCase();
+          const mailTreatment = String(sendRecord.mail_treatment || '').trim().toLowerCase();
+          // Align with completeManualTask: policy may list the campaign product
+          // (e.g. golden_ticket) while the step's task_type is a different label
+          // (e.g. standard_postcard). Also honor a bare "mail" token.
+          const policyRequiresReview =
             isReviewRequired(projectConfig, stepKind, taskType)
-            && channel === 'mail'
-          ) {
-            const mailReviewPresentation = resolveReviewPresentation({ step, record: sendRecord });
-            const mailBody = String(
+            || (channelKey === 'mail' && (
+              policyTokens.has('mail')
+              || (taskKey && policyTokens.has(taskKey))
+              || (mailTreatment && mailTreatment !== 'none' && policyTokens.has(mailTreatment))
+            ));
+
+          if (hasDeclaredReview || policyRequiresReview) {
+            const actionType = taskType || stepKind || 'manual_task';
+            const reviewChannel = channelKey || null;
+            const bodyText = String(
               sendRecord.mail_copy
               || sendRecord.mail_body
               || sendRecord.preliminary_snapshot
+              || sendRecord.invite_message
               || '',
             );
-            const mailAssetVersion = currentStageAssetVersion({
+            const recipient = String(
+              (channelKey === 'mail'
+                ? (sendRecord.address || sendRecord.contact_email)
+                : '')
+              || sendRecord.address
+              || sendRecord.contact_email
+              || sendRecord.linkedin_url
+              || sendRecord.contact_linkedin
+              || '',
+            );
+            const manualAssetVersion = currentStageAssetVersion({
               record: sendRecord,
               stageId: sequenceStepId,
               assetForStep,
               policyVersion: projectConfig?.policy?.version,
-              recipient: String(sendRecord.address || sendRecord.contact_email || ''),
-              bodyText: mailBody,
+              recipient,
+              bodyText: bodyText || null,
               activeContactId,
-              reviewPresentation: mailReviewPresentation,
+              reviewPresentation: manualReviewPresentation,
             });
-            const mailInvalidated = applyStageReviewMaterialInvalidation({
+            const manualInvalidated = applyStageReviewMaterialInvalidation({
               db,
               record: sendRecord,
               stageId: sequenceStepId,
-              currentAssetVersion: mailAssetVersion,
-              channel: 'mail',
-              actionType: taskType || stepKind || 'manual_task',
+              currentAssetVersion: manualAssetVersion,
+              channel: reviewChannel,
+              actionType,
               contactId: activeContactId || null,
-              presentation: mailReviewPresentation,
+              presentation: manualReviewPresentation,
             });
-            const mailRecord = mailInvalidated.record;
-            const mailAuth = evaluateExternalActionAuthorization({
-              config: projectConfig,
-              record: mailRecord,
-              stepKind,
-              taskType,
-              stageId: sequenceStepId,
-              assetVersion: mailAssetVersion,
-              channel: 'mail',
-            });
-            if (mailAuth.needsPendingReview) {
-              applyStageReviewPause({
-                db,
-                record: mailRecord,
-                stageId: sequenceStepId,
-                assetVersion: mailAssetVersion,
-                channel: 'mail',
-                actionType: taskType || stepKind || 'manual_task',
-                contactId: activeContactId || null,
-                reason: `Stage review required before mail task ${taskType || sequenceStepId}`,
-                presentation: mailReviewPresentation,
-              });
+            // Material rebind already opened a pending review — do not thrash.
+            if (!manualInvalidated.blocked) {
+              const reviewRecord = manualInvalidated.record;
+              const stageKeys = [
+                sequenceStepId,
+                taskType,
+                stepKind,
+                channelKey || null,
+                mailTreatment && mailTreatment !== 'none' ? mailTreatment : null,
+              ];
+              const existingReview = parseStageReviewJson(reviewRecord.stage_review_json);
+              const pendingForStage = Boolean(
+                existingReview
+                && (existingReview.status === 'pending' || existingReview.status === 'edited')
+                && stageKeys.some((key) => {
+                  const k = String(key || '').trim().toLowerCase();
+                  if (!k) return false;
+                  return (
+                    String(existingReview.stage_id || '').trim().toLowerCase() === k
+                    || String(existingReview.action_type || '').trim().toLowerCase() === k
+                  );
+                }),
+              );
+              const alreadyAuthorized = isAuthorizedForAnyOf(
+                reviewRecord,
+                stageKeys,
+                manualAssetVersion,
+              );
+              // Open only when missing a usable review for this stage. Never
+              // invent an authorization — park stays awaiting_manual either way.
+              if (!pendingForStage && !alreadyAuthorized) {
+                applyStageReviewPause({
+                  db,
+                  record: reviewRecord,
+                  stageId: sequenceStepId,
+                  assetVersion: manualAssetVersion,
+                  channel: reviewChannel,
+                  actionType,
+                  contactId: activeContactId || null,
+                  reason:
+                    `Stage review required before manual task `
+                    + `${taskType || sequenceStepId}`,
+                  presentation: manualReviewPresentation,
+                });
+              }
             }
           }
         } catch {

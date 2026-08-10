@@ -7,8 +7,9 @@
  * Phase A1 (MIS-835) slice:
  * - linkedin_connect: hard-block unless stage_review_json is authorized for the stage
  * - send_email: ready draft (interim approval artifact) OR authorized stage review
- * - pipeline-declared mail products: call the same helpers when mail is automated;
- *   today mail parks as manual_task and is not auto-sent here
+ * - manual_task with a declared review: block (or policy.review_required_for): parks
+ *   as awaiting_manual and opens a pending stage review (same pauseForStageReview
+ *   machinery as LinkedIn). Not auto-sent; complete still requires authorization.
  *
  * asset_version is a material fingerprint (account, contact, recipient, content/claim,
  * step). On external send, recompute current version and refuse when authorized review
