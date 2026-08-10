@@ -1525,13 +1525,16 @@ const enqueuePendingNotifications = ({
           summary: summarizePending(pendingRowsForPayload),
           occurredAt: now.toISOString(),
         };
+        // Coalesce merges into the existing pending delivery without extending
+        // available_at. The first-enqueue deadline (created_at + coalesce_for)
+        // is firm: batching must not starve a row that keeps receiving events.
+        // Failure backoff is the only path that may push available_at forward.
         db.prepare(`
           UPDATE notification_deliveries
-          SET payload_json = ?, available_at = ?, updated_at = ?
+          SET payload_json = ?, updated_at = ?
           WHERE delivery_id = ?
         `).run(
           JSON.stringify(payload),
-          new Date(now.getTime() + coalesceMs).toISOString(),
           now.toISOString(),
           existingDeliveryId,
         );
