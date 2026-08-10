@@ -1860,6 +1860,19 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
           );
           // Rotate after manual-tail completion when not opted out / engaged.
           if (!['engaged', 'opted_out'].includes(normalizedTransition)) {
+            // upsertRecord only persists dynamic fields whose columns already exist
+            // (unknown keys are dropped silently). Ensure lazy columns before write.
+            ensureRecordColumns({
+              db,
+              columns: [
+                'sequence_status',
+                'contact_campaign_status',
+                'active_contact_id',
+                'contact_id',
+                'next_action_json',
+                'account_contact_plan_json',
+              ],
+            });
             const rotation = applyContactRotation(updated, {
               reason: `call_board_disposition:${normalizedAction}`,
             });
@@ -1891,8 +1904,11 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
             }
           }
         }
-      } catch {
-        /* park close / rotation best-effort — disposition still records */
+      } catch (error) {
+        // Best-effort: disposition still records via upsertRecord below.
+        // Surface like stage_review_open_failed / compliance_log_write_failed.
+        const message = String((error as Error)?.message || error || 'unknown');
+        updated.last_error = `park_close_rotation_failed:${message}`;
       }
     }
 
