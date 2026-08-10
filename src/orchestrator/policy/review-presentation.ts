@@ -44,14 +44,24 @@ export type PresentationEquivalence = {
 
 /**
  * Read-time view of a stage review presentation.
- * `presentation` is always resolved against current config + record when possible;
- * the creation-time snapshot remains inspectable as `bound_presentation`.
+ *
+ * Authorization integrity: `presentation` field **values** come from the
+ * creation-time bound snapshot whenever that snapshot has the field. Structure
+ * (which fields, labels, purpose) follows current config so config migrations
+ * remain visible. Live record re-resolution alone must never be what a human
+ * authorizes — that is the content that may already be frozen on a draft.
  */
 export type StageReviewPresentationRead = {
   presentation: ResolvedReviewPresentation | null;
   bound_presentation: ResolvedReviewPresentation | null;
   bound_asset_version: string;
   presentation_equivalence: PresentationEquivalence;
+  /**
+   * True when every presented value is proven identical to the bound snapshot
+   * (or there is nothing to present). False → must not authorize.
+   */
+  presentation_authorizable: boolean;
+  presentation_authorization_reason: string;
 };
 
 const text = (value: unknown) => String(value ?? '').trim();
@@ -159,6 +169,93 @@ export const findConfiguredStepById = (
   return null;
 };
 
+/**
+ * Project bound field values onto the current config structure.
+ * Labels/purpose/require_non_empty and the field list come from `current`;
+ * each field's value prefers the bound snapshot when that field was bound.
+ */
+export const projectBoundPresentationValues = ({
+  current,
+  bound,
+}: {
+  current: ResolvedReviewPresentation | null | undefined;
+  bound: ResolvedReviewPresentation | null | undefined;
+}): ResolvedReviewPresentation | null => {
+  if (!current) return bound ?? null;
+  if (!bound) return current;
+  const boundByField = new Map(
+    (bound.present || []).map((entry) => [text(entry.field), entry]),
+  );
+  return {
+    purpose: current.purpose,
+    require_non_empty: current.require_non_empty,
+    present: (current.present || []).map((entry) => {
+      const prior = boundByField.get(text(entry.field));
+      if (!prior) return entry;
+      return { ...entry, value: prior.value };
+    }),
+  };
+};
+
+/**
+ * Fail-closed authorization gate for stage-review presentation.
+ *
+ * A review is authorizable only when every value shown to the human is proven
+ * identical to the creation-time bound snapshot. Live-only fields (config added
+ * a present field after pause) or any value drift between presented and bound
+ * refuse authorization — the human must not approve content that cannot be
+ * tied to the sendable asset.
+ */
+export const presentationAuthorizationGate = ({
+  bound,
+  presentation,
+}: {
+  bound: ResolvedReviewPresentation | null | undefined;
+  presentation: ResolvedReviewPresentation | null | undefined;
+}): { authorizable: boolean; reason: string } => {
+  const shown = presentation?.present || [];
+  const boundPresent = bound?.present || [];
+  const boundEmpty = !bound || (boundPresent.length === 0 && !text(bound.purpose));
+  const shownEmpty = !presentation || (shown.length === 0 && !text(presentation.purpose));
+
+  if (shownEmpty && boundEmpty) {
+    return { authorizable: true, reason: '' };
+  }
+  if (shownEmpty && !boundEmpty) {
+    // Nothing to show; bound snapshot is historical only.
+    return { authorizable: true, reason: '' };
+  }
+  if (!bound || boundEmpty) {
+    return {
+      authorizable: false,
+      reason: 'presentation_unbound: review has no bound presentation snapshot for the values shown',
+    };
+  }
+
+  const boundByField = new Map(
+    boundPresent.map((entry) => [text(entry.field), entry]),
+  );
+  for (const entry of shown) {
+    const field = text(entry.field);
+    if (!field) continue;
+    const prior = boundByField.get(field);
+    if (!prior) {
+      return {
+        authorizable: false,
+        reason: `presentation_field_unbound: "${field}" is shown from live/config but was not bound at creation`,
+      };
+    }
+    if (stableValue(prior.value) !== stableValue(entry.value)) {
+      return {
+        authorizable: false,
+        reason: `presentation_value_not_bound: "${field}" presented value differs from the bound snapshot`,
+      };
+    }
+  }
+
+  return { authorizable: true, reason: '' };
+};
+
 /** Diff bound-at-creation presentation against a freshly resolved one. */
 export const compareReviewPresentations = (
   bound: ResolvedReviewPresentation | null | undefined,
@@ -253,8 +350,15 @@ export const compareReviewPresentations = (
 };
 
 /**
- * Resolve stage-review presentation at read time against current config + record.
- * Does not mutate stored stage_review_json; bound snapshot and asset_version remain available.
+ * Resolve stage-review presentation at read time.
+ *
+ * - Live resolve establishes current config structure and a live value baseline.
+ * - Shown values prefer the bound snapshot (what was fingerprint-bound with the
+ *   sendable asset) so the human judges the same content that will go out.
+ * - presentation_equivalence reports bound vs live (operator visibility).
+ * - presentation_authorizable is the fail-closed gate for authorize paths.
+ *
+ * Does not mutate stored stage_review_json.
  */
 export const resolveStageReviewPresentationForRead = ({
   review,
@@ -273,6 +377,10 @@ export const resolveStageReviewPresentationForRead = ({
   const bound_asset_version = text(review.asset_version);
 
   if (!config) {
+    const gate = presentationAuthorizationGate({
+      bound: bound_presentation,
+      presentation: bound_presentation,
+    });
     return {
       presentation: bound_presentation,
       bound_presentation,
@@ -282,12 +390,18 @@ export const resolveStageReviewPresentationForRead = ({
         reason: 'Current config is unavailable; showing presentation bound at creation.',
         changed_fields: [],
       },
+      presentation_authorizable: gate.authorizable,
+      presentation_authorization_reason: gate.reason,
     };
   }
 
   const stageId = text(review.stage_id);
   const step = findConfiguredStepById(config, stageId);
   if (!step) {
+    const gate = presentationAuthorizationGate({
+      bound: bound_presentation,
+      presentation: bound_presentation,
+    });
     return {
       presentation: bound_presentation,
       bound_presentation,
@@ -299,21 +413,33 @@ export const resolveStageReviewPresentationForRead = ({
           : 'Stage id is missing; showing presentation bound at creation.',
         changed_fields: [],
       },
+      presentation_authorizable: gate.authorizable,
+      presentation_authorization_reason: gate.reason,
     };
   }
 
-  const presentation = resolveReviewPresentation({ step, record: source });
+  const live = resolveReviewPresentation({ step, record: source });
+  const presentation = projectBoundPresentationValues({
+    current: live,
+    bound: bound_presentation,
+  });
+  const gate = presentationAuthorizationGate({
+    bound: bound_presentation,
+    presentation,
+  });
   return {
     presentation,
     bound_presentation,
     bound_asset_version,
-    presentation_equivalence: compareReviewPresentations(bound_presentation, presentation),
+    presentation_equivalence: compareReviewPresentations(bound_presentation, live),
+    presentation_authorizable: gate.authorizable,
+    presentation_authorization_reason: gate.reason,
   };
 };
 
 /**
  * Enrich a stored stage-review packet for operator read surfaces.
- * Presentation is current; bound fields preserve creation-time history.
+ * Presentation values prefer the bound snapshot; bound_* fields preserve history.
  */
 export const stageReviewForRead = ({
   review,
@@ -340,5 +466,7 @@ export const stageReviewForRead = ({
     bound_presentation: read.bound_presentation,
     bound_asset_version: read.bound_asset_version || String(review.asset_version || ''),
     presentation_equivalence: read.presentation_equivalence,
+    presentation_authorizable: read.presentation_authorizable,
+    presentation_authorization_reason: read.presentation_authorization_reason,
   };
 };

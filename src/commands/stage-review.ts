@@ -24,6 +24,10 @@ import {
   parseStageReviewJson,
   type StageReviewApplyResult,
 } from '../orchestrator/policy/transition-audit.js';
+import {
+  presentationAuthorizationGate,
+  resolveStageReviewPresentationForRead,
+} from '../orchestrator/policy/review-presentation.js';
 import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
 
 const ALLOWED_DECISIONS = new Set(['authorize', 'reject'] as const);
@@ -168,6 +172,45 @@ export const stageReviewAuthorizeCommand = ({
         message: 'asset_version is required when the pending review has none bound.',
         retryable: false,
       });
+    }
+
+    // Fail closed: never authorize when the values a human would be shown are
+    // not proven identical to the bound presentation snapshot.
+    if (decisionKey === 'authorize') {
+      let projectConfig: unknown = null;
+      try {
+        projectConfig = readConfig(listDir).config;
+      } catch {
+        projectConfig = null;
+      }
+      const read = resolveStageReviewPresentationForRead({
+        review: existing,
+        record,
+        config: projectConfig,
+      });
+      const gate = presentationAuthorizationGate({
+        bound: read.bound_presentation,
+        presentation: read.presentation,
+      });
+      if (!gate.authorizable) {
+        return {
+          ok: false,
+          allowed: false,
+          reason: gate.reason || 'presentation_not_authorizable',
+          decision: decisionKey,
+          record_id: String(record._row_id || rid),
+          stage_id: stage,
+          asset_version: boundAssetVersion,
+          review_id: existing.review_id,
+          authorization: existing,
+          presentation_authorizable: false,
+          presentation_authorization_reason: gate.reason,
+          account_sequence_state: String(record.account_sequence_state || ''),
+          work_state: String(record.work_state || ''),
+          next_action_json: String(record.next_action_json || ''),
+          stage_review_json: String(record.stage_review_json || ''),
+        };
+      }
     }
 
     const accountId = normalize(record._row_id || record.id || existing.account_id || rid);

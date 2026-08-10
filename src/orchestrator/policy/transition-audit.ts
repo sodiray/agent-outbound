@@ -838,6 +838,12 @@ export function invalidateStageReviewIfAssetChanged(input: {
   // Pending/edited with drift: re-bind to current fingerprint. Authorize refuses
   // mismatch and does not rebind — without this, a paused_review record can never
   // refresh itself (outbound gate sits in front of the late invalidation sites).
+  //
+  // Preserve the prior presentation snapshot when rebinding. Replacing it with a
+  // live resolve would show intermediate fields that no longer match a frozen
+  // draft while the new asset_version still fingerprints that draft body.
+  // Callers supply presentation for brand-new pauses; pending rebind keeps the
+  // values the human already had bound to the sendable artifact.
   if (existing.status === 'pending' || existing.status === 'edited') {
     if (input.re_pause === false) {
       return {
@@ -859,7 +865,7 @@ export function invalidateStageReviewIfAssetChanged(input: {
       pending_action: existing.pending_action_snapshot,
       lifecycle_stage: lifecycle,
       reason: notes,
-      presentation: input.presentation ?? null,
+      presentation: existing.presentation ?? input.presentation ?? null,
     });
     return {
       changed: true,
@@ -1097,15 +1103,20 @@ export type PendingStageReviewRow = {
   bound_asset_version?: string;
   /** Whether current presentation matches what was bound at creation. */
   presentation_equivalence?: PresentationEquivalence;
+  /** Fail-closed: every shown value is proven from the bound snapshot. */
+  presentation_authorizable?: boolean;
+  presentation_authorization_reason?: string;
 };
 
 /**
  * Queryable stage-review queue for canary operators.
  * Default: open statuses only (pending / edited). Pass status to filter, or 'all'.
  *
- * When `config` is provided, presentation is re-resolved at read time against
- * current config + current record values (draft content_equivalence spirit).
- * Bound presentation and asset_version remain inspectable; authorization is unchanged.
+ * When `config` is provided, presentation structure is resolved from current
+ * config; field values prefer the bound-at-creation snapshot so the human sees
+ * the content fingerprint-bound with the sendable asset. Live vs bound drift is
+ * reported as presentation_equivalence; presentation_authorizable is the
+ * fail-closed authorize gate.
  */
 export function listPendingStageReviews(input: {
   db: any;
@@ -1182,6 +1193,8 @@ export function listPendingStageReviews(input: {
       bound_presentation: read.bound_presentation,
       bound_asset_version: read.bound_asset_version || review.asset_version,
       presentation_equivalence: read.presentation_equivalence,
+      presentation_authorizable: read.presentation_authorizable,
+      presentation_authorization_reason: read.presentation_authorization_reason,
     });
   }
 

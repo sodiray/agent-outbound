@@ -173,7 +173,7 @@ const seedPendingReview = (db, {
   return paused;
 };
 
-test('stage-review list resolves current presentation when stage config changed since creation', () => {
+test('stage-review list resolves current structure when stage config changed since creation', () => {
   const listDir = createList();
   const db = openListDb({ listDir, readonly: false });
   seedPendingReview(db);
@@ -188,6 +188,7 @@ test('stage-review list resolves current presentation when stage config changed 
 
   const fields = (row.presentation?.present || []).map((entry) => entry.field).sort();
   assert.deepEqual(fields, ['friction_line', 'friction_noun', 'preliminary_snapshot']);
+  // New fields (not in bound snapshot) surface live values, but are not authorizable.
   assert.equal(
     row.presentation.present.find((entry) => entry.field === 'friction_line')?.value,
     "You've implemented online booking and payment, but patients with quick questions before booking have no live chat option.",
@@ -196,6 +197,8 @@ test('stage-review list resolves current presentation when stage config changed 
     !(row.presentation?.present || []).some((entry) => entry.field === 'email_subject'),
     'current presentation must not surface stale email_subject',
   );
+  assert.equal(row.presentation_authorizable, false);
+  assert.match(String(row.presentation_authorization_reason || ''), /unbound/i);
 });
 
 test('stage-review list retains bound presentation and asset_version for history', () => {
@@ -221,29 +224,29 @@ test('stage-review list retains bound presentation and asset_version for history
   db2.close();
 });
 
-test('CONTROL: unchanged config and values report matches and read as before', () => {
-  const matchingPresentation = {
-    purpose: 'Confirm friction and evidence before send.',
-    present: [
-      {
-        field: 'friction_line',
-        label: 'Friction line',
-        value:
-          "You've implemented online booking and payment, but patients with quick questions before booking have no live chat option.",
-      },
-      { field: 'friction_noun', label: 'Friction noun', value: 'live chat' },
-      {
-        field: 'preliminary_snapshot',
-        label: 'Snapshot',
-        value: 'Online booking present; no live chat.',
-      },
-    ],
-    require_non_empty: ['friction_line'],
-  };
+const matchingFrictionPresentation = {
+  purpose: 'Confirm friction and evidence before send.',
+  present: [
+    {
+      field: 'friction_line',
+      label: 'Friction line',
+      value:
+        "You've implemented online booking and payment, but patients with quick questions before booking have no live chat option.",
+    },
+    { field: 'friction_noun', label: 'Friction noun', value: 'live chat' },
+    {
+      field: 'preliminary_snapshot',
+      label: 'Snapshot',
+      value: 'Online booking present; no live chat.',
+    },
+  ],
+  require_non_empty: ['friction_line'],
+};
 
+test('CONTROL: unchanged config and values report matches and read as before', () => {
   const listDir = createList();
   const db = openListDb({ listDir, readonly: false });
-  seedPendingReview(db, { presentation: matchingPresentation });
+  seedPendingReview(db, { presentation: matchingFrictionPresentation });
   db.close();
 
   const listed = stageReviewListCommand({ list: listDir });
@@ -251,8 +254,9 @@ test('CONTROL: unchanged config and values report matches and read as before', (
 
   assert.equal(row.presentation_equivalence.status, 'matches');
   assert.deepEqual(row.presentation_equivalence.changed_fields, []);
-  assert.deepEqual(row.presentation, matchingPresentation);
-  assert.deepEqual(row.bound_presentation, matchingPresentation);
+  assert.deepEqual(row.presentation, matchingFrictionPresentation);
+  assert.deepEqual(row.bound_presentation, matchingFrictionPresentation);
+  assert.equal(row.presentation_authorizable, true);
   assert.equal(row.asset_version, BOUND_ASSET);
   assert.equal(row.bound_asset_version, BOUND_ASSET);
 });
@@ -260,26 +264,27 @@ test('CONTROL: unchanged config and values report matches and read as before', (
 test('CONTROL: authorization still accepts bound version and refuses mismatch', () => {
   const listDir = createList();
   const db = openListDb({ listDir, readonly: false });
-  seedPendingReview(db, { asset_version: BOUND_ASSET });
+  // Structure-migrated bound presentation is not authorizable (live-only fields).
+  seedPendingReview(db, { asset_version: BOUND_ASSET, presentation: stalePresentation });
   db.close();
 
-  // List re-resolves presentation; authorize path must remain version-bound.
   const listed = stageReviewListCommand({ list: listDir });
   assert.equal(listed.reviews[0].presentation_equivalence.status, 'changed');
+  assert.equal(listed.reviews[0].presentation_authorizable, false);
   assert.equal(listed.reviews[0].asset_version, BOUND_ASSET);
 
-  const mismatch = stageReviewAuthorizeCommand({
+  const unbound = stageReviewAuthorizeCommand({
     list: listDir,
     recordId: 'acct_present',
     stage_id: STAGE_ID,
     decision: 'authorize',
-    asset_version: 'wrong_version',
+    asset_version: BOUND_ASSET,
     actor: 'canary',
   });
-  assert.equal(mismatch.allowed, false);
-  assert.equal(mismatch.reason, 'asset_version_mismatch');
+  assert.equal(unbound.allowed, false);
+  assert.match(String(unbound.reason || ''), /unbound|presentation/i);
 
-  // Re-seed pending after invalidation (authorize mismatch invalidates the packet).
+  // Re-seed with a fully bound presentation so the version gate can be tested.
   const db2 = openListDb({ listDir, readonly: false });
   const paused = pauseForStageReview({
     account_id: 'acct_present',
@@ -287,7 +292,7 @@ test('CONTROL: authorization still accepts bound version and refuses mismatch', 
     asset_version: BOUND_ASSET,
     channel: 'email',
     action_type: 'send_email',
-    presentation: stalePresentation,
+    presentation: matchingFrictionPresentation,
   });
   ensureRecordColumns({
     db: db2,
@@ -311,6 +316,49 @@ test('CONTROL: authorization still accepts bound version and refuses mismatch', 
   );
   db2.close();
 
+  const mismatch = stageReviewAuthorizeCommand({
+    list: listDir,
+    recordId: 'acct_present',
+    stage_id: STAGE_ID,
+    decision: 'authorize',
+    asset_version: 'wrong_version',
+    actor: 'canary',
+  });
+  assert.equal(mismatch.allowed, false);
+  assert.equal(mismatch.reason, 'asset_version_mismatch');
+
+  // Re-seed pending after invalidation (authorize mismatch invalidates the packet).
+  const db3 = openListDb({ listDir, readonly: false });
+  const paused2 = pauseForStageReview({
+    account_id: 'acct_present',
+    stage_id: STAGE_ID,
+    asset_version: BOUND_ASSET,
+    channel: 'email',
+    action_type: 'send_email',
+    presentation: matchingFrictionPresentation,
+  });
+  ensureRecordColumns({
+    db: db3,
+    columns: ['stage_review_json', 'account_sequence_state', 'work_state', 'next_action_json', 'related_review_id'],
+  });
+  db3.prepare(`
+    UPDATE records
+    SET stage_review_json = ?,
+        account_sequence_state = ?,
+        work_state = ?,
+        next_action_json = ?,
+        related_review_id = ?
+    WHERE _row_id = ?
+  `).run(
+    paused2.patch.stage_review_json,
+    paused2.patch.account_sequence_state,
+    paused2.patch.work_state,
+    paused2.patch.next_action_json,
+    paused2.patch.related_review_id,
+    'acct_present',
+  );
+  db3.close();
+
   const ok = stageReviewAuthorizeCommand({
     list: listDir,
     recordId: 'acct_present',
@@ -325,7 +373,7 @@ test('CONTROL: authorization still accepts bound version and refuses mismatch', 
   assert.equal(ok.account_sequence_state, 'active');
 });
 
-test('decision and timeline detail surfaces also re-resolve presentation', () => {
+test('decision and timeline detail surfaces also re-resolve presentation structure', () => {
   const listDir = createList();
   const db = openListDb({ listDir, readonly: false });
   seedPendingReview(db);
@@ -340,6 +388,7 @@ test('decision and timeline detail surfaces also re-resolve presentation', () =>
   assert.deepEqual(decision.stage_review.bound_presentation, stalePresentation);
   assert.equal(decision.stage_review.bound_asset_version, BOUND_ASSET);
   assert.equal(decision.stage_review.asset_version, BOUND_ASSET);
+  assert.equal(decision.stage_review.presentation_authorizable, false);
 
   const timeline = timelineCommand({ list: listDir, record: 'acct_present' });
   assert.equal(timeline.current.stage_review.presentation_equivalence.status, 'changed');

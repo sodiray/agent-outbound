@@ -21,7 +21,11 @@ import { readConfig } from '../orchestrator/lib/config.js';
 import { resolveSendMailbox } from '../orchestrator/lib/mailboxes.js';
 import { flattenPipelineSteps } from '../orchestrator/lib/subpipelines.js';
 import type { ResolvedReviewPresentation } from '../orchestrator/policy/review-presentation.js';
-import { resolveReviewPresentation } from '../orchestrator/policy/review-presentation.js';
+import {
+  presentationAuthorizationGate,
+  resolveReviewPresentation,
+  resolveStageReviewPresentationForRead,
+} from '../orchestrator/policy/review-presentation.js';
 import { renderCurrentEmailDraftContent } from '../orchestrator/lib/draft-content.js';
 import { supersedeDraftWithRenderedContent } from '../orchestrator/lib/draft-supersede.js';
 import { assertApprovedOutboundContent } from '../orchestrator/lib/outbound-content.js';
@@ -84,10 +88,13 @@ const planDraftApproval = ({
   record,
   draft,
   reviewPresentation,
+  config = null,
 }: {
   record: Record<string, unknown>;
   draft: Record<string, unknown>;
   reviewPresentation?: ResolvedReviewPresentation | null;
+  /** Current list config — enables fail-closed presentation binding check. */
+  config?: unknown | null;
 }): {
   authorized: boolean;
   reason: string;
@@ -99,11 +106,14 @@ const planDraftApproval = ({
 } => {
   const existing = parseStageReviewJson(record.stage_review_json);
   const stepId = String(draft.step_id || '').trim();
+  // Prefer the bound presentation snapshot for the material fingerprint so
+  // live intermediate fields cannot silently re-key authorization.
+  const materialPresentation = existing?.presentation ?? reviewPresentation ?? null;
   const boundVersion = composeOutboundReviewVersion({
     record,
     draft,
     stageId: stepId || existing?.stage_id,
-    reviewPresentation: reviewPresentation ?? null,
+    reviewPresentation: materialPresentation,
   });
 
   // A review that was REFUSED must not yield a sendable draft. This branch used
@@ -144,6 +154,26 @@ const planDraftApproval = ({
     return {
       authorized: false,
       reason: 'stage_mismatch',
+      asset_version: boundVersion,
+      recordPatch: {},
+      markReady: false,
+    };
+  }
+
+  // Fail closed: presented values must be proven from the bound snapshot.
+  const read = resolveStageReviewPresentationForRead({
+    review: existing,
+    record,
+    config,
+  });
+  const presentationGate = presentationAuthorizationGate({
+    bound: read.bound_presentation,
+    presentation: read.presentation,
+  });
+  if (!presentationGate.authorizable) {
+    return {
+      authorized: false,
+      reason: presentationGate.reason || 'presentation_not_authorizable',
       asset_version: boundVersion,
       recordPatch: {},
       markReady: false,
@@ -513,6 +543,7 @@ export const draftsApproveCommand = ({ list, draftId = '', all = false, where = 
       const plan = planDraftApproval({
         record,
         draft: existing,
+        config: projectConfig,
         reviewPresentation: reviewPresentationForDraft({
           config: projectConfig,
           draft: existing,

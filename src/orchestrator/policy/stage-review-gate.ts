@@ -269,7 +269,14 @@ export function resolveStageAssetVersion(input: {
   bodyText?: string | null;
   subjectText?: string | null;
   templateHash?: string | null;
-  /** Resolved review fields are material so later changes invalidate authorization. */
+  /**
+   * Resolved review fields are material only when exact sendable copy is not
+   * already fingerprinting content. Intermediate present fields (e.g. friction
+   * lines that fed a template) must not re-bind a pending review to live record
+   * values while the draft body stays frozen — that is the authorization-
+   * integrity bug presentation_authorization_gate closes at authorize time.
+   * When body/subject are present they are the sendable artifact.
+   */
   reviewPresentation?: ResolvedReviewPresentation | null;
   stepId?: string | null;
 }): string {
@@ -310,7 +317,9 @@ export function resolveStageAssetVersion(input: {
   if (mailboxId) material.mailbox = mailboxId;
   if (step) material.step = step;
   if (content) material.content = content;
-  if (input.reviewPresentation) {
+  // Include presentation hash only when it is the content standing in for a
+  // body — never alongside exact subject/body (those already bind the send).
+  if (input.reviewPresentation && !bodyHash) {
     material.review_presentation = stableHash(input.reviewPresentation);
   }
 
