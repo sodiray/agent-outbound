@@ -65,6 +65,7 @@ import {
   createTransitionAudit,
   appendTransitionAudit,
   detectCollision,
+  hasOpenStageReview,
   parseStageReviewJson,
 } from './transition-audit.js';
 import {
@@ -887,6 +888,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
    * every send with `non_outbound_action_pending_human_review`.
    */
   const awaitsLiveHumanReview = () => {
+    // Any open review on the multi-review bag keeps pending_human_review live.
+    if (hasOpenStageReview(record.stage_review_json)) return true;
     const status = String(parseStageReviewJson(record.stage_review_json)?.status || '').toLowerCase();
     return status === 'pending' || status === 'edited';
   };

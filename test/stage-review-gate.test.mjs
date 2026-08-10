@@ -27,9 +27,17 @@ import {
   pauseForStageReview,
   authorizeStageReview,
   parseStageReviewJson,
+  parseStageReviewStore,
+  findStageReview,
   invalidateStageReviewIfAssetChanged,
   listPendingStageReviews,
+  STAGE_REVIEWS_STORE_VERSION,
 } from '../dist/orchestrator/policy/transition-audit.js';
+import {
+  stageReviewAuthorizeCommand,
+  stageReviewListCommand,
+} from '../dist/commands/stage-review.js';
+import { presentationAuthorizationGate } from '../dist/orchestrator/policy/review-presentation.js';
 import { openListDb, ensureRecordColumns, insertDraft, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
 import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
@@ -2234,4 +2242,547 @@ test('policy product mismatch: park still opens review when campaign product is 
   assert.equal(review.status, 'pending');
   assert.equal(String(review.stage_id), stepId);
   db.close();
+});
+
+// =============================================================================
+// Multi-review bag: a record may hold one operative review per stage
+// =============================================================================
+
+test('multi-review: terminal for step X then pending for step Y; list returns both', () => {
+  const pausedX = pauseForStageReview({
+    account_id: 'acct_multi_xy',
+    stage_id: 'linkedin_1',
+    asset_version: 'av_li',
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+    reason: 'review linkedin',
+  });
+  assert.equal(pausedX.allowed, true);
+  const authX = authorizeStageReview({
+    review_id: pausedX.authorization.review_id,
+    stage_id: 'linkedin_1',
+    asset_version: 'av_li',
+    expected_asset_version: 'av_li',
+    decision: 'authorize',
+    account_id: 'acct_multi_xy',
+    existing: pausedX.authorization,
+    existing_json: pausedX.patch.stage_review_json,
+    actor: 'op',
+  });
+  assert.equal(authX.allowed, true);
+  assert.equal(authX.authorization.status, 'authorized');
+
+  const pausedY = pauseForStageReview({
+    account_id: 'acct_multi_xy',
+    stage_id: 'mail_postcard',
+    asset_version: 'av_mail',
+    channel: 'mail',
+    action_type: 'standard_postcard',
+    reason: 'review mail after linkedin',
+    existing_json: authX.patch.stage_review_json,
+  });
+  assert.equal(pausedY.allowed, true, pausedY.reason);
+  assert.equal(pausedY.authorization.status, 'pending');
+  assert.equal(pausedY.authorization.stage_id, 'mail_postcard');
+
+  const store = parseStageReviewStore(pausedY.patch.stage_review_json);
+  assert.equal(store.reviews.length, 2, 'both X and Y must be operative');
+  const byStage = Object.fromEntries(store.reviews.map((r) => [r.stage_id, r]));
+  assert.equal(byStage.linkedin_1.status, 'authorized');
+  assert.equal(byStage.mail_postcard.status, 'pending');
+
+  // listPendingStageReviews expands multi-review rows
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-multi-list-'));
+  writeFileSync(join(listDir, 'outbound.yaml'), projectYaml({ reviewRequiredFor: [] }));
+  writeFileSync(join(listDir, 'operator.md'), 'test');
+  writeFileSync(join(listDir, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  ensureRecordColumns({
+    db,
+    columns: ['stage_review_json', 'account_sequence_state', 'work_state', 'business_name'],
+  });
+  db.prepare(`
+    INSERT INTO records (
+      _row_id, business_name, sequence_name, sequence_status, sequence_step,
+      stage_review_json, account_sequence_state, work_state,
+      _created_at, _updated_at, created_at, updated_at
+    ) VALUES (?, 'Multi Co', 'default', 'active', 2, ?, 'paused_review', 'pending_human_review', ?, ?, ?, ?)
+  `).run('acct_multi_xy', pausedY.patch.stage_review_json, now, now, now, now);
+
+  const open = listPendingStageReviews({ db, status: 'open' });
+  const openFor = open.reviews.filter((r) => r.record_id === 'acct_multi_xy');
+  assert.equal(openFor.length, 1);
+  assert.equal(openFor[0].stage_id, 'mail_postcard');
+
+  const all = listPendingStageReviews({ db, status: 'all' });
+  const allFor = all.reviews.filter((r) => r.record_id === 'acct_multi_xy');
+  assert.equal(allFor.length, 2, 'list all must return both reviews distinguishably');
+  const stages = new Set(allFor.map((r) => r.stage_id));
+  assert.ok(stages.has('linkedin_1'));
+  assert.ok(stages.has('mail_postcard'));
+  db.close();
+});
+
+test('multi-review: authorizing Y does not authorize or alter X (and vice versa)', () => {
+  const pX = pauseForStageReview({
+    account_id: 'acct_scope',
+    stage_id: 'step_x',
+    asset_version: 'av_x',
+    action_type: 'linkedin_connect',
+  });
+  const aX = authorizeStageReview({
+    review_id: pX.authorization.review_id,
+    stage_id: 'step_x',
+    asset_version: 'av_x',
+    expected_asset_version: 'av_x',
+    decision: 'authorize',
+    account_id: 'acct_scope',
+    existing: pX.authorization,
+    existing_json: pX.patch.stage_review_json,
+    actor: 'op',
+  });
+  const pY = pauseForStageReview({
+    account_id: 'acct_scope',
+    stage_id: 'step_y',
+    asset_version: 'av_y',
+    action_type: 'manual_task',
+    existing_json: aX.patch.stage_review_json,
+  });
+  assert.equal(pY.allowed, true);
+
+  // Before authorize Y: X authorized, Y pending
+  const recordMid = { stage_review_json: pY.patch.stage_review_json };
+  assert.equal(isAuthorizedForStep(recordMid, 'step_x', 'av_x'), true);
+  assert.equal(isAuthorizedForStep(recordMid, 'step_y', 'av_y'), false);
+
+  const aY = authorizeStageReview({
+    review_id: pY.authorization.review_id,
+    stage_id: 'step_y',
+    asset_version: 'av_y',
+    expected_asset_version: 'av_y',
+    decision: 'authorize',
+    account_id: 'acct_scope',
+    existing: pY.authorization,
+    existing_json: pY.patch.stage_review_json,
+    actor: 'op',
+  });
+  assert.equal(aY.allowed, true);
+
+  const recordAfter = { stage_review_json: aY.patch.stage_review_json };
+  assert.equal(isAuthorizedForStep(recordAfter, 'step_x', 'av_x'), true, 'X still authorized');
+  assert.equal(isAuthorizedForStep(recordAfter, 'step_y', 'av_y'), true, 'Y now authorized');
+  assert.equal(isAuthorizedForStep(recordAfter, 'step_x', 'av_y'), false, 'Y version must not unlock X');
+  assert.equal(isAuthorizedForStep(recordAfter, 'step_y', 'av_x'), false, 'X version must not unlock Y');
+
+  const store = parseStageReviewStore(aY.patch.stage_review_json);
+  const x = store.reviews.find((r) => r.stage_id === 'step_x');
+  const y = store.reviews.find((r) => r.stage_id === 'step_y');
+  assert.equal(x.review_id, pX.authorization.review_id);
+  assert.equal(x.status, 'authorized');
+  assert.equal(x.asset_version, 'av_x');
+  assert.equal(y.status, 'authorized');
+  assert.equal(y.asset_version, 'av_y');
+
+  // Reject X must not touch Y
+  const rejX = authorizeStageReview({
+    review_id: x.review_id,
+    stage_id: 'step_x',
+    asset_version: 'av_x',
+    expected_asset_version: 'av_x',
+    decision: 'reject',
+    account_id: 'acct_scope',
+    existing: x,
+    existing_json: aY.patch.stage_review_json,
+    actor: 'op',
+  });
+  // Already terminal authorize refusal path may keep authorized; reject of terminal
+  // is handled as already terminal for authorize only. Use a fresh pending for reject
+  // path: just assert Y unchanged after any decision on X.
+  const afterRej = parseStageReviewStore(rejX.patch.stage_review_json || aY.patch.stage_review_json);
+  const yAfter = afterRej.reviews.find((r) => r.stage_id === 'step_y');
+  assert.equal(yAfter.status, 'authorized');
+  assert.equal(yAfter.asset_version, 'av_y');
+});
+
+test('multi-review: pending for step X is NOT overwritten when step Y wants one (refuse)', () => {
+  const pX = pauseForStageReview({
+    account_id: 'acct_conflict',
+    stage_id: 'step_x',
+    asset_version: 'av_x',
+    action_type: 'linkedin_connect',
+  });
+  assert.equal(pX.allowed, true);
+  const jsonX = pX.patch.stage_review_json;
+
+  const pY = pauseForStageReview({
+    account_id: 'acct_conflict',
+    stage_id: 'step_y',
+    asset_version: 'av_y',
+    action_type: 'manual_task',
+    existing_json: jsonX,
+  });
+  assert.equal(pY.allowed, false, 'must refuse when another stage is pending');
+  assert.match(String(pY.reason || ''), /pending_review_other_stage/);
+  assert.equal(pY.patch.stage_review_json, undefined, 'must not write a destructive patch');
+
+  // Original pending X intact
+  const still = parseStageReviewJson(jsonX);
+  assert.equal(still.stage_id, 'step_x');
+  assert.equal(still.status, 'pending');
+
+  // Gate also refuses needsPendingReview for Y
+  const decision = evaluateExternalActionAuthorization({
+    config: { policy: { review_required_for: ['manual_task'] } },
+    record: { stage_review_json: jsonX },
+    stepKind: 'manual_task',
+    stageId: 'step_y',
+    channel: 'mail',
+  });
+  assert.equal(decision.allowed, false);
+  assert.equal(decision.needsPendingReview, false);
+  assert.match(String(decision.reason || ''), /pending_other_stage|pending_review_other_stage/);
+});
+
+test('multi-review e2e: park → review → authorize → manual complete after earlier terminal review', async () => {
+  // Seed with terminal linkedin review already on the record (the live failure mode).
+  const liPaused = pauseForStageReview({
+    account_id: 'acct_e2e_multi',
+    stage_id: 'linkedin_1',
+    asset_version: 'av_li_done',
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+  });
+  const liAuth = authorizeStageReview({
+    review_id: liPaused.authorization.review_id,
+    stage_id: 'linkedin_1',
+    asset_version: 'av_li_done',
+    expected_asset_version: 'av_li_done',
+    decision: 'authorize',
+    account_id: 'acct_e2e_multi',
+    existing: liPaused.authorization,
+    existing_json: liPaused.patch.stage_review_json,
+    actor: 'op',
+  });
+  assert.equal(liAuth.allowed, true);
+
+  const { listDir, db, rowId, stepId, step, config } = seedDeclaredManualMail({
+    rowId: 'acct_e2e_multi',
+    stepId: 'mail_postcard',
+    productType: 'golden_ticket',
+    reviewRequiredFor: ['golden_ticket'],
+    stage_review_json: liAuth.patch.stage_review_json,
+  });
+
+  // Park the manual_task — must open a NEW pending mail review alongside terminal LI.
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const park = await executeChannelStep({
+    mcp: null,
+    listDir,
+    listName: 'Multi E2E',
+    toolCatalog: null,
+    db,
+    record,
+    sequenceName: 'default',
+    stepNumber: 2,
+    step,
+    sequence: { steps: [step] },
+    channelHint: 'mail',
+    intent: 'send',
+    dryRun: false,
+  });
+  assert.equal(park.status, 'skipped');
+  assert.equal(park.reason, 'awaiting_manual');
+
+  const afterPark = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const store = parseStageReviewStore(afterPark.stage_review_json);
+  assert.ok(
+    store.reviews.length >= 2,
+    `expected terminal LI + pending mail, got ${store.reviews.length}: ${JSON.stringify(store.reviews.map((r) => ({ s: r.stage_id, st: r.status })))}`,
+  );
+  const li = store.reviews.find((r) => r.stage_id === 'linkedin_1');
+  const mail = store.reviews.find((r) => r.stage_id === stepId);
+  assert.ok(li && li.status === 'authorized', 'linkedin terminal must survive');
+  assert.ok(mail && mail.status === 'pending', 'mail pending must open');
+
+  // Restore outbound sequence so complete reaches the stage-review gate
+  // (not sequence_state_paused_review), matching the declared-review e2e pattern.
+  const outboundNa = JSON.stringify(nextAction(rowId, { action_type: 'manual_task' }));
+  db.prepare(`
+    UPDATE records
+    SET account_sequence_state = 'active',
+        work_state = 'executing_external_action',
+        next_action_json = ?
+    WHERE _row_id = ?
+  `).run(outboundNa, rowId);
+
+  // complete without authorize still refuses
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      config,
+      recordId: rowId,
+      stepId,
+      note: 'too early',
+    }),
+    /Stage review required/,
+  );
+
+  // Authorize mail only (LI sibling preserved via existing_json)
+  const authorized = authorizeStageReview({
+    review_id: mail.review_id,
+    stage_id: stepId,
+    asset_version: mail.asset_version,
+    expected_asset_version: mail.asset_version,
+    decision: 'authorize',
+    account_id: rowId,
+    existing: mail,
+    existing_json: afterPark.stage_review_json,
+    lifecycle_stage: 'contacted',
+    actor: 'operator',
+  });
+  assert.equal(authorized.allowed, true, authorized.reason);
+  db.prepare(`
+    UPDATE records
+    SET stage_review_json = ?,
+        account_sequence_state = 'active',
+        work_state = 'executing_external_action',
+        next_action_json = ?
+    WHERE _row_id = ?
+  `).run(
+    authorized.patch.stage_review_json,
+    authorized.patch.next_action_json || outboundNa,
+    rowId,
+  );
+
+  // LinkedIn still authorized, mail now authorized
+  const afterAuth = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  assert.equal(isAuthorizedForStep(afterAuth, 'linkedin_1'), true);
+  assert.equal(isAuthorizedForStep(afterAuth, stepId, mail.asset_version), true);
+
+  const result = await completeManualTask({
+    db,
+    config,
+    recordId: rowId,
+    stepId,
+    note: 'mailed after multi-review authorize',
+  });
+  assert.equal(result.status, 'manual_completed');
+  db.close();
+});
+
+test('multi-review: legacy single-object stage_review_json still lists, authorizes, rejects', () => {
+  // Write legacy single-object shape directly (no v2 bag).
+  const legacy = {
+    review_id: 'rev_legacy_1',
+    stage_id: 'email_1',
+    asset_version: 'av_legacy',
+    status: 'pending',
+    account_id: 'acct_legacy',
+    channel: 'email',
+    action_type: 'send_email',
+    policy_version: 'stage-review-v1',
+    presentation: {
+      purpose: 'legacy',
+      present: [{ field: 'business_name', label: 'Business', value: 'Legacy Co' }],
+      require_non_empty: ['business_name'],
+    },
+    pending_action_snapshot: {
+      action_type: 'send_email',
+      account_id: 'acct_legacy',
+    },
+  };
+  const legacyJson = JSON.stringify(legacy);
+  // parse understands legacy
+  assert.equal(parseStageReviewJson(legacyJson)?.review_id, 'rev_legacy_1');
+  assert.equal(parseStageReviewStore(legacyJson).reviews.length, 1);
+  assert.equal(parseStageReviewStore(legacyJson).version, STAGE_REVIEWS_STORE_VERSION);
+
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-legacy-review-'));
+  // Minimal config so presentation resolves
+  writeFileSync(join(listDir, 'outbound.yaml'), `
+project:
+  name: Legacy
+  vertical: test
+policy:
+  review_required_for: []
+pipeline:
+  - kind: pipeline
+    id: main
+    steps:
+      - kind: send_email
+        id: email_1
+        review:
+          purpose: legacy
+          present:
+            - field: business_name
+              label: Business
+          require_non_empty:
+            - business_name
+`);
+  writeFileSync(join(listDir, 'operator.md'), 'test');
+  writeFileSync(join(listDir, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  ensureRecordColumns({
+    db,
+    columns: [
+      'stage_review_json', 'account_sequence_state', 'work_state',
+      'business_name', 'lifecycle_stage', 'next_action_json', 'transition_audit_json',
+    ],
+  });
+  db.prepare(`
+    INSERT INTO records (
+      _row_id, business_name, sequence_name, sequence_status, sequence_step,
+      lifecycle_stage, account_sequence_state, work_state, stage_review_json,
+      next_action_json, _created_at, _updated_at, created_at, updated_at
+    ) VALUES (
+      'acct_legacy', 'Legacy Co', 'default', 'active', 0,
+      'contacted', 'paused_review', 'pending_human_review', ?,
+      ?, ?, ?, ?, ?
+    )
+  `).run(
+    legacyJson,
+    JSON.stringify({
+      action_id: 'na1',
+      action_type: 'pending_human_review',
+      account_id: 'acct_legacy',
+      lifecycle_stage: 'contacted',
+      sequence_state: 'paused_review',
+      work_state: 'pending_human_review',
+      reason: 'legacy',
+      on_success: 'resume',
+      policy_version: NEXT_ACTION_POLICY_VERSION,
+    }),
+    now, now, now, now,
+  );
+  db.close();
+
+  const listed = stageReviewListCommand({ list: listDir, status: 'open' });
+  const rows = listed.reviews.filter((r) => r.record_id === 'acct_legacy');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].stage_id, 'email_1');
+  assert.equal(rows[0].status, 'pending');
+
+  const auth = stageReviewAuthorizeCommand({
+    list: listDir,
+    recordId: 'acct_legacy',
+    stage_id: 'email_1',
+    decision: 'authorize',
+    asset_version: 'av_legacy',
+    actor: 'op',
+  });
+  assert.equal(auth.allowed, true, JSON.stringify(auth));
+  assert.equal(auth.authorization.status, 'authorized');
+
+  // Re-seed reject path with a fresh legacy pending
+  const db2 = openListDb({ listDir, readonly: false });
+  const legacy2 = { ...legacy, review_id: 'rev_legacy_2', status: 'pending' };
+  db2.prepare(`
+    UPDATE records SET stage_review_json = ?, account_sequence_state = 'paused_review',
+      work_state = 'pending_human_review' WHERE _row_id = 'acct_legacy'
+  `).run(JSON.stringify(legacy2));
+  db2.close();
+
+  const rej = stageReviewAuthorizeCommand({
+    list: listDir,
+    recordId: 'acct_legacy',
+    stage_id: 'email_1',
+    decision: 'reject',
+    asset_version: 'av_legacy',
+    actor: 'op',
+  });
+  assert.equal(rej.authorization.status, 'rejected');
+  // Still parseable as single or bag
+  assert.ok(parseStageReviewJson(rej.stage_review_json) || findStageReview(rej.stage_review_json, ['email_1']));
+});
+
+test('multi-review: presentation-integrity gate still refuses a diverged review per step', () => {
+  // Step X authorized with bound presentation; step Y pending with its own bound presentation.
+  // Diverged live values must not authorize Y; X remains authorized independently.
+  const boundY = {
+    purpose: 'Mail review',
+    present: [
+      { field: 'business_name', label: 'Business', value: 'Bound Name' },
+      { field: 'address', label: 'Address', value: '1 Bound St' },
+    ],
+    require_non_empty: ['business_name', 'address'],
+  };
+  const pX = pauseForStageReview({
+    account_id: 'acct_pres_multi',
+    stage_id: 'linkedin_1',
+    asset_version: 'av_x',
+    action_type: 'linkedin_connect',
+    presentation: {
+      purpose: 'LI',
+      present: [{ field: 'invite_message', label: 'Invite', value: 'hello' }],
+      require_non_empty: ['invite_message'],
+    },
+  });
+  const aX = authorizeStageReview({
+    review_id: pX.authorization.review_id,
+    stage_id: 'linkedin_1',
+    asset_version: 'av_x',
+    expected_asset_version: 'av_x',
+    decision: 'authorize',
+    account_id: 'acct_pres_multi',
+    existing: pX.authorization,
+    existing_json: pX.patch.stage_review_json,
+    actor: 'op',
+  });
+  const pY = pauseForStageReview({
+    account_id: 'acct_pres_multi',
+    stage_id: 'mail_1',
+    asset_version: 'av_y',
+    action_type: 'manual_task',
+    presentation: boundY,
+    existing_json: aX.patch.stage_review_json,
+  });
+  assert.equal(pY.allowed, true);
+
+  // Presentation gate (de30ee3 property): diverged shown values refuse authorize.
+  const diverged = presentationAuthorizationGate({
+    bound: boundY,
+    presentation: {
+      purpose: boundY.purpose,
+      present: [
+        { field: 'business_name', label: 'Business', value: 'LIVE DRIFT NAME' },
+        { field: 'address', label: 'Address', value: '1 Bound St' },
+      ],
+      require_non_empty: boundY.require_non_empty,
+    },
+  });
+  assert.equal(diverged.authorizable, false);
+
+  // Matching bound values still authorizable for Y; X unaffected
+  const ok = presentationAuthorizationGate({
+    bound: boundY,
+    presentation: boundY,
+  });
+  assert.equal(ok.authorizable, true);
+  assert.equal(
+    isAuthorizedForStep({ stage_review_json: pY.patch.stage_review_json }, 'linkedin_1', 'av_x'),
+    true,
+  );
+  assert.equal(
+    isAuthorizedForStep({ stage_review_json: pY.patch.stage_review_json }, 'mail_1', 'av_y'),
+    false,
+  );
+
+  const aY = authorizeStageReview({
+    review_id: pY.authorization.review_id,
+    stage_id: 'mail_1',
+    asset_version: 'av_y',
+    expected_asset_version: 'av_y',
+    decision: 'authorize',
+    account_id: 'acct_pres_multi',
+    existing: pY.authorization,
+    existing_json: pY.patch.stage_review_json,
+    actor: 'op',
+  });
+  assert.equal(aY.allowed, true);
+  // X still intact after Y authorize
+  const store = parseStageReviewStore(aY.patch.stage_review_json);
+  assert.equal(store.reviews.find((r) => r.stage_id === 'linkedin_1')?.status, 'authorized');
+  assert.equal(store.reviews.find((r) => r.stage_id === 'mail_1')?.status, 'authorized');
 });

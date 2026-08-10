@@ -58,7 +58,11 @@ import {
   reviewRequiredTokens,
   pauseForStageReview,
   invalidateStageReviewIfAssetChanged,
+  findStageReview,
+  hasOpenStageReview,
+  listStageReviews,
   parseStageReviewJson,
+  parseStageReviewStore,
   appendTransitionAudit,
   readinessChannelPermission,
   evaluateTransmitterSuppression,
@@ -200,7 +204,19 @@ const applyStageReviewPause = ({
     lifecycle_stage: lifecycle,
     reason,
     presentation: presentation ?? null,
+    // Multi-review: keep terminal siblings; refuse when another stage is open.
+    existing_json: record.stage_review_json,
   });
+  if (!paused.allowed) {
+    // Fail closed: never overwrite a pending review for a different step.
+    const next: Record<string, unknown> = {
+      ...record,
+      transition_audit_json: appendTransitionAudit(record.transition_audit_json, paused.audit),
+    };
+    ensureRecordColumns({ db, columns: ['transition_audit_json'] });
+    upsertRecord({ db, row: next });
+    return next;
+  }
   const next: Record<string, unknown> = {
     ...record,
     ...paused.patch,
@@ -315,16 +331,22 @@ const evaluateEarlyStageReviewMaterialInvalidation = async ({
   stepNumber: number;
   activeContactId: string | null;
 }): Promise<{ record: Record<string, unknown>; blocked: boolean; reason?: string } | null> => {
-  const existing = parseStageReviewJson(record.stage_review_json);
+  const store = parseStageReviewStore(record.stage_review_json);
+  if (store.reviews.length === 0) return null;
+  const stepKind = String(step?.kind || '').trim().toLowerCase();
+  const taskType = String(step?.config?.task_type || step?.config?.taskType || '').trim();
+  const channel = String(channelHint || step?.config?.channel || '').trim().toLowerCase();
+  // Prefer the review for this step when multi-review; fall back only if sole.
+  const stageKeys = [sequenceStepId, stepKind, taskType || null];
+  const existing =
+    findStageReview(record.stage_review_json, stageKeys)
+    || (store.reviews.length === 1 ? store.reviews[0] : null);
   if (!existing) return null;
   const status = String(existing.status || '').trim().toLowerCase();
   if (status !== 'pending' && status !== 'edited' && status !== 'authorized') {
     return null;
   }
 
-  const stepKind = String(step?.kind || '').trim().toLowerCase();
-  const taskType = String(step?.config?.task_type || step?.config?.taskType || '').trim();
-  const channel = String(channelHint || step?.config?.channel || '').trim().toLowerCase();
   const named = namedAssertChannel({
     channelHint,
     stepKind,
@@ -798,7 +820,8 @@ export const executeChannelStep = async ({
       timeZone: sequence?.timezone,
     });
     if (!preReachabilityGate.execute) {
-      const hasStageReview = Boolean(parseStageReviewJson(reachableRecord.stage_review_json));
+      const hasStageReview = listStageReviews(reachableRecord.stage_review_json).length > 0
+        || hasOpenStageReview(reachableRecord.stage_review_json);
       if (!hasStageReview) {
         return {
           status: 'skipped',
@@ -1543,19 +1566,19 @@ export const executeChannelStep = async ({
                 channelKey || null,
                 mailTreatment && mailTreatment !== 'none' ? mailTreatment : null,
               ];
-              const existingReview = parseStageReviewJson(reviewRecord.stage_review_json);
-              const pendingForStage = Boolean(
-                existingReview
-                && (existingReview.status === 'pending' || existingReview.status === 'edited')
-                && stageKeys.some((key) => {
+              const stageStore = parseStageReviewStore(reviewRecord.stage_review_json);
+              const pendingForStage = stageStore.reviews.some((r) => {
+                const st = String(r.status || '').trim().toLowerCase();
+                if (st !== 'pending' && st !== 'edited') return false;
+                return stageKeys.some((key) => {
                   const k = String(key || '').trim().toLowerCase();
                   if (!k) return false;
                   return (
-                    String(existingReview.stage_id || '').trim().toLowerCase() === k
-                    || String(existingReview.action_type || '').trim().toLowerCase() === k
+                    String(r.stage_id || '').trim().toLowerCase() === k
+                    || String(r.action_type || '').trim().toLowerCase() === k
                   );
-                }),
-              );
+                });
+              });
               const alreadyAuthorized = isAuthorizedForAnyOf(
                 reviewRecord,
                 stageKeys,
@@ -1563,6 +1586,7 @@ export const executeChannelStep = async ({
               );
               // Open only when missing a usable review for this stage. Never
               // invent an authorization — park stays awaiting_manual either way.
+              // applyStageReviewPause refuses if another stage is genuinely pending.
               if (!pendingForStage && !alreadyAuthorized) {
                 applyStageReviewPause({
                   db,
@@ -2999,14 +3023,25 @@ export const executeChannelStep = async ({
               lifecycle_stage: lifecycle,
               reason: `Draft pending approval + stage review for ${sequenceStepId}`,
               presentation: draftReviewPresentation,
+              existing_json: sendRecord.stage_review_json,
             });
-            stageReviewPausePatch = {
-              ...paused.patch,
-              transition_audit_json: appendTransitionAudit(
-                sendRecord.transition_audit_json,
-                paused.audit,
-              ),
-            };
+            if (paused.allowed) {
+              stageReviewPausePatch = {
+                ...paused.patch,
+                transition_audit_json: appendTransitionAudit(
+                  sendRecord.transition_audit_json,
+                  paused.audit,
+                ),
+              };
+            } else {
+              // Refuse overwrite of a pending review for another step; audit only.
+              stageReviewPausePatch = {
+                transition_audit_json: appendTransitionAudit(
+                  sendRecord.transition_audit_json,
+                  paused.audit,
+                ),
+              };
+            }
           }
         }
       }

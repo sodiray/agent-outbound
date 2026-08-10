@@ -78,7 +78,10 @@ export type StageReviewDecision =
   | 'hold'
   | 'skip';
 
-/** Version-bound review packet: exactly one stage result awaiting human decision. */
+/**
+ * Version-bound review packet for one stage/step.
+ * A record may hold multiple of these (one operative review per stage_id).
+ */
 export type StageReviewAuthorization = {
   review_id: string;
   stage_id: string;
@@ -95,6 +98,23 @@ export type StageReviewAuthorization = {
   /** Immutable, resolved fields the reviewer was asked to judge. */
   presentation?: ResolvedReviewPresentation | null;
   pending_action_snapshot?: Record<string, unknown> | null;
+};
+
+/**
+ * Multi-review store for `records.stage_review_json`.
+ *
+ * Legacy rows hold a single StageReviewAuthorization object. On write we migrate
+ * lazily to this bag so a record can carry one operative review per stage while
+ * retaining prior decisions in `history` (never silently discarded).
+ */
+export const STAGE_REVIEWS_STORE_VERSION = 'stage-reviews-v2';
+
+export type StageReviewStore = {
+  version: typeof STAGE_REVIEWS_STORE_VERSION;
+  /** Operative reviews — at most one entry per stage_id. */
+  reviews: StageReviewAuthorization[];
+  /** Prior decisions for a stage superseded by a newer review for that stage. */
+  history: StageReviewAuthorization[];
 };
 
 export type StageReviewApplyResult = {
@@ -166,22 +186,282 @@ export function appendTransitionAudit(
   return JSON.stringify(list);
 }
 
-export function parseStageReviewJson(raw: unknown): StageReviewAuthorization | null {
-  if (raw == null || raw === '') return null;
+const OPEN_REVIEW_STATUSES = new Set<string>(['pending', 'edited']);
+const TERMINAL_REVIEW_STATUSES = new Set<string>(['authorized', 'rejected', 'invalidated']);
+
+const emptyStageReviewStore = (): StageReviewStore => ({
+  version: STAGE_REVIEWS_STORE_VERSION,
+  reviews: [],
+  history: [],
+});
+
+const isReviewObject = (value: unknown): value is StageReviewAuthorization => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const obj = value as StageReviewAuthorization;
+  return Boolean(obj.review_id && obj.stage_id && obj.asset_version);
+};
+
+const normalizeStageKey = (value: unknown): string =>
+  String(value || '').trim().toLowerCase();
+
+/** True when review.stage_id or review.action_type matches any non-empty key. */
+export function stageReviewMatchesKeys(
+  review: { stage_id?: string | null; action_type?: string | null },
+  stageKeys: Array<string | null | undefined>,
+): boolean {
+  const keys = stageKeys
+    .map((k) => normalizeStageKey(k))
+    .filter(Boolean);
+  if (keys.length === 0) return true;
+  const stage = normalizeStageKey(review.stage_id);
+  const action = normalizeStageKey(review.action_type);
+  return keys.some((k) => k === stage || k === action);
+}
+
+export function isOpenStageReviewStatus(status: unknown): boolean {
+  return OPEN_REVIEW_STATUSES.has(String(status || '').trim().toLowerCase());
+}
+
+export function isTerminalStageReviewStatus(status: unknown): boolean {
+  return TERMINAL_REVIEW_STATUSES.has(String(status || '').trim().toLowerCase());
+}
+
+/**
+ * Parse stage_review_json into a multi-review store.
+ * Accepts legacy single-object rows and v2 bags; never requires a migration step.
+ */
+export function parseStageReviewStore(raw: unknown): StageReviewStore {
+  if (raw == null || raw === '') return emptyStageReviewStore();
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (!parsed || typeof parsed !== 'object') return null;
-    const obj = parsed as StageReviewAuthorization;
-    if (!obj.review_id || !obj.stage_id || !obj.asset_version) return null;
-    return obj;
+    if (!parsed || typeof parsed !== 'object') return emptyStageReviewStore();
+
+    // v2 bag
+    if (
+      String((parsed as StageReviewStore).version || '') === STAGE_REVIEWS_STORE_VERSION
+      || Array.isArray((parsed as StageReviewStore).reviews)
+    ) {
+      const bag = parsed as StageReviewStore;
+      const reviews = Array.isArray(bag.reviews)
+        ? bag.reviews.filter(isReviewObject)
+        : [];
+      const history = Array.isArray(bag.history)
+        ? bag.history.filter(isReviewObject)
+        : [];
+      return {
+        version: STAGE_REVIEWS_STORE_VERSION,
+        reviews,
+        history,
+      };
+    }
+
+    // Legacy single StageReviewAuthorization object
+    if (isReviewObject(parsed)) {
+      return {
+        version: STAGE_REVIEWS_STORE_VERSION,
+        reviews: [parsed],
+        history: [],
+      };
+    }
+    return emptyStageReviewStore();
   } catch {
-    return null;
+    return emptyStageReviewStore();
   }
+}
+
+/**
+ * Serialize a store for records.stage_review_json.
+ * Single operative review + empty history stays legacy-shaped for back-compat
+ * with older readers; multi-review or history uses the v2 bag.
+ */
+export function serializeStageReviewStore(store: StageReviewStore): string {
+  const reviews = Array.isArray(store?.reviews)
+    ? store.reviews.filter(isReviewObject)
+    : [];
+  const history = Array.isArray(store?.history)
+    ? store.history.filter(isReviewObject)
+    : [];
+  if (reviews.length === 1 && history.length === 0) {
+    return JSON.stringify(reviews[0]);
+  }
+  if (reviews.length === 0 && history.length === 0) {
+    return '';
+  }
+  return JSON.stringify({
+    version: STAGE_REVIEWS_STORE_VERSION,
+    reviews,
+    history,
+  } satisfies StageReviewStore);
+}
+
+/** Find an operative review matching any of the stage identity keys. */
+export function findStageReviewInStore(
+  store: StageReviewStore,
+  stageKeys: Array<string | null | undefined>,
+): StageReviewAuthorization | null {
+  const keys = stageKeys.map((k) => normalizeStageKey(k)).filter(Boolean);
+  if (keys.length === 0) {
+    return store.reviews[0] ?? null;
+  }
+  for (const review of store.reviews) {
+    if (stageReviewMatchesKeys(review, keys)) return review;
+  }
+  return null;
+}
+
+export function findStageReview(
+  raw: unknown,
+  stageKeys: Array<string | null | undefined>,
+): StageReviewAuthorization | null {
+  return findStageReviewInStore(parseStageReviewStore(raw), stageKeys);
+}
+
+/** True when any operative review is pending/edited. */
+export function hasOpenStageReview(raw: unknown): boolean {
+  return parseStageReviewStore(raw).reviews.some((r) => isOpenStageReviewStatus(r.status));
+}
+
+/** All operative reviews (not history). */
+export function listStageReviews(raw: unknown): StageReviewAuthorization[] {
+  return [...parseStageReviewStore(raw).reviews];
+}
+
+/**
+ * Upsert an operative review into the store.
+ *
+ * - Same stage terminal → prior moves to history, new review becomes operative.
+ * - Same stage open → replace in place (rebind / decision update).
+ * - Different stage open (pending/edited) → refuse (fail closed; never disturb).
+ * - Different stage terminal → keep both.
+ */
+export function upsertStageReviewInStore(
+  store: StageReviewStore,
+  review: StageReviewAuthorization,
+): {
+  store: StageReviewStore;
+  allowed: boolean;
+  reason: string;
+  replaced: StageReviewAuthorization | null;
+} {
+  if (!isReviewObject(review)) {
+    return {
+      store,
+      allowed: false,
+      reason: 'invalid_review',
+      replaced: null,
+    };
+  }
+  const stageKey = normalizeStageKey(review.stage_id);
+  const openOther = store.reviews.find(
+    (r) =>
+      isOpenStageReviewStatus(r.status)
+      && normalizeStageKey(r.stage_id) !== stageKey
+      && normalizeStageKey(r.review_id) !== normalizeStageKey(review.review_id),
+  );
+  if (openOther) {
+    return {
+      store,
+      allowed: false,
+      reason: `pending_review_other_stage:${openOther.stage_id}`,
+      replaced: null,
+    };
+  }
+
+  const sameIdx = store.reviews.findIndex(
+    (r) =>
+      normalizeStageKey(r.stage_id) === stageKey
+      || normalizeStageKey(r.review_id) === normalizeStageKey(review.review_id),
+  );
+  if (sameIdx < 0) {
+    return {
+      store: {
+        version: STAGE_REVIEWS_STORE_VERSION,
+        reviews: [...store.reviews, review],
+        history: [...store.history],
+      },
+      allowed: true,
+      reason: 'inserted',
+      replaced: null,
+    };
+  }
+
+  const prior = store.reviews[sameIdx];
+  const history = [...store.history];
+  // Preserve audit trail when a terminal (or distinct) prior is superseded.
+  if (
+    prior
+    && prior.review_id !== review.review_id
+    && (isTerminalStageReviewStatus(prior.status) || prior.asset_version !== review.asset_version)
+  ) {
+    history.push(prior);
+  }
+  const reviews = [...store.reviews];
+  reviews[sameIdx] = review;
+  return {
+    store: {
+      version: STAGE_REVIEWS_STORE_VERSION,
+      reviews,
+      history,
+    },
+    allowed: true,
+    reason: prior ? 'replaced' : 'inserted',
+    replaced: prior ?? null,
+  };
+}
+
+/** Replace an existing review by review_id (or stage_id fallback); no conflict checks. */
+export function replaceStageReviewInStore(
+  store: StageReviewStore,
+  review: StageReviewAuthorization,
+): StageReviewStore {
+  if (!isReviewObject(review)) return store;
+  const idx = store.reviews.findIndex(
+    (r) =>
+      normalizeStageKey(r.review_id) === normalizeStageKey(review.review_id)
+      || normalizeStageKey(r.stage_id) === normalizeStageKey(review.stage_id),
+  );
+  if (idx < 0) {
+    return {
+      version: STAGE_REVIEWS_STORE_VERSION,
+      reviews: [...store.reviews, review],
+      history: [...store.history],
+    };
+  }
+  const reviews = [...store.reviews];
+  reviews[idx] = review;
+  return {
+    version: STAGE_REVIEWS_STORE_VERSION,
+    reviews,
+    history: [...store.history],
+  };
+}
+
+/**
+ * Parse a single operative review for backward-compatible call sites.
+ *
+ * Preference: unique open review → sole operative review → first open → first
+ * authorized → first review. Multi-review stage-scoped work should use
+ * findStageReview / listStageReviews instead.
+ */
+export function parseStageReviewJson(raw: unknown): StageReviewAuthorization | null {
+  const store = parseStageReviewStore(raw);
+  if (store.reviews.length === 0) return null;
+  if (store.reviews.length === 1) return store.reviews[0];
+  const open = store.reviews.filter((r) => isOpenStageReviewStatus(r.status));
+  if (open.length === 1) return open[0];
+  if (open.length > 1) return open[0];
+  const authorized = store.reviews.find((r) => String(r.status).toLowerCase() === 'authorized');
+  if (authorized) return authorized;
+  return store.reviews[0] ?? null;
 }
 
 /**
  * Create a version-bound pending review and pause the account sequence.
  * Does not invent commercial lifecycle transitions.
+ *
+ * When `existing_json` holds a terminal review for a *different* stage, that
+ * review is retained and the new pending review is added. A genuine open
+ * (pending/edited) review for another stage is never overwritten — fail closed.
  */
 export function pauseForStageReview(input: {
   account_id: string;
@@ -196,14 +476,22 @@ export function pauseForStageReview(input: {
   reason?: string;
   review_id?: string;
   presentation?: ResolvedReviewPresentation | null;
+  /**
+   * Current records.stage_review_json — enables multi-review upsert and
+   * refuse-on-pending-other-stage. Omitted = empty store (first review).
+   */
+  existing_json?: unknown;
 }): {
   authorization: StageReviewAuthorization;
+  /** False when a pending review for another stage blocks the open. */
+  allowed: boolean;
+  reason: string;
   patch: {
-    account_sequence_state: SequenceState;
-    work_state: WorkState;
-    next_action_json: string;
-    stage_review_json: string;
-    related_review_id: string;
+    account_sequence_state?: SequenceState;
+    work_state?: WorkState;
+    next_action_json?: string;
+    stage_review_json?: string;
+    related_review_id?: string;
   };
   audit: TransitionAuditRecord;
 } {
@@ -227,6 +515,29 @@ export function pauseForStageReview(input: {
       ? (input.pending_action as Record<string, unknown>)
       : null,
   };
+
+  const priorStore = parseStageReviewStore(input.existing_json);
+  const upserted = upsertStageReviewInStore(priorStore, authorization);
+  if (!upserted.allowed) {
+    const audit = createTransitionAudit({
+      account_id: input.account_id,
+      kind: 'human_decision',
+      from_state: 'active',
+      to_state: 'active',
+      reason:
+        `pause_for_review refused: ${upserted.reason} `
+        + `wanted_stage=${input.stage_id}`,
+      evidence_ids: [input.stage_id, input.asset_version],
+      actor: 'system',
+    });
+    return {
+      authorization: findStageReviewInStore(priorStore, [input.stage_id]) || authorization,
+      allowed: false,
+      reason: upserted.reason,
+      patch: {},
+      audit,
+    };
+  }
 
   const next_action: NextAction = {
     action_id: newId('na_review'),
@@ -255,11 +566,13 @@ export function pauseForStageReview(input: {
 
   return {
     authorization,
+    allowed: true,
+    reason: upserted.reason,
     patch: {
       account_sequence_state: 'paused_review',
       work_state: 'pending_human_review',
       next_action_json: JSON.stringify(next_action),
-      stage_review_json: JSON.stringify(authorization),
+      stage_review_json: serializeStageReviewStore(upserted.store),
       related_review_id: review_id,
     },
     audit,
@@ -292,6 +605,11 @@ export function authorizeStageReview(input: {
   expected_asset_version?: string | null;
   /** Existing pending review (from stage_review_json). */
   existing?: StageReviewAuthorization | null;
+  /**
+   * Full records.stage_review_json so multi-review siblings are preserved on write.
+   * When omitted, the store is reconstructed from `existing` alone (legacy callers).
+   */
+  existing_json?: unknown;
   /** Lifecycle stage preserved across the decision (never invents won/lost). */
   lifecycle_stage?: LifecycleStage | string;
   /**
@@ -311,6 +629,22 @@ export function authorizeStageReview(input: {
     hold: 'rejected',
     skip: 'rejected',
   };
+
+  const resolveStore = (): StageReviewStore => {
+    if (input.existing_json != null && input.existing_json !== '') {
+      return parseStageReviewStore(input.existing_json);
+    }
+    if (input.existing && isReviewObject(input.existing)) {
+      return {
+        version: STAGE_REVIEWS_STORE_VERSION,
+        reviews: [input.existing],
+        history: [],
+      };
+    }
+    return emptyStageReviewStore();
+  };
+  const writeReviewJson = (authorization: StageReviewAuthorization): string =>
+    serializeStageReviewStore(replaceStageReviewInStore(resolveStore(), authorization));
 
   const account_id = input.account_id || input.existing?.account_id || 'unknown';
   const lifecycle = (input.lifecycle_stage
@@ -360,7 +694,7 @@ export function authorizeStageReview(input: {
       allowed: false,
       reason: `review_already_${prior}`,
       patch: {
-        stage_review_json: JSON.stringify(authorization),
+        stage_review_json: writeReviewJson(authorization),
         related_review_id: input.review_id,
       },
       audit,
@@ -414,7 +748,7 @@ export function authorizeStageReview(input: {
         account_sequence_state: 'paused_review',
         work_state: 'pending_human_review',
         next_action_json: JSON.stringify(next_action),
-        stage_review_json: JSON.stringify(authorization),
+        stage_review_json: writeReviewJson(authorization),
         related_review_id: input.review_id,
       },
       audit,
@@ -465,7 +799,7 @@ export function authorizeStageReview(input: {
       allowed: false,
       reason: `required review field "${field}" is empty`,
       patch: {
-        stage_review_json: JSON.stringify(authorization),
+        stage_review_json: writeReviewJson(authorization),
         related_review_id: input.review_id,
       },
       audit,
@@ -498,7 +832,7 @@ export function authorizeStageReview(input: {
   }
 
   const patch: StageReviewApplyResult['patch'] = {
-    stage_review_json: JSON.stringify(authorization),
+    stage_review_json: writeReviewJson(authorization),
     related_review_id: input.review_id,
   };
 
@@ -556,7 +890,7 @@ export function authorizeStageReview(input: {
   } else if (input.decision === 'edit') {
     // Edited content needs a new asset version on the next authorize; stay pending.
     authorization.status = 'edited';
-    patch.stage_review_json = JSON.stringify(authorization);
+    patch.stage_review_json = writeReviewJson(authorization);
     patch.account_sequence_state = 'paused_review';
     patch.work_state = 'pending_human_review';
     const next_action: NextAction = {
@@ -771,9 +1105,12 @@ export function invalidateStageReviewIfAssetChanged(input: {
   authorization: StageReviewAuthorization | null;
   reason: string;
 } {
-  const existing = parseStageReviewJson(input.record?.stage_review_json);
+  const store = parseStageReviewStore(input.record?.stage_review_json);
   const current = String(input.current_asset_version || '').trim();
   const stage = String(input.stage_id || '').trim();
+  // Stage-scoped: never invalidate/rebind a sibling step's review.
+  const existing = findStageReviewInStore(store, stage ? [stage] : [])
+    || (store.reviews.length === 1 ? store.reviews[0] : null);
 
   if (!existing || !current) {
     return {
@@ -855,6 +1192,7 @@ export function invalidateStageReviewIfAssetChanged(input: {
         reason: 'version_drift_pending_no_repause',
       };
     }
+    const existingJson = input.record?.stage_review_json;
     const paused = pauseForStageReview({
       account_id,
       stage_id: stage || existing.stage_id,
@@ -866,7 +1204,18 @@ export function invalidateStageReviewIfAssetChanged(input: {
       lifecycle_stage: lifecycle,
       reason: notes,
       presentation: existing.presentation ?? input.presentation ?? null,
+      existing_json: existingJson,
     });
+    if (!paused.allowed) {
+      return {
+        changed: true,
+        invalidated: false,
+        patch: null,
+        audits: [paused.audit],
+        authorization: existing,
+        reason: paused.reason,
+      };
+    }
     return {
       changed: true,
       invalidated: true,
@@ -889,6 +1238,7 @@ export function invalidateStageReviewIfAssetChanged(input: {
     };
   }
 
+  const existingJson = input.record?.stage_review_json;
   const inv = authorizeStageReview({
     review_id: existing.review_id,
     stage_id: existing.stage_id || stage,
@@ -898,6 +1248,7 @@ export function invalidateStageReviewIfAssetChanged(input: {
     account_id,
     contact_id,
     existing,
+    existing_json: existingJson,
     lifecycle_stage: lifecycle,
     notes,
     actor: 'system',
@@ -920,14 +1271,20 @@ export function invalidateStageReviewIfAssetChanged(input: {
       lifecycle_stage: lifecycle,
       reason: notes,
       presentation: input.presentation ?? null,
+      // After invalidate, store already has this stage as invalidated — rebind replaces it.
+      existing_json: inv.patch.stage_review_json ?? existingJson,
     });
-    patch = {
-      ...patch,
-      ...paused.patch,
-    };
-    authorization = paused.authorization;
-    audits.push(paused.audit);
-    reason = 'invalidated_and_repaused_asset_version_changed';
+    if (paused.allowed) {
+      patch = {
+        ...patch,
+        ...paused.patch,
+      };
+      authorization = paused.authorization;
+      audits.push(paused.audit);
+      reason = 'invalidated_and_repaused_asset_version_changed';
+    } else {
+      audits.push(paused.audit);
+    }
   }
 
   return {
@@ -1159,43 +1516,45 @@ export function listPendingStageReviews(input: {
 
   const reviews: PendingStageReviewRow[] = [];
   for (const row of rows) {
-    const review = parseStageReviewJson(row.stage_review_json);
-    if (!review) continue;
-    const status = String(review.status || 'pending').toLowerCase();
-    if (statusFilter === 'open' || statusFilter === '') {
-      if (!OPEN_STAGE_REVIEW_STATUSES.has(status as StageReviewStatus)) continue;
-    } else if (statusFilter !== 'all' && status !== statusFilter) {
-      continue;
+    // One list row per operative review (multi-review records expand).
+    const store = parseStageReviewStore(row.stage_review_json);
+    for (const review of store.reviews) {
+      const status = String(review.status || 'pending').toLowerCase();
+      if (statusFilter === 'open' || statusFilter === '') {
+        if (!OPEN_STAGE_REVIEW_STATUSES.has(status as StageReviewStatus)) continue;
+      } else if (statusFilter !== 'all' && status !== statusFilter) {
+        continue;
+      }
+      const read = resolveStageReviewPresentationForRead({
+        review,
+        record: row,
+        config,
+      });
+      reviews.push({
+        record_id: String(row._row_id || row.id || row.record_id || ''),
+        business_name: String(row.business_name || ''),
+        review_id: review.review_id,
+        stage_id: review.stage_id,
+        asset_version: review.asset_version,
+        status: review.status || 'pending',
+        channel: review.channel ?? null,
+        action_type: review.action_type ?? null,
+        account_sequence_state: String(
+          row.account_sequence_state || row.sequence_status || '',
+        ),
+        work_state: String(row.work_state || ''),
+        contact_id: review.contact_id ?? null,
+        notes: review.notes,
+        authorized_by: review.authorized_by ?? null,
+        authorized_at: review.authorized_at ?? null,
+        presentation: read.presentation,
+        bound_presentation: read.bound_presentation,
+        bound_asset_version: read.bound_asset_version || review.asset_version,
+        presentation_equivalence: read.presentation_equivalence,
+        presentation_authorizable: read.presentation_authorizable,
+        presentation_authorization_reason: read.presentation_authorization_reason,
+      });
     }
-    const read = resolveStageReviewPresentationForRead({
-      review,
-      record: row,
-      config,
-    });
-    reviews.push({
-      record_id: String(row._row_id || row.id || row.record_id || ''),
-      business_name: String(row.business_name || ''),
-      review_id: review.review_id,
-      stage_id: review.stage_id,
-      asset_version: review.asset_version,
-      status: review.status || 'pending',
-      channel: review.channel ?? null,
-      action_type: review.action_type ?? null,
-      account_sequence_state: String(
-        row.account_sequence_state || row.sequence_status || '',
-      ),
-      work_state: String(row.work_state || ''),
-      contact_id: review.contact_id ?? null,
-      notes: review.notes,
-      authorized_by: review.authorized_by ?? null,
-      authorized_at: review.authorized_at ?? null,
-      presentation: read.presentation,
-      bound_presentation: read.bound_presentation,
-      bound_asset_version: read.bound_asset_version || review.asset_version,
-      presentation_equivalence: read.presentation_equivalence,
-      presentation_authorizable: read.presentation_authorizable,
-      presentation_authorization_reason: read.presentation_authorization_reason,
-    });
   }
 
   const total = reviews.length;

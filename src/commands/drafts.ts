@@ -13,7 +13,10 @@ import { resolveListDir } from '../orchestrator/runtime/paths.js';
 import {
   authorizeStageReview,
   appendTransitionAudit,
+  findStageReview,
+  isOpenStageReviewStatus,
   parseStageReviewJson,
+  stageReviewMatchesKeys,
 } from '../orchestrator/policy/transition-audit.js';
 import { resolveStageAssetVersion } from '../orchestrator/policy/stage-review-gate.js';
 import { assertRecordAccessForMutation } from '../orchestrator/policy/canary-isolation.js';
@@ -104,8 +107,12 @@ const planDraftApproval = ({
   /** When true, caller may mark the draft ready. */
   markReady: boolean;
 } => {
-  const existing = parseStageReviewJson(record.stage_review_json);
   const stepId = String(draft.step_id || '').trim();
+  // Stage-scoped among multi-review bags so a sibling terminal review cannot
+  // block or authorize this draft's step.
+  const existing =
+    findStageReview(record.stage_review_json, [stepId, 'send_email'])
+    || parseStageReviewJson(record.stage_review_json);
   // Prefer the bound presentation snapshot for the material fingerprint so
   // live intermediate fields cannot silently re-key authorization.
   const materialPresentation = existing?.presentation ?? reviewPresentation ?? null;
@@ -126,7 +133,11 @@ const planDraftApproval = ({
   // `paused_review` refuses terminal reviews and the only site that opens a
   // replacement review sits behind that same gate.
   const refusedStatuses = new Set(['rejected', 'invalidated', 'superseded', 'expired']);
-  if (existing && refusedStatuses.has(String(existing.status || '').trim().toLowerCase())) {
+  if (
+    existing
+    && stageReviewMatchesKeys(existing, [stepId, 'send_email'].filter(Boolean))
+    && refusedStatuses.has(String(existing.status || '').trim().toLowerCase())
+  ) {
     return {
       authorized: false,
       reason: `stage_review_${String(existing.status).trim().toLowerCase()}`,
@@ -148,8 +159,7 @@ const planDraftApproval = ({
 
   const stageMatch =
     !stepId
-    || String(existing.stage_id || '').trim() === stepId
-    || String(existing.action_type || '').trim().toLowerCase() === 'send_email';
+    || stageReviewMatchesKeys(existing, [stepId, 'send_email']);
   if (!stageMatch) {
     return {
       authorized: false,
@@ -192,6 +202,7 @@ const planDraftApproval = ({
     account_id: String(record._row_id || record.id || existing.account_id || ''),
     contact_id: existing.contact_id ?? null,
     existing,
+    existing_json: record.stage_review_json,
     lifecycle_stage: String(record.lifecycle_stage || 'contacted'),
     actor: 'drafts_approve',
     notes: `Authorized via draft approval ${String(draft.draft_id || '')}`,
@@ -907,11 +918,23 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
           | Record<string, unknown>
           | undefined;
         if (record) {
-          const existingReview = parseStageReviewJson(record.stage_review_json);
+          // Invalidate only the review bound to this draft's step (siblings intact).
+          const draftStepId = String(existingDraft.step_id || '').trim();
+          const existingReview =
+            findStageReview(record.stage_review_json, [draftStepId, 'send_email'])
+            || parseStageReviewJson(record.stage_review_json);
           let stagePatch: Record<string, unknown> = {};
-          if (existingReview && (existingReview.status === 'authorized'
-            || existingReview.status === 'pending'
-            || existingReview.status === 'edited')) {
+          if (
+            existingReview
+            && (
+              existingReview.status === 'authorized'
+              || isOpenStageReviewStatus(existingReview.status)
+            )
+            && (
+              !draftStepId
+              || stageReviewMatchesKeys(existingReview, [draftStepId, 'send_email'])
+            )
+          ) {
             const invalidated = authorizeStageReview({
               review_id: existingReview.review_id,
               stage_id: existingReview.stage_id,
@@ -921,6 +944,7 @@ export const draftsEditCommand = ({ list, draftId, subject = '', body = '' }) =>
               account_id: String(record._row_id || record.id || existingReview.account_id || ''),
               contact_id: existingReview.contact_id ?? null,
               existing: existingReview,
+              existing_json: record.stage_review_json,
               lifecycle_stage: String(record.lifecycle_stage || 'contacted'),
               actor: 'drafts_edit',
               notes: `Invalidated by draft edit ${String(draftId || '')}`,

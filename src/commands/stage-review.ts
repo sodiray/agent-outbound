@@ -20,8 +20,11 @@ import { readConfig } from '../orchestrator/lib/config.js';
 import {
   appendTransitionAudit,
   authorizeStageReview,
+  findStageReview,
   listPendingStageReviews,
+  listStageReviews,
   parseStageReviewJson,
+  parseStageReviewStore,
   type StageReviewApplyResult,
 } from '../orchestrator/policy/transition-audit.js';
 import {
@@ -146,8 +149,12 @@ export const stageReviewAuthorizeCommand = ({
       });
     }
 
-    const existing = parseStageReviewJson(record.stage_review_json);
-    if (!existing) {
+    // Multi-review: select the operative review for this stage_id among siblings.
+    const store = parseStageReviewStore(record.stage_review_json);
+    const existing =
+      findStageReview(record.stage_review_json, [stage])
+      || parseStageReviewJson(record.stage_review_json);
+    if (!existing || store.reviews.length === 0) {
       throw new AgentOutboundError({
         code: 'NOT_FOUND',
         message: `No stage_review_json on record ${rid}.`,
@@ -156,11 +163,16 @@ export const stageReviewAuthorizeCommand = ({
       });
     }
     if (!stageMatches(existing, stage)) {
+      const known = listStageReviews(record.stage_review_json)
+        .map((r) => r.stage_id)
+        .filter(Boolean)
+        .join(', ');
       throw new AgentOutboundError({
         code: 'INVALID_ARGUMENT',
         message:
-          `stage_id "${stage}" does not match pending review `
-          + `(stage_id=${existing.stage_id}, action_type=${existing.action_type || ''}).`,
+          `stage_id "${stage}" does not match any review on this record `
+          + `(known stage_ids: ${known || 'none'}; `
+          + `matched stage_id=${existing.stage_id}, action_type=${existing.action_type || ''}).`,
         retryable: false,
       });
     }
@@ -223,6 +235,7 @@ export const stageReviewAuthorizeCommand = ({
       account_id: accountId,
       contact_id: existing.contact_id ?? null,
       existing,
+      existing_json: record.stage_review_json,
       lifecycle_stage: String(record.lifecycle_stage || 'contacted'),
       actor: actorName,
       notes: noteText || undefined,
@@ -253,7 +266,9 @@ export const stageReviewAuthorizeCommand = ({
     const persisted = getRecordById({ db, id: String(record._row_id || rid) }) as
       | Record<string, unknown>
       | undefined;
-    const review = parseStageReviewJson(persisted?.stage_review_json ?? next.stage_review_json);
+    const review =
+      findStageReview(persisted?.stage_review_json ?? next.stage_review_json, [stage, existing.stage_id])
+      || result.authorization;
 
     return {
       ok: Boolean(result.allowed),
@@ -264,7 +279,7 @@ export const stageReviewAuthorizeCommand = ({
       stage_id: stage,
       asset_version: boundAssetVersion,
       review_id: existing.review_id,
-      authorization: review || result.authorization,
+      authorization: review,
       account_sequence_state:
         String(persisted?.account_sequence_state ?? patch.account_sequence_state ?? record.account_sequence_state ?? ''),
       work_state: String(persisted?.work_state ?? patch.work_state ?? record.work_state ?? ''),

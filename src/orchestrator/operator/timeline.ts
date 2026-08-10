@@ -4,6 +4,7 @@
  */
 
 import { stageReviewForRead } from '../policy/review-presentation.js';
+import { parseStageReviewStore } from '../policy/transition-audit.js';
 
 export type TimelineEvent = {
   at: string;
@@ -220,9 +221,11 @@ export function getAccountTimeline(input: {
   }
 
   // --- stage_review_json transitions (pending / authorized / rejected / …) ---
+  // Multi-review bags emit one timeline event per operative review (+ history).
   try {
-    const review = parseJson(row.stage_review_json) as Record<string, unknown> | null;
-    if (review && typeof review === 'object') {
+    const store = parseStageReviewStore(row.stage_review_json);
+    const all = [...store.reviews, ...store.history];
+    for (const review of all) {
       const status = String(review.status || 'unknown');
       const stageId = String(review.stage_id || '');
       const assetVersion = String(review.asset_version || '');
@@ -282,14 +285,27 @@ export function getAccountTimeline(input: {
     readiness = row.readiness_json;
   }
   try {
-    const parsed = row.stage_review_json ? parseJson(row.stage_review_json) : null;
-    stage_review = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? stageReviewForRead({
-        review: parsed as Record<string, unknown>,
+    const store = parseStageReviewStore(row.stage_review_json);
+    if (store.reviews.length === 0) {
+      stage_review = null;
+    } else if (store.reviews.length === 1 && store.history.length === 0) {
+      stage_review = stageReviewForRead({
+        review: store.reviews[0] as unknown as Record<string, unknown>,
         record: row as Record<string, unknown>,
         config: input.config ?? null,
-      })
-      : parsed;
+      });
+    } else {
+      stage_review = {
+        version: store.version,
+        reviews: store.reviews.map((r) =>
+          stageReviewForRead({
+            review: r as unknown as Record<string, unknown>,
+            record: row as Record<string, unknown>,
+            config: input.config ?? null,
+          })),
+        history: store.history,
+      };
+    }
   } catch {
     stage_review = row.stage_review_json;
   }
@@ -316,14 +332,35 @@ export function getDecisionView(input: { db: any; recordId: string; config?: unk
   const row = input.db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rid);
   if (!row) throw new Error(`Record not found: ${rid}`);
   const parse = (v: unknown) => parseJson(v);
-  const rawStageReview = parse(row.stage_review_json);
-  const stage_review = rawStageReview && typeof rawStageReview === 'object' && !Array.isArray(rawStageReview)
-    ? stageReviewForRead({
-      review: rawStageReview as Record<string, unknown>,
+  const store = parseStageReviewStore(row.stage_review_json);
+  let stage_review: unknown = null;
+  if (store.reviews.length === 1 && store.history.length === 0) {
+    stage_review = stageReviewForRead({
+      review: store.reviews[0] as unknown as Record<string, unknown>,
       record: row as Record<string, unknown>,
       config: input.config ?? null,
-    })
-    : rawStageReview;
+    });
+  } else if (store.reviews.length > 0 || store.history.length > 0) {
+    stage_review = {
+      version: store.version,
+      reviews: store.reviews.map((r) =>
+        stageReviewForRead({
+          review: r as unknown as Record<string, unknown>,
+          record: row as Record<string, unknown>,
+          config: input.config ?? null,
+        })),
+      history: store.history,
+    };
+  } else {
+    const rawStageReview = parse(row.stage_review_json);
+    stage_review = rawStageReview && typeof rawStageReview === 'object' && !Array.isArray(rawStageReview)
+      ? stageReviewForRead({
+        review: rawStageReview as Record<string, unknown>,
+        record: row as Record<string, unknown>,
+        config: input.config ?? null,
+      })
+      : rawStageReview;
+  }
   return {
     record_id: rid,
     business_name: String(row.business_name || ''),

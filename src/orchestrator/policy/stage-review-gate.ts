@@ -18,7 +18,11 @@
 
 import { stableHash } from '../lib/record.js';
 import {
+  findStageReviewInStore,
+  isOpenStageReviewStatus,
   parseStageReviewJson,
+  parseStageReviewStore,
+  stageReviewMatchesKeys,
   type StageReviewAuthorization,
 } from './transition-audit.js';
 import type { ResolvedReviewPresentation } from './review-presentation.js';
@@ -63,7 +67,9 @@ export function isReviewRequired(
 }
 
 /**
- * True when stage_review_json is authorized for this stage (and asset version when given).
+ * True when stage_review_json holds an authorized review for this stage
+ * (and asset version when given). Scans all operative reviews on the record
+ * so an authorization for step X never satisfies step Y.
  * Accepts stage_id match against review.stage_id or review.action_type so callers can
  * pass either the sequence step id or the step kind (e.g. linkedin_connect).
  */
@@ -72,25 +78,22 @@ export function isAuthorizedForStep(
   stageId: string | null | undefined,
   assetVersion?: string | null,
 ): boolean {
-  const review = parseStageReviewJson(record?.stage_review_json);
-  if (!review) return false;
-  if (review.status !== 'authorized') return false;
+  const store = parseStageReviewStore(record?.stage_review_json);
+  if (store.reviews.length === 0) return false;
 
   const stage = String(stageId || '').trim();
-  if (stage) {
-    const stageKey = stage.toLowerCase();
-    const reviewStage = String(review.stage_id || '').trim().toLowerCase();
-    const reviewAction = String(review.action_type || '').trim().toLowerCase();
-    if (reviewStage !== stageKey && reviewAction !== stageKey) {
-      return false;
+  const candidates = stage
+    ? store.reviews.filter((r) => stageReviewMatchesKeys(r, [stage]))
+    : store.reviews;
+
+  for (const review of candidates) {
+    if (review.status !== 'authorized') continue;
+    if (assetVersion != null && String(assetVersion).trim() !== '') {
+      if (String(review.asset_version) !== String(assetVersion)) continue;
     }
+    return true;
   }
-
-  if (assetVersion != null && String(assetVersion).trim() !== '') {
-    if (String(review.asset_version) !== String(assetVersion)) return false;
-  }
-
-  return true;
+  return false;
 }
 
 /**
@@ -157,7 +160,12 @@ export function evaluateExternalActionAuthorization(input: {
   const task = normalizeToken(input.taskType);
   const channel = normalizeToken(input.channel);
   const reviewRequired = isReviewRequired(input.config, input.stepKind, input.taskType);
-  const existing = parseStageReviewJson(input.record?.stage_review_json);
+  const store = parseStageReviewStore(input.record?.stage_review_json);
+  // Same identity key set for allow and refusal diagnostics (stage id, kind, task).
+  const stageKeys = [input.stageId, kind, task || null];
+  const existing =
+    findStageReviewInStore(store, stageKeys)
+    || parseStageReviewJson(input.record?.stage_review_json);
 
   if (!reviewRequired) {
     return {
@@ -171,8 +179,6 @@ export function evaluateExternalActionAuthorization(input: {
     };
   }
 
-  // Same identity key set for allow and refusal diagnostics (stage id, kind, task).
-  const stageKeys = [input.stageId, kind, task || null];
   const stageAuthorized = isAuthorizedForAnyOf(input.record, stageKeys, input.assetVersion);
 
   const isEmail =
@@ -194,15 +200,22 @@ export function evaluateExternalActionAuthorization(input: {
   }
 
   // Pending review already open for this stage → wait; do not thrash a new review.
-  const pendingForStage = Boolean(
-    existing
-    && (existing.status === 'pending' || existing.status === 'edited')
-    && (
-      !String(input.stageId || '').trim()
-      || normalizeToken(existing.stage_id) === normalizeToken(input.stageId)
-      || normalizeToken(existing.action_type) === kind
-      || (task && normalizeToken(existing.action_type) === task)
-    ),
+  const pendingForStage = store.reviews.some(
+    (r) =>
+      isOpenStageReviewStatus(r.status)
+      && (
+        !String(input.stageId || '').trim()
+        || stageReviewMatchesKeys(r, stageKeys)
+      ),
+  );
+
+  // A genuine open review for a *different* stage must not be overwritten.
+  // Refuse a second pending open (fail closed); do not set needsPendingReview.
+  const pendingOtherStage = store.reviews.find(
+    (r) =>
+      isOpenStageReviewStatus(r.status)
+      && String(input.stageId || '').trim()
+      && !stageReviewMatchesKeys(r, stageKeys),
   );
 
   // Authorized for this stage identity but wrong material version → content changed.
@@ -213,6 +226,18 @@ export function evaluateExternalActionAuthorization(input: {
     input.assetVersion != null && String(input.assetVersion).trim() !== '';
   const authorizedForStageIdentity =
     hasBoundAssetVersion && isAuthorizedForAnyOf(input.record, stageKeys);
+
+  if (pendingOtherStage && !pendingForStage) {
+    return {
+      allowed: false,
+      reason: `stage_review_pending_other_stage:${pendingOtherStage.stage_id}`,
+      reviewRequired: true,
+      stageAuthorized: false,
+      emailDraftAuthorized: false,
+      existing: pendingOtherStage,
+      needsPendingReview: false,
+    };
+  }
 
   return {
     allowed: false,
