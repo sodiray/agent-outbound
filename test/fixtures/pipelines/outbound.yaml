@@ -6,8 +6,6 @@ source:
 policy:
   enforce_readiness: true
   fit_rule_version: representative-fit-v1
-  treatment_rule_version: representative-treatment-v1
-  deterministic_treatment: true
   prohibited_channels: [sms]
   prohibited_task_types: [visit]
   review_required_for: [send_email]

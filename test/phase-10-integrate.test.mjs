@@ -168,18 +168,15 @@ test('representative config preserves policy fields through normalization and lo
       : [];
   assert.deepEqual(errors, []);
 
-  // PolicySchema preserves readiness + rule versions + review gates (no strip).
+  // PolicySchema preserves readiness + fit rule version + review gates (no strip).
+  // treatment_rule_version / deterministic_treatment are refused (inert) — only
+  // fit_rule_version is consumed (fit-model.ts).
   assert.equal(normalized.config.policy?.enforce_readiness, true);
   assert.deepEqual(
     normalized.config.policy?.prohibited_channels || [],
     raw.policy?.prohibited_channels || [],
   );
   assert.equal(normalized.config.policy?.fit_rule_version, raw.policy?.fit_rule_version);
-  assert.equal(
-    normalized.config.policy?.treatment_rule_version,
-    raw.policy?.treatment_rule_version,
-  );
-  assert.equal(normalized.config.policy?.deterministic_treatment, true);
   assert.ok(
     Array.isArray(normalized.config.policy?.review_required_for) &&
       normalized.config.policy.review_required_for.includes('send_email'),
@@ -195,10 +192,6 @@ test('representative config preserves policy fields through normalization and lo
   assert.deepEqual(loaded.errors, []);
   assert.equal(loaded.config.policy?.enforce_readiness, true);
   assert.equal(loaded.config.policy?.fit_rule_version, raw.policy?.fit_rule_version);
-  assert.equal(
-    loaded.config.policy?.treatment_rule_version,
-    raw.policy?.treatment_rule_version,
-  );
 });
 
 // ---------------------------------------------------------------------------

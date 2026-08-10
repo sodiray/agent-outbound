@@ -1,13 +1,5 @@
 list:
   name: pilates
-  territory:
-    home_base: Boise, ID
-    max_visits_per_day: 8
-    preferred_visit_days:
-      - tue
-      - wed
-      - thu
-    max_drive_radius_miles: 20
 source:
   identity:
     - business_name

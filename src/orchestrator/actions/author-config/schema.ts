@@ -22,12 +22,10 @@ const ARRAY_KEYS = new Set([
   'depends_on',
   'disposition_options',
   'enum',
-  'exclude_zips',
   'identity',
   'key_source',
   'manual_results',
   'notes',
-  'preferred_visit_days',
   'runs_after',
   'steps',
   'toolkits',
@@ -41,7 +39,6 @@ const BOOLEAN_DEFAULTS: Record<string, boolean> = {
   dnc_sync: true,
   draft_approval_required: false,
   force: false,
-  visit_permit_required: false,
 };
 
 const NUMBER_DEFAULTS: Record<string, number> = {
@@ -49,9 +46,7 @@ const NUMBER_DEFAULTS: Record<string, number> = {
   day: 0,
   floor: 0,
   limit: 25,
-  max_drive_radius_miles: 35,
   max_results: 100,
-  max_visits_per_day: 12,
   step_budget: 8,
   template_version: 1,
   version: 1,

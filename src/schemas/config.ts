@@ -1675,15 +1675,25 @@ const MailConfidenceConfigSchema = z.object({
 // A single lead score (0-100). One weighted criteria list, one LLM pass.
 // Legacy fit/trigger/priority configs are normalized into this shape at load time.
 const ScoreSchema = z.object({
-  description: z.string().default(''),
-  model: ProviderModelSchema.optional(),
-  // ternary: criteria graded yes/partial/no (1 / 0.5 / 0) — coarse, saturates
-  // easily. graded: integer 0-10 per criterion with anchored skeptical
-  // calibration — granular, spreads the distribution.
-  grading: z.enum(['ternary', 'graded']).default('ternary'),
+  // Global score.description / model / grading / inputs are only read by
+  // retiredGlobalScoring (never called). Live scoring is pipeline kind: score
+  // stages, which carry their own model + criteria and always grade 0–10.
+  // score.samples and score.minimum remain live — do not refuse them.
+  description: unsupportedDeclaredConfigKey(
+    'score.description is not read; global scoring is retired. Declare description intent on a pipeline kind: score stage (criteria[].description), which always grades 0–10. Remove score.description.',
+  ).optional(),
+  model: unsupportedDeclaredConfigKey(
+    'score.model is not read; global scoring is retired. Declare model on each pipeline kind: score stage (step.model). Remove score.model.',
+  ).optional(),
+  grading: unsupportedDeclaredConfigKey(
+    'score.grading is not read; global scoring is retired. Pipeline kind: score stages always grade criteria on a 0–10 scale (no ternary/graded switch). Remove score.grading.',
+  ).optional(),
   // Independent graded samples per criterion; even counts use the lower median.
+  // Honoured by runScoreStage (pipeline kind: score) via reduce-samples.
   samples: z.coerce.number().int().positive().default(1),
-  inputs: z.array(z.string()).default([]),
+  inputs: unsupportedDeclaredConfigKey(
+    'score.inputs is not read; global scoring is retired. Declare inputs on each pipeline kind: score stage (step.inputs). Remove score.inputs.',
+  ).optional(),
   criteria: z.array(ScoringCriterionSchema).default([]),
   // Leads scoring below this threshold are dropped at scoring time
   // (gate "score_minimum"). 0 / unset disables the floor.
@@ -1717,14 +1727,42 @@ const SuppressionSchema = z.object({
   ).optional(),
 }).partial().default({});
 
+// list.territory.* visit-routing knobs are schema-accepted but never read.
+// Visit routing uses channels.visit.tool and territories[] polygons instead.
+const unsupportedTerritoryVisitKey = (key: string, remedy: string) => unsupportedDeclaredConfigKey(
+  `list.territory.${key} is not read; ${remedy}`,
+);
+
 const TerritorySchema = z.object({
-  home_base: z.string().default(''),
-  max_visits_per_day: z.coerce.number().int().min(1).max(100).default(12),
-  business_hours: z.record(z.string()).default({}),
-  preferred_visit_days: z.array(z.enum(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'])).default([]),
-  max_drive_radius_miles: z.coerce.number().min(1).max(500).default(35),
-  exclude_zips: z.array(z.string()).default([]),
-  visit_permit_required: z.boolean().default(false),
+  home_base: unsupportedTerritoryVisitKey(
+    'home_base',
+    'visit routing uses channels.visit.tool and territories[] polygons, not list.territory.home_base. Remove home_base.',
+  ).optional(),
+  max_visits_per_day: unsupportedTerritoryVisitKey(
+    'max_visits_per_day',
+    'visit routing uses channels.visit.tool and territories[] polygons; there is no daily visit cap in list.territory. Remove max_visits_per_day.',
+  ).optional(),
+  business_hours: unsupportedTerritoryVisitKey(
+    'business_hours',
+    'visit routing uses channels.visit.tool and territories[] polygons; business_hours here does nothing. Remove business_hours.',
+  ).optional(),
+  preferred_visit_days: unsupportedTerritoryVisitKey(
+    'preferred_visit_days',
+    'visit routing uses channels.visit.tool and territories[] polygons; preferred_visit_days here does nothing. Remove preferred_visit_days.',
+  ).optional(),
+  max_drive_radius_miles: unsupportedTerritoryVisitKey(
+    'max_drive_radius_miles',
+    'visit routing uses channels.visit.tool and territories[] polygons; max_drive_radius_miles here does nothing. Remove max_drive_radius_miles.',
+  ).optional(),
+  exclude_zips: unsupportedTerritoryVisitKey(
+    'exclude_zips',
+    'visit routing uses channels.visit.tool and territories[] polygons; exclude_zips here does nothing. Remove exclude_zips.',
+  ).optional(),
+  // Reads as a legal precondition on door-knocking and changes nothing.
+  visit_permit_required: unsupportedTerritoryVisitKey(
+    'visit_permit_required',
+    'visit routing uses channels.visit.tool and territories[] polygons; visit_permit_required is not a legal gate and is never checked. Remove visit_permit_required.',
+  ).optional(),
 }).partial().default({});
 
 const CrmSchema = z.object({
@@ -2004,9 +2042,17 @@ const PolicySchema = z.object({
   first_touch: FirstTouchPolicySchema,
   /** When true, channel execute hard-blocks non-ready external sends (send_email, linkedin_connect). */
   enforce_readiness: z.boolean().default(false),
+  // Consumed by resolvePipelineFitModel (fit-model.ts) as the fit model version.
   fit_rule_version: z.string().trim().default(''),
-  treatment_rule_version: z.string().trim().default(''),
-  deterministic_treatment: z.boolean().default(true),
+  // Trap twin of fit_rule_version: zero execution readers. Treatment assignment
+  // is rule-based via score.treatment / policy_apply, not a version string.
+  treatment_rule_version: unsupportedDeclaredConfigKey(
+    'policy.treatment_rule_version is not read; unlike policy.fit_rule_version (which resolvePipelineFitModel / fit-model.ts consumes as the fit model version), there is no treatment-rule version consumer. Treatment assignment is rule-based via score.treatment and policy_apply. Remove treatment_rule_version.',
+  ).optional(),
+  // Treatment assignment is already rule-based; this flag changes nothing.
+  deterministic_treatment: unsupportedDeclaredConfigKey(
+    'policy.deterministic_treatment is not read; treatment assignment is already rule-based (score.treatment / policy_apply), so this flag changes nothing. Remove deterministic_treatment.',
+  ).optional(),
   review_required_for: z.array(z.string()).default([]),
 }).partial().default({});
 

@@ -64,26 +64,6 @@ policy:
   enforce_readiness: true
 score:
   treatment: ${JSON.stringify(treasureValleyTreatmentStrategy)}
-  grading: graded
-  criteria:
-    - id: operational_coordination_burden
-      weight: 0.22
-      description: x
-    - id: repetition_and_volume
-      weight: 0.18
-      description: x
-    - id: economic_impact_potential
-      weight: 0.2
-      description: x
-    - id: operating_scale_surface_area
-      weight: 0.15
-      description: x
-    - id: mission_delivery_compatibility
-      weight: 0.15
-      description: x
-    - id: local_buying_autonomy
-      weight: 0.1
-      description: x
   minimum: 0
 channels:
   email:

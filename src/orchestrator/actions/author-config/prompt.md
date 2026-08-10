@@ -55,8 +55,7 @@ Important:
 - When any semantic filter or enrichment prompt refers to an upstream produced field, reference it as a token (`{field}` or `${field}`), not freehand prose. This is how the dependency graph is derived.
 
 Shape requirements:
-- `list.territory.home_base` is a single string (example: `"Boise, ID"`).
-- `list.territory.preferred_visit_days` values must be one of: `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`.
+- Do not emit a `list.territory` visit block (`home_base`, `max_visits_per_day`, `business_hours`, `preferred_visit_days`, `max_drive_radius_miles`, `exclude_zips`, `visit_permit_required`). The engine refuses those keys: visit routing reads `channels.visit.tool` and territory polygons instead.
 - `sequences.<name>.working_days` values must be lowercase three-letter days only: `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`.
 - `sequences.<name>.non_working_day_policy` must be `shift_forward` or `skip`.
 - Template guidance:

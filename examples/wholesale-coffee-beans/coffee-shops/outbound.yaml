@@ -1,7 +1,5 @@
 list:
   name: coffee-shops
-  territory:
-    home_base: Boise, ID
 source:
   identity:
     - business_name

@@ -285,9 +285,11 @@ test('residual operator call board + health + decision modules exist', () => {
   assert.ok(cli.includes('stageReviewAuthorizeCommand'));
 });
 
-test('residual PolicySchema preserves fit/treatment rule versions', () => {
+test('residual PolicySchema preserves fit rule version and review gates', () => {
   const src = readFileSync(join(ROOT, 'src/schemas/config.ts'), 'utf8');
   assert.ok(src.includes('fit_rule_version'));
+  // treatment_rule_version remains in the schema only as an explicit refusal
+  // (inert twin of fit_rule_version) — the name must still appear.
   assert.ok(src.includes('treatment_rule_version'));
   assert.ok(src.includes('review_required_for'));
 });

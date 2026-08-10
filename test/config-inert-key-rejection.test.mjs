@@ -121,6 +121,118 @@ test('CONTROL: ceilings.tiers.A still validates and still enforces', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Group C — policy treatment twins (fit_rule_version is live; the others are not)
+// ---------------------------------------------------------------------------
+
+test('policy.deterministic_treatment is rejected; treatment is already rule-based', () => {
+  const result = normalizeConfig({
+    policy: { deterministic_treatment: true },
+  });
+  assert.ok(result.errors.length > 0, 'expected config error');
+  assert.ok(
+    errorMentions(result.errors, 'deterministic_treatment', 'rule-based'),
+    `message must name deterministic_treatment and rule-based reality: ${JSON.stringify(result.errors)}`,
+  );
+});
+
+test('policy.treatment_rule_version is rejected and names the live fit_rule_version twin', () => {
+  const result = normalizeConfig({
+    policy: { treatment_rule_version: 'treatment-v1' },
+  });
+  assert.ok(result.errors.length > 0, 'expected config error');
+  assert.ok(
+    errorMentions(result.errors, 'treatment_rule_version', 'fit_rule_version'),
+    `message must name treatment_rule_version and the live fit_rule_version twin: ${JSON.stringify(result.errors)}`,
+  );
+});
+
+test('CONTROL: policy.fit_rule_version still validates and is still consumed by fit-model resolution', async () => {
+  const result = normalizeConfig({
+    policy: { fit_rule_version: 'fit-v-control' },
+    pipeline: [
+      {
+        kind: 'score',
+        id: 'fit_stage',
+        key: 'fit',
+        model: 'openai/gpt-4o-mini',
+        inputs: { account: { from: 'business_name', required: true } },
+        criteria: [{ id: 'c1', weight: 1, description: 'control criterion' }],
+        outputs: {
+          fit_score: { type: 'number' },
+          fit_breakdown: { type: 'json' },
+          fit_reasoning: { type: 'string' },
+        },
+      },
+    ],
+  });
+  assert.deepEqual(result.errors, [], `fit_rule_version must validate: ${JSON.stringify(result.errors)}`);
+  assert.equal(result.config.policy.fit_rule_version, 'fit-v-control');
+
+  const { resolvePipelineFitModel } = await import('../dist/orchestrator/scoring/fit-model.js');
+  const resolved = resolvePipelineFitModel(result.config);
+  assert.equal(resolved.declared, true);
+  assert.equal(resolved.fitModel?.modelVersion, 'fit-v-control');
+});
+
+// ---------------------------------------------------------------------------
+// Group D — list.territory visit knobs (routing uses channels.visit.tool + polygons)
+// ---------------------------------------------------------------------------
+
+const TERRITORY_INERT = [
+  ['home_base', 'Boise, ID', ['home_base', 'channels.visit.tool']],
+  ['max_visits_per_day', 8, ['max_visits_per_day', 'channels.visit.tool']],
+  ['business_hours', { mon: '9-5' }, ['business_hours', 'channels.visit.tool']],
+  ['preferred_visit_days', ['tue', 'wed'], ['preferred_visit_days', 'channels.visit.tool']],
+  ['max_drive_radius_miles', 20, ['max_drive_radius_miles', 'channels.visit.tool']],
+  ['exclude_zips', ['83702'], ['exclude_zips', 'channels.visit.tool']],
+  ['visit_permit_required', true, ['visit_permit_required', 'channels.visit.tool']],
+];
+
+for (const [key, value, needles] of TERRITORY_INERT) {
+  test(`list.territory.${key} is rejected and points at visit tool / polygons`, () => {
+    const result = normalizeConfig({
+      list: { territory: { [key]: value } },
+    });
+    assert.ok(result.errors.length > 0, `expected error for list.territory.${key}`);
+    assert.ok(
+      errorMentions(result.errors, ...needles),
+      `message must name ${key} and visit routing reality: ${JSON.stringify(result.errors)}`,
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Group E — retired global score surface (score.samples / score.minimum stay live)
+// ---------------------------------------------------------------------------
+
+for (const [key, value, needles] of [
+  ['grading', 'graded', ['score.grading', '0–10']],
+  ['model', 'openai/gpt-4o-mini', ['score.model', 'kind: score']],
+  ['description', 'holistic fit', ['score.description', 'kind: score']],
+  ['inputs', ['business_name'], ['score.inputs', 'kind: score']],
+]) {
+  test(`score.${key} is rejected; live scoring is pipeline kind: score stages`, () => {
+    const result = normalizeConfig({
+      score: { [key]: value },
+    });
+    assert.ok(result.errors.length > 0, `expected error for score.${key}`);
+    assert.ok(
+      errorMentions(result.errors, ...needles),
+      `message must name score.${key} and pipeline score reality: ${JSON.stringify(result.errors)}`,
+    );
+  });
+}
+
+test('CONTROL: score.samples and score.minimum still validate', () => {
+  const result = normalizeConfig({
+    score: { samples: 3, minimum: 40 },
+  });
+  assert.deepEqual(result.errors, [], `samples/minimum must validate: ${JSON.stringify(result.errors)}`);
+  assert.equal(result.config.score.samples, 3);
+  assert.equal(result.config.score.minimum, 40);
+});
+
+// ---------------------------------------------------------------------------
 // CONTROL overall — healthy config without inert keys
 // ---------------------------------------------------------------------------
 
@@ -129,8 +241,11 @@ test('CONTROL: a config declaring none of the rejected keys validates with zero 
     policy: {
       prohibited_channels: ['sms'],
       enforce_readiness: true,
+      fit_rule_version: 'healthy-fit-v1',
     },
     score: {
+      samples: 1,
+      minimum: 0,
       enrichment_budget: {
         ceilings: {
           foundational: 0.15,
@@ -146,6 +261,7 @@ test('CONTROL: a config declaring none of the rejected keys validates with zero 
       },
     },
     suppression: {},
+    list: { name: 'healthy', territory: {} },
     pipeline: [
       {
         kind: 'filter',
