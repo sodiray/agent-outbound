@@ -572,7 +572,7 @@ test('compose repairs known em-dash mojibake and preserves non-ASCII through per
   });
 });
 
-test('compose never receives or accepts ungranted facts, and missing required input fails only that record', async () => {
+test('compose never receives or accepts ungranted facts', async () => {
   await withDb(async ({ db, listDir: root }) => {
     const prompt = { value: '' };
     const denied = await runComposeStep({
@@ -602,7 +602,16 @@ test('compose never receives or accepts ungranted facts, and missing required in
     assert.equal(denied.failed, 1);
     assert.match(denied.errors[0].error, /ungranted inputs/);
     assert.equal(getAssetsForRow({ db, rowId: record._row_id }).length, 0);
+  });
+});
 
+test('compose skips when a required input is absent and never calls the model', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    let called = 0;
+    const generateObject = async () => {
+      called += 1;
+      throw new Error('model must not be called');
+    };
     const missing = await runComposeStep({
       db,
       listDir: root,
@@ -610,12 +619,113 @@ test('compose never receives or accepts ungranted facts, and missing required in
       step: step(),
       rows: [{ ...record, contact_first_name: '' }],
       stepId: 'channel_copy',
+      generateObject,
+    });
+    assert.equal(called, 0);
+    assert.equal(missing.failed, 0);
+    assert.equal(missing.processed, 0);
+    assert.equal(
+      missing.non_execution_reasons[record._row_id],
+      'skipped_required_input_missing:person',
+    );
+  });
+});
+
+test('compose with required input present composes normally', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    let called = 0;
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: step(),
+      rows: [record],
+      stepId: 'channel_copy',
       generateObject: async () => {
-        throw new Error('model must not be called');
+        called += 1;
+        return { object: validObject, usage: {} };
       },
     });
-    assert.equal(missing.failed, 1);
-    assert.match(missing.errors[0].error, /required input "person"/);
+    assert.equal(called, 1);
+    assert.equal(result.failed, 0, JSON.stringify(result.errors));
+    assert.equal(result.processed, 1);
+    assert.equal(result.non_execution_reasons[record._row_id], undefined);
+    assert.deepEqual(result.declared_output_writes[record._row_id], {
+      headline: { provided: true, value: 'Hello Ada' },
+      message: { provided: true, value: 'Ada, this is about Acme.' },
+    });
+  });
+});
+
+test('compose with optional input absent still composes', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    let called = 0;
+    const optionalStep = {
+      ...step(),
+      inputs: {
+        person: { from: 'contact_first_name', required: true },
+        account: { from: 'business_name', required: false },
+      },
+    };
+    const result = await runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step: optionalStep,
+      rows: [{ ...record, business_name: '' }],
+      stepId: 'channel_copy',
+      generateObject: async (request) => {
+        called += 1;
+        assert.equal(request.prompt.includes('"account"'), false);
+        return {
+          object: {
+            outputs: {
+              headline: 'Hello Ada',
+              message: 'Ada, a note without account facts.',
+            },
+            used_inputs: ['person'],
+            grounding: [
+              { output: 'headline', text: 'Hello Ada', inputs: ['person'] },
+              { output: 'message', text: 'Ada, a note without account facts.', inputs: ['person'] },
+            ],
+          },
+          usage: {},
+        };
+      },
+    });
+    assert.equal(called, 1);
+    assert.equal(result.failed, 0, JSON.stringify(result.errors));
+    assert.equal(result.processed, 1);
+    assert.equal(result.non_execution_reasons[record._row_id], undefined);
+  });
+});
+
+test('compose treats empty-string and whitespace required inputs as absent via resolveStageInputs', async () => {
+  await withDb(async ({ db, listDir: root }) => {
+    let called = 0;
+    const generateObject = async () => {
+      called += 1;
+      throw new Error('model must not be called');
+    };
+    for (const blank of ['', '   ', '\t\n']) {
+      const result = await runComposeStep({
+        db,
+        listDir: root,
+        config: { ai: {} },
+        step: step(),
+        rows: [{ ...record, contact_first_name: blank }],
+        stepId: 'channel_copy',
+        generateObject,
+      });
+      assert.equal(
+        result.non_execution_reasons[record._row_id],
+        'skipped_required_input_missing:person',
+        `blank=${JSON.stringify(blank)}`,
+      );
+      assert.equal(result.failed, 0);
+      assert.equal(result.processed, 0);
+    }
+    assert.equal(called, 0);
   });
 });
 

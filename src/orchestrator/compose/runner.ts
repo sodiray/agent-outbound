@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
+import { resolveStageInputs } from '../lib/stage-inputs.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { ensureRecordColumns, insertAsset, upsertRecord } from '../runtime/db.js';
@@ -238,9 +239,6 @@ const declaredInputs = ({ step, record }: { step: ComposeStep; record: RecordRow
   const values: Record<string, string> = {};
   for (const [name, definition] of Object.entries(step.inputs || {})) {
     const value = definition.value ?? (definition.from ? pathGet(record, definition.from) : undefined);
-    if (definition.required !== false && isBlank(value)) {
-      throw new ComposeStepError(`Compose required input "${name}" is missing or empty.`);
-    }
     if (!isBlank(value)) values[name] = String(value).trim();
   }
   return values;
@@ -336,6 +334,12 @@ export const runComposeStep = async ({
   await mapWithConcurrency(rows, async (record) => {
     const recordId = getRecordRowId(record);
     try {
+      // Same required-input gate as scoring: skip before any model call.
+      const resolved = resolveStageInputs({ step, record });
+      if (resolved.missingRequired.length > 0) {
+        summary.non_execution_reasons[recordId] = `skipped_required_input_missing:${resolved.missingRequired.join(',')}`;
+        return;
+      }
       const inputs = declaredInputs({ step, record });
       const depHash = composeDependencyHash({ step, record });
       const cached = readStaleness({ db, recordId, stepId });
