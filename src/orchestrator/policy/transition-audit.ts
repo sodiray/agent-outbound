@@ -8,6 +8,8 @@
 
 import {
   missingRequiredReviewFields,
+  resolveStageReviewPresentationForRead,
+  type PresentationEquivalence,
   type ResolvedReviewPresentation,
 } from './review-presentation.js';
 
@@ -1044,46 +1046,54 @@ export type PendingStageReviewRow = {
   notes?: string;
   authorized_by?: string | null;
   authorized_at?: string | null;
+  /** Current config + record resolution — what the reviewer should judge. */
   presentation?: ResolvedReviewPresentation | null;
+  /** Presentation snapshotted when the review was created (history; not overwritten). */
+  bound_presentation?: ResolvedReviewPresentation | null;
+  /** Asset version bound at creation (authorization gate still uses this). */
+  bound_asset_version?: string;
+  /** Whether current presentation matches what was bound at creation. */
+  presentation_equivalence?: PresentationEquivalence;
 };
 
 /**
  * Queryable stage-review queue for canary operators.
  * Default: open statuses only (pending / edited). Pass status to filter, or 'all'.
+ *
+ * When `config` is provided, presentation is re-resolved at read time against
+ * current config + current record values (draft content_equivalence spirit).
+ * Bound presentation and asset_version remain inspectable; authorization is unchanged.
  */
 export function listPendingStageReviews(input: {
   db: any;
   status?: string;
   limit?: number;
   offset?: number;
+  /** Current list config — enables resolve-on-read presentation. */
+  config?: unknown | null;
 }): { total: number; reviews: PendingStageReviewRow[]; as_of: string } {
   const limit = Math.max(1, Number(input.limit) || 100);
   const offset = Math.max(0, Number(input.offset) || 0);
   const statusFilter = String(input.status || 'open').trim().toLowerCase();
+  const config = input.config ?? null;
 
   let rows: Array<Record<string, unknown>> = [];
   try {
+    // Full rows so presentation can resolve field values from the current record.
     rows = input.db.prepare(`
-      SELECT
-        _row_id AS record_id,
-        COALESCE(business_name, '') AS business_name,
-        stage_review_json,
-        COALESCE(account_sequence_state, sequence_status, '') AS account_sequence_state,
-        COALESCE(work_state, '') AS work_state
+      SELECT *
       FROM records
       WHERE COALESCE(stage_review_json, '') != ''
       ORDER BY COALESCE(updated_at, _updated_at, created_at) DESC
     `).all() as Array<Record<string, unknown>>;
   } catch {
-    // Schema may lack account_sequence_state / work_state on older DBs.
     try {
       rows = input.db.prepare(`
         SELECT
-          _row_id AS record_id,
-          COALESCE(business_name, '') AS business_name,
+          _row_id,
+          business_name,
           stage_review_json,
-          COALESCE(sequence_status, '') AS account_sequence_state,
-          '' AS work_state
+          sequence_status AS account_sequence_state
         FROM records
         WHERE COALESCE(stage_review_json, '') != ''
         ORDER BY COALESCE(updated_at, _updated_at, created_at) DESC
@@ -1103,8 +1113,13 @@ export function listPendingStageReviews(input: {
     } else if (statusFilter !== 'all' && status !== statusFilter) {
       continue;
     }
+    const read = resolveStageReviewPresentationForRead({
+      review,
+      record: row,
+      config,
+    });
     reviews.push({
-      record_id: String(row.record_id || ''),
+      record_id: String(row._row_id || row.id || row.record_id || ''),
       business_name: String(row.business_name || ''),
       review_id: review.review_id,
       stage_id: review.stage_id,
@@ -1112,13 +1127,18 @@ export function listPendingStageReviews(input: {
       status: review.status || 'pending',
       channel: review.channel ?? null,
       action_type: review.action_type ?? null,
-      account_sequence_state: String(row.account_sequence_state || ''),
+      account_sequence_state: String(
+        row.account_sequence_state || row.sequence_status || '',
+      ),
       work_state: String(row.work_state || ''),
       contact_id: review.contact_id ?? null,
       notes: review.notes,
       authorized_by: review.authorized_by ?? null,
       authorized_at: review.authorized_at ?? null,
-      presentation: review.presentation ?? null,
+      presentation: read.presentation,
+      bound_presentation: read.bound_presentation,
+      bound_asset_version: read.bound_asset_version || review.asset_version,
+      presentation_equivalence: read.presentation_equivalence,
     });
   }
 

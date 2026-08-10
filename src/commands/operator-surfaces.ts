@@ -168,9 +168,16 @@ export const timelineCommand = ({
   limit?: number;
 }) => {
   const listDir = resolveListDir(list);
+  const config = (() => {
+    try {
+      return readConfig(listDir).config as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  })();
   const db = openListDb({ listDir, readonly: true });
   try {
-    return getAccountTimeline({ db, recordId: record, limit });
+    return getAccountTimeline({ db, recordId: record, limit, config });
   } finally {
     db.close();
   }
@@ -178,9 +185,16 @@ export const timelineCommand = ({
 
 export const decisionViewCommand = ({ list, record }: { list: string; record: string }) => {
   const listDir = resolveListDir(list);
+  const config = (() => {
+    try {
+      return readConfig(listDir).config as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  })();
   const db = openListDb({ listDir, readonly: true });
   try {
-    return getDecisionView({ db, recordId: record });
+    return getDecisionView({ db, recordId: record, config });
   } finally {
     db.close();
   }

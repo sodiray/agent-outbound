@@ -16,6 +16,7 @@ import {
 } from '../orchestrator/runtime/db.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
+import { readConfig } from '../orchestrator/lib/config.js';
 import {
   appendTransitionAudit,
   authorizeStageReview,
@@ -40,6 +41,13 @@ export const stageReviewListCommand = ({
   offset?: number;
 }) => {
   const listDir = resolveListDir(list);
+  const config = (() => {
+    try {
+      return readConfig(listDir).config as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  })();
   const db = openListDb({ listDir, readonly: true });
   try {
     return listPendingStageReviews({
@@ -47,6 +55,7 @@ export const stageReviewListCommand = ({
       status,
       limit: Number(limit) || 100,
       offset: Number(offset) || 0,
+      config,
     });
   } finally {
     db.close();

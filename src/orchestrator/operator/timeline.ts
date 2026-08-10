@@ -3,6 +3,8 @@
  * stage review transitions, next_action, reviews.
  */
 
+import { stageReviewForRead } from '../policy/review-presentation.js';
+
 export type TimelineEvent = {
   at: string;
   kind: string;
@@ -61,6 +63,8 @@ export function getAccountTimeline(input: {
   db: any;
   recordId: string;
   limit?: number;
+  /** Current list config — enables resolve-on-read stage review presentation. */
+  config?: unknown | null;
 }): AccountTimeline {
   const rid = String(input.recordId || '').trim();
   const limit = Math.max(1, Number(input.limit) || 100);
@@ -278,7 +282,14 @@ export function getAccountTimeline(input: {
     readiness = row.readiness_json;
   }
   try {
-    stage_review = row.stage_review_json ? parseJson(row.stage_review_json) : null;
+    const parsed = row.stage_review_json ? parseJson(row.stage_review_json) : null;
+    stage_review = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? stageReviewForRead({
+        review: parsed as Record<string, unknown>,
+        record: row as Record<string, unknown>,
+        config: input.config ?? null,
+      })
+      : parsed;
   } catch {
     stage_review = row.stage_review_json;
   }
@@ -300,11 +311,19 @@ export function getAccountTimeline(input: {
 }
 
 /** Decision/evidence view: why the system chose treatment/priority/withheld. */
-export function getDecisionView(input: { db: any; recordId: string }) {
+export function getDecisionView(input: { db: any; recordId: string; config?: unknown | null }) {
   const rid = String(input.recordId || '').trim();
   const row = input.db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rid);
   if (!row) throw new Error(`Record not found: ${rid}`);
   const parse = (v: unknown) => parseJson(v);
+  const rawStageReview = parse(row.stage_review_json);
+  const stage_review = rawStageReview && typeof rawStageReview === 'object' && !Array.isArray(rawStageReview)
+    ? stageReviewForRead({
+      review: rawStageReview as Record<string, unknown>,
+      record: row as Record<string, unknown>,
+      config: input.config ?? null,
+    })
+    : rawStageReview;
   return {
     record_id: rid,
     business_name: String(row.business_name || ''),
@@ -325,7 +344,7 @@ export function getDecisionView(input: { db: any; recordId: string }) {
     reachability: parse(row.reachability_json),
     cost_ledger: parse(row.cost_ledger_json),
     next_action: parse(row.next_action_json),
-    stage_review: parse(row.stage_review_json),
+    stage_review,
     withheld: {
       mail_program_eligible: row.mail_program_eligible,
       mail_treatment: row.mail_treatment,
