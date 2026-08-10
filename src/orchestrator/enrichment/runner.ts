@@ -994,6 +994,8 @@ export const executeEnrichmentAction = async ({
 
   // Pre-provider spend gate: when a tiered record is already over its enrichment
   // ceiling, skip tool_call / model generate / decision_makers without calling the provider.
+  // Check-then-act only — safe because dataflow serialises steps per record (see
+  // evaluateEnrichmentCeilingGate / runDataflowCore). Not the mailbox-cap pattern.
   if (!fixtureMode) {
     const gate = evaluateEnrichmentCeilingGate({ db, record, stepConfig, enrichmentBudget });
     if (gate.apply && !gate.within_budget) {

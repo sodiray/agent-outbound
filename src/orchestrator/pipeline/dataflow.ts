@@ -490,6 +490,11 @@ export const runDataflowCore = async ({
     errored: sharedSet(erroredByRecord, getRecordRowId(record)),
     status: sharedStatus(getRecordRowId(record)),
   }));
+  // One advance coroutine per input row. For a given record it is fully serial:
+  // select → await loadStep → await onStepOutcome → recurse. Cross-record
+  // concurrency does not overlap steps of the same _row_id (unless the same id
+  // appears twice in `records`). That serialisation is why per-record enrichment
+  // ceilings can stay check-then-act without cost_reservations.
   const advance = async (recordState: RecordState): Promise<void> => {
     const selected = await withAdvancePermit(state, concurrency, async () => {
       const candidate = nextStep({

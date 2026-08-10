@@ -15,6 +15,16 @@ import {
   type CostEntry,
 } from '../policy/cost-ledger.js';
 
+/**
+ * Per-record cost exposure = settled cost_events + open cost_reservations.
+ *
+ * Designed for reserve-then-act account spend (incl. high-cost mail eligibility).
+ * Not currently wired into the enrichment ceiling path (`evaluateEnrichmentCeilingGate`):
+ * that gate is check-then-act on enrichment_usd only, and pipeline dataflow already
+ * serialises steps per record so concurrent overshoot of a per-record ceiling is
+ * not reachable there. `settleAccountCostReservation` writes a cost_event itself —
+ * do not also call `recordCostEvent` for the same spend or totals double-count.
+ */
 export type AccountCostTotals = {
   record_id: string;
   actual_usd: number;
@@ -98,6 +108,13 @@ export const getAccountCostTotals = ({
   return accountCostTotals({ db, recordId: rid });
 };
 
+/**
+ * Atomically reserve spend against a per-record USD ceiling (total cost_events
+ * exposure, not enrichment-kind-only). Idempotent on reservationId.
+ * Callers must settle or release on every path — a leaked reservation permanently
+ * reduces budget. Currently exercised only by unit tests; enrichment ceilings
+ * use evaluateEnrichmentCeilingGate instead (see AccountCostTotals note).
+ */
 export const reserveAccountCost = ({
   db,
   recordId,

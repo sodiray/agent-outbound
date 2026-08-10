@@ -26,6 +26,7 @@ import {
   parseCostLedger,
   appendCostEntry,
   ledgerFromCostEventRows,
+  sumRecordCostEventsUsd,
 } from '../dist/orchestrator/policy/cost-ledger.js';
 import { treasureValleyEnrichmentBudget, treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
 
@@ -42,6 +43,7 @@ import {
   insertCostEvent,
 } from '../dist/orchestrator/runtime/db.js';
 import { cleanupSockets, withActivityContext } from '../dist/orchestrator/runtime/activity.js';
+import { runDataflowCore } from '../dist/orchestrator/pipeline/dataflow.js';
 
 // Ensure fixture mode cannot bypass the pre-provider gate in this file.
 delete process.env.AO_PIPELINE_FIXTURE;
@@ -577,4 +579,238 @@ test('executeEnrichmentAction: early enrich without tier is not ceiling-gated', 
   });
   assert.equal(tiered.apply, true);
   assert.equal(tiered.within_budget, false);
+});
+
+// ---------------------------------------------------------------------------
+// Scheduling: per-record serialisation vs latent check-then-act TOCTOU
+// ---------------------------------------------------------------------------
+
+test('dataflow serialises steps for one record under high concurrency (ceiling race not reachable)', async () => {
+  // runDataflowCore advances each record on one chain: load → outcome → next.
+  // Concurrency only multiplexes *records*, so two enrich steps for the same
+  // _row_id never evaluate the ceiling gate in parallel on the pipeline path.
+  const order = [];
+  let stepARunning = false;
+  let stepBRunning = false;
+  let overlapped = false;
+
+  await runDataflowCore({
+    records: [{ _row_id: 'ceil_serial_1' }],
+    steps: [
+      {
+        id: 'enrich_a',
+        index: 0,
+        step: { kind: 'enrich' },
+        kind: 'enrich',
+        tier: 2,
+        cost: 0,
+        dropGate: false,
+        deps: [],
+        executable: true,
+      },
+      {
+        id: 'enrich_b',
+        index: 1,
+        step: { kind: 'enrich' },
+        kind: 'enrich',
+        tier: 2,
+        cost: 0,
+        dropGate: false,
+        deps: [],
+        executable: true,
+      },
+    ],
+    concurrency: 10,
+    isTimeReady: () => true,
+    loadStep: async (step) => {
+      order.push(`start:${step.id}`);
+      if (step.id === 'enrich_a') {
+        stepARunning = true;
+        if (stepBRunning) overlapped = true;
+      }
+      if (step.id === 'enrich_b') {
+        stepBRunning = true;
+        if (stepARunning) overlapped = true;
+      }
+      await new Promise((r) => setTimeout(r, 30));
+      if (step.id === 'enrich_a') stepARunning = false;
+      if (step.id === 'enrich_b') stepBRunning = false;
+      order.push(`end:${step.id}`);
+      return { passed: true, reason: 'ok' };
+    },
+    onStepOutcome: async (_recordState, step) => {
+      order.push(`outcome:${step.id}`);
+      return { resolved: true };
+    },
+  });
+
+  assert.equal(overlapped, false, 'steps for one record must not overlap');
+  assert.deepEqual(order, [
+    'start:enrich_a',
+    'end:enrich_a',
+    'outcome:enrich_a',
+    'start:enrich_b',
+    'end:enrich_b',
+    'outcome:enrich_b',
+  ]);
+});
+
+test('latent TOCTOU: concurrent check-then-act on the gate can overshoot (why serialisation matters)', async () => {
+  // If two expensive spends for the same record evaluated the gate and then
+  // recorded cost without serialisation, both would pass a tight remaining
+  // budget. This is the structural race that reserveAccountCost would close —
+  // but dataflow never schedules that interleaving for one record (see above).
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-ceil-toctou-'));
+  writeFileSync(
+    join(listDir, 'outbound.yaml'),
+    `list: { name: ceil-toctou }
+business: { name: T, description: t, icp: t, offer: t }
+pipeline: []
+score: { minimum: 0 }
+sequences: { default: { steps: [] } }
+`,
+  );
+  writeFileSync(join(listDir, 'operator.md'), 'ceil toctou');
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const recordId = 'toctou_rec';
+  const ceiling = TIER_CEILINGS.C; // 0.30
+  const unit = 0.2; // two concurrent units → 0.40 > 0.30
+
+  ensureRecordColumns({
+    db,
+    columns: ['treatment_tier', 'enrichment_cost_usd', 'cost_ledger_json'],
+  });
+  db.prepare(`
+    INSERT INTO records (
+      _row_id, business_name, sequence_name, sequence_status, treatment_tier,
+      enrichment_cost_usd, _created_at, _updated_at, created_at, updated_at
+    ) VALUES (?, 'TOCTOU Co', 'default', 'idle', 'C', 0, ?, ?, ?, ?)
+  `).run(recordId, now, now, now, now);
+
+  const record = () => db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId);
+  const stepConfig = { action: 'tool_call', unit_cost_usd: unit };
+
+  // Explicit interleaving: both read pre-spend totals, both pass, both settle.
+  const gate1 = evaluateEnrichmentCeilingGate({
+    db,
+    record: record(),
+    stepConfig,
+    enrichmentBudget: treasureValleyEnrichmentBudget,
+  });
+  const gate2 = evaluateEnrichmentCeilingGate({
+    db,
+    record: record(),
+    stepConfig,
+    enrichmentBudget: treasureValleyEnrichmentBudget,
+  });
+  assert.equal(gate1.within_budget, true, 'first concurrent check passes');
+  assert.equal(gate2.within_budget, true, 'second concurrent check also passes (stale total)');
+  assert.equal(gate1.ceiling, ceiling);
+
+  insertCostEvent({
+    db,
+    event: {
+      id: randomUUID(),
+      record_id: recordId,
+      step_id: 'pipeline_enrich:step_a',
+      usd_cost: unit,
+      provider: 'fixture',
+      payload: {},
+      occurred_at: now,
+    },
+  });
+  insertCostEvent({
+    db,
+    event: {
+      id: randomUUID(),
+      record_id: recordId,
+      step_id: 'pipeline_enrich:step_b',
+      usd_cost: unit,
+      provider: 'fixture',
+      payload: {},
+      occurred_at: now,
+    },
+  });
+
+  const spent = sumRecordCostEventsUsd(db, recordId);
+  assert.ok(
+    spent.enrichment_usd > ceiling,
+    `forced concurrent spends overshoot: ${spent.enrichment_usd} > ${ceiling}`,
+  );
+  // After both land, a third check is blocked — the race is only in-flight.
+  const after = evaluateEnrichmentCeilingGate({
+    db,
+    record: record(),
+    stepConfig: { action: 'tool_call', unit_cost_usd: unit },
+    enrichmentBudget: treasureValleyEnrichmentBudget,
+  });
+  assert.equal(after.within_budget, false);
+  assert.equal(after.reason, 'enrichment_ceiling');
+  db.close();
+});
+
+test('sequential steps for one record respect the ceiling (production interleaving)', async () => {
+  // Same unit costs as the TOCTOU case, but serialised like dataflow: second
+  // gate sees the first spend and blocks.
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-ceil-serial-spend-'));
+  writeFileSync(
+    join(listDir, 'outbound.yaml'),
+    `list: { name: ceil-serial }
+business: { name: T, description: t, icp: t, offer: t }
+pipeline: []
+score: { minimum: 0 }
+sequences: { default: { steps: [] } }
+`,
+  );
+  writeFileSync(join(listDir, 'operator.md'), 'ceil serial');
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const recordId = 'serial_spend_rec';
+  const unit = 0.2;
+
+  ensureRecordColumns({
+    db,
+    columns: ['treatment_tier', 'enrichment_cost_usd', 'cost_ledger_json'],
+  });
+  db.prepare(`
+    INSERT INTO records (
+      _row_id, business_name, sequence_name, sequence_status, treatment_tier,
+      enrichment_cost_usd, _created_at, _updated_at, created_at, updated_at
+    ) VALUES (?, 'Serial Co', 'default', 'idle', 'C', 0, ?, ?, ?, ?)
+  `).run(recordId, now, now, now, now);
+
+  const record = () => db.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordId);
+  const stepConfig = { action: 'tool_call', unit_cost_usd: unit };
+
+  const first = evaluateEnrichmentCeilingGate({
+    db,
+    record: record(),
+    stepConfig,
+    enrichmentBudget: treasureValleyEnrichmentBudget,
+  });
+  assert.equal(first.within_budget, true);
+  insertCostEvent({
+    db,
+    event: {
+      id: randomUUID(),
+      record_id: recordId,
+      step_id: 'pipeline_enrich:step_a',
+      usd_cost: unit,
+      provider: 'fixture',
+      payload: {},
+      occurred_at: now,
+    },
+  });
+
+  const second = evaluateEnrichmentCeilingGate({
+    db,
+    record: record(),
+    stepConfig,
+    enrichmentBudget: treasureValleyEnrichmentBudget,
+  });
+  assert.equal(second.within_budget, false, 'second serial step sees first spend');
+  assert.equal(second.reason, 'enrichment_ceiling');
+  assert.ok(second.enrichment_usd + unit > TIER_CEILINGS.C);
+  db.close();
 });

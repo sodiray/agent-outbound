@@ -317,6 +317,14 @@ export type EnrichmentCeilingGateResult = {
  * Pre-provider enrichment spend check.
  * Hydrates from cost_events when db is present, else ledger / enrichment_cost_usd.
  * Callers skip with the specific budget reason when apply && !within_budget.
+ *
+ * Check-then-act (no reservation / row lock). That is safe under the pipeline
+ * dataflow scheduler: `runDataflowCore` advances each record on a single
+ * sequential chain (pick step → await load → await outcome → next), so two
+ * expensive enrich steps for the same record never evaluate this gate
+ * concurrently. Cross-record concurrency (default 3) does not share a per-record
+ * ceiling. If per-record step fan-out is ever introduced, wire
+ * `reserveAccountCost` (or an enrichment-scoped variant) here — see costs.ts.
  */
 export function evaluateEnrichmentCeilingGate(input: {
   db?: any;
