@@ -3,6 +3,7 @@ import { flattenPipelineSteps } from '../lib/subpipelines.js';
 import {
   insertPipelineEvent,
   insertChannelEvent,
+  logOutboundSuppressionRefusal,
   nowTimestamp,
   ensureRecordColumns,
   upsertRecord,
@@ -172,6 +173,13 @@ export const submitMailWithIdempotency = async ({
 }): Promise<MailSubmitResult> => {
   const suppression = evaluateTransmitterSuppression({ db, record, channel: 'mail' });
   if (suppression.blocked) {
+    logOutboundSuppressionRefusal({
+      db,
+      recordId: request.recordId,
+      reason: suppression.reason,
+      channel: 'mail',
+      payload: { step_id: stepId },
+    });
     throw new Error(`Mail submit blocked for ${request.recordId} step ${stepId}: ${suppression.reason}`);
   }
   ensureMailIdempotencyTable(db);

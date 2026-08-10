@@ -25,6 +25,7 @@ import {
   addSuppression,
   ensureRecordColumns,
   insertChannelEvent,
+  insertComplianceLog,
   projectContactOntoRecord,
   upsertRecord,
 } from './db.js';
@@ -365,6 +366,30 @@ export function processBounceEvent(input: ProcessBounceEventInput): ProcessBounc
       });
     }
     insertChannelEvent({ db: input.db, event: applied.channel_event });
+    // Factual audit of AO's hard-bounce handling (channel invalidation). Soft
+    // bounces without harden are not logged here — they are delivery retries,
+    // not a durable compliance action.
+    if (applied.bounce_type === 'hard') {
+      insertComplianceLog({
+        db: input.db,
+        entry: {
+          record_id: recordId,
+          action: 'hard_bounce',
+          reason: String(applied.channel_event.payload?.reason
+            || `${applied.scope}_hard_bounce`),
+          payload: {
+            bounce_type: applied.bounce_type,
+            scope: applied.scope,
+            source: applied.channel_event.payload?.source || input.source || 'dsn',
+            email: String(applied.channel_event.payload?.email || bouncedEmail || ''),
+            contact_id: String(applied.channel_event.contact_id || contactId || ''),
+            message_id: String(applied.channel_event.provider_message_id || messageId || ''),
+            hardened_from_soft: Boolean(applied.hardened_from_soft),
+          },
+          occurred_at: applied.channel_event.occurred_at,
+        },
+      });
+    }
     for (const entry of suppressEntries) {
       addSuppression({ db: input.db, entry });
       if (input.globalSuppressionDb && input.globalSuppressionDb !== input.db) {

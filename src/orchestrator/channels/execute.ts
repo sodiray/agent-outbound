@@ -12,6 +12,7 @@ import {
   insertChannelEvent,
   insertDraft,
   insertPipelineEvent,
+  logOutboundSuppressionRefusal,
   nowTimestamp,
   upsertRecord,
   updateDraft,
@@ -1650,6 +1651,13 @@ export const executeChannelStep = async ({
         channel: 'linkedin',
       });
       if (linkedinSuppression.blocked) {
+        logOutboundSuppressionRefusal({
+          db,
+          recordId,
+          reason: linkedinSuppression.reason,
+          channel: 'linkedin',
+          payload: { step_id: sequenceStepId },
+        });
         return {
           status: 'skipped',
           reason: linkedinSuppression.reason,
@@ -2497,6 +2505,13 @@ export const executeChannelStep = async ({
         channel: 'email',
       });
       if (emailSuppression.blocked) {
+        logOutboundSuppressionRefusal({
+          db,
+          recordId,
+          reason: emailSuppression.reason,
+          channel: 'email',
+          payload: { step_id: sequenceStepId },
+        });
         return {
           status: 'skipped',
           reason: emailSuppression.reason,

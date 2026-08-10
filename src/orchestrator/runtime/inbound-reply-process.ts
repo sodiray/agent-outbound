@@ -10,7 +10,13 @@ import { generateObjectWithTools } from './llm.js';
 import { randomUUID } from 'node:crypto';
 import { applyInboundReplyClassification } from '../policy/inbound-reply.js';
 import { detectBounceFromText } from '../policy/bounce.js';
-import { addSuppression, ensureRecordColumns, insertChannelEvent, upsertRecord } from './db.js';
+import {
+  addSuppression,
+  ensureRecordColumns,
+  insertChannelEvent,
+  insertComplianceLog,
+  upsertRecord,
+} from './db.js';
 import { processBounceEvent } from './bounce-process.js';
 import { nowIso } from '../lib/record.js';
 
@@ -195,6 +201,23 @@ export async function processInboundReplyText(input: {
   upsertRecord({ db: input.db, row: applied.patch });
   insertChannelEvent({ db: input.db, event: applied.channel_event });
   if (explicitStop) {
+    // Factual audit: AO classified this reply as an opt-out (pipeline-declared
+    // opt_out_classifications). Separate from the suppress registry write below.
+    insertComplianceLog({
+      db: input.db,
+      entry: {
+        record_id: recordId,
+        action: 'opt_out',
+        reason: 'opt_out',
+        payload: {
+          classification,
+          source: 'inbound_reply_classifier',
+          explicit_stop: true,
+          message_id: String(input.messageId || ''),
+        },
+        occurred_at: pauseAt,
+      },
+    });
     const email = String(record.email_primary || record.contact_email || '').trim().toLowerCase();
     if (email) {
       const entry = {

@@ -3699,24 +3699,177 @@ export const listDrafts = ({ db, whereSql = '1=1', params = [], limit = 100, off
     LIMIT ? OFFSET ?
   `).all(...params, Number(limit), Number(offset));
 
+/**
+ * Reasons that mean an outbound action was refused because of suppression /
+ * channel block state (not verification gates or unrelated skips).
+ */
+export const SUPPRESSION_REFUSAL_REASONS = new Set([
+  'record_suppressed',
+  'contact_suppressed',
+  'email_suppressed',
+  'linkedin_suppressed',
+  'mail_suppressed',
+  'address_suppressed',
+  'phone_suppressed',
+  'dne_email',
+  'dnc_phone',
+  'do_not_sms',
+  'dnk_visit',
+]);
+
+const hasComplianceLogTable = (db) => {
+  try {
+    const row = db.prepare(
+      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'compliance_log' LIMIT 1",
+    ).get();
+    return Boolean(row?.ok);
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Append one factual row to compliance_log (AO's audit of its own mechanism).
+ *
+ * Never throws: a log failure must not abort the action being audited.
+ * On write failure, surfaces `compliance_log_write_failed:...` on the record's
+ * last_error when record_id is present (same pattern as stage_review_open_failed).
+ * Global suppression DBs have no compliance_log table — skipped, not a failure.
+ *
+ * Pipelines / commands may call this for author-declared policy events; keep
+ * action/reason/payload factual and neutral.
+ */
+export const insertComplianceLog = ({ db, entry }) => {
+  const id = String(entry?.id || `cl_${randomUUID()}`);
+  const recordId = String(entry?.record_id || entry?.row_id || '').trim();
+  const action = String(entry?.action || '').trim();
+  const reason = String(entry?.reason || '');
+  const occurredAt = String(entry?.occurred_at || nowIso());
+  const payload = entry?.payload !== undefined ? entry.payload : (entry?.payload_json ?? {});
+
+  if (!action) {
+    return { ok: false, id, error: 'compliance_log action required', skipped: false };
+  }
+  if (!hasComplianceLogTable(db)) {
+    return { ok: true, id, skipped: true };
+  }
+
+  try {
+    db.prepare(`
+      INSERT INTO compliance_log (id, record_id, action, reason, payload_json, occurred_at)
+      VALUES (@id, @record_id, @action, @reason, @payload_json, @occurred_at)
+    `).run({
+      id,
+      record_id: recordId,
+      action,
+      reason,
+      payload_json: typeof payload === 'string' ? payload : safeJson(payload),
+      occurred_at: occurredAt,
+    });
+    return { ok: true, id, skipped: false };
+  } catch (error) {
+    const message = String((error as Error)?.message || error);
+    if (recordId) {
+      try {
+        db.prepare(`
+          UPDATE records
+          SET last_error = ?, updated_at = ?
+          WHERE _row_id = ?
+        `).run(`compliance_log_write_failed:${message}`, nowIso(), recordId);
+      } catch {
+        // Surface attempt failed; still return the write error to the caller.
+      }
+    }
+    return { ok: false, id, error: message, skipped: false };
+  }
+};
+
+/**
+ * Log that an outbound action was refused because of suppression / DNC state.
+ * No-op (not a failure) for non-suppression gate reasons.
+ */
+export const logOutboundSuppressionRefusal = ({
+  db,
+  recordId,
+  reason,
+  channel = '',
+  payload = {},
+  occurredAt = undefined,
+}: {
+  db: any;
+  recordId?: string;
+  reason?: string;
+  channel?: string;
+  payload?: Record<string, unknown>;
+  occurredAt?: string;
+}) => {
+  const refusalReason = String(reason || '').trim();
+  if (!SUPPRESSION_REFUSAL_REASONS.has(refusalReason)) {
+    return { ok: true, id: '', skipped: true };
+  }
+  return insertComplianceLog({
+    db,
+    entry: {
+      record_id: String(recordId || '').trim(),
+      action: 'outbound_refused',
+      reason: refusalReason,
+      payload: {
+        channel: String(channel || ''),
+        ...((payload && typeof payload === 'object') ? payload : {}),
+      },
+      occurred_at: occurredAt,
+    },
+  });
+};
+
 export const addSuppression = ({ db, entry }) => {
+  const identifierValue = String((entry.identifier_value || entry.value) || '').toLowerCase().trim();
+  const identifierType = entry.identifier_type || entry.value_type;
+  const value = String((entry.value || entry.identifier_value) || '').toLowerCase().trim();
+  const valueType = entry.value_type || entry.identifier_type;
+  const rowId = entry.row_id || entry.record_id || '';
+  const createdAt = entry.created_at || nowIso();
+  const source = entry.source || '';
+  const reason = entry.reason;
+  const entryId = entry.entry_id || entry.id;
+
   db.prepare(`
     INSERT OR REPLACE INTO suppression
       (entry_id, id, identifier_value, identifier_type, value, value_type, scope, reason, source, row_id, created_at)
     VALUES
       (@entry_id, @id, @identifier_value, @identifier_type, @value, @value_type, @scope, @reason, @source, @row_id, @created_at)
   `).run({
-    entry_id: entry.entry_id || entry.id,
+    entry_id: entryId,
     id: entry.id || entry.entry_id,
-    identifier_value: String((entry.identifier_value || entry.value) || '').toLowerCase().trim(),
-    identifier_type: entry.identifier_type || entry.value_type,
-    value: String((entry.value || entry.identifier_value) || '').toLowerCase().trim(),
-    value_type: entry.value_type || entry.identifier_type,
+    identifier_value: identifierValue,
+    identifier_type: identifierType,
+    value,
+    value_type: valueType,
     scope: entry.scope,
-    reason: entry.reason,
-    source: entry.source || '',
-    row_id: entry.row_id || entry.record_id || '',
-    created_at: entry.created_at || nowIso(),
+    reason,
+    source,
+    row_id: rowId,
+    created_at: createdAt,
+  });
+
+  // Audit the registry write itself. Global suppression DB has no compliance_log
+  // table — insertComplianceLog skips cleanly. Log failure never undoes the
+  // suppression row above.
+  insertComplianceLog({
+    db,
+    entry: {
+      record_id: rowId,
+      action: 'suppress',
+      reason: String(reason || ''),
+      payload: {
+        identifier: identifierValue || value,
+        identifier_type: String(identifierType || valueType || ''),
+        source: String(source || ''),
+        scope: String(entry.scope || ''),
+        entry_id: String(entryId || ''),
+      },
+      occurred_at: createdAt,
+    },
   });
 };
 

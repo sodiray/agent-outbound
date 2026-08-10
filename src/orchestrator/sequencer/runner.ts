@@ -7,6 +7,7 @@ import {
   inPlayWhere,
   insertChannelEvent,
   listContactsByRecord,
+  logOutboundSuppressionRefusal,
   openGlobalSuppressionDb,
   openListDb,
   ensureRecordColumns,
@@ -1032,6 +1033,21 @@ export const runSequencer = async ({
         // Gate-blocked records keep their current sequence_status — gate blocks are
         // per-step, not terminal. The record will be re-evaluated next run.
         // Only write last_error so the operator can inspect why it was skipped.
+        logOutboundSuppressionRefusal({
+          db,
+          recordId: getRecordRowId(record),
+          reason: gate.reason,
+          channel: stepIntent.uses_email
+            ? 'email'
+            : stepIntent.uses_phone
+              ? (stepIntent.uses_sms ? 'sms' : 'phone')
+              : stepIntent.uses_mail
+                ? 'mail'
+                : stepIntent.uses_visit
+                  ? 'visit'
+                  : '',
+          payload: { step_id: step?.id || stepNumber },
+        });
         upsertRecord({ db, row: { ...record, last_error: `gate_blocked: ${gate.reason}` } });
         summary.skipped += 1;
         return;
@@ -1524,6 +1540,12 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
       const records = group.records.filter((row) => {
         const launchSuppression = evaluateTransmitterSuppression({ db, record: row, channel });
         if (launchSuppression.blocked) {
+          logOutboundSuppressionRefusal({
+            db,
+            recordId: getRecordRowId(row),
+            reason: launchSuppression.reason,
+            channel,
+          });
           upsertRecord({ db, row: { ...row, last_error: `gate_blocked: ${launchSuppression.reason}` } });
           summary.skipped += 1;
           return false;
@@ -1565,6 +1587,12 @@ export const launchSend = async ({ listDir, limit = 50 }) => {
             channel: launchSuppressionChannel,
           });
           if (launchSuppression.blocked) {
+            logOutboundSuppressionRefusal({
+              db,
+              recordId: getRecordRowId(row),
+              reason: launchSuppression.reason,
+              channel: launchSuppressionChannel,
+            });
             upsertRecord({ db, row: { ...row, last_error: `gate_blocked: ${launchSuppression.reason}` } });
             summary.skipped += 1;
             return false;

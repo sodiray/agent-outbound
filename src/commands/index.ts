@@ -10,6 +10,7 @@ import {
   deleteRecordsKeepTop,
   getRecordById,
   inPlayWhere,
+  insertComplianceLog,
   listActiveOverrides,
   logComplianceEvent,
   openGlobalSuppressionDb,
@@ -2151,6 +2152,19 @@ export const forgetCommand = ({ list, email = '', phone = '' }) => {
       });
     }
 
+    insertComplianceLog({
+      db,
+      entry: {
+        action: 'forget',
+        reason: 'forget_request',
+        payload: {
+          source: 'forget_command',
+          email: normalizedEmail,
+          phone: normalizedPhone,
+          records_updated: rows.length,
+        },
+      },
+    });
     logComplianceEvent({
       listDir,
       payload: {
