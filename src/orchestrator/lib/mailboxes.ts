@@ -7,6 +7,7 @@ import {
 } from './credentials.js';
 import { nowIso } from './record.js';
 import { deliveryModeForChannel } from '../runtime/delivery-mode.js';
+import { mailboxCapInteractionType } from './channel-daily-caps.js';
 
 export type MailboxCredentials = Credentials;
 
@@ -152,14 +153,27 @@ const eventMailboxId = (db: Db, rowId?: string) => {
 export const countMailboxSendsToday = (db: Db, mailboxId: string, asOf: string | Date = nowIso()) => {
   const dayStart = new Date(asOf);
   dayStart.setUTCHours(0, 0, 0, 0);
+  const dayStartIso = dayStart.toISOString();
+  const interactionType = mailboxCapInteractionType(mailboxId);
+  // Events (accepted sends) + in-flight/accepted reservations so selection and
+  // concurrent workers share one capacity view (reserve-then-act).
   const row = db.prepare(`
-    SELECT COUNT(*) AS n
-    FROM channel_events
-    WHERE channel = 'email'
-      AND (action IN ('executed', 'sent') OR event_type IN ('executed', 'sent'))
-      AND occurred_at >= ?
-      AND json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END, '$.mailbox_id') = ?
-  `).get(dayStart.toISOString(), mailboxId);
+    SELECT (
+      SELECT COUNT(*)
+      FROM channel_events
+      WHERE channel = 'email'
+        AND (action IN ('executed', 'sent') OR event_type IN ('executed', 'sent'))
+        AND occurred_at >= ?
+        AND json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END, '$.mailbox_id') = ?
+    ) + (
+      SELECT COUNT(*)
+      FROM channel_daily_cap_reservations
+      WHERE channel = 'email'
+        AND interaction_type = ?
+        AND day_start = ?
+        AND status IN ('reserved', 'accepted')
+    ) AS n
+  `).get(dayStartIso, mailboxId, interactionType, dayStartIso);
   return Number(row?.n || 0);
 };
 

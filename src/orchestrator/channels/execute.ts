@@ -29,11 +29,12 @@ import { readConfig } from '../lib/config.js';
 import { resolveChannelProviderCredentials } from '../lib/channel-credentials.js';
 import {
   acceptChannelDailyCapReservation,
+  mailboxCapInteractionType,
   releaseChannelDailyCapReservation,
   reserveChannelDailyCap,
   settleChannelDailyCapReservation,
 } from '../lib/channel-daily-caps.js';
-import { countMailboxSendsToday, resolveSendMailbox, smtpCredentialEnv } from '../lib/mailboxes.js';
+import { resolveSendMailbox, smtpCredentialEnv } from '../lib/mailboxes.js';
 import {
   commitLiveInteraction,
   isSinkOrFixtureMode,
@@ -833,6 +834,9 @@ export const executeChannelStep = async ({
   const recordId = getRecordRowId(record);
   const sequenceStepId = String(step?.id || `step_${stepNumber}`);
   const deliveryState: { emailMode: 'live' | 'sink' | 'unlimited' | null } = { emailMode: null };
+  // Per-mailbox email daily cap reservation (reserve-then-act). Null when the
+  // selected mailbox has no daily_cap — global AO_EMAIL_DAILY_CAP stays check-then-act.
+  let emailCapReservation: { allowed: true; reservationId: string } | null = null;
 
   // Canary isolation FIRST — before idempotency, models, tools, or providers.
   // A later DB guard is insufficient: SMTP sink / Unipile can already have fired.
@@ -2315,29 +2319,34 @@ export const executeChannelStep = async ({
     } else if (actionName === 'tool_call' && intent === 'send') {
       // Deterministic send path — no LLM. Used for SMTP / pinned tools.
       const { executeToolCallAction } = await import('../enrichment/actions/tool-call.js');
-      // A selected mailbox's daily_cap is scoped to its own event payload and
-      // takes precedence over the legacy step/global cap. The latter remains
-      // the compatibility guard for lists without a capped mailbox.
-      const dailyCap = Number(sendMailbox?.mailbox.daily_cap ?? stepConfig.daily_cap ?? process.env.AO_EMAIL_DAILY_CAP ?? 2);
-      if (Number.isFinite(dailyCap) && dailyCap >= 0 && preChannelHint === 'email') {
-        const dayStart = new Date(now);
-        dayStart.setUTCHours(0, 0, 0, 0);
-        const sentToday = sendMailbox?.mailbox.daily_cap !== undefined
-          ? { n: countMailboxSendsToday(db, sendMailbox.id, now) }
-          : db.prepare(`
+      // Per-mailbox daily_cap takes precedence and is enforced by reserve-then-act
+      // immediately before the provider side-effect (see reserve below). The legacy
+      // step/global cap remains the compatibility guard for lists without a capped
+      // mailbox and stays check-then-act (mailbox with no daily_cap is unaffected).
+      const mailboxDailyCapRaw = sendMailbox?.mailbox.daily_cap;
+      const hasMailboxDailyCap = mailboxDailyCapRaw !== undefined
+        && Number.isFinite(Number(mailboxDailyCapRaw))
+        && Number(mailboxDailyCapRaw) >= 0;
+      if (!hasMailboxDailyCap && preChannelHint === 'email') {
+        const dailyCap = Number(stepConfig.daily_cap ?? process.env.AO_EMAIL_DAILY_CAP ?? 2);
+        if (Number.isFinite(dailyCap) && dailyCap >= 0) {
+          const dayStart = new Date(now);
+          dayStart.setUTCHours(0, 0, 0, 0);
+          const sentToday = db.prepare(`
               SELECT COUNT(*) AS n
               FROM channel_events
               WHERE channel = 'email'
                 AND (action IN ('executed', 'sent') OR event_type IN ('executed', 'sent'))
                 AND occurred_at >= ?
             `).get(dayStart.toISOString());
-        if (Number(sentToday?.n || 0) >= dailyCap) {
-          return {
-            status: 'skipped',
-            reason: `Daily email cap reached (${dailyCap}).`,
-            provider_id: '',
-            auto_skipped_steps: [],
-          };
+          if (Number(sentToday?.n || 0) >= dailyCap) {
+            return {
+              status: 'skipped',
+              reason: `Daily email cap reached (${dailyCap}).`,
+              provider_id: '',
+              auto_skipped_steps: [],
+            };
+          }
         }
       }
       // Construct FINAL provider arguments FIRST — apply args_map + fallbacks here,
@@ -2583,25 +2592,64 @@ export const executeChannelStep = async ({
           auto_skipped_steps: [],
         };
       }
+
+      // Reserve-then-act for per-mailbox daily_cap (same table + helpers as LinkedIn).
+      if (hasMailboxDailyCap && sendMailbox) {
+        const mailboxCap = Number(mailboxDailyCapRaw);
+        const reserved = reserveChannelDailyCap({
+          db,
+          channel: 'email',
+          interactionType: mailboxCapInteractionType(sendMailbox.id),
+          cap: mailboxCap,
+          at: now,
+          mailboxId: sendMailbox.id,
+        });
+        if (!reserved.allowed) {
+          return {
+            status: 'skipped',
+            reason: `Daily email cap reached (${mailboxCap}).`,
+            provider_id: '',
+            auto_skipped_steps: [],
+          };
+        }
+        emailCapReservation = reserved;
+      }
+
       const emailClaim = reserveProviderInteraction({ providerChannel: 'email' });
-      if (emailClaim.ok === false) return emailClaim.result as any;
+      if (emailClaim.ok === false) {
+        if (emailCapReservation) {
+          releaseChannelDailyCapReservation({ db, reservationId: emailCapReservation.reservationId });
+          emailCapReservation = null;
+        }
+        return emailClaim.result as any;
+      }
       deliveryState.emailMode = emailClaim.mode;
 
-      // Frozen args only — args_map already applied above; do not re-apply in tool-call.
-      const toolResult = await executeToolCallAction({
-        mcp,
-        listDir,
-        stepId: sequenceStepId,
-        stepConfig: {
-          ...stepConfig,
-          args: baseArgs,
-          args_map: {},
-          external_send: true,
-        },
-        record: sendRecord,
-        toolCatalog,
-        env: toolEnvironment,
-      });
+      let toolResult: Awaited<ReturnType<typeof executeToolCallAction>>;
+      try {
+        // Frozen args only — args_map already applied above; do not re-apply in tool-call.
+        toolResult = await executeToolCallAction({
+          mcp,
+          listDir,
+          stepId: sequenceStepId,
+          stepConfig: {
+            ...stepConfig,
+            args: baseArgs,
+            args_map: {},
+            external_send: true,
+          },
+          record: sendRecord,
+          toolCatalog,
+          env: toolEnvironment,
+        });
+      } catch (error) {
+        releaseProviderInteraction({ mode: emailClaim.mode });
+        if (emailCapReservation) {
+          releaseChannelDailyCapReservation({ db, reservationId: emailCapReservation.reservationId });
+          emailCapReservation = null;
+        }
+        throw error;
+      }
       const sendOutputs = (toolResult.outputs || {}) as Record<string, unknown>;
       // Provider rejection is NOT acceptance — never mark sent / invent provider id.
       const providerRejected =
@@ -2612,6 +2660,10 @@ export const executeChannelStep = async ({
         || String(sendOutputs.status || '').toLowerCase() === 'rejected';
       if (providerRejected) {
         releaseProviderInteraction({ mode: emailClaim.mode });
+        if (emailCapReservation) {
+          releaseChannelDailyCapReservation({ db, reservationId: emailCapReservation.reservationId });
+          emailCapReservation = null;
+        }
         if (idemKey && !dryRun) {
           failIdempotency({
             db,
@@ -2649,6 +2701,11 @@ export const executeChannelStep = async ({
         sendMessageId = `accepted_fixture_${recordId}_${sequenceStepId}_${Date.now()}`;
       } else if (!sendMessageId && !dryRun) {
         // Ambiguous: tool returned without error but no id — mark uncertain, not sent/retryable failed.
+        releaseProviderInteraction({ mode: emailClaim.mode });
+        if (emailCapReservation) {
+          releaseChannelDailyCapReservation({ db, reservationId: emailCapReservation.reservationId });
+          emailCapReservation = null;
+        }
         (sendRecord as any).__provider_accept_attempted = true;
         if (idemKey) {
           failIdempotency({
@@ -2676,6 +2733,9 @@ export const executeChannelStep = async ({
       // CRITICAL: record provider acceptance immediately — before any bookkeeping
       // that can throw. A later SQLite failure must not leave the claim failed/retryable.
       (sendRecord as any).__provider_accept_attempted = true;
+      if (emailCapReservation) {
+        acceptChannelDailyCapReservation({ db, reservationId: emailCapReservation.reservationId, at: now });
+      }
       commitProviderInteraction({
         mode: emailClaim.mode,
         providerChannel: 'email',
@@ -2879,11 +2939,18 @@ export const executeChannelStep = async ({
             ...(sendMailbox ? {
               mailbox_id: sendMailbox.id,
               smtp_from: String(sendMailbox.credentials.SMTP_FROM || sendMailbox.credentials.SMTP_USER || ''),
+              ...(emailCapReservation
+                ? { interaction_type: mailboxCapInteractionType(sendMailbox.id) }
+                : {}),
             } : {}),
           },
           occurred_at: now,
         },
       });
+      if (emailCapReservation) {
+        settleChannelDailyCapReservation({ db, reservationId: emailCapReservation.reservationId });
+        emailCapReservation = null;
+      }
     }
 
     // When review is required for email, pause sequence on draft create so
