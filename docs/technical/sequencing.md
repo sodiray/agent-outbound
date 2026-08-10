@@ -143,13 +143,16 @@ sequences:
     steps: [ ... ]
   re_engage:
     steps: [ ... ]
-    start_when: >-
-      The record completed the default sequence without engagement,
-      but its trigger score has since rebounded above 60 — suggesting
-      new timing signals worth acting on.
 ```
 
-The sequencer assigns records to sequences. Records carry `sequence_name`. Switching sequences is explicit and resets `sequence_step`. The `start_when` field is agent-evaluated against the record's current state.
+The sequencer assigns records to sequences. Records carry `sequence_name`. Switching sequences is explicit and resets `sequence_step`.
+
+**Membership is decided by an `assign` step, not by the sequence block.** A record
+enters `re_engage` because something set its `sequence_name`, and the condition for
+that belongs on the assign step. This document previously described a `start_when`
+field as "agent-evaluated against the record's current state" — nothing ever read it,
+and the engine now rejects it, because a gate that is documented and inert is worse
+than no gate at all.
 
 ## Config Shape
 
@@ -200,18 +203,24 @@ sequences:
             toolkits: [GMAIL]
             tools: [GMAIL_SEND_EMAIL]
 
-    on_reply: pause
-    on_bounce: stop
-    on_opt_out: stop
-
   re_engage:
-    start_when: >-
-      The record completed the default sequence without engagement,
-      but its trigger score has since rebounded above 70.
     steps: [ ... ]
 ```
 
-Steps have no `action` type field — the agent reads the `description` to determine what kind of work is required. Conditions, `defer`, and `start_when` are natural language, evaluated by the agent against the record's full state. Day offsets, `on_reply`/`on_bounce`/`on_opt_out`, and tool config remain structured — those are operational mechanics, not judgment calls.
+### Inbound handling is not configurable here
+
+A reply pauses the sequence, an opt-out suppresses the contact, and a bounce is
+handled structurally. That behaviour is fixed in the engine and there is no key
+that changes it.
+
+`on_reply`, `on_bounce` and `on_opt_out` used to appear in this document and were
+accepted by the schema. Nothing read them. An author declaring `on_opt_out: stop`
+was configuring a compliance stop that did not exist — and both shipped example
+configs declared exactly that. The engine now rejects all three with a message
+pointing here. If you need inbound behaviour the engine does not provide, that is
+a change to the engine, not a key.
+
+Steps have no `action` type field — the agent reads the `description` to determine what kind of work is required. Conditions and `defer` are natural language, evaluated by the agent against the record's full state. Day offsets and tool config remain structured — those are operational mechanics, not judgment calls. Inbound reactions are neither: they are fixed engine behaviour, not configuration (see above).
 
 File references in step descriptions (e.g., `./assets/flyer.pdf`) are relative to the list directory.
 

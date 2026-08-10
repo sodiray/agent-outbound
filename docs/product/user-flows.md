@@ -156,7 +156,7 @@ The visit landed 1 day after delivery rather than 3 days after dispatch — exac
 
 **Under the hood:**
 1. `/outbound` runs `agent-outbound config author boise-plumbers "add a re_engage sequence: ..."`
-2. `author-config` adds `sequences.re_engage` with a `start_when` condition and a new three-step cadence
+2. `author-config` adds `sequences.re_engage` with a new three-step cadence, and an `assign` step whose condition routes records into it (sequence membership is decided by assign, not by a key on the sequence)
 3. Next sequence run picks up eligible records and starts them on the new sequence
 
 ## Flow 15: Watch a Long-Running Operation
