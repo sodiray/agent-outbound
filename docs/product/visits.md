@@ -41,9 +41,15 @@ When multiple visits come due on the same day, the tool batches them. Given:
 
 - Records due for a visit
 - The operator's home base
-- Daily visit cap (defaults to 12)
+- Daily visit cap
 - Business hours window
 - Any existing calendar conflicts
+
+These are inputs to the route-planning tool (`channels.visit.tool`), **not**
+configuration keys. A `list.territory` block declaring `home_base`,
+`max_visits_per_day`, `business_hours` or `max_drive_radius_miles` was accepted
+by the schema for a long time and read by nothing; the engine now refuses those
+keys rather than letting them look like settings that shape a route.
 
 The tool:
 

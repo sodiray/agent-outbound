@@ -11,7 +11,7 @@ How the operator interacts with the system and what happens under the hood. All 
 2. CLI creates the list directory with a blank `outbound.yaml` at the root and a tool-managed `.outbound/` subdirectory containing a fresh SQLite database (`prospects.db`). Nothing else is scaffolded — the operator creates whatever directories and files they need (assets, templates, etc.).
 3. `/outbound` runs `agent-outbound config author boise-plumbers "add searches for plumbing contractors in Boise metro"` — `author-config` calls `generateObject` with a `ConfigChange` schema and a Composio-toolkit-catalog lookup, emitting a typed diff that adds `source.searches` entries referencing whichever local-business-search and web-search toolkits are connected, plus default filters (has-website, has-phone, in-territory)
 4. The agent also determines the list's **identity** — the ordered fields used for deduplication (e.g., `[name, address]` for a business list) — and writes it to config
-5. The config diff also proposes default `list.territory` settings (home base, max visits per day) for operator review
+5. The config diff does **not** propose a `list.territory` visit block. Those keys (`home_base`, `max_visits_per_day`, `business_hours`, `preferred_visit_days`, `max_drive_radius_miles`, `exclude_zips`, `visit_permit_required`) were accepted by the schema and read by nothing; the engine now refuses them, and `author-config` no longer emits them. Visit routing takes its inputs from `channels.visit.tool` and territory polygons.
 6. Config written to `outbound.yaml`
 
 ## Flow 2: Source and Qualify
