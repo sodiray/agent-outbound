@@ -159,7 +159,14 @@ export const declaredStageInputs = (stepValue: unknown): string[] => {
 
 export type ResolvedStageInputs = {
   values: Record<string, unknown>;
+  /** Required inputs that are absent (null / undefined / blank string). */
   missingRequired: string[];
+  /**
+   * Inputs present but shorter than a declared `min_chars` (or non-string when
+   * `min_chars` is set and positive). Distinct from `missingRequired` so the
+   * event log can tell "absent" from "too thin to support a conclusion".
+   */
+  belowMinimum: string[];
 };
 
 const valueAtPath = (source: Record<string, unknown>, path: string): unknown => (
@@ -174,6 +181,38 @@ const absentInputValue = (value: unknown): boolean => (
   value === undefined || value === null || (typeof value === 'string' && value.trim() === '')
 );
 
+/**
+ * Character length of a resolved input for `min_chars`. Only strings have a
+ * character length; non-strings return null so the caller can fail closed.
+ * Counts the resolved value as returned (no extra trim) — resolution itself
+ * does not normalise text.
+ */
+const resolvedInputCharCount = (value: unknown): number | null => (
+  typeof value === 'string' ? value.length : null
+);
+
+/** Parse a declared non-negative integer min_chars; absent/invalid → no minimum. */
+const declaredMinChars = (value: unknown): number | undefined => {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) return undefined;
+  return value;
+};
+
+/**
+ * Non-execution reason when required inputs are unusable. Same shape as the
+ * historical missing-required skip, with a distinct token for below-minimum so
+ * the two are distinguishable in the event log. Null when the step may run.
+ */
+export const requiredInputNonExecutionReason = (resolved: ResolvedStageInputs): string | null => {
+  const parts: string[] = [];
+  if (resolved.missingRequired.length > 0) {
+    parts.push(`skipped_required_input_missing:${resolved.missingRequired.join(',')}`);
+  }
+  if (resolved.belowMinimum.length > 0) {
+    parts.push(`skipped_required_input_below_minimum:${resolved.belowMinimum.join(',')}`);
+  }
+  return parts.length > 0 ? parts.join(';') : null;
+};
+
 /** Resolve the declared capability map without exposing the rest of the record. */
 export const resolveStageInputs = ({
   step: stepValue,
@@ -187,19 +226,37 @@ export const resolveStageInputs = ({
   const inputs = config.inputs;
   if (Array.isArray(inputs)) {
     const values = Object.fromEntries(strings(inputs).map((field) => [field, record[field]]));
-    return { values, missingRequired: [] };
+    return { values, missingRequired: [], belowMinimum: [] };
   }
   const entries = Object.entries(asRecord(inputs)).map(([name, definition]) => {
     const input = asRecord(definition);
     const hasValue = Object.prototype.hasOwnProperty.call(input, 'value');
     const value = hasValue ? input.value : valueAtPath(record, text(input.from));
-    return { name, value, required: input.required !== false };
+    return {
+      name,
+      value,
+      required: input.required !== false,
+      minChars: declaredMinChars(input.min_chars),
+    };
   });
+  const missingRequired = entries
+    .filter(({ value, required }) => required && absentInputValue(value))
+    .map(({ name }) => name);
+  // Present but too thin: same non-execution gate as missing required, distinct reason.
+  // Boundary: length === min_chars is viable (not below). min_chars: 0 never fails a string.
+  // Non-string present values cannot satisfy a positive min_chars (fail closed).
+  const belowMinimum = entries
+    .filter(({ value, minChars }) => {
+      if (minChars === undefined || absentInputValue(value)) return false;
+      const chars = resolvedInputCharCount(value);
+      if (chars === null) return minChars > 0;
+      return chars < minChars;
+    })
+    .map(({ name }) => name);
   return {
     values: Object.fromEntries(entries.map(({ name, value }) => [name, value])),
-    missingRequired: entries
-      .filter(({ value, required }) => required && absentInputValue(value))
-      .map(({ name }) => name),
+    missingRequired,
+    belowMinimum,
   };
 };
 

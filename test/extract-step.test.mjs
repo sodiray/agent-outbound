@@ -333,3 +333,96 @@ pipeline:
     'extracted:email:1:site_text',
   ]);
 });
+
+const mapFormExtractStep = ({ minChars } = {}) => ({
+  kind: 'extract',
+  id: 'site_email_extract',
+  from: 'site_text',
+  using: 'email',
+  select: 'first',
+  inputs: {
+    site_text: {
+      from: 'site_text',
+      required: true,
+      ...(minChars === undefined ? {} : { min_chars: minChars }),
+    },
+    domain: { from: 'domain', required: false },
+    website: { from: 'website', required: false },
+  },
+  outputs: {
+    site_published_email: { type: 'string', description: 'Published business email.' },
+  },
+});
+
+test('extract with site_text longer than min_chars runs and writes the match', async () => {
+  const body = `Contact sales@acme.com for service. ${'padding '.repeat(50)}`;
+  assert.ok(body.length > 400);
+  await withDb({
+    domain: 'acme.com',
+    site_text: body,
+  }, async ({ db, listDir: root, record }) => {
+    const outcome = await execute({
+      db,
+      root,
+      configuredStep: mapFormExtractStep({ minChars: 400 }),
+      record,
+    });
+    const persisted = db.prepare('SELECT site_published_email FROM records WHERE _row_id = ?').get('extract_record');
+    assert.equal(outcome.passed, true);
+    assert.match(outcome.reason, /^extracted:email:1:site_text$/);
+    assert.equal(persisted.site_published_email, 'sales@acme.com');
+  });
+});
+
+test('extract with site_text shorter than min_chars does not run and records below-minimum', async () => {
+  const thin = 'Email sales@acme.com today.'; // well under 400 chars, would match if run
+  assert.ok(thin.length < 400);
+  await withDb({
+    domain: 'acme.com',
+    site_text: thin,
+    site_published_email: 'preexisting@acme.com',
+  }, async ({ db, listDir: root, record }) => {
+    const outcome = await execute({
+      db,
+      root,
+      configuredStep: mapFormExtractStep({ minChars: 400 }),
+      record,
+    });
+    const persisted = db.prepare('SELECT site_published_email FROM records WHERE _row_id = ?').get('extract_record');
+    assert.equal(outcome.reason, 'skipped_required_input_below_minimum:site_text');
+    assert.deepEqual(outcome.declaredOutputWrites, {});
+    // Must not overwrite with a confident extract from thin text.
+    assert.equal(persisted.site_published_email, 'preexisting@acme.com');
+  });
+});
+
+test('extract with required site_text absent is missing-required, not below-minimum', async () => {
+  await withDb({
+    domain: 'acme.com',
+    site_text: '',
+  }, async ({ db, listDir: root, record }) => {
+    const outcome = await execute({
+      db,
+      root,
+      configuredStep: mapFormExtractStep({ minChars: 400 }),
+      record,
+    });
+    assert.equal(outcome.reason, 'skipped_required_input_missing:site_text');
+    assert.notEqual(outcome.reason, 'skipped_required_input_below_minimum:site_text');
+  });
+});
+
+test('extract without min_chars still runs on short site_text', async () => {
+  await withDb({
+    domain: 'acme.com',
+    site_text: 'Email sales@acme.com.',
+  }, async ({ db, listDir: root, record }) => {
+    const outcome = await execute({
+      db,
+      root,
+      configuredStep: mapFormExtractStep(),
+      record,
+    });
+    assert.match(outcome.reason, /^extracted:email:1:site_text$/);
+  });
+});

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
-import { resolveStageInputs } from '../lib/stage-inputs.js';
+import { requiredInputNonExecutionReason, resolveStageInputs } from '../lib/stage-inputs.js';
 import { buildModelContext, withModelContextTelemetry } from '../lib/model-context.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { recordCostEvent } from '../lib/costs.js';
@@ -281,8 +281,11 @@ export const runScoreStage = async ({
   for (const initialRecord of rows) {
     const recordId = getRecordRowId(initialRecord);
     const inputs = resolveStageInputs({ step, record: initialRecord });
-    if (inputs.missingRequired.length > 0) {
-      outcomes.set(recordId, { passed: true, reason: `skipped_required_input_missing:${inputs.missingRequired.join(',')}` });
+    const requiredSkip = requiredInputNonExecutionReason(inputs);
+    if (requiredSkip) {
+      // Non-execution (not a confident grade): same gate as missing required,
+      // with a distinct reason token when the input is present but below min_chars.
+      outcomes.set(recordId, { passed: true, reason: requiredSkip });
       continue;
     }
     const depHash = scoreStageDependencyHash({ step, record: initialRecord, samples: sampleCount });

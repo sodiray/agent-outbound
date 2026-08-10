@@ -469,13 +469,24 @@ const StageInputDefinitionSchema = z.object({
   from: z.string().trim().min(1).optional(),
   value: z.union([z.string(), z.number(), z.boolean()]).optional(),
   required: z.boolean().default(true),
+  /** Minimum character length of the resolved string value; absent means no minimum. */
+  min_chars: z.number().int().min(0).optional(),
 }).strict().superRefine((value, ctx) => {
   const sources = Number(Boolean(value.from)) + Number(value.value !== undefined);
-  if (sources === 1) return;
-  ctx.addIssue({
-    code: z.ZodIssueCode.custom,
-    message: 'stage input must declare exactly one of from or value.',
-  });
+  if (sources !== 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'stage input must declare exactly one of from or value.',
+    });
+  }
+  // min_chars measures string length. A non-string literal cannot satisfy it.
+  if (value.min_chars !== undefined && value.value !== undefined && typeof value.value !== 'string') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'stage input min_chars applies only to string values.',
+      path: ['min_chars'],
+    });
+  }
 });
 
 const StageInputsSchema = z.union([
@@ -1085,6 +1096,8 @@ const ComposeInputSchema = z.object({
   from: z.string().min(1).optional(),
   value: z.union([z.string().min(1), z.number()]).transform((value) => String(value)).optional(),
   required: z.boolean().default(true),
+  /** Minimum character length of the resolved string value; absent means no minimum. */
+  min_chars: z.number().int().min(0).optional(),
 }).strict().superRefine((value, ctx) => {
   const sources = Number(Boolean(value.from)) + Number(Boolean(value.value));
   if (sources === 1) return;

@@ -3,7 +3,11 @@ import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
-import { resolveStageInputs, stageInputRecord } from '../lib/stage-inputs.js';
+import {
+  requiredInputNonExecutionReason,
+  resolveStageInputs,
+  stageInputRecord,
+} from '../lib/stage-inputs.js';
 
 export const EXTRACTOR_NAMES = ['email', 'phone', 'url'] as const;
 
@@ -279,6 +283,17 @@ export const executeExtractStepOnRecords = ({
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     try {
+      // Map-form inputs honour required + min_chars the same way compose/score do.
+      // Array-form inputs have no per-input options; resolve returns empty skip lists.
+      const requiredSkip = requiredInputNonExecutionReason(resolveStageInputs({ step: config, record: row }));
+      if (requiredSkip) {
+        outcomes.set(recordId, {
+          passed: true,
+          reason: requiredSkip,
+          declaredOutputWrites: {},
+        });
+        return;
+      }
       const depHash = extractDependencyHash({ step: config, record: row });
       const cached = readStaleness({ db, recordId, stepId: String(config.id || '') });
       const outputKeys = Object.keys(outputs);

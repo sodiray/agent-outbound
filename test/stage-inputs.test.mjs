@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   UndeclaredStageInputError,
+  requiredInputNonExecutionReason,
+  resolveStageInputs,
   stageInputDiagnosticMessages,
   stageInputRecord,
 } from '../dist/orchestrator/lib/stage-inputs.js';
@@ -248,5 +250,216 @@ test('a template placeholder counts as a read of the field it interpolates', () 
   assert.deepEqual(
     unread({ pipeline: [sendStep] }),
     ['pipeline.email_1 (send_email) declares unread inputs: "contact_first_name".'],
+  );
+});
+
+// --- min_chars: minimum viable declared input --------------------------------
+// Boundary: length === min_chars is viable (runs). length < min_chars does not.
+// Absent min_chars: no minimum, byte-identical to prior behaviour.
+// Non-strings: config rejects min_chars on non-string literals; at runtime a
+// non-string present value fails a positive min_chars (fail closed).
+
+const mapStep = (inputs) => ({
+  kind: 'score',
+  id: 'capability_read',
+  inputs,
+});
+
+test('min_chars: input longer than the threshold resolves cleanly and may run', () => {
+  const resolved = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 40 },
+    }),
+    record: { site_text: 'x'.repeat(86) },
+  });
+  assert.deepEqual(resolved.missingRequired, []);
+  assert.deepEqual(resolved.belowMinimum, []);
+  assert.equal(requiredInputNonExecutionReason(resolved), null);
+  assert.equal(resolved.values.site_text, 'x'.repeat(86));
+});
+
+test('min_chars: input shorter than the threshold is a non-execution naming the input', () => {
+  const thin = 'x'.repeat(86);
+  const resolved = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 400 },
+    }),
+    record: { site_text: thin },
+  });
+  assert.deepEqual(resolved.missingRequired, []);
+  assert.deepEqual(resolved.belowMinimum, ['site_text']);
+  assert.equal(
+    requiredInputNonExecutionReason(resolved),
+    'skipped_required_input_below_minimum:site_text',
+  );
+});
+
+test('min_chars: absent required input stays missing-required, distinguishable from below-minimum', () => {
+  const absent = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 400 },
+    }),
+    record: { site_text: '' },
+  });
+  assert.deepEqual(absent.missingRequired, ['site_text']);
+  assert.deepEqual(absent.belowMinimum, []);
+  assert.equal(
+    requiredInputNonExecutionReason(absent),
+    'skipped_required_input_missing:site_text',
+  );
+
+  const missingKey = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 400 },
+    }),
+    record: {},
+  });
+  assert.deepEqual(missingKey.missingRequired, ['site_text']);
+  assert.deepEqual(missingKey.belowMinimum, []);
+  assert.equal(
+    requiredInputNonExecutionReason(missingKey),
+    'skipped_required_input_missing:site_text',
+  );
+
+  const below = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 400 },
+    }),
+    record: { site_text: 'short' },
+  });
+  assert.notEqual(
+    requiredInputNonExecutionReason(absent),
+    requiredInputNonExecutionReason(below),
+  );
+  assert.match(requiredInputNonExecutionReason(below), /below_minimum/);
+  assert.match(requiredInputNonExecutionReason(absent), /input_missing/);
+});
+
+test('min_chars: step with no min_chars declared is completely unaffected', () => {
+  const thin = 'x'.repeat(10);
+  const withMap = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true },
+    }),
+    record: { site_text: thin },
+  });
+  assert.deepEqual(withMap.missingRequired, []);
+  assert.deepEqual(withMap.belowMinimum, []);
+  assert.equal(requiredInputNonExecutionReason(withMap), null);
+  assert.equal(withMap.values.site_text, thin);
+
+  const arrayForm = resolveStageInputs({
+    step: { kind: 'extract', id: 'e', inputs: ['site_text'] },
+    record: { site_text: thin },
+  });
+  assert.deepEqual(arrayForm.missingRequired, []);
+  assert.deepEqual(arrayForm.belowMinimum, []);
+  assert.equal(requiredInputNonExecutionReason(arrayForm), null);
+});
+
+test('min_chars: zero and exact boundary — length >= min_chars is viable', () => {
+  // min_chars: 0 never fails a present string (length < 0 is impossible).
+  const zero = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 0 },
+    }),
+    record: { site_text: 'a' },
+  });
+  assert.deepEqual(zero.belowMinimum, []);
+  assert.equal(requiredInputNonExecutionReason(zero), null);
+
+  // Exact equality is viable (not below).
+  const exact = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 5 },
+    }),
+    record: { site_text: '12345' },
+  });
+  assert.deepEqual(exact.belowMinimum, []);
+  assert.equal(requiredInputNonExecutionReason(exact), null);
+
+  // One under is below.
+  const under = resolveStageInputs({
+    step: mapStep({
+      site_text: { from: 'site_text', required: true, min_chars: 5 },
+    }),
+    record: { site_text: '1234' },
+  });
+  assert.deepEqual(under.belowMinimum, ['site_text']);
+  assert.equal(
+    requiredInputNonExecutionReason(under),
+    'skipped_required_input_below_minimum:site_text',
+  );
+});
+
+test('min_chars: invalid declarations are rejected by config validation', () => {
+  const scoreBase = {
+    kind: 'score',
+    id: 'score_fit',
+    key: 'fit',
+    model: 'openrouter/anthropic/claude-haiku-4.5',
+    criteria: [{ id: 'c', weight: 1, description: 'criterion' }],
+    outputs: {
+      fit_score: { type: 'number' },
+      fit_breakdown: { type: 'json' },
+      fit_reasoning: { type: 'string' },
+    },
+  };
+
+  const negative = normalizeConfig({
+    pipeline: [{
+      ...scoreBase,
+      inputs: { evidence: { from: 'site_text', min_chars: -1 } },
+    }],
+  });
+  assert.ok(negative.errors.length > 0, 'negative min_chars must error');
+  assert.ok(
+    negative.errors.some((error) => /min_chars|too_small|greater than or equal/i.test(error)),
+    negative.errors.join('\n'),
+  );
+
+  const nonInteger = normalizeConfig({
+    pipeline: [{
+      ...scoreBase,
+      inputs: { evidence: { from: 'site_text', min_chars: 3.5 } },
+    }],
+  });
+  assert.ok(nonInteger.errors.length > 0, 'non-integer min_chars must error');
+
+  const onNumberLiteral = normalizeConfig({
+    pipeline: [{
+      kind: 'generate',
+      id: 'g',
+      inputs: { count: { value: 42, min_chars: 2 } },
+      outputs: { note: { type: 'string', description: 'n' } },
+    }],
+  });
+  assert.ok(onNumberLiteral.errors.length > 0, 'min_chars on non-string value must error');
+  assert.ok(
+    onNumberLiteral.errors.some((error) => /min_chars|string/i.test(error)),
+    onNumberLiteral.errors.join('\n'),
+  );
+
+  const valid = normalizeConfig({
+    pipeline: [{
+      ...scoreBase,
+      inputs: { evidence: { from: 'site_text', required: true, min_chars: 400 } },
+    }],
+  });
+  assert.deepEqual(valid.errors, []);
+});
+
+test('min_chars: non-string present values fail a positive threshold at resolve time', () => {
+  const resolved = resolveStageInputs({
+    step: mapStep({
+      score: { from: 'fit_score', required: true, min_chars: 1 },
+    }),
+    record: { fit_score: 88 },
+  });
+  assert.deepEqual(resolved.missingRequired, []);
+  assert.deepEqual(resolved.belowMinimum, ['score']);
+  assert.equal(
+    requiredInputNonExecutionReason(resolved),
+    'skipped_required_input_below_minimum:score',
   );
 });

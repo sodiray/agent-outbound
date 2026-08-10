@@ -4,7 +4,7 @@ import { mapWithConcurrency } from '../lib/concurrency.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
 import { readStaleness, writeStaleness } from '../enrichment/runner.js';
-import { resolveStageInputs } from '../lib/stage-inputs.js';
+import { requiredInputNonExecutionReason, resolveStageInputs } from '../lib/stage-inputs.js';
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { ensureRecordColumns, insertAsset, upsertRecord } from '../runtime/db.js';
@@ -336,9 +336,11 @@ export const runComposeStep = async ({
     const recordId = getRecordRowId(record);
     try {
       // Same required-input gate as scoring: skip before any model call.
+      // Covers absent required inputs and present-but-below-min_chars inputs.
       const resolved = resolveStageInputs({ step, record });
-      if (resolved.missingRequired.length > 0) {
-        summary.non_execution_reasons[recordId] = `skipped_required_input_missing:${resolved.missingRequired.join(',')}`;
+      const requiredSkip = requiredInputNonExecutionReason(resolved);
+      if (requiredSkip) {
+        summary.non_execution_reasons[recordId] = requiredSkip;
         return;
       }
       const inputs = declaredInputs({ step, record });
