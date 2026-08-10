@@ -56,6 +56,7 @@ import {
   isReviewRequired,
   pauseForStageReview,
   invalidateStageReviewIfAssetChanged,
+  parseStageReviewJson,
   appendTransitionAudit,
   readinessChannelPermission,
   evaluateTransmitterSuppression,
@@ -216,9 +217,9 @@ const applyStageReviewPause = ({
 };
 
 /**
- * If authorized stage review is bound to a different material asset_version,
- * invalidate + re-pause and persist. Returns { record, blocked } — when blocked,
- * caller must not send (fail closed).
+ * If a stage review is bound to a different material asset_version, invalidate
+ * and/or re-bind + re-pause and persist. Returns { record, blocked } — when
+ * blocked, caller must not send (fail closed). A refresh is never an approval.
  */
 const applyStageReviewMaterialInvalidation = ({
   db,
@@ -277,6 +278,244 @@ const applyStageReviewMaterialInvalidation = ({
     blocked: true,
     reason: 'Stage review invalidated: asset changed; re-paused for review.',
   };
+};
+
+/**
+ * Material-invalidation for email / linkedin / mail send kinds, evaluated
+ * ahead of shouldExecuteSequenceOutbound so a stale review on paused_review
+ * can re-bind instead of waiting behind the gate it holds shut.
+ *
+ * Only for reachable records (caller must have already confirmed reachability).
+ * Never authorizes; when blocked the record remains review-gated.
+ * Returns null when this step is not a channel that uses the late invalidation
+ * path, or when there is no open/authorized review to inspect.
+ */
+const evaluateEarlyStageReviewMaterialInvalidation = async ({
+  db,
+  record,
+  step,
+  sequenceStepId,
+  assetForStep,
+  channelHint,
+  listDir,
+  sequenceName,
+  stepNumber,
+  activeContactId,
+}: {
+  db: any;
+  record: Record<string, unknown>;
+  step: any;
+  sequenceStepId: string;
+  assetForStep: { asset_id?: string } | null;
+  channelHint: string;
+  listDir: string;
+  sequenceName: string;
+  stepNumber: number;
+  activeContactId: string | null;
+}): Promise<{ record: Record<string, unknown>; blocked: boolean; reason?: string } | null> => {
+  const existing = parseStageReviewJson(record.stage_review_json);
+  if (!existing) return null;
+  const status = String(existing.status || '').trim().toLowerCase();
+  if (status !== 'pending' && status !== 'edited' && status !== 'authorized') {
+    return null;
+  }
+
+  const stepKind = String(step?.kind || '').trim().toLowerCase();
+  const taskType = String(step?.config?.task_type || step?.config?.taskType || '').trim();
+  const channel = String(channelHint || step?.config?.channel || '').trim().toLowerCase();
+  const named = namedAssertChannel({
+    channelHint,
+    stepKind,
+    taskType,
+    channel,
+  });
+
+  let projectConfig: any = null;
+  try {
+    projectConfig = readConfig(listDir)?.config;
+  } catch {
+    projectConfig = null;
+  }
+
+  // LinkedIn — mirrors the late call site at linkedin_connect.
+  if (stepKind === 'linkedin_connect' || named === 'linkedin') {
+    const liBody = linkedinBodyForReview({ record, step });
+    const presentation = resolveReviewPresentation({ step, record });
+    const currentAssetVersion = currentStageAssetVersion({
+      record,
+      stageId: sequenceStepId,
+      assetForStep,
+      policyVersion: projectConfig?.policy?.version,
+      recipient: String(
+        record.linkedin_url
+        || record.contact_linkedin
+        || record.contact_email
+        || '',
+      ),
+      bodyText: liBody || null,
+      activeContactId,
+      reviewPresentation: presentation,
+    });
+    return applyStageReviewMaterialInvalidation({
+      db,
+      record,
+      stageId: sequenceStepId,
+      currentAssetVersion,
+      channel: 'linkedin',
+      actionType: 'linkedin_connect',
+      contactId: activeContactId || null,
+      presentation,
+    });
+  }
+
+  // Mail — mirrors the late call site on manual_task park (channel mail).
+  if (
+    named === 'mail'
+    || channel === 'mail'
+    || (stepKind === 'manual_task' && /mail|postcard|letter/i.test(`${taskType} ${channel}`))
+  ) {
+    const presentation = resolveReviewPresentation({ step, record });
+    const mailBody = String(
+      record.mail_copy
+      || record.mail_body
+      || record.preliminary_snapshot
+      || '',
+    );
+    const currentAssetVersion = currentStageAssetVersion({
+      record,
+      stageId: sequenceStepId,
+      assetForStep,
+      policyVersion: projectConfig?.policy?.version,
+      recipient: String(record.address || record.contact_email || ''),
+      bodyText: mailBody,
+      activeContactId,
+      reviewPresentation: presentation,
+    });
+    return applyStageReviewMaterialInvalidation({
+      db,
+      record,
+      stageId: sequenceStepId,
+      currentAssetVersion,
+      channel: 'mail',
+      actionType: taskType || stepKind || 'manual_task',
+      contactId: activeContactId || null,
+      presentation,
+    });
+  }
+
+  // Email — mirrors the late send_email material fingerprint (draft + mailbox).
+  const isEmail =
+    stepKind === 'send_email'
+    || named === 'email'
+    || channel === 'email'
+    || String(channelHint || '').trim().toLowerCase() === 'email';
+  if (!isEmail) return null;
+
+  const presentation = resolveReviewPresentation({ step, record });
+  let approvedDraft: any = null;
+  try {
+    approvedDraft = db.prepare(`
+      SELECT *
+      FROM drafts
+      WHERE row_id = ?
+        AND sequence_name = ?
+        AND step_number = ?
+        AND status = 'ready'
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get(
+      String(record._row_id || record.id || ''),
+      String(sequenceName || 'default'),
+      Number(stepNumber || 0),
+    );
+  } catch {
+    approvedDraft = null;
+  }
+
+  let earlyMailbox: { id?: string; credentials?: Record<string, string> } | null = null;
+  try {
+    earlyMailbox = resolveSendMailbox({
+      listDir,
+      config: projectConfig || (listDir ? readConfig(listDir).config : null),
+      db,
+      record,
+      stepConfig: (step?.config && typeof step.config === 'object') ? step.config as any : {},
+    });
+  } catch {
+    earlyMailbox = null;
+  }
+  const resolvedFrom = earlyMailbox
+    ? String(earlyMailbox.credentials?.SMTP_FROM || earlyMailbox.credentials?.SMTP_USER || earlyMailbox.id || '').trim()
+    : String(record.email_last_from || '').trim();
+  const resolvedMailboxId = earlyMailbox
+    ? String(earlyMailbox.id || '')
+    : String(record.assigned_mailbox_id || '');
+
+  let draftEnvelope: Record<string, unknown> | null = null;
+  if (approvedDraft) {
+    try {
+      const cb = typeof approvedDraft.content_binding_json === 'string'
+        ? JSON.parse(approvedDraft.content_binding_json || '{}')
+        : (approvedDraft.content_binding || {});
+      if (cb?.provider_envelope && typeof cb.provider_envelope === 'object') {
+        draftEnvelope = cb.provider_envelope as Record<string, unknown>;
+      }
+    } catch { /* */ }
+  }
+
+  const stepCfgEarly = (step?.config && typeof step.config === 'object') ? step.config as any : {};
+  const argsEarly = resolveToolCallArguments({
+    stepConfig: stepCfgEarly,
+    record,
+  });
+  const tmplEarly = (stepCfgEarly.template_context && typeof stepCfgEarly.template_context === 'object')
+    ? stepCfgEarly.template_context
+    : {};
+  const blankEarly = (v: unknown) => v === undefined || v === null || String(v).trim() === '';
+  let emailSubject = '';
+  let emailBody = '';
+  if (draftEnvelope) {
+    if (!blankEarly(draftEnvelope.subject)) emailSubject = String(draftEnvelope.subject);
+    if (!blankEarly(draftEnvelope.body)) emailBody = String(draftEnvelope.body);
+  }
+  if (approvedDraft) {
+    if (blankEarly(emailSubject) && !blankEarly(approvedDraft.subject)) emailSubject = String(approvedDraft.subject);
+    if (blankEarly(emailBody) && !blankEarly(approvedDraft.body)) emailBody = String(approvedDraft.body);
+  }
+  if (blankEarly(emailSubject) && !blankEarly(argsEarly.subject)) emailSubject = String(argsEarly.subject);
+  if (blankEarly(emailBody) && !blankEarly(argsEarly.body)) emailBody = String(argsEarly.body);
+  if (blankEarly(emailSubject) && !blankEarly(tmplEarly.subject)) emailSubject = String(tmplEarly.subject);
+  if (blankEarly(emailBody) && !blankEarly(tmplEarly.body)) emailBody = String(tmplEarly.body);
+
+  const envelopeFrom = draftEnvelope?.from ? String(draftEnvelope.from) : resolvedFrom;
+  const envelopeMailbox = draftEnvelope?.mailbox_id ? String(draftEnvelope.mailbox_id) : resolvedMailboxId;
+
+  const { composeOutboundReviewVersion: composeSendVersion } = await import('../../commands/drafts.js');
+  const currentAssetVersion = composeSendVersion({
+    record,
+    draft: {
+      draft_id: approvedDraft?.draft_id ? String(approvedDraft.draft_id) : '',
+      step_id: sequenceStepId,
+      subject: emailSubject,
+      body: emailBody,
+    },
+    stageId: sequenceStepId,
+    policyVersion: projectConfig?.policy?.version,
+    sender: envelopeFrom || null,
+    mailboxId: envelopeMailbox || null,
+    reviewPresentation: presentation,
+  });
+
+  return applyStageReviewMaterialInvalidation({
+    db,
+    record,
+    stageId: sequenceStepId,
+    currentAssetVersion,
+    channel: 'email',
+    actionType: 'send_email',
+    contactId: activeContactId || null,
+    presentation,
+  });
 };
 
 /** Map step/channel hints onto assertActionTarget's named-channel union. */
@@ -544,6 +783,11 @@ export const executeChannelStep = async ({
   const hydrated = hydrateActiveContactOntoRecord({ db, record });
   const reachableRecord = hydrated.record;
   const currentSequenceState = String(reachableRecord.account_sequence_state || '').trim().toLowerCase();
+  // Pre-reachability outbound gate: skip expensive reconcile when already blocked
+  // AND there is no stage review that might need material rebind. When a review
+  // is present, fall through so we can confirm reachability first (unreachable
+  // must not do review bookkeeping) then refresh a stale binding before the
+  // main gate. This does not widen send authority — the main gate still runs.
   if (currentSequenceState && currentSequenceState !== 'unreachable') {
     const preReachabilityGate = shouldExecuteSequenceOutbound(reachableRecord, now, {
       channel: String(channelHint || step?.config?.channel || '').trim(),
@@ -552,12 +796,15 @@ export const executeChannelStep = async ({
       timeZone: sequence?.timezone,
     });
     if (!preReachabilityGate.execute) {
-      return {
-        status: 'skipped',
-        reason: `sequence_outbound_gated: ${preReachabilityGate.reason}`,
-        provider_id: '',
-        auto_skipped_steps: [],
-      };
+      const hasStageReview = Boolean(parseStageReviewJson(reachableRecord.stage_review_json));
+      if (!hasStageReview) {
+        return {
+          status: 'skipped',
+          reason: `sequence_outbound_gated: ${preReachabilityGate.reason}`,
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
     }
   }
   const reachability = reconcileSequenceReachability({
@@ -566,6 +813,7 @@ export const executeChannelStep = async ({
     persist: !dryRun,
   });
   if (!reachability.reachable) {
+    // Unreachable: no review bookkeeping — return before material invalidation.
     return {
       status: 'skipped',
       reason: 'sequence_unreachable:no_reachable_contact',
@@ -574,10 +822,46 @@ export const executeChannelStep = async ({
     };
   }
 
-  const sequenceRecord = reachability.record;
+  let sequenceRecord = reachability.record;
 
   const usesAssetId = String(step?.uses_asset || '').trim();
   const assetForStep = usesAssetId ? findAsset({ db, rowId: recordId, stepId: usesAssetId }) : null;
+
+  // Material-invalidation BEFORE the main outbound gate. A pending/authorized
+  // review bound to content that has moved must re-bind here; the late call
+  // sites (email / linkedin / mail) sit behind shouldExecuteSequenceOutbound and
+  // cannot run while paused_review holds the gate shut. Refresh never approves.
+  // Placement: AFTER reachability (unreachable must not bookkeep), BEFORE the
+  // main outbound gate (reachable-but-paused must refresh). dryRun skips persist
+  // paths that would mutate — match late sites which only invalidate when !dryRun.
+  if (!dryRun) {
+    const earlyInvalidation = await evaluateEarlyStageReviewMaterialInvalidation({
+      db,
+      record: sequenceRecord,
+      step,
+      sequenceStepId,
+      assetForStep,
+      channelHint: String(channelHint || ''),
+      listDir: String(listDir || ''),
+      sequenceName: String(sequenceName || 'default'),
+      stepNumber: Number(stepNumber || 0),
+      activeContactId: hydrated.active_contact_id
+        ? String(hydrated.active_contact_id)
+        : (sequenceRecord.active_contact_id ? String(sequenceRecord.active_contact_id) : null),
+    });
+    if (earlyInvalidation) {
+      sequenceRecord = earlyInvalidation.record;
+      if (earlyInvalidation.blocked) {
+        return {
+          status: 'skipped',
+          reason: earlyInvalidation.reason
+            || 'Stage review invalidated: asset changed; re-paused for review.',
+          provider_id: '',
+          auto_skipped_steps: [],
+        };
+      }
+    }
+  }
 
   // Nested pipeline + sequencer share this chokepoint: never auto-send (or draft)
   // when account_sequence_state / next_action policy forbids outbound.

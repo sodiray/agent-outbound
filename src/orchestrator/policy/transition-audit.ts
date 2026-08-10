@@ -725,16 +725,21 @@ export function authorizeStageReview(input: {
 }
 
 /**
- * Fail-closed material-change gate for external send.
+ * Fail-closed material-change gate for external send / review refresh.
  *
- * When stage_review_json is **authorized** for `stage_id` but its bound
- * `asset_version` no longer equals `current_asset_version` (recomputed from the
- * asset about to execute: account, contact, recipient, content/claim, step),
- * invalidate the authorization and optionally re-pause with a pending review
- * bound to the current fingerprint.
+ * When stage_review_json is bound to a different `asset_version` than
+ * `current_asset_version` (recomputed from the asset about to execute:
+ * account, contact, recipient, content/claim, step):
+ * - **authorized**: invalidate the authorization and optionally re-pause with a
+ *   pending review bound to the current fingerprint.
+ * - **pending / edited**: re-bind a fresh pending review to the current
+ *   fingerprint (authorize refuses version mismatch and does not rebind, so
+ *   execute must refresh before the outbound gate that paused_review holds shut).
+ * - **terminal** (rejected / invalidated / …): no patch; cannot authorize send.
  *
- * Callers on email / linkedin / mail complete must recompute current version,
- * invoke this helper, persist any patch, and **not send** when `invalidated`.
+ * Callers on email / linkedin / mail must recompute current version, invoke this
+ * helper, persist any patch, and **not send** when `invalidated`. Rebinding never
+ * authorizes — a refreshed review is still pending a human.
  */
 export function invalidateStageReviewIfAssetChanged(input: {
   record: Record<string, unknown> | null | undefined;
@@ -756,7 +761,10 @@ export function invalidateStageReviewIfAssetChanged(input: {
 }): {
   /** True when bound version differs from current (whether or not we invalidated). */
   changed: boolean;
-  /** True when an authorized review was invalidated due to version drift. */
+  /**
+   * True when a review was invalidated or a pending/edited review was re-bound
+   * due to version drift. Never means "authorized to send".
+   */
   invalidated: boolean;
   patch: StageReviewApplyResult['patch'] | null;
   audits: TransitionAuditRecord[];
@@ -808,19 +816,6 @@ export function invalidateStageReviewIfAssetChanged(input: {
     };
   }
 
-  // Only invalidate live authorizations. Pending/edited with drift is handled by
-  // re-bind on authorize; terminal rejected/invalidated cannot authorize send.
-  if (existing.status !== 'authorized') {
-    return {
-      changed: true,
-      invalidated: false,
-      patch: null,
-      audits: [],
-      authorization: existing,
-      reason: `version_drift_status_${existing.status}`,
-    };
-  }
-
   const account_id = String(
     input.account_id
     || existing.account_id
@@ -839,6 +834,54 @@ export function invalidateStageReviewIfAssetChanged(input: {
   );
   const notes = input.reason
     || `Material change invalidated stage review: bound=${bound} current=${current}`;
+
+  // Pending/edited with drift: re-bind to current fingerprint. Authorize refuses
+  // mismatch and does not rebind — without this, a paused_review record can never
+  // refresh itself (outbound gate sits in front of the late invalidation sites).
+  if (existing.status === 'pending' || existing.status === 'edited') {
+    if (input.re_pause === false) {
+      return {
+        changed: true,
+        invalidated: false,
+        patch: null,
+        audits: [],
+        authorization: existing,
+        reason: 'version_drift_pending_no_repause',
+      };
+    }
+    const paused = pauseForStageReview({
+      account_id,
+      stage_id: stage || existing.stage_id,
+      asset_version: current,
+      contact_id,
+      channel: input.channel ?? existing.channel ?? null,
+      action_type: input.action_type ?? existing.action_type ?? null,
+      pending_action: existing.pending_action_snapshot,
+      lifecycle_stage: lifecycle,
+      reason: notes,
+      presentation: input.presentation ?? null,
+    });
+    return {
+      changed: true,
+      invalidated: true,
+      patch: paused.patch,
+      audits: [paused.audit],
+      authorization: paused.authorization,
+      reason: 'rebound_pending_asset_version_changed',
+    };
+  }
+
+  // Terminal rejected/invalidated/etc. cannot authorize send.
+  if (existing.status !== 'authorized') {
+    return {
+      changed: true,
+      invalidated: false,
+      patch: null,
+      audits: [],
+      authorization: existing,
+      reason: `version_drift_status_${existing.status}`,
+    };
+  }
 
   const inv = authorizeStageReview({
     review_id: existing.review_id,

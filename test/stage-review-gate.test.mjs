@@ -471,6 +471,63 @@ test('invalidateStageReviewIfAssetChanged: authorized A + current B → invalida
   assert.equal(same.changed, false);
 });
 
+test('invalidateStageReviewIfAssetChanged: pending A + current B → re-bind pending B (never authorizes)', () => {
+  const recordBase = {
+    _row_id: 'acct_pending_rebind',
+    active_contact_id: 'c_owner',
+    contact_email: 'pending-rebind@example.com',
+    lifecycle_stage: 'contacted',
+  };
+  const versionA = materialAssetVersion({
+    record: { ...recordBase, linkedin_message: 'Pending message A' },
+    stageId: 'linkedin_1',
+    bodyText: 'Pending message A',
+  });
+  const versionB = materialAssetVersion({
+    record: { ...recordBase, linkedin_message: 'Pending message B' },
+    stageId: 'linkedin_1',
+    bodyText: 'Pending message B',
+  });
+  assert.notEqual(versionA, versionB);
+
+  const paused = pauseForStageReview({
+    account_id: 'acct_pending_rebind',
+    stage_id: 'linkedin_1',
+    asset_version: versionA,
+    contact_id: 'c_owner',
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+    pending_action: { action_type: 'linkedin_connect', account_id: 'acct_pending_rebind' },
+    lifecycle_stage: 'contacted',
+  });
+  assert.equal(paused.authorization.status, 'pending');
+  assert.equal(paused.patch.account_sequence_state, 'paused_review');
+
+  const result = invalidateStageReviewIfAssetChanged({
+    record: {
+      ...recordBase,
+      stage_review_json: paused.patch.stage_review_json,
+      account_sequence_state: 'paused_review',
+      linkedin_message: 'Pending message B',
+    },
+    stage_id: 'linkedin_1',
+    current_asset_version: versionB,
+    account_id: 'acct_pending_rebind',
+    contact_id: 'c_owner',
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+    re_pause: true,
+  });
+  assert.equal(result.changed, true);
+  assert.equal(result.invalidated, true);
+  assert.ok(result.patch?.stage_review_json);
+  assert.equal(result.patch.account_sequence_state, 'paused_review', 'rebind stays paused');
+  const after = parseStageReviewJson(result.patch.stage_review_json);
+  assert.equal(after.status, 'pending');
+  assert.equal(after.asset_version, versionB);
+  assert.notEqual(after.status, 'authorized');
+});
+
 // --- executeChannelStep: LinkedIn + email review gates ---------------------
 
 const projectYaml = ({ reviewRequiredFor }) => `
@@ -942,6 +999,372 @@ test('executeChannelStep: authorized version A + content change → B blocks sen
     if (prevFixture === undefined) delete process.env.AO_UNIPILE_FIXTURE;
     else process.env.AO_UNIPILE_FIXTURE = prevFixture;
   }
+
+  db.close();
+});
+
+// --- Deadlock fix: material invalidation ahead of outbound gate ------------
+//
+// A pending review on paused_review bound to a stale asset_version used to sit
+// forever behind shouldExecuteSequenceOutbound (which the pause itself holds
+// shut). Refresh must run before that gate; it must never authorize a send.
+
+const countLiveInteractionLedger = (db) => {
+  try {
+    return Number(db.prepare('SELECT COUNT(*) AS n FROM live_interaction_ledger').get()?.n || 0);
+  } catch {
+    return 0;
+  }
+};
+
+const countChannelEventsAll = (db) => {
+  try {
+    return Number(db.prepare('SELECT COUNT(*) AS n FROM channel_events').get()?.n || 0);
+  } catch {
+    return 0;
+  }
+};
+
+test('executeChannelStep: paused_review + pending review on stale asset → re-binds, still gated, no send', async () => {
+  const accountId = 'acct_stale_pending_refresh';
+  const messageA = 'Stale pending LinkedIn message A';
+  const messageB = 'Current LinkedIn message B after content change';
+  const transmitterCalls = [];
+
+  const { listDir, db, rowId } = seedList({
+    rowId: accountId,
+    reviewRequiredFor: ['linkedin_connect'],
+    account_sequence_state: 'paused_review',
+    next_action_json: JSON.stringify(
+      nextAction(accountId, {
+        action_type: 'pending_human_review',
+        sequence_state: 'paused_review',
+        work_state: 'pending_human_review',
+      }),
+    ),
+  });
+  ensureRecordColumns({ db, columns: ['linkedin_message', 'work_state', 'related_review_id', 'transition_audit_json'] });
+  const seeded = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  upsertRecord({ db, row: { ...seeded, linkedin_message: messageA } });
+  const withA = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const versionA = materialAssetVersion({
+    record: withA,
+    stageId: 'linkedin_1',
+    policyVersion: 'tv-pipeline-v1',
+    bodyText: messageA,
+  });
+  const versionB = materialAssetVersion({
+    record: { ...withA, linkedin_message: messageB },
+    stageId: 'linkedin_1',
+    policyVersion: 'tv-pipeline-v1',
+    bodyText: messageB,
+  });
+  assert.notEqual(versionA, versionB);
+
+  const paused = pauseForStageReview({
+    account_id: accountId,
+    stage_id: 'linkedin_1',
+    asset_version: versionA,
+    contact_id: 'c_owner',
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+    pending_action: {
+      action_type: 'linkedin_connect',
+      account_id: accountId,
+      contact_id: 'c_owner',
+      lifecycle_stage: 'contacted',
+      sequence_state: 'active',
+      work_state: 'executing_external_action',
+      reason: 'resume after review',
+      on_success: 'continue',
+      policy_version: NEXT_ACTION_POLICY_VERSION,
+    },
+    lifecycle_stage: 'contacted',
+    reason: 'pending review bound to A',
+  });
+  assert.equal(paused.authorization.status, 'pending');
+  assert.equal(paused.authorization.asset_version, versionA);
+
+  upsertRecord({
+    db,
+    row: {
+      ...withA,
+      account_sequence_state: 'paused_review',
+      work_state: 'pending_human_review',
+      next_action_json: paused.patch.next_action_json,
+      stage_review_json: paused.patch.stage_review_json,
+      related_review_id: paused.patch.related_review_id,
+      linkedin_message: messageB,
+    },
+  });
+
+  const ledgerBefore = countLiveInteractionLedger(db);
+  const eventsBefore = countChannelEventsAll(db);
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const boundBefore = parseStageReviewJson(record.stage_review_json);
+  assert.equal(boundBefore.status, 'pending');
+  assert.equal(boundBefore.asset_version, versionA);
+
+  const prevFixture = process.env.AO_UNIPILE_FIXTURE;
+  delete process.env.AO_UNIPILE_FIXTURE;
+  try {
+    const out = await runLinkedin({
+      listDir,
+      db,
+      record,
+      dryRun: false,
+      step: {
+        ...linkedinStep,
+        config: {
+          ...linkedinStep.config,
+          args_map: { invite_message: 'linkedin_message' },
+          invite_message: '',
+          // Injected transmitter — must never fire while gated/refreshed.
+          __tryTool: async (...args) => {
+            transmitterCalls.push(args);
+            return { result: { invitation_id: 'must_not_send' }, provider: 'test_provider' };
+          },
+        },
+      },
+    });
+
+    // Safety: still gated, never a send. Outcome names the refresh.
+    assert.equal(out.status, 'skipped', JSON.stringify(out));
+    assert.match(
+      String(out.reason),
+      /asset changed|invalidated|re-paused for review/i,
+      `operator should see refresh reason, not only generic pause: ${out.reason}`,
+    );
+    assert.equal(out.provider_id, '');
+    assert.equal(transmitterCalls.length, 0, 'injected transmitter must never be called');
+    assert.equal(countLiveInteractionLedger(db), ledgerBefore, 'live-interaction ledger unchanged');
+    assert.equal(countChannelEventsAll(db), eventsBefore, 'no channel_events from a gated refresh');
+
+    const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+    assert.equal(after.account_sequence_state, 'paused_review', 'still gated after rebind');
+    assert.equal(after.work_state, 'pending_human_review');
+    const review = parseStageReviewJson(after.stage_review_json);
+    assert.ok(review);
+    assert.equal(review.status, 'pending', 'refresh is a pending review, never an approval');
+    assert.equal(review.asset_version, versionB, 're-bound to current material fingerprint');
+  } finally {
+    if (prevFixture === undefined) delete process.env.AO_UNIPILE_FIXTURE;
+    else process.env.AO_UNIPILE_FIXTURE = prevFixture;
+  }
+
+  db.close();
+});
+
+test('executeChannelStep: paused_review + pending review on matching asset → same gate reason, review untouched, no send', async () => {
+  const accountId = 'acct_match_pending_control';
+  const message = 'Stable LinkedIn message that still matches the bound review';
+  const transmitterCalls = [];
+
+  const { listDir, db, rowId } = seedList({
+    rowId: accountId,
+    reviewRequiredFor: ['linkedin_connect'],
+    account_sequence_state: 'paused_review',
+    next_action_json: JSON.stringify(
+      nextAction(accountId, {
+        action_type: 'pending_human_review',
+        sequence_state: 'paused_review',
+        work_state: 'pending_human_review',
+      }),
+    ),
+  });
+  ensureRecordColumns({ db, columns: ['linkedin_message', 'work_state', 'related_review_id', 'transition_audit_json'] });
+  const seeded = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  upsertRecord({ db, row: { ...seeded, linkedin_message: message } });
+  const withMsg = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const version = materialAssetVersion({
+    record: withMsg,
+    stageId: 'linkedin_1',
+    policyVersion: 'tv-pipeline-v1',
+    bodyText: message,
+  });
+
+  const paused = pauseForStageReview({
+    account_id: accountId,
+    stage_id: 'linkedin_1',
+    asset_version: version,
+    contact_id: 'c_owner',
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+    pending_action: {
+      action_type: 'linkedin_connect',
+      account_id: accountId,
+      contact_id: 'c_owner',
+      lifecycle_stage: 'contacted',
+      sequence_state: 'active',
+      work_state: 'executing_external_action',
+      reason: 'resume after review',
+      on_success: 'continue',
+      policy_version: NEXT_ACTION_POLICY_VERSION,
+    },
+    lifecycle_stage: 'contacted',
+    reason: 'pending review matching current asset',
+  });
+
+  upsertRecord({
+    db,
+    row: {
+      ...withMsg,
+      account_sequence_state: 'paused_review',
+      work_state: 'pending_human_review',
+      next_action_json: paused.patch.next_action_json,
+      stage_review_json: paused.patch.stage_review_json,
+      related_review_id: paused.patch.related_review_id,
+      linkedin_message: message,
+    },
+  });
+
+  const before = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const reviewBefore = parseStageReviewJson(before.stage_review_json);
+  const reviewJsonBefore = String(before.stage_review_json || '');
+  const ledgerBefore = countLiveInteractionLedger(db);
+  const eventsBefore = countChannelEventsAll(db);
+
+  const prevFixture = process.env.AO_UNIPILE_FIXTURE;
+  delete process.env.AO_UNIPILE_FIXTURE;
+  try {
+    const out = await runLinkedin({
+      listDir,
+      db,
+      record: before,
+      dryRun: false,
+      step: {
+        ...linkedinStep,
+        config: {
+          ...linkedinStep.config,
+          args_map: { invite_message: 'linkedin_message' },
+          invite_message: '',
+          __tryTool: async (...args) => {
+            transmitterCalls.push(args);
+            return { result: { invitation_id: 'must_not_send' }, provider: 'test_provider' };
+          },
+        },
+      },
+    });
+
+    // CONTROL: same gate as before the fix when asset still matches.
+    assert.equal(out.status, 'skipped', JSON.stringify(out));
+    assert.match(
+      String(out.reason),
+      /sequence_outbound_gated:.*sequence_state_paused_review/,
+      String(out.reason),
+    );
+    assert.equal(transmitterCalls.length, 0, 'injected transmitter must never be called');
+    assert.equal(countLiveInteractionLedger(db), ledgerBefore, 'live-interaction ledger unchanged');
+    assert.equal(countChannelEventsAll(db), eventsBefore);
+
+    const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+    assert.equal(after.account_sequence_state, 'paused_review');
+    assert.equal(String(after.stage_review_json || ''), reviewJsonBefore, 'review untouched when asset matches');
+    const reviewAfter = parseStageReviewJson(after.stage_review_json);
+    assert.equal(reviewAfter.status, reviewBefore.status);
+    assert.equal(reviewAfter.asset_version, reviewBefore.asset_version);
+    assert.equal(reviewAfter.review_id, reviewBefore.review_id);
+  } finally {
+    if (prevFixture === undefined) delete process.env.AO_UNIPILE_FIXTURE;
+    else process.env.AO_UNIPILE_FIXTURE = prevFixture;
+  }
+
+  db.close();
+});
+
+test('executeChannelStep: unreachable record does not perform stage-review bookkeeping', async () => {
+  const accountId = 'acct_unreachable_no_review_bookkeeping';
+  const messageA = 'Unreachable stale message A';
+  const messageB = 'Unreachable content B';
+
+  const { listDir, db, rowId } = seedList({
+    rowId: accountId,
+    reviewRequiredFor: ['linkedin_connect'],
+    // No contact_email → reachability parks as unreachable.
+    contact_email: '',
+    active_contact_id: '',
+    account_sequence_state: 'paused_review',
+    next_action_json: JSON.stringify(
+      nextAction(accountId, {
+        action_type: 'pending_human_review',
+        sequence_state: 'paused_review',
+        work_state: 'pending_human_review',
+      }),
+    ),
+  });
+  ensureRecordColumns({
+    db,
+    columns: ['linkedin_message', 'work_state', 'related_review_id', 'transition_audit_json', 'linkedin_url', 'contact_linkedin'],
+  });
+  const seeded = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  // Explicitly blank delivery targets so reconcileSequenceReachability parks.
+  upsertRecord({
+    db,
+    row: {
+      ...seeded,
+      contact_email: '',
+      email: '',
+      linkedin_url: '',
+      contact_linkedin: '',
+      phone: '',
+      linkedin_message: messageA,
+      active_contact_id: '',
+    },
+  });
+  const withA = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const versionA = materialAssetVersion({
+    record: withA,
+    stageId: 'linkedin_1',
+    policyVersion: 'tv-pipeline-v1',
+    bodyText: messageA,
+  });
+
+  const paused = pauseForStageReview({
+    account_id: accountId,
+    stage_id: 'linkedin_1',
+    asset_version: versionA,
+    contact_id: null,
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+    lifecycle_stage: 'contacted',
+    reason: 'pending on unreachable record',
+  });
+  const reviewJsonBefore = String(paused.patch.stage_review_json || '');
+  upsertRecord({
+    db,
+    row: {
+      ...withA,
+      account_sequence_state: 'paused_review',
+      work_state: 'pending_human_review',
+      next_action_json: paused.patch.next_action_json,
+      stage_review_json: paused.patch.stage_review_json,
+      related_review_id: paused.patch.related_review_id,
+      linkedin_message: messageB,
+      contact_email: '',
+      active_contact_id: '',
+    },
+  });
+
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const out = await runLinkedin({ listDir, db, record, dryRun: false });
+  assert.equal(out.status, 'skipped', JSON.stringify(out));
+  assert.match(
+    String(out.reason),
+    /sequence_unreachable/,
+    `unreachable must short-circuit before review bookkeeping: ${out.reason}`,
+  );
+  assert.doesNotMatch(
+    String(out.reason),
+    /asset changed|invalidated|re-paused for review/i,
+    'must not report material invalidation for unreachable',
+  );
+
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  // Review JSON must be untouched (no rebind / invalidate bookkeeping).
+  assert.equal(String(after.stage_review_json || ''), reviewJsonBefore);
+  const reviewAfter = parseStageReviewJson(after.stage_review_json);
+  assert.equal(reviewAfter.asset_version, versionA, 'stale binding left alone when unreachable');
+  assert.equal(reviewAfter.status, 'pending');
 
   db.close();
 });
