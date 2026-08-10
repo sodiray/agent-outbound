@@ -4,6 +4,7 @@ import { collectProviderToolUsage } from '../../runtime/providers/usage.js';
 import { isBudgetExceededError } from '../../runtime/contract.js';
 import { assertToolCallEffectsAllowed } from '../../policy/tool-effects.js';
 import { readConfig } from '../../lib/config.js';
+import { isRetryableProviderError } from '../../lib/provider-retry.js';
 import { stageInputRecord } from '../../lib/stage-inputs.js';
 
 type ToolCallActionInput = {
@@ -95,29 +96,11 @@ export const resolveToolWaterfall = (stepConfig: Record<string, unknown>): ToolS
 /**
  * Retryable provider failures advance the waterfall. Permanent / config / budget
  * failures fail closed immediately (no invented success, no silent skip).
+ *
+ * Delegates to the shared HTTP-status-first classifier so 4xx client errors
+ * (except 429) never advance the waterfall or invite a second identical call.
  */
-export const isRetryableToolError = (error: unknown): boolean => {
-  if (isBudgetExceededError(error)) return false;
-  if (error && typeof error === 'object') {
-    const e = error as { retryable?: unknown; code?: unknown; status?: unknown; name?: unknown };
-    if (e.retryable === false) return false;
-    if (e.retryable === true) return true;
-    const status = Number(e.status);
-    if (Number.isFinite(status) && status >= 500) return true;
-    if (status === 429) return true;
-    if (String(e.code || '') === 'BUDGET_EXCEEDED') return false;
-  }
-  const msg = String((error as any)?.message || error || '').toLowerCase();
-  if (!msg.trim()) return false;
-  // Permanent / operator-actionable: do not waterfall past these.
-  if (/\b(invalid[_\s-]?argument|not[_\s-]?found|unauthorized|forbidden|tool_not_connected|unsupported)\b/.test(msg)) {
-    return false;
-  }
-  return (
-    /\b(429|502|503|504|timeout|timed out|etimedout|econnreset|econnrefused|enotfound|socket hang up|rate.?limit|temporar(y|ily)|unavailable|overloaded|try again|retry)\b/.test(msg)
-    || /\b5\d\d\b/.test(msg)
-  );
-};
+export const isRetryableToolError = (error: unknown): boolean => isRetryableProviderError(error);
 
 type RecordScopedToolFailure = Error & {
   tool_failure_scope?: unknown;

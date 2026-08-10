@@ -58,6 +58,10 @@ test('isRetryableToolError: 429/5xx/timeout vs permanent', () => {
   assert.equal(isRetryableToolError({ retryable: false, message: 'timeout' }), false);
   assert.equal(isRetryableToolError(new Error('invalid_argument: bad domain')), false);
   assert.equal(isRetryableToolError(new Error('TOOL_NOT_CONNECTED')), false);
+  // Structured HTTP status wins: 4xx client errors are never retryable.
+  assert.equal(isRetryableToolError({ status: 400, message: 'try again' }), false);
+  assert.equal(isRetryableToolError({ status: 429 }), true);
+  assert.equal(isRetryableToolError({ status: 503 }), true);
 });
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,10 @@ import {
 } from '../lib/step-when.js';
 import { nullableBoolean, nullableNumber, nullableString } from '../actions/schema-helpers.js';
 import { formatErrorMessage } from '../lib/error-format.js';
+import {
+  isNonRetryableProviderError,
+  providerRetryAfter,
+} from '../lib/provider-retry.js';
 import { toolSpecNeedsMcp, type ToolCatalog, type ToolSpec } from '../runtime/tools.js';
 import { providerToolUsageFromError } from '../runtime/providers/usage.js';
 import { decisionMakerProviderNeedsMcp } from '../runtime/providers/decision-makers/index.js';
@@ -561,11 +565,98 @@ export const enrichStepUsesEmptyOnError = (stepConfig: unknown) => {
   return String(config.on_error || 'fail').trim().toLowerCase() === 'empty';
 };
 
-const providerRetryAfter = (error: unknown) => (
-  error
-  && typeof error === 'object'
-  && String((error as { retry_after?: unknown }).retry_after || '').trim()
+/**
+ * Durable outcome that should not re-burn a provider call on the same inputs:
+ * successful declared outputs, OR a recorded step failure (including permanent
+ * non-retryable client errors that wrote staleness with status=failed).
+ */
+export const enrichStepHasDurableOutcome = ({
+  record,
+  expectedOutputs,
+  statusColumn,
+}: {
+  record: Record<string, unknown>;
+  expectedOutputs: Record<string, unknown>;
+  statusColumn: string;
+}): boolean => {
+  if (declaredOutputsHaveAnyValue({ record, expectedOutputs })) return true;
+  return String(record?.[statusColumn] || '').trim().toLowerCase() === 'failed';
+};
+
+/**
+ * dep_hash value that `isEnrichFresh` will accept for this execution config.
+ * When executionConfig is absent, isEnrichFresh compares against the material
+ * input hash (same as inputHash), not the nested {inputHash,policyHash} depHash.
+ */
+const freshnessDepHash = ({
+  dependencyHashes,
+  executionConfig,
+}: {
+  dependencyHashes: { depHash: string; inputHash: string; policyHash: string };
+  executionConfig?: Record<string, unknown>;
+}) => (
+  executionConfig === undefined
+    ? dependencyHashes.inputHash
+    : dependencyHashes.depHash
 );
+
+const persistEnrichmentProviderFailure = ({
+  db,
+  recordId,
+  stepId,
+  statusColumn,
+  stepConfig,
+  currentRow,
+  detail,
+  dependencyHashes,
+  executionConfig,
+  permanent,
+}: {
+  db: any;
+  recordId: string;
+  stepId: string;
+  statusColumn: string;
+  stepConfig: Record<string, unknown>;
+  currentRow: Record<string, unknown>;
+  detail: string;
+  dependencyHashes: { depHash: string; inputHash: string; policyHash: string };
+  executionConfig?: Record<string, unknown>;
+  permanent: boolean;
+}) => {
+  const evidencePatch = buildEnrichEvidencePatch({
+    record: currentRow,
+    step_id: stepId,
+    step_config: stepConfig,
+    error: detail,
+    failed: true,
+  });
+  upsertRecord({
+    db,
+    row: {
+      ...currentRow,
+      ...evidencePatch,
+      [statusColumn]: 'failed',
+      retry_count: Number(currentRow.retry_count || 0) + 1,
+      last_error: ownedLastError({ error: detail, stepId }),
+    },
+  });
+  // Permanent (non-retryable) failures keep staleness so subsequent runs skip
+  // the same bad request. Retryable failures clear it so later runs can try again.
+  if (permanent) {
+    writeStaleness({
+      db,
+      recordId,
+      stepId,
+      depHash: freshnessDepHash({ dependencyHashes, executionConfig }),
+      inputHash: dependencyHashes.inputHash,
+      policyHash: dependencyHashes.policyHash,
+      cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
+      cacheTtl: String(stepConfig?.cache || ''),
+    });
+  } else {
+    clearStaleness({ db, recordId, stepId });
+  }
+};
 
 export const enrichmentActionNeedsMcp = (stepConfig: unknown) => {
   const config = stepConfig && typeof stepConfig === 'object' ? stepConfig as Record<string, unknown> : {};
@@ -798,6 +889,7 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
   const expectedOutputs = Object.keys(declaredOutputs).length > 0
     ? declaredOutputs
     : legacyColumns;
+  const statusColumn = stepStatusColumn(id);
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
   const result = { would_enrich: 0, skip_fresh: 0, skip_when: 0 };
   for (const record of rows || []) {
@@ -806,7 +898,7 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
     if (
       isEnrichFresh({ cached, stepConfig, depValues: dependencyValuesForRecord({ stepConfig, record }), executionConfig, force })
-      && declaredOutputsHaveAnyValue({ record, expectedOutputs })
+      && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn })
     ) { result.skip_fresh += 1; continue; }
     result.would_enrich += 1;
   }
@@ -1186,7 +1278,7 @@ export const executeEnrichmentStepOnRecords = async ({
       : legacyColumns;
     if (
       isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
-      && declaredOutputsHaveAnyValue({ record: currentRecord, expectedOutputs })
+      && enrichStepHasDurableOutcome({ record: currentRecord, expectedOutputs, statusColumn })
     ) {
       summary.skipped_fresh += 1;
       summary.non_execution_reasons[recordId] = 'skipped:fresh';
@@ -1320,6 +1412,46 @@ export const executeEnrichmentStepOnRecords = async ({
       return { outcome, attempt };
     };
 
+    const recordFailure = ({
+      error,
+      detail,
+      retryDeferred = false,
+      retried = false,
+    }: {
+      error: unknown;
+      detail: string;
+      retryDeferred?: boolean;
+      retried?: boolean;
+    }) => {
+      const permanent = isNonRetryableProviderError(error);
+      const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || currentRecord;
+      persistEnrichmentProviderFailure({
+        db,
+        recordId,
+        stepId: id,
+        statusColumn,
+        stepConfig,
+        currentRow,
+        detail,
+        dependencyHashes,
+        executionConfig,
+        permanent,
+      });
+      summary.failed += 1;
+      summary.errors.push({ record_id: recordId, error: detail });
+      summary.record_ids.push(recordId);
+      emitActivity({
+        event: 'error',
+        phase: 'pipeline',
+        step: id,
+        row: rowLabel,
+        detail,
+        retry_deferred: retryDeferred,
+        retried,
+        non_retryable: permanent,
+      });
+    };
+
     try {
       await runAttempt(1);
     } catch (error) {
@@ -1349,6 +1481,7 @@ export const executeEnrichmentStepOnRecords = async ({
           failed: true,
         });
         patch[statusColumn] = 'failed';
+        const permanent = isNonRetryableProviderError(error);
         const merged = {
           ...currentRow,
           ...patch,
@@ -1356,45 +1489,40 @@ export const executeEnrichmentStepOnRecords = async ({
           last_error: ownedLastError({ error: detail, stepId: id }),
         };
         upsertRecord({ db, row: merged });
-        clearStaleness({ db, recordId, stepId: id });
+        if (permanent) {
+          writeStaleness({
+            db,
+            recordId,
+            stepId: id,
+            depHash: freshnessDepHash({ dependencyHashes, executionConfig }),
+            inputHash: dependencyHashes.inputHash,
+            policyHash: dependencyHashes.policyHash,
+            cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
+            cacheTtl: String(stepConfig?.cache || ''),
+          });
+        } else {
+          clearStaleness({ db, recordId, stepId: id });
+        }
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: detail });
         summary.handled_errors.push(recordId);
         summary.record_ids.push(recordId);
-        emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail });
+        emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail, non_retryable: permanent });
         return;
       }
-      // A step the author declared world-touching is never retried automatically.
-      // The engine cannot tell a call that failed before it did anything from one
-      // that failed after it did everything, so the same reasoning that stops the
-      // provider waterfall advancing on an external send stops a second attempt
-      // here: a silent retry of a purchase is a second purchase. The failure is
-      // recorded and left for a deliberate, observable re-run instead.
+      // Non-retryable client errors (4xx except 429): record failed once, write
+      // staleness, never re-attempt the identical request. Retry-After / side-
+      // effecting steps also skip the in-process second attempt (retry later or
+      // deliberate re-run). Unknown errors keep the historical second attempt.
       const authorDeclaredSideEffect = (step as { side_effecting?: unknown })?.side_effecting === true;
-      if (providerRetryAfter(error) || authorDeclaredSideEffect) {
-        summary.failed += 1;
-        summary.errors.push({ record_id: recordId, error: detail });
-        clearStaleness({ db, recordId, stepId: id });
-        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
-        const evidencePatch = buildEnrichEvidencePatch({
-          record: currentRow,
-          step_id: id,
-          step_config: stepConfig,
-          error: detail,
-          failed: true,
+      const nonRetryable = isNonRetryableProviderError(error);
+      const deferred = Boolean(providerRetryAfter(error)) || authorDeclaredSideEffect;
+      if (nonRetryable || deferred) {
+        recordFailure({
+          error,
+          detail,
+          retryDeferred: deferred && !nonRetryable,
         });
-        upsertRecord({
-          db,
-          row: {
-            ...currentRow,
-            ...evidencePatch,
-            [statusColumn]: 'failed',
-            retry_count: Number(currentRow.retry_count || 0) + 1,
-            last_error: ownedLastError({ error: detail, stepId: id }),
-          },
-        });
-        summary.record_ids.push(recordId);
-        emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail, retry_deferred: true });
         return;
       }
       emitActivity({ event: 'row_retry', phase: 'pipeline', step: id, row: rowLabel, detail });
@@ -1410,30 +1538,11 @@ export const executeEnrichmentStepOnRecords = async ({
           error: retryError,
         });
         if (isBudgetExceededError(retryError)) throw retryError;
-        const detail = formatErrorMessage(retryError);
-        summary.failed += 1;
-        summary.errors.push({ record_id: recordId, error: detail });
-        clearStaleness({ db, recordId, stepId: id });
-        const currentRow = db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1').get(recordId, recordId) || record;
-        const evidencePatch = buildEnrichEvidencePatch({
-          record: currentRow,
-          step_id: id,
-          step_config: stepConfig,
-          error: detail,
-          failed: true,
+        recordFailure({
+          error: retryError,
+          detail: formatErrorMessage(retryError),
+          retried: true,
         });
-        upsertRecord({
-          db,
-          row: {
-            ...currentRow,
-            ...evidencePatch,
-            [statusColumn]: 'failed',
-            retry_count: Number(currentRow.retry_count || 0) + 1,
-            last_error: ownedLastError({ error: detail, stepId: id }),
-          },
-        });
-        summary.record_ids.push(recordId);
-        emitActivity({ event: 'error', phase: 'pipeline', step: id, row: rowLabel, detail, retried: true });
       }
     }
   }, concurrency);
@@ -1659,8 +1768,17 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           skippedWhen?: boolean;
           skippedCeiling?: boolean;
           failedError?: string;
+          permanentFailure?: boolean;
         }> = [];
-        const failures: Array<{ recordId: string; rowLabel: string; error: string }> = [];
+        const failures: Array<{
+          recordId: string;
+          rowLabel: string;
+          error: string;
+          permanentFailure?: boolean;
+          dependencyHashes?: { depHash: string; inputHash: string; policyHash: string };
+          cacheTtlSeconds?: number;
+          cacheTtl?: string;
+        }> = [];
         const snapshot = [...recordState.values()];
         const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
 
@@ -1700,7 +1818,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             : legacyColumns;
           if (
             isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
-            && declaredOutputsHaveAnyValue({ record, expectedOutputs })
+            && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn })
           ) {
             summary.skipped_fresh += 1;
             return;
@@ -1841,22 +1959,51 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               patch.retry_count = Number(record.retry_count || 0) + 1;
               patch.last_error = ownedLastError({ error: detail, stepId: id });
               markStepFailure(recordId, id);
+              const permanent = isNonRetryableProviderError(error);
               patches.push({
                 recordId,
                 rowLabel,
                 patch,
-                ...dependencyHashes,
+                depHash: permanent
+                  ? freshnessDepHash({ dependencyHashes, executionConfig })
+                  : dependencyHashes.depHash,
+                inputHash: dependencyHashes.inputHash,
+                policyHash: dependencyHashes.policyHash,
                 cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
                 cacheTtl: String(stepConfig.cache || ''),
                 skippedWhen: false,
                 failedError: detail,
+                // Permanent failures keep staleness (write); retryable clear it.
+                permanentFailure: permanent,
               });
-              emitActivity({ event: 'error', phase: 'enrichment', step: id, row: rowLabel, detail });
+              emitActivity({ event: 'error', phase: 'enrichment', step: id, row: rowLabel, detail, non_retryable: permanent });
               return;
             }
             markStepFailure(recordId, id);
-            failures.push({ recordId, rowLabel, error: detail });
-            emitActivity({ event: 'error', phase: 'enrichment', step: id, row: rowLabel, detail });
+            const permanent = isNonRetryableProviderError(error);
+            failures.push({
+              recordId,
+              rowLabel,
+              error: detail,
+              permanentFailure: permanent,
+              dependencyHashes: {
+                depHash: permanent
+                  ? freshnessDepHash({ dependencyHashes, executionConfig })
+                  : dependencyHashes.depHash,
+                inputHash: dependencyHashes.inputHash,
+                policyHash: dependencyHashes.policyHash,
+              },
+              cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
+              cacheTtl: String(stepConfig.cache || ''),
+            });
+            emitActivity({
+              event: 'error',
+              phase: 'enrichment',
+              step: id,
+              row: rowLabel,
+              detail,
+              non_retryable: permanent,
+            });
           }
         }, concurrency);
 
@@ -1890,7 +2037,20 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
             upsertRecord({ db, row: merged });
             if (!result.managesContacts) upsertPrimaryContactIfPresent({ db, record: merged });
             if (item.failedError) {
-              clearStaleness({ db, recordId: item.recordId, stepId: result.id });
+              if (item.permanentFailure) {
+                writeStaleness({
+                  db,
+                  recordId: item.recordId,
+                  stepId: result.id,
+                  depHash: item.depHash,
+                  inputHash: item.inputHash,
+                  policyHash: item.policyHash,
+                  cacheTtlSeconds: item.cacheTtlSeconds,
+                  cacheTtl: item.cacheTtl,
+                });
+              } else {
+                clearStaleness({ db, recordId: item.recordId, stepId: result.id });
+              }
             } else if (!item.skippedWhen && !item.skippedCeiling) {
               writeStaleness({
                 db,
@@ -1928,7 +2088,20 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         for (const failure of result.failures) {
           summary.failed += 1;
           summary.errors.push({ step: result.id, record_id: failure.recordId, error: failure.error });
-          clearStaleness({ db, recordId: failure.recordId, stepId: result.id });
+          if (failure.permanentFailure && failure.dependencyHashes) {
+            writeStaleness({
+              db,
+              recordId: failure.recordId,
+              stepId: result.id,
+              depHash: failure.dependencyHashes.depHash,
+              inputHash: failure.dependencyHashes.inputHash,
+              policyHash: failure.dependencyHashes.policyHash,
+              cacheTtlSeconds: failure.cacheTtlSeconds || 0,
+              cacheTtl: failure.cacheTtl || '',
+            });
+          } else {
+            clearStaleness({ db, recordId: failure.recordId, stepId: result.id });
+          }
           const currentRow = recordState.get(failure.recordId);
           if (currentRow) {
             const evidencePatch = buildEnrichEvidencePatch({
