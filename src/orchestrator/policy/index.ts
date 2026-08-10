@@ -23,6 +23,7 @@ export * from './timing-reachability.js';
 export * from './campaign-process.js';
 export * from './transition-audit.js';
 export * from './stage-review-gate.js';
+export * from './manual-task-stage-review.js';
 export * from './review-presentation.js';
 export * from './cost-ledger.js';
 export * from './inbound-reply.js';

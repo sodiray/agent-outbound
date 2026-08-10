@@ -54,8 +54,6 @@ import {
   evaluateExternalActionAuthorization,
   resolveStageAssetVersion,
   isReviewRequired,
-  isAuthorizedForAnyOf,
-  reviewRequiredTokens,
   pauseForStageReview,
   invalidateStageReviewIfAssetChanged,
   findStageReview,
@@ -68,6 +66,7 @@ import {
   evaluateTransmitterSuppression,
   resolveReviewPresentation,
   evaluateSiblingFirstTouch,
+  ensureStageReviewOnManualTaskPark,
   type ResolvedReviewPresentation,
 } from '../policy/index.js';
 import { shouldExecuteSequenceOutbound } from '../policy/sequence-outbound.js';
@@ -1451,9 +1450,9 @@ export const executeChannelStep = async ({
       // Exactly one open park per record+step — do not insert a second awaiting event.
       // Manual mail tasks remain awaiting_manual; they are not auto-sent here.
       if (db && !dryRun) {
+        // Contact-cycle: an open park for a different contact must not block a new cycle.
+        const parkContact = activeContactId || String(sendRecord.active_contact_id || '');
         try {
-          // Contact-cycle: an open park for a different contact must not block a new cycle.
-          const parkContact = activeContactId || String(sendRecord.active_contact_id || '');
           const already = db.prepare(`
             SELECT event_id FROM pipeline_events
             WHERE record_id = ? AND step_id = ? AND kind = 'manual_task'
@@ -1491,121 +1490,33 @@ export const executeChannelStep = async ({
               },
             });
           }
-          // Open a pending stage review when the step declares review: or policy
-          // requires review for this park — mirrors linkedin_connect's applyStageReviewPause
-          // path so stage-review list/authorize can address the parked manual task.
-          // Drive from declared config (review.present / purpose / require_non_empty);
-          // do not hardcode product/task types. Never auto-authorizes.
-          const manualReviewPresentation = resolveReviewPresentation({
-            step,
-            record: sendRecord,
-          });
-          const hasDeclaredReview = Boolean(manualReviewPresentation);
-          const policyTokens = reviewRequiredTokens(projectConfig);
-          const taskKey = String(taskType || '').trim().toLowerCase();
-          const channelKey = String(channel || '').trim().toLowerCase();
-          const mailTreatment = String(sendRecord.mail_treatment || '').trim().toLowerCase();
-          // Align with completeManualTask: policy may list the campaign product
-          // (e.g. golden_ticket) while the step's task_type is a different label
-          // (e.g. standard_postcard). Also honor a bare "mail" token.
-          const policyRequiresReview =
-            isReviewRequired(projectConfig, stepKind, taskType)
-            || (channelKey === 'mail' && (
-              policyTokens.has('mail')
-              || (taskKey && policyTokens.has(taskKey))
-              || (mailTreatment && mailTreatment !== 'none' && policyTokens.has(mailTreatment))
-            ));
-
-          if (hasDeclaredReview || policyRequiresReview) {
-            const actionType = taskType || stepKind || 'manual_task';
-            const reviewChannel = channelKey || null;
-            const bodyText = String(
-              sendRecord.mail_copy
-              || sendRecord.mail_body
-              || sendRecord.preliminary_snapshot
-              || sendRecord.invite_message
-              || '',
-            );
-            const recipient = String(
-              (channelKey === 'mail'
-                ? (sendRecord.address || sendRecord.contact_email)
-                : '')
-              || sendRecord.address
-              || sendRecord.contact_email
-              || sendRecord.linkedin_url
-              || sendRecord.contact_linkedin
-              || '',
-            );
-            const manualAssetVersion = currentStageAssetVersion({
-              record: sendRecord,
-              stageId: sequenceStepId,
-              assetForStep,
-              policyVersion: projectConfig?.policy?.version,
-              recipient,
-              bodyText: bodyText || null,
-              activeContactId,
-              reviewPresentation: manualReviewPresentation,
-            });
-            const manualInvalidated = applyStageReviewMaterialInvalidation({
-              db,
-              record: sendRecord,
-              stageId: sequenceStepId,
-              currentAssetVersion: manualAssetVersion,
-              channel: reviewChannel,
-              actionType,
-              contactId: activeContactId || null,
-              presentation: manualReviewPresentation,
-            });
-            // Material rebind already opened a pending review — do not thrash.
-            if (!manualInvalidated.blocked) {
-              const reviewRecord = manualInvalidated.record;
-              const stageKeys = [
-                sequenceStepId,
-                taskType,
-                stepKind,
-                channelKey || null,
-                mailTreatment && mailTreatment !== 'none' ? mailTreatment : null,
-              ];
-              const stageStore = parseStageReviewStore(reviewRecord.stage_review_json);
-              const pendingForStage = stageStore.reviews.some((r) => {
-                const st = String(r.status || '').trim().toLowerCase();
-                if (st !== 'pending' && st !== 'edited') return false;
-                return stageKeys.some((key) => {
-                  const k = String(key || '').trim().toLowerCase();
-                  if (!k) return false;
-                  return (
-                    String(r.stage_id || '').trim().toLowerCase() === k
-                    || String(r.action_type || '').trim().toLowerCase() === k
-                  );
-                });
-              });
-              const alreadyAuthorized = isAuthorizedForAnyOf(
-                reviewRecord,
-                stageKeys,
-                manualAssetVersion,
-              );
-              // Open only when missing a usable review for this stage. Never
-              // invent an authorization — park stays awaiting_manual either way.
-              // applyStageReviewPause refuses if another stage is genuinely pending.
-              if (!pendingForStage && !alreadyAuthorized) {
-                applyStageReviewPause({
-                  db,
-                  record: reviewRecord,
-                  stageId: sequenceStepId,
-                  assetVersion: manualAssetVersion,
-                  channel: reviewChannel,
-                  actionType,
-                  contactId: activeContactId || null,
-                  reason:
-                    `Stage review required before manual task `
-                    + `${taskType || sequenceStepId}`,
-                  presentation: manualReviewPresentation,
-                });
-              }
-            }
-          }
-        } catch {
-          /* schema may lack pipeline_events in some harnesses — still return park */
+        } catch (parkErr) {
+          // Harnesses may lack pipeline_events — still park in-memory and attempt review open.
+          console.warn(
+            `[manual_task park] pipeline_events insert failed for ${recordId}/${sequenceStepId}:`,
+            String((parkErr as Error)?.message || parkErr),
+          );
+        }
+        // Open pending stage review on every channel park path when review: or
+        // policy requires it. Shared helper — same as pipeline dataflow park path.
+        // Never auto-authorizes. Failures are visible (audit + last_error); park stays.
+        const reviewOpen = ensureStageReviewOnManualTaskPark({
+          db,
+          record: sendRecord,
+          step,
+          projectConfig,
+          stageId: sequenceStepId,
+          stepKind,
+          taskType,
+          channel,
+          assetForStep,
+          activeContactId: activeContactId || null,
+        });
+        if (reviewOpen.error) {
+          console.warn(
+            `[manual_task park] stage review open failed for ${recordId}/${sequenceStepId}:`,
+            reviewOpen.error,
+          );
         }
       }
       return {

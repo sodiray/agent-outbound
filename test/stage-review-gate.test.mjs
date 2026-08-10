@@ -41,8 +41,10 @@ import { presentationAuthorizationGate } from '../dist/orchestrator/policy/revie
 import { openListDb, ensureRecordColumns, insertDraft, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { executeChannelStep } from '../dist/orchestrator/channels/execute.js';
 import { completeManualTask } from '../dist/orchestrator/pipeline/manual.js';
+import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { buildContactPlan } from '../dist/orchestrator/policy/contact-campaign.js';
 import { NEXT_ACTION_POLICY_VERSION } from '../dist/orchestrator/policy/lifecycle.js';
+import { ensureStageReviewOnManualTaskPark } from '../dist/orchestrator/policy/manual-task-stage-review.js';
 
 /** Mirror execute currentStageAssetVersion composition for seed/authorize parity. */
 const materialAssetVersion = ({
@@ -2785,4 +2787,392 @@ test('multi-review: presentation-integrity gate still refuses a diverged review 
   const store = parseStageReviewStore(aY.patch.stage_review_json);
   assert.equal(store.reviews.find((r) => r.stage_id === 'linkedin_1')?.status, 'authorized');
   assert.equal(store.reviews.find((r) => r.stage_id === 'mail_1')?.status, 'authorized');
+});
+
+// =============================================================================
+// Pipeline path regression: awaiting_manual park must open stage review
+//
+// Root cause: step-executor short-circuits manual_task without executeChannelStep;
+// dataflow alone inserts the park event. Review creation lived only in
+// executeChannelStep — so pipeline parks never opened a review. Tests that only
+// call executeChannelStep miss this path.
+// =============================================================================
+
+const pipelineYamlWithManualMail = ({
+  stepId = 'mail_standard',
+  taskType = 'standard_postcard',
+  reviewRequiredFor = [],
+  withReviewBlock = true,
+} = {}) => {
+  const reviewBlock = withReviewBlock ? `
+    review:
+      purpose: Physical mail costs real money per piece and cannot be recalled.
+      present:
+        - field: business_name
+          label: Business
+        - field: address
+          label: Delivery address
+      require_non_empty:
+        - address
+        - business_name` : '';
+  return `
+list:
+  name: Pipeline Manual Park Review
+business:
+  name: Mission
+  description: Test
+  icp: Test
+  offer: Test
+ai:
+  default_model: anthropic/claude-haiku-4-5-20251001
+pipeline:
+  - kind: manual_task
+    id: ${stepId}
+    inputs: [business_name, address]
+    config:
+      task_type: ${taskType}
+      channel: mail${reviewBlock}
+policy:
+  version: tv-pipeline-v1
+  enforce_readiness: false
+  review_required_for: ${JSON.stringify(reviewRequiredFor)}
+channels:
+  mail:
+    template_id: postcard_v1
+`;
+};
+
+const seedPipelineManualMail = ({
+  rowId = 'acct_pipeline_park_review',
+  stepId = 'mail_standard',
+  taskType = 'standard_postcard',
+  productType = 'golden_ticket',
+  reviewRequiredFor = [],
+  withReviewBlock = true,
+  address = '1 Main St',
+  businessName = 'Pipeline Park HVAC',
+  stage_review_json = null,
+} = {}) => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-pipeline-manual-park-'));
+  writeFileSync(
+    join(listDir, 'outbound.yaml'),
+    pipelineYamlWithManualMail({ stepId, taskType, reviewRequiredFor, withReviewBlock }),
+  );
+  writeFileSync(join(listDir, 'operator.md'), 'test');
+  writeFileSync(join(listDir, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+  const db = openListDb({ listDir, readonly: false });
+  const now = new Date().toISOString();
+  const campaign = buildContactPlan({
+    account_id: rowId,
+    campaign_id: `camp_${rowId}`,
+    treatment_tier: 'A',
+    mail_treatment: productType,
+    contacts: [{ contact_id: 'c1', outbound_disposition: 'eligible_target', outreach_rank: 1 }],
+  });
+  ensureRecordColumns({
+    db,
+    columns: [
+      'lifecycle_stage',
+      'account_sequence_state',
+      'work_state',
+      'next_action_json',
+      'active_contact_id',
+      'contact_id',
+      'treatment_tier',
+      'suppressed',
+      'stage_review_json',
+      'related_review_id',
+      'transition_audit_json',
+      'account_contact_plan_json',
+      'mail_treatment',
+      'mail_allocated',
+      'mail_copy',
+      'address',
+      'city',
+      'state',
+      'zip',
+      'business_name',
+      'last_error',
+    ],
+  });
+  db.prepare(`
+    INSERT INTO records (
+      _row_id, business_name, sequence_name, sequence_status, sequence_step,
+      contact_email, lifecycle_stage, account_sequence_state, work_state, next_action_json,
+      active_contact_id, treatment_tier, suppressed, stage_review_json,
+      account_contact_plan_json, mail_treatment, mail_allocated, mail_copy,
+      address, city, state, zip,
+      _created_at, _updated_at, created_at, updated_at
+    ) VALUES (
+      ?, ?, 'default', 'active', 0,
+      'owner@example-pipeline-park.test', 'contacted', 'active', 'executing_external_action', ?,
+      'c1', 'A', 0, ?,
+      ?, ?, 0, '',
+      ?, 'Boise', 'ID', '83702',
+      ?, ?, ?, ?
+    )
+  `).run(
+    rowId,
+    businessName,
+    JSON.stringify(nextAction(rowId, { action_type: 'manual_task' })),
+    stage_review_json,
+    JSON.stringify(campaign),
+    productType,
+    address,
+    now,
+    now,
+    now,
+    now,
+  );
+  return { listDir, db, rowId, stepId, taskType, productType };
+};
+
+test('pipeline path: parking manual_task with review: opens pending stage review listable by channel and step id', async () => {
+  // Uses runPipelineDataflow — the path that actually parks in production —
+  // not a direct executeChannelStep helper call.
+  const { listDir, db, rowId, stepId } = seedPipelineManualMail({
+    rowId: 'acct_pipeline_opens_review',
+    reviewRequiredFor: [],
+    withReviewBlock: true,
+  });
+
+  await runPipelineDataflow({ listDir, force: true });
+
+  const park = db.prepare(`
+    SELECT reason, passed FROM pipeline_events
+    WHERE record_id = ? AND step_id = ? AND kind = 'manual_task'
+    ORDER BY occurred_at DESC LIMIT 1
+  `).get(rowId, stepId);
+  assert.ok(park, 'pipeline must record awaiting_manual park event');
+  assert.equal(Number(park.passed), 0);
+  assert.equal(park.reason, 'awaiting_manual');
+
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const review = parseStageReviewJson(after.stage_review_json);
+  assert.ok(review, 'pipeline park must open pending stage_review_json');
+  assert.equal(review.status, 'pending');
+  assert.equal(String(review.stage_id), stepId);
+  assert.equal(String(review.channel || ''), 'mail');
+  assert.equal(String(review.action_type || ''), 'standard_postcard');
+  assert.ok(review.presentation, 'bound presentation from declared review:');
+
+  const listedAll = listPendingStageReviews({ db, status: 'all' });
+  const byChannel = listedAll.reviews.filter(
+    (r) => r.record_id === rowId && String(r.channel || '') === 'mail',
+  );
+  assert.ok(byChannel.length >= 1, 'stage-review list filtered by channel=mail must find the park');
+  const byStep = listedAll.reviews.find((r) => r.record_id === rowId && r.stage_id === stepId);
+  assert.ok(byStep, 'review must be addressable by step id');
+  assert.equal(byStep.status, 'pending');
+
+  // Gate not weakened: complete still refuses without authorize.
+  const outboundNa = JSON.stringify(nextAction(rowId, { action_type: 'manual_task' }));
+  db.prepare(`
+    UPDATE records
+    SET account_sequence_state = 'active',
+        work_state = 'executing_external_action',
+        next_action_json = ?
+    WHERE _row_id = ?
+  `).run(outboundNa, rowId);
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      config: {
+        policy: { version: 'tv-pipeline-v1', review_required_for: [] },
+        pipeline: [{
+          kind: 'manual_task',
+          id: stepId,
+          config: { task_type: 'standard_postcard', channel: 'mail' },
+          review: {
+            purpose: 'Physical mail',
+            present: [
+              { field: 'business_name', label: 'Business' },
+              { field: 'address', label: 'Delivery address' },
+            ],
+            require_non_empty: ['address', 'business_name'],
+          },
+        }],
+        channels: { mail: { template_id: 'postcard_v1' } },
+      },
+      recordId: rowId,
+      stepId,
+      note: 'too early',
+    }),
+    /Stage review required|asset changed|Re-authorize|fail-closed/i,
+  );
+  db.close();
+});
+
+test('pipeline path: terminal review for other step still gets new pending mail review (multi-review store)', async () => {
+  const liPaused = pauseForStageReview({
+    account_id: 'acct_pipeline_multi',
+    stage_id: 'linkedin_1',
+    asset_version: 'av_li_done',
+    channel: 'linkedin',
+    action_type: 'linkedin_connect',
+  });
+  const liAuth = authorizeStageReview({
+    review_id: liPaused.authorization.review_id,
+    stage_id: 'linkedin_1',
+    asset_version: 'av_li_done',
+    expected_asset_version: 'av_li_done',
+    decision: 'authorize',
+    account_id: 'acct_pipeline_multi',
+    existing: liPaused.authorization,
+    existing_json: liPaused.patch.stage_review_json,
+    actor: 'op',
+  });
+  assert.equal(liAuth.allowed, true);
+
+  const { listDir, db, rowId, stepId } = seedPipelineManualMail({
+    rowId: 'acct_pipeline_multi',
+    stepId: 'mail_standard',
+    reviewRequiredFor: [],
+    withReviewBlock: true,
+    // Legacy-looking single-object terminal can also appear; use multi bag from authorize.
+    stage_review_json: liAuth.patch.stage_review_json,
+  });
+
+  await runPipelineDataflow({ listDir, force: true });
+
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const store = parseStageReviewStore(after.stage_review_json);
+  assert.ok(
+    store.reviews.length >= 2,
+    `expected terminal LI + pending mail via pipeline park, got ${store.reviews.length}: `
+    + JSON.stringify(store.reviews.map((r) => ({ s: r.stage_id, st: r.status }))),
+  );
+  const li = store.reviews.find((r) => r.stage_id === 'linkedin_1');
+  const mail = store.reviews.find((r) => r.stage_id === stepId);
+  assert.ok(li && li.status === 'authorized', 'linkedin terminal must survive pipeline park');
+  assert.ok(mail && mail.status === 'pending', 'mail pending must open alongside terminal');
+  assert.equal(String(mail.channel || ''), 'mail');
+
+  const listed = listPendingStageReviews({ db, status: 'all' });
+  const mailListed = listed.reviews.filter(
+    (r) => r.record_id === rowId && String(r.channel || '') === 'mail',
+  );
+  assert.ok(mailListed.length >= 1);
+  db.close();
+});
+
+test('pipeline path: manual_task without review: and without policy token does not invent a stage review', async () => {
+  const { listDir, db, rowId, stepId } = seedPipelineManualMail({
+    rowId: 'acct_pipeline_no_review',
+    stepId: 'mail_plain',
+    reviewRequiredFor: [],
+    withReviewBlock: false,
+  });
+
+  await runPipelineDataflow({ listDir, force: true });
+
+  const park = db.prepare(`
+    SELECT reason FROM pipeline_events
+    WHERE record_id = ? AND step_id = ? AND kind = 'manual_task' AND passed = 0
+    LIMIT 1
+  `).get(rowId, stepId);
+  assert.ok(park, 'still parks awaiting_manual');
+  assert.equal(park.reason, 'awaiting_manual');
+
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  assert.equal(
+    parseStageReviewJson(after.stage_review_json),
+    null,
+    'no declared review: and no policy token → no stage review invented',
+  );
+  const listed = listPendingStageReviews({ db, status: 'all' });
+  assert.equal(listed.reviews.filter((r) => r.record_id === rowId).length, 0);
+  db.close();
+});
+
+test('ensureStageReviewOnManualTaskPark: open failure is visible and complete still refuses', async () => {
+  const { listDir, db, rowId, stepId } = seedPipelineManualMail({
+    rowId: 'acct_review_open_fail',
+    reviewRequiredFor: [],
+    withReviewBlock: true,
+  });
+  // Seed an open pending park without a review (reproduces the live bug state).
+  db.prepare(`
+    INSERT INTO pipeline_events (event_id, record_id, step_id, kind, passed, reason, occurred_at)
+    VALUES (?, ?, ?, 'manual_task', 0, 'awaiting_manual', ?)
+  `).run('park_pre', rowId, stepId, new Date().toISOString());
+
+  const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  const step = {
+    kind: 'manual_task',
+    id: stepId,
+    config: { task_type: 'standard_postcard', channel: 'mail' },
+    review: {
+      purpose: 'Physical mail',
+      present: [
+        { field: 'business_name', label: 'Business' },
+        { field: 'address', label: 'Delivery address' },
+      ],
+      require_non_empty: ['address', 'business_name'],
+    },
+  };
+
+  // Force open failure: db that throws on every prepare used by upsert paths.
+  let threw = false;
+  const flakyDb = {
+    prepare(sql) {
+      // Allow reads for existing state; fail writes that open the review.
+      if (/UPDATE\s+records|INSERT\s+INTO\s+records/i.test(sql)) {
+        threw = true;
+        throw new Error('simulated_stage_review_write_failure');
+      }
+      return db.prepare(sql);
+    },
+    exec: (...args) => db.exec(...args),
+    close: () => db.close(),
+  };
+
+  const result = ensureStageReviewOnManualTaskPark({
+    db: flakyDb,
+    record,
+    step,
+    projectConfig: { policy: { version: 'tv-pipeline-v1', review_required_for: [] } },
+    stageId: stepId,
+    stepKind: 'manual_task',
+    taskType: 'standard_postcard',
+    channel: 'mail',
+  });
+  assert.equal(result.opened, false);
+  assert.ok(result.error, 'failure must be visible on the result');
+  assert.match(String(result.error), /simulated_stage_review_write_failure|stage_review/i);
+  assert.equal(threw, true);
+
+  // Real record still has no review (write failed) — complete refuses.
+  const after = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(rowId);
+  // May have last_error / audit from recordOpenFailure if a partial write path ran;
+  // the review itself must not be pending authorized.
+  const review = parseStageReviewJson(after.stage_review_json);
+  assert.ok(!review || review.status !== 'authorized');
+
+  const outboundNa = JSON.stringify(nextAction(rowId, { action_type: 'manual_task' }));
+  db.prepare(`
+    UPDATE records
+    SET account_sequence_state = 'active',
+        work_state = 'executing_external_action',
+        next_action_json = ?
+    WHERE _row_id = ?
+  `).run(outboundNa, rowId);
+
+  await assert.rejects(
+    () => completeManualTask({
+      db,
+      config: {
+        policy: { version: 'tv-pipeline-v1', review_required_for: [] },
+        pipeline: [step],
+        channels: { mail: { template_id: 'postcard_v1' } },
+      },
+      recordId: rowId,
+      stepId,
+      note: 'still refuse without review',
+    }),
+    /Stage review required|awaiting|not authorized|manual/i,
+  );
+  // Visibility: helper returned error; optionally last_error/audit on record when persist worked.
+  assert.ok(result.error);
+  db.close();
 });

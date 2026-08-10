@@ -19,7 +19,7 @@ import { readToolCatalog } from '../lib/tool-catalog.js';
 import { formatErrorMessage } from '../lib/error-format.js';
 import { emitActivity } from '../runtime/activity.js';
 import { beginRun, endRun, heartbeat, tickProgress } from '../runtime/progress.js';
-import { hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides, syncPrimaryContactProjection } from '../runtime/db.js';
+import { findAsset, hasPassedStep, inPlayWhere, insertPipelineEvent, logPipelineEvent, openListDb, overridesByRecordMap, reconcileFieldOverrides, reconcileOverrides, syncPrimaryContactProjection } from '../runtime/db.js';
 import { resolveWorkingDayConfig } from '../lib/working-days.js';
 import {
   flattenPipelineSteps,
@@ -35,6 +35,7 @@ import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js'
 import { isSkippedWhenOutcome } from '../lib/step-when.js';
 import { computeWaitWakeAt } from './sequence-step-runtime.js';
 import { countAwaitingReviewRecords } from './review.js';
+import { ensureStageReviewOnManualTaskPark } from '../policy/manual-task-stage-review.js';
 import {
   pipelineStepId,
   filterDepHash,
@@ -1125,6 +1126,44 @@ export const runPipelineDataflow = async ({
       onStepOutcome: async (recordState, step, outcome) => {
         const recordId = getRecordRowId(recordState.record);
         const now = clockIso(clock);
+        /** Open stage review on every pipeline path that records awaiting_manual. */
+        const openManualParkReview = (parkRecord: Record<string, unknown>) => {
+          if (String(outcome.reason || '') !== 'awaiting_manual' && step.kind !== 'manual_task') {
+            return parkRecord;
+          }
+          const rawStep = (step.step && typeof step.step === 'object')
+            ? step.step as Record<string, unknown>
+            : { kind: step.kind, id: step.id };
+          const usesAssetId = String((rawStep as any).uses_asset || '').trim();
+          const assetForStep = usesAssetId
+            ? findAsset({ db, rowId: recordId, stepId: usesAssetId })
+            : null;
+          const reviewOpen = ensureStageReviewOnManualTaskPark({
+            db,
+            record: parkRecord,
+            step: rawStep,
+            projectConfig: config,
+            stageId: step.id,
+            stepKind: String(rawStep.kind || step.kind || 'manual_task'),
+            taskType: String(
+              (rawStep.config as any)?.task_type
+              || (rawStep.config as any)?.taskType
+              || '',
+            ),
+            channel: String((rawStep.config as any)?.channel || ''),
+            assetForStep,
+            activeContactId: String(
+              parkRecord.active_contact_id || parkRecord.contact_id || '',
+            ) || null,
+          });
+          if (reviewOpen.error) {
+            console.warn(
+              `[manual_task park] stage review open failed for ${recordId}/${step.id}:`,
+              reviewOpen.error,
+            );
+          }
+          return reviewOpen.record;
+        };
         if (outcome.parked) {
           const reason = String(outcome.reason || 'Awaiting author step approval.');
           const alreadyParked = Boolean(db.prepare(`
@@ -1148,6 +1187,10 @@ export const runPipelineDataflow = async ({
                 occurred_at: now,
               },
             });
+          }
+          // Channel-style parks (parked:true + awaiting_manual) must open reviews too.
+          if (reason === 'awaiting_manual' || step.kind === 'manual_task') {
+            openManualParkReview(recordState.record as Record<string, unknown>);
           }
           summary.newly_parked += alreadyParked ? 0 : 1;
           progressState.done += 1;
@@ -1352,6 +1395,9 @@ export const runPipelineDataflow = async ({
               },
             });
           }
+          // Pipeline short-circuit parks here without executeChannelStep — open
+          // the stage review on this path so stage-review list/complete work.
+          openManualParkReview(recordState.record as Record<string, unknown>);
           summary.newly_parked += alreadyAwaiting ? 0 : 1;
           progressState.done += 1;
           tickProgress(db, runId, { done: progressState.done, target: rows.length });
