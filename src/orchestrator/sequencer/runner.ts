@@ -58,6 +58,20 @@ import { evaluateTransmitterSuppression } from '../policy/transmitter-suppressio
 import { hydrateActiveContactOntoRecord } from '../policy/load-contacts.js';
 import { evaluateSequenceReachability } from '../policy/sequence-reachability.js';
 import { reconcileSequenceReachability } from '../policy/sequence-reachability-reconcile.js';
+import { LIFECYCLE_STAGES } from '../policy/lifecycle.js';
+
+/**
+ * Sequence-status transitions that `logOutcome` can apply. These are a separate
+ * axis from lifecycle_stage: why outreach stopped / how the sequence is parked,
+ * not where the commercial deal stands.
+ */
+const LOG_SEQUENCE_STATUS_TRANSITIONS = ['engaged', 'opted_out', 'bounced', 'completed'] as const;
+
+/** Accepted `--transition` values: full lifecycle vocabulary ∪ sequence-status controls. */
+const LOG_ACCEPTED_TRANSITIONS = new Set<string>([
+  ...LIFECYCLE_STAGES,
+  ...LOG_SEQUENCE_STATUS_TRANSITIONS,
+]);
 
 const parseExtra = (value) => {
   try {
@@ -1718,7 +1732,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
     // Infer transition from action if not explicitly provided
     const normalizedAction = String(action || '').toLowerCase();
     const inferredTransition = transition
-      ? String(transition).toLowerCase()
+      ? String(transition).toLowerCase().trim()
       : (normalizedAction === 'opted_out' || normalizedAction === 'opt_out')
         ? 'opted_out'
         : (normalizedAction === 'talked_to_owner' || normalizedAction === 'booked_meeting' || normalizedAction === 'meeting_booked')
@@ -1727,6 +1741,17 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
             ? 'opted_out'
             : '';
     const normalizedTransition = inferredTransition;
+
+    // Reject unknown transitions loudly — never report status:updated when the
+    // requested transition cannot be applied.
+    if (normalizedTransition && !LOG_ACCEPTED_TRANSITIONS.has(normalizedTransition)) {
+      const accepted = [...LOG_ACCEPTED_TRANSITIONS].sort().join(', ');
+      return {
+        ok: false,
+        status: 'error',
+        error: `Unknown transition "${normalizedTransition}". Accepted transitions: ${accepted}.`,
+      };
+    }
 
     const updated: Record<string, unknown> = {
       ...row,
@@ -1739,6 +1764,14 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
       outcome_at: nowIso(),
     };
 
+    // lifecycle_stage axis: any accepted lifecycle vocabulary value writes the field.
+    // sequence_status is a separate axis (handled below for the four sequence transitions).
+    if (normalizedTransition && (LIFECYCLE_STAGES as readonly string[]).includes(normalizedTransition)) {
+      ensureRecordColumns({ db, columns: ['lifecycle_stage'] });
+      updated.lifecycle_stage = normalizedTransition;
+    }
+
+    // sequence_status axis — load-bearing safety behaviour for opt-out / bounce.
     if (normalizedTransition === 'engaged') {
       updated.sequence_status = 'engaged';
       updated.next_action_date = '';
@@ -1875,6 +1908,7 @@ export const logOutcome = ({ listDir, prospect, action, note = '', transition = 
       status: 'updated',
       record_id: getRecordRowId(updated),
       sequence_status: updated.sequence_status,
+      lifecycle_stage: updated.lifecycle_stage ?? row.lifecycle_stage ?? '',
       suppressed: isAffirmativeFlag(updated.suppressed, { failClosed: true }),
     };
   } finally {

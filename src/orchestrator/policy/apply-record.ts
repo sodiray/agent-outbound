@@ -21,6 +21,7 @@ import {
 import {
   createInitialColdState,
   checkStateIntegrity,
+  LIFECYCLE_STAGES,
   type AccountStateBundle,
   type LifecycleStage,
   type SequenceState,
@@ -814,7 +815,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   });
 
   let lifecycle_stage = String(record.lifecycle_stage || 'cold') as LifecycleStage;
-  if (!['cold', 'contacted', 'replied', 'engaged', 'meeting_booked', 'won', 'lost', 'recycled', 'disqualified'].includes(lifecycle_stage)) {
+  if (!(LIFECYCLE_STAGES as readonly string[]).includes(lifecycle_stage)) {
     lifecycle_stage = 'cold';
   }
 
