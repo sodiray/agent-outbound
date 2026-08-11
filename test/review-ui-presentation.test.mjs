@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { normalizeConfig } from '../dist/schemas/config.js';
+import { configuredReviewStages } from '../dist/orchestrator/pipeline/review.js';
 import {
   reviewIdentityAddsInformation,
   reviewLabelFor,
@@ -26,6 +27,25 @@ test('review record names use the declared title field and fall back only when i
   assert.equal(reviewRecordName({
     record: { _row_id: 'row-undeclared', venue_title: 'PALM TREE SPA' },
   }), 'Record row-undeclared');
+});
+
+test('pipeline-level record title field supplies every review stage, with a stage override when needed', () => {
+  const normalized = normalizeConfig({
+    record_title_field: 'lead_label',
+    pipeline: [
+      { kind: 'review', id: 'review_first' },
+      { kind: 'review', id: 'review_override', title_field: 'alternate_label' },
+      { kind: 'review', id: 'review_last' },
+    ],
+  });
+  const stages = configuredReviewStages(normalized.config);
+
+  assert.deepEqual(normalized.errors, []);
+  assert.equal(normalized.config.record_title_field, 'lead_label');
+  assert.deepEqual(stages.map((stage) => stage.title_field), ['lead_label', 'alternate_label', 'lead_label']);
+  assert.equal(reviewRecordName({ record: { _row_id: 'named', lead_label: 'Primary label' }, titleField: stages[0].title_field }), 'Primary label');
+  assert.equal(reviewRecordName({ record: { _row_id: 'empty', lead_label: ' ' }, titleField: stages[2].title_field }), 'Record empty');
+  assert.equal(reviewRecordName({ record: { _row_id: 'undeclared', lead_label: 'Primary label' } }), 'Record undeclared');
 });
 
 test('review identity column only appears for all stages when a declared title is not already visible', () => {

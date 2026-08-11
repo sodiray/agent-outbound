@@ -10,7 +10,12 @@ import {
 } from './api.js';
 import { DetailDrawer } from './DetailDrawer.js';
 import { RouteNav } from './RouteNav.js';
-import { resolveReviewDetail, reviewDetailHref, reviewDetailLinkText } from '../../review-detail.js';
+import {
+  canRenderReviewDetailMap,
+  resolveReviewDetail,
+  reviewDetailHref,
+  reviewDetailLinkText,
+} from '../../review-detail.js';
 import {
   reviewIdentityAddsInformation,
   reviewLabelFor,
@@ -161,14 +166,19 @@ const DetailValue = ({
 const DeclaredReviewDetail = ({
   detail,
   record,
+  mapsApiKey,
 }: {
   detail: NonNullable<MetaResponse['review_stages'][number]['detail']>;
   record: RecordRow;
+  mapsApiKey: string;
 }) => {
   const sections = resolveReviewDetail({ detail, record });
   return (
     <>
-      {sections?.map((section, sectionIndex) => (
+      {sections?.filter((section) => (
+        section.kind !== 'map'
+        || canRenderReviewDetailMap({ mapsApiKey, coordinates: section.coordinates })
+      )).map((section, sectionIndex) => (
         <section className="detail-section" key={`${section.title}-${sectionIndex}`}>
           <div className="section-title">{section.title}</div>
           {section.kind === 'fields' ? (
@@ -209,6 +219,47 @@ const DeclaredReviewDetail = ({
                 ))}
               </tbody>
             </table>
+          ) : null}
+          {section.kind === 'map' ? (
+            <div className="review-detail-map">
+              <APIProvider apiKey={mapsApiKey}>
+                <GoogleMap
+                  defaultCenter={section.coordinates}
+                  defaultZoom={10}
+                  disableDefaultUI
+                  gestureHandling="cooperative"
+                >
+                  <Marker position={section.coordinates} />
+                </GoogleMap>
+              </APIProvider>
+            </div>
+          ) : null}
+          {section.kind === 'embed' ? (
+            <>
+              <div className="review-detail-embed">
+                <iframe
+                  src={section.url}
+                  title={`${section.title} preview`}
+                  loading="lazy"
+                  sandbox=""
+                  referrerPolicy="no-referrer"
+                  tabIndex={-1}
+                />
+                <a
+                  className="review-detail-embed__open"
+                  href={section.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label={`Open ${section.title} in a new tab`}
+                >
+                  Open in new tab
+                </a>
+              </div>
+              <p className="review-detail-embed__notice">
+                Preview may be blocked by the site.{' '}
+                <a href={section.url} target="_blank" rel="noopener noreferrer">Open website in a new tab.</a>
+              </p>
+            </>
           ) : null}
         </section>
       ))}
@@ -313,7 +364,9 @@ const ReviewDetail = ({
               </button>
             </div>
           </header>
-          {hasDeclaredDetail ? <DeclaredReviewDetail detail={detailDeclaration || []} record={record} /> : null}
+          {hasDeclaredDetail ? (
+            <DeclaredReviewDetail detail={detailDeclaration || []} record={record} mapsApiKey={mapsApiKey} />
+          ) : null}
           {!hasDeclaredDetail && mapsApiKey && coordinates ? (
             <section className="detail-section">
               <div className="section-title">Location</div>

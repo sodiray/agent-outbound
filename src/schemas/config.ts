@@ -975,6 +975,7 @@ const ReviewDetailFieldItemSchema = z.union([
     as: ReviewDetailRendererSchema.default('text'),
     label: z.string().min(1).optional(),
     link_text: z.string().min(1).optional(),
+    show_when_empty: z.boolean().optional(),
   }),
 ]);
 const ReviewDetailColumnSchema = z.union([
@@ -1006,6 +1007,26 @@ const ReviewDetailSectionSchema = z.union([
     from: z.string().min(1),
     as: z.literal('table'),
     columns: z.array(ReviewDetailColumnSchema).min(1),
+  }),
+  z.object({
+    title: z.string().min(1),
+    as: z.literal('map'),
+    latitude_field: z.string().min(1).optional(),
+    longitude_field: z.string().min(1).optional(),
+    coordinates_field: z.string().min(1).optional(),
+  }).superRefine((value, ctx) => {
+    const hasSeparateCoordinates = Boolean(value.latitude_field) || Boolean(value.longitude_field);
+    if (value.coordinates_field && !hasSeparateCoordinates) return;
+    if (!value.coordinates_field && value.latitude_field && value.longitude_field) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'map detail requires coordinates_field or both latitude_field and longitude_field.',
+    });
+  }),
+  z.object({
+    title: z.string().min(1),
+    as: z.literal('embed'),
+    from: z.string().min(1),
   }),
 ]);
 
@@ -2243,6 +2264,7 @@ export const ConfigSchema = z.object({
     near_duplicate: NearDuplicateSchema,
     budget: SourceBudgetSchema.default({}),
   }).partial().default({}),
+  record_title_field: z.string().trim().min(1).optional(),
   pipeline: z.array(PipelineStepSchema).default([]),
   score: ScoreSchema,
   /** Pipeline-owned limits that determine how often a person is contacted. */

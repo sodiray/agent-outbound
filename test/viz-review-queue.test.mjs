@@ -15,6 +15,14 @@ const CONFIG = {
   ],
 };
 
+const PIPELINE_TITLE_CONFIG = {
+  record_title_field: 'lead_label',
+  pipeline: [
+    { kind: 'review', id: 'review_alpha', label: 'Alpha review', fields: ['priority'] },
+    { kind: 'review', id: 'review_beta', label: 'Beta review', fields: ['category'] },
+  ],
+};
+
 const createQueue = () => {
   const listDir = mkdtempSync(join(tmpdir(), 'ao-viz-review-'));
   writeFileSync(join(listDir, 'outbound.yaml'), `
@@ -33,7 +41,7 @@ pipeline:
     title_field: account_label
 `);
   const db = openListDb({ listDir, readonly: false });
-  ensureRecordColumns({ db, columns: ['priority', 'category', 'venue_title', 'account_label'] });
+  ensureRecordColumns({ db, columns: ['priority', 'category', 'venue_title', 'account_label', 'lead_label'] });
   const records = [
     { id: 'alpha-1', priority: '2', category: 'one', stage: 'review_alpha' },
     { id: 'alpha-2', priority: '1', category: 'two', stage: 'review_alpha' },
@@ -53,6 +61,7 @@ pipeline:
         category: record.category,
         venue_title: `Venue ${record.id}`,
         account_label: `Account ${record.id}`,
+        lead_label: `Lead ${record.id}`,
       },
     });
   });
@@ -139,6 +148,31 @@ test('review queues project declared title fields even when they are not table f
     assert.deepEqual(allStages.stage.fields, ['priority', 'category']);
     assert.equal(allStages.records[0].venue_title, 'Venue alpha-1');
     assert.equal(allStages.records.at(-1).account_label, 'Account beta-1');
+  } finally {
+    db.close();
+  }
+});
+
+test('review queues project a pipeline-level title field across stages without stage declarations', () => {
+  const { db } = createQueue();
+  try {
+    const alpha = getReviewQueue({
+      db,
+      config: PIPELINE_TITLE_CONFIG,
+      stageId: 'review_alpha',
+      limit: 100,
+    });
+    const beta = getReviewQueue({
+      db,
+      config: PIPELINE_TITLE_CONFIG,
+      stageId: 'review_beta',
+      limit: 100,
+    });
+
+    assert.equal(alpha.stage.title_field, 'lead_label');
+    assert.equal(beta.stage.title_field, 'lead_label');
+    assert.equal(alpha.records[0].lead_label, 'Lead alpha-1');
+    assert.equal(beta.records[0].lead_label, 'Lead shared');
   } finally {
     db.close();
   }

@@ -1933,11 +1933,46 @@ kbd {
   opacity: 0.55;
 }
 
-.review-detail-map {
+.review-detail-map,
+.review-detail-embed {
   height: 13rem;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+
+.review-detail-embed {
+  position: relative;
+  background: rgba(185, 193, 201, 0.06);
+}
+
+.review-detail-embed iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.review-detail-embed__open {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: end;
+  justify-content: end;
+  padding: 0.5rem;
+  color: transparent;
+  background: transparent;
+}
+
+.review-detail-embed__open:focus-visible,
+.review-detail-embed:hover .review-detail-embed__open {
+  color: var(--ink);
+  background: linear-gradient(transparent 55%, rgba(247, 248, 250, 0.88));
+}
+
+.review-detail-embed__notice {
+  margin: -0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .review-detail-fields {

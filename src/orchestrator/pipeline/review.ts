@@ -52,7 +52,7 @@ export const configuredReviewStages = (config: any): ReviewStage[] => (
   .map((step: any) => {
     const id = String(step?.id || '').trim();
     const label = String(step?.label || '').trim();
-    const titleField = String(step?.title_field || '').trim();
+    const titleField = String(step?.title_field || config?.record_title_field || '').trim();
     return {
       id,
       label: label || id,

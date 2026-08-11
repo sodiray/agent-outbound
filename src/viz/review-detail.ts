@@ -7,6 +7,7 @@ export type ReviewDetailFieldItem = {
   as?: ReviewDetailRenderer;
   label?: string;
   link_text?: string;
+  show_when_empty?: boolean;
 };
 
 export type ReviewDetailListItem = {
@@ -38,6 +39,18 @@ export type ReviewDetailSection =
     from: string;
     as: 'table';
     columns: Array<string | ReviewDetailColumn>;
+  }
+  | {
+    title: string;
+    as: 'map';
+    latitude_field?: string;
+    longitude_field?: string;
+    coordinates_field?: string;
+  }
+  | {
+    title: string;
+    as: 'embed';
+    from: string;
   };
 
 export type ResolvedReviewDetailSection =
@@ -69,6 +82,16 @@ export type ResolvedReviewDetailSection =
       link_text?: string;
     }>;
     rows: Array<Array<string | null>>;
+  }
+  | {
+    kind: 'map';
+    title: string;
+    coordinates: { lat: number; lng: number };
+  }
+  | {
+    kind: 'embed';
+    title: string;
+    url: string;
   };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
@@ -90,6 +113,51 @@ const displayValue = (value: unknown): string | null => {
     return JSON.stringify(value);
   } catch {
     return String(value);
+  }
+};
+
+const coordinateNumber = (value: unknown): number | null => {
+  if (isEmpty(value)) return null;
+  const number = typeof value === 'number' ? value : Number(String(value).trim());
+  return Number.isFinite(number) ? number : null;
+};
+
+const validCoordinates = (lat: unknown, lng: unknown): { lat: number; lng: number } | null => {
+  const resolvedLat = coordinateNumber(lat);
+  const resolvedLng = coordinateNumber(lng);
+  if (resolvedLat === null || resolvedLng === null) return null;
+  if (Math.abs(resolvedLat) > 90 || Math.abs(resolvedLng) > 180) return null;
+  return { lat: resolvedLat, lng: resolvedLng };
+};
+
+const parseCoordinatePair = (value: unknown): { lat: number; lng: number } | null => {
+  if (Array.isArray(value)) return validCoordinates(value[0], value[1]);
+  if (isRecord(value)) {
+    return validCoordinates(
+      value.lat ?? value.latitude,
+      value.lng ?? value.lon ?? value.longitude,
+    );
+  }
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  try {
+    return parseCoordinatePair(JSON.parse(text));
+  } catch {
+    const pair = text.split(',').map((part) => part.trim());
+    return pair.length === 2 ? validCoordinates(pair[0], pair[1]) : null;
+  }
+};
+
+const externalUrl = (value: unknown): string | null => {
+  const raw = displayValue(value);
+  if (!raw) return null;
+  const candidate = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const url = new URL(candidate);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
   }
 };
 
@@ -130,16 +198,40 @@ const resolveFields = ({
   const items = section.items.flatMap((item) => {
     const normalized = fieldItem(item);
     const value = displayValue(record[normalized.field]);
-    if (value === null) return [];
+    if (value === null && !normalized.show_when_empty) return [];
     return [{
       field: normalized.field,
       ...(normalized.label ? { label: normalized.label } : {}),
       renderer: normalized.as || 'text',
-      value,
+      value: value || '—',
       ...(normalized.link_text ? { link_text: normalized.link_text } : {}),
     }];
   });
   return items.length > 0 ? { kind: 'fields', title: section.title, items } : null;
+};
+
+const resolveMap = ({
+  section,
+  record,
+}: {
+  section: Extract<ReviewDetailSection, { as: 'map' }>;
+  record: Record<string, unknown>;
+}): ResolvedReviewDetailSection | null => {
+  const coordinates = section.coordinates_field
+    ? parseCoordinatePair(record[section.coordinates_field])
+    : validCoordinates(record[section.latitude_field || ''], record[section.longitude_field || '']);
+  return coordinates ? { kind: 'map', title: section.title, coordinates } : null;
+};
+
+const resolveEmbed = ({
+  section,
+  record,
+}: {
+  section: Extract<ReviewDetailSection, { as: 'embed' }>;
+  record: Record<string, unknown>;
+}): ResolvedReviewDetailSection | null => {
+  const url = externalUrl(record[section.from]);
+  return url ? { kind: 'embed', title: section.title, url } : null;
 };
 
 const resolveList = ({
@@ -205,10 +297,26 @@ export const resolveReviewDetail = ({
       const resolved = resolveList({ section, record });
       return resolved ? [resolved] : [];
     }
-    const resolved = resolveTable({ section, record });
+    if (section.as === 'table') {
+      const resolved = resolveTable({ section, record });
+      return resolved ? [resolved] : [];
+    }
+    if (section.as === 'map') {
+      const resolved = resolveMap({ section, record });
+      return resolved ? [resolved] : [];
+    }
+    const resolved = resolveEmbed({ section, record });
     return resolved ? [resolved] : [];
   });
 };
+
+export const canRenderReviewDetailMap = ({
+  mapsApiKey,
+  coordinates,
+}: {
+  mapsApiKey: string;
+  coordinates: { lat: number; lng: number } | null;
+}) => Boolean(mapsApiKey.trim()) && coordinates !== null;
 
 export const reviewDetailHref = ({ renderer, value }: { renderer: ReviewDetailRenderer; value: string }) => {
   if (renderer === 'email') return `mailto:${value}`;

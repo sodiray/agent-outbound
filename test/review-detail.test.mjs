@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { normalizeConfig } from '../dist/schemas/config.js';
 import { buildMeta } from '../dist/viz/data.js';
-import { resolveReviewDetail, reviewDetailHref } from '../dist/viz/review-detail.js';
+import {
+  canRenderReviewDetailMap,
+  resolveReviewDetail,
+  reviewDetailHref,
+} from '../dist/viz/review-detail.js';
 import { ensureRecordColumns, openListDb } from '../dist/orchestrator/runtime/db.js';
 
 const declaredDetail = [
@@ -151,6 +155,74 @@ test('malformed, absent, and non-array JSON omit the affected declared section',
   assert.deepEqual(resolveReviewDetail({ detail, record: {} }), []);
 });
 
+test('declared maps support separate fields and combined coordinate values, while invalid maps stay hidden', () => {
+  const separateFields = [{
+    title: 'Location',
+    as: 'map',
+    latitude_field: 'source_latitude',
+    longitude_field: 'source_longitude',
+  }];
+  const combinedField = [{
+    title: 'Location',
+    as: 'map',
+    coordinates_field: 'source_coordinates',
+  }];
+
+  assert.deepEqual(resolveReviewDetail({
+    detail: separateFields,
+    record: { source_latitude: '43.615', source_longitude: '-116.2023' },
+  }), [{ kind: 'map', title: 'Location', coordinates: { lat: 43.615, lng: -116.2023 } }]);
+  assert.deepEqual(resolveReviewDetail({
+    detail: combinedField,
+    record: { source_coordinates: '[43.615, -116.2023]' },
+  }), [{ kind: 'map', title: 'Location', coordinates: { lat: 43.615, lng: -116.2023 } }]);
+  assert.deepEqual(resolveReviewDetail({
+    detail: combinedField,
+    record: { source_coordinates: '{"latitude":43.615,"longitude":-116.2023}' },
+  }), [{ kind: 'map', title: 'Location', coordinates: { lat: 43.615, lng: -116.2023 } }]);
+
+  assert.equal(canRenderReviewDetailMap({ mapsApiKey: '', coordinates: { lat: 43.615, lng: -116.2023 } }), false);
+  assert.deepEqual(resolveReviewDetail({ detail: separateFields, record: {} }), []);
+  assert.deepEqual(resolveReviewDetail({ detail: combinedField, record: { source_coordinates: 'not coordinates' } }), []);
+  assert.deepEqual(resolveReviewDetail({ detail: combinedField, record: { source_coordinates: '91, -116.2023' } }), []);
+});
+
+test('declared website embeds resolve safe URLs and disclose their external-preview safeguards', () => {
+  const detail = [{ title: 'Website', as: 'embed', from: 'prospect_site' }];
+  const sections = resolveReviewDetail({ detail, record: { prospect_site: 'example.test/about' } });
+
+  assert.deepEqual(sections, [{ kind: 'embed', title: 'Website', url: 'https://example.test/about' }]);
+  assert.deepEqual(resolveReviewDetail({ detail, record: {} }), []);
+  assert.deepEqual(resolveReviewDetail({ detail, record: { prospect_site: 'javascript:alert(1)' } }), []);
+
+  const reviewRoute = readFileSync(new URL('../src/viz/ui/src/ReviewRoute.tsx', import.meta.url), 'utf8');
+  assert.match(reviewRoute, /loading="lazy"/);
+  assert.match(reviewRoute, /sandbox=""/);
+  assert.match(reviewRoute, /referrerPolicy="no-referrer"/);
+  assert.match(reviewRoute, /rel="noopener noreferrer"/);
+  assert.match(reviewRoute, /Preview may be blocked by the site/);
+});
+
+test('declared fields can retain empty values when explicitly requested', () => {
+  const detail = [{
+    title: 'Website signal',
+    items: [
+      { field: 'prospect_site', label: 'Website', show_when_empty: true },
+      { field: 'secondary_site', label: 'Secondary website' },
+    ],
+  }];
+
+  assert.deepEqual(resolveReviewDetail({ detail, record: { prospect_site: '  ', secondary_site: '' } }), [{
+    kind: 'fields',
+    title: 'Website signal',
+    items: [{ field: 'prospect_site', label: 'Website', renderer: 'text', value: '—' }],
+  }]);
+  assert.deepEqual(resolveReviewDetail({
+    detail: [{ title: 'No signals', items: ['prospect_site', 'secondary_site'] }],
+    record: { prospect_site: '', secondary_site: null },
+  }), []);
+});
+
 test('review detail validates its closed renderer vocabulary and warns when absent', () => {
   const unknownRenderer = normalizeConfig({
     pipeline: [{
@@ -161,6 +233,31 @@ test('review detail validates its closed renderer vocabulary and warns when abse
   });
   assert.ok(unknownRenderer.errors.length > 0);
   assert.match(unknownRenderer.error, /badge/);
+
+  const declaredMedia = normalizeConfig({
+    pipeline: [{
+      kind: 'review',
+      id: 'review_media',
+      detail: [
+        { title: 'Location', as: 'map', latitude_field: 'source_latitude', longitude_field: 'source_longitude' },
+        { title: 'Website', as: 'embed', from: 'prospect_site' },
+        { title: 'Signals', items: [{ field: 'prospect_site', show_when_empty: true }] },
+      ],
+    }],
+  });
+  assert.deepEqual(declaredMedia.errors, []);
+  assert.deepEqual(declaredMedia.config.pipeline[0].detail[0], {
+    title: 'Location',
+    as: 'map',
+    latitude_field: 'source_latitude',
+    longitude_field: 'source_longitude',
+  });
+  assert.deepEqual(declaredMedia.config.pipeline[0].detail[1], {
+    title: 'Website',
+    as: 'embed',
+    from: 'prospect_site',
+  });
+  assert.equal(declaredMedia.config.pipeline[0].detail[2].items[0].show_when_empty, true);
 
   const noDetail = normalizeConfig({
     pipeline: [{ kind: 'review', id: 'review_without_detail' }],
