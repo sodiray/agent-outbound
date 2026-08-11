@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { executeEnrichmentStepOnRecords } from '../dist/orchestrator/enrichment/runner.js';
+import { runGenerateStep } from '../dist/orchestrator/generate/runner.js';
+import { runComposeStep } from '../dist/orchestrator/compose/runner.js';
+import { runScoreStage } from '../dist/orchestrator/scoring/stage-runner.js';
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
 
@@ -117,9 +120,205 @@ test('memoized enrich steps never cache provider errors', async () => {
 
 test('memoization config rejects unknown keys', () => {
   const valid = normalizeConfig({ pipeline: [memoizedStep({ memoize: { ttl_days: 30 } })] });
+  const validKinds = normalizeConfig({ pipeline: [
+    {
+      kind: 'generate', id: 'memoized_generate_config', inputs: ['website'], memoize: {},
+      outputs: { generated_result: { type: 'string', description: 'Generated result.' } },
+    },
+    {
+      kind: 'score', id: 'memoized_score_config', key: 'fit', model: 'openrouter/anthropic/claude-haiku-4.5', memoize: {},
+      inputs: ['website'], criteria: [],
+      outputs: { fit_score: { type: 'number' }, fit_breakdown: { type: 'json' }, fit_reasoning: { type: 'string' } },
+    },
+    {
+      kind: 'compose', id: 'memoized_compose_config', model: 'openrouter/anthropic/claude-haiku-4.5', memoize: {},
+      inputs: { subject: { from: 'website' } }, structure: { headline: 'Headline.' }, length: { max_words: 10 },
+      outputs: { headline: { type: 'string', description: 'Headline.' } },
+    },
+  ] });
   const invalid = normalizeConfig({ pipeline: [memoizedStep({ memoize: { ttl_dyas: 30 } })] });
 
   assert.deepEqual(valid.errors, []);
+  assert.deepEqual(validKinds.errors, []);
   assert.ok(invalid.errors.length > 0);
   assert.match(invalid.error, /ttl_dyas|Unrecognized key/i);
+});
+
+test('memoized generate steps replay their settled output and re-execute when a declared input changes', async () => {
+  let providerCalls = 0;
+  const step = {
+    kind: 'generate',
+    id: 'memoized_generate',
+    inputs: { subject: { from: 'website' } },
+    outputs: { generated_result: { type: 'string', description: 'Generated result.' } },
+    memoize: {},
+  };
+  await withDb(async ({ db, root }) => {
+    ensureRecordColumns({ db, columns: ['generated_result'] });
+    const run = () => runGenerateStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step,
+      rows: [currentRecord(db)],
+      executeAction: async ({ record }) => {
+        providerCalls += 1;
+        return { outputs: { generated_result: `generated:${record.website}` }, usage: {} };
+      },
+    });
+    await run();
+    const firstOutput = currentRecord(db).generated_result;
+    const second = await run();
+    assert.equal(providerCalls, 1);
+    assert.equal(second.memoization_hits, 1);
+    assert.equal(second.non_execution_reasons['memoization-record'], 'memoization_hit');
+    assert.equal(currentRecord(db).generated_result, firstOutput);
+
+    upsertRecord({ db, row: { ...currentRecord(db), website: 'https://changed.example' } });
+    await run();
+    assert.equal(providerCalls, 2);
+    assert.equal(currentRecord(db).generated_result, 'generated:https://changed.example');
+  });
+});
+
+test('memoized compose steps replay their settled output and re-execute when a declared input changes', async () => {
+  let providerCalls = 0;
+  const step = {
+    kind: 'compose',
+    id: 'memoized_compose',
+    model: 'openrouter/anthropic/claude-haiku-4.5',
+    inputs: { subject: { from: 'website' } },
+    structure: { headline: 'A brief headline.' },
+    length: { max_words: 10 },
+    outputs: { headline: { type: 'string', description: 'Headline.' } },
+    memoize: {},
+  };
+  await withDb(async ({ db, root }) => {
+    ensureRecordColumns({ db, columns: ['headline'] });
+    const run = () => runComposeStep({
+      db,
+      listDir: root,
+      config: { ai: {} },
+      step,
+      rows: [currentRecord(db)],
+      stepId: step.id,
+      generateObject: async () => {
+        providerCalls += 1;
+        return { object: { outputs: { headline: 'A brief note' } }, usage: {} };
+      },
+    });
+    await run();
+    const firstOutput = currentRecord(db).headline;
+    const second = await run();
+    assert.equal(providerCalls, 1);
+    assert.equal(second.memoization_hits, 1);
+    assert.equal(second.non_execution_reasons['memoization-record'], 'memoization_hit');
+    assert.equal(currentRecord(db).headline, firstOutput);
+
+    upsertRecord({ db, row: { ...currentRecord(db), website: 'https://changed.example' } });
+    await run();
+    assert.equal(providerCalls, 2);
+  });
+});
+
+test('memoized score steps cache the complete sampled result and invalidate declared inputs and samples', async () => {
+  let providerCalls = 0;
+  const step = {
+    kind: 'score',
+    id: 'memoized_score',
+    key: 'fit',
+    model: 'openrouter/anthropic/claude-haiku-4.5',
+    inputs: { evidence: { from: 'website' } },
+    criteria: [{ id: 'fit', weight: 1, description: 'Declared evidence fit.' }],
+    outputs: {
+      fit_score: { type: 'number' },
+      fit_breakdown: { type: 'json' },
+      fit_reasoning: { type: 'string' },
+    },
+    memoize: {},
+  };
+  await withDb(async ({ db, root }) => {
+    const run = (samples) => runScoreStage({
+      db,
+      listDir: root,
+      config: { ai: {}, score: { samples } },
+      step,
+      rows: [currentRecord(db)],
+      generateObject: async () => {
+        providerCalls += 1;
+        return {
+          object: {
+            criteria: [{ id: 'fit', grade: 6, assessable: true, reasoning: 'Declared evidence supports fit.' }],
+            summary_reasoning: 'Settled score.',
+          },
+          usage: {},
+        };
+      },
+    });
+    await run(3);
+    const first = currentRecord(db);
+    const second = await run(3);
+    assert.equal(providerCalls, 3, 'a cached samples: 3 result must not create another draw');
+    assert.equal(second.get('memoization-record').reason, 'memoization_hit');
+    assert.equal(currentRecord(db).fit_score, first.fit_score);
+    assert.equal(JSON.parse(currentRecord(db).fit_breakdown).samples, 3);
+
+    upsertRecord({ db, row: { ...currentRecord(db), website: 'https://changed.example' } });
+    await run(3);
+    assert.equal(providerCalls, 6, 'a changed declared input re-executes all three draws');
+
+    await run(2);
+    assert.equal(providerCalls, 8, 'changing samples invalidates the memoized full sampled result');
+    assert.equal(JSON.parse(currentRecord(db).fit_breakdown).samples, 2);
+  });
+});
+
+test('memoized generate, compose, and score errors re-execute and never leave a staleness entry', async () => {
+  const generateStep = {
+    kind: 'generate', id: 'memoized_generate_error', inputs: { subject: { from: 'website' } }, memoize: {},
+    outputs: { generated_result: { type: 'string', description: 'Generated result.' } },
+  };
+  const composeStep = {
+    kind: 'compose', id: 'memoized_compose_error', model: 'openrouter/anthropic/claude-haiku-4.5', memoize: {},
+    inputs: { subject: { from: 'website' } }, structure: { headline: 'Headline.' }, length: { max_words: 10 },
+    outputs: { headline: { type: 'string', description: 'Headline.' } },
+  };
+  const scoreStep = {
+    kind: 'score', id: 'memoized_score_error', key: 'fit', model: 'openrouter/anthropic/claude-haiku-4.5', memoize: {},
+    inputs: { subject: { from: 'website' } }, criteria: [{ id: 'fit', weight: 1, description: 'Declared fit.' }],
+    outputs: { fit_score: { type: 'number' }, fit_breakdown: { type: 'json' }, fit_reasoning: { type: 'string' } },
+  };
+  await withDb(async ({ db, root }) => {
+    let generateCalls = 0;
+    const runGenerate = () => runGenerateStep({
+      db, listDir: root, config: { ai: {} }, step: generateStep, rows: [currentRecord(db)],
+      executeAction: async () => { generateCalls += 1; throw new Error('temporary generate outage'); },
+    });
+    await runGenerate();
+    await runGenerate();
+    assert.equal(generateCalls, 2);
+
+    let composeCalls = 0;
+    const runCompose = () => runComposeStep({
+      db, listDir: root, config: { ai: {} }, step: composeStep, rows: [currentRecord(db)], stepId: composeStep.id,
+      generateObject: async () => { composeCalls += 1; throw new Error('temporary compose outage'); },
+    });
+    await runCompose();
+    await runCompose();
+    assert.equal(composeCalls, 2);
+
+    let scoreCalls = 0;
+    const runScore = () => runScoreStage({
+      db, listDir: root, config: { ai: {} }, step: scoreStep, rows: [currentRecord(db)],
+      generateObject: async () => { scoreCalls += 1; throw new Error('temporary score outage'); },
+    });
+    await runScore();
+    await runScore();
+    assert.equal(scoreCalls, 2);
+
+    for (const stepId of [generateStep.id, composeStep.id, scoreStep.id]) {
+      assert.equal(db.prepare('SELECT 1 FROM staleness WHERE record_id = ? AND step_id = ?')
+        .get('memoization-record', stepId), undefined);
+    }
+  });
 });

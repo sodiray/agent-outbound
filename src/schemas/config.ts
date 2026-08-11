@@ -1076,6 +1076,7 @@ const PipelineGenerateStepSchema = z.object({
   reasoning: PipelineEnrichmentStepSchema.shape.reasoning,
   step_budget: PipelineEnrichmentStepSchema.shape.step_budget,
   concurrency: PipelineEnrichmentStepSchema.shape.concurrency,
+  memoize: PipelineEnrichmentStepSchema.shape.memoize,
   cache_key: PipelineEnrichmentStepSchema.shape.cache_key,
   action: PipelineEnrichmentStepSchema.shape.action,
   tool: PipelineEnrichmentStepSchema.shape.tool,
@@ -1121,6 +1122,7 @@ const PipelineScoreStepSchema = z.object({
   model: ProviderModelSchema,
   criteria: z.array(ScoreCriterionSchema).default([]),
   outputs: z.record(ScoreOutputDefSchema).default({}),
+  memoize: StepMemoizationSchema.optional(),
   ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 }).strict();
@@ -1192,6 +1194,7 @@ const PipelineComposeStepSchema = z.object({
     'compose outputs must not be empty.',
   ),
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
+  memoize: StepMemoizationSchema.optional(),
   ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 }).strict();

@@ -680,6 +680,9 @@ const executeScoreBatch = async (
     outputs: step.outputs && typeof step.outputs === 'object' && !Array.isArray(step.outputs)
       ? step.outputs as ScoreStage['outputs']
       : {},
+    memoize: step.memoize && typeof step.memoize === 'object' && !Array.isArray(step.memoize)
+      ? step.memoize as ScoreStage['memoize']
+      : undefined,
   };
   return runScoreStage({
     db: ctx.db as Parameters<typeof runScoreStage>[0]['db'],
@@ -700,7 +703,7 @@ const executeComposeBatch = async (
 ) => {
   const { runComposeStep } = await import('../compose/runner.js');
   const result = await runComposeStep({
-    db: ctx.db as { prepare: (sql: string) => { get: (...params: unknown[]) => unknown } },
+    db: ctx.db as { prepare: (sql: string) => { get: (...params: unknown[]) => unknown; run: (...params: unknown[]) => unknown } },
     listDir: ctx.listDir,
     config: (ctx.config || { ai: ctx.aiConfig || {} }) as Record<string, unknown>,
     step,

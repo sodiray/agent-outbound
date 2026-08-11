@@ -3,7 +3,13 @@ import { createRequire } from 'node:module';
 import { mapWithConcurrency } from '../lib/concurrency.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { hasAllDeclaredOutputs } from '../lib/declared-outputs.js';
-import { readStaleness, writeStaleness } from '../enrichment/runner.js';
+import {
+  isMemoizationFresh,
+  memoizationCacheDetailsForResolvedInputs,
+  memoizationConfigForStep,
+  readStaleness,
+  writeStaleness,
+} from '../enrichment/runner.js';
 import {
   inputTruncationReason,
   requiredInputNonExecutionReason,
@@ -12,11 +18,12 @@ import {
 import { getRecordRowId, stableHash } from '../lib/record.js';
 import { generateObjectWithTools } from '../runtime/llm.js';
 import { ensureRecordColumns, insertAsset, upsertRecord } from '../runtime/db.js';
+import { emitActivity } from '../runtime/activity.js';
 
 type RecordRow = Record<string, unknown>;
 
 type DbLike = {
-  prepare: (sql: string) => { get: (...params: unknown[]) => unknown };
+  prepare: (sql: string) => { get: (...params: unknown[]) => unknown; run: (...params: unknown[]) => unknown };
 };
 
 type ComposeStep = {
@@ -28,6 +35,7 @@ type ComposeStep = {
   length?: { max_words?: number; max_sentences?: number };
   outputs?: Record<string, { type?: string; description?: string; append?: string }>;
   concurrency?: number;
+  memoize?: { ttl_days?: number };
 };
 
 export const composeDependencyHash = ({ step, record }: { step: ComposeStep; record: RecordRow }) => stableHash({
@@ -40,6 +48,16 @@ export const composeDependencyHash = ({ step, record }: { step: ComposeStep; rec
     length: step.length || {},
     outputs: step.outputs || {},
   },
+});
+
+const composeMemoizationMaterialConfig = (step: ComposeStep) => ({
+  kind: 'compose',
+  model: step.model || '',
+  inputs: step.inputs || {},
+  structure: step.structure || {},
+  rules: step.rules || [],
+  length: step.length || {},
+  outputs: step.outputs || {},
 });
 
 export type ComposeGenerator = (input: {
@@ -325,6 +343,7 @@ export const runComposeStep = async ({
   const summary = {
     processed: 0,
     failed: 0,
+    memoization_hits: 0,
     errors: [] as Array<{ record_id: string; error: string }>,
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
     non_execution_reasons: {} as Record<string, string>,
@@ -346,8 +365,16 @@ export const runComposeStep = async ({
         summary.non_execution_reasons[recordId] = truncationNote;
       }
       const inputs = declaredInputs({ step, record });
+      const memoization = memoizationConfigForStep(step as Record<string, unknown>);
       const depHash = composeDependencyHash({ step, record });
       const cached = readStaleness({ db, recordId, stepId });
+      const memoizationDetails = memoization
+        ? memoizationCacheDetailsForResolvedInputs({
+          memoization,
+          inputs,
+          materialConfig: composeMemoizationMaterialConfig(step),
+        })
+        : undefined;
       const outputKeys = Object.keys(step.outputs || {});
       // Presence is judged on the durable row (DB wins over a stale in-memory
       // batch row). Unchanged inputs only justify a skip when prior outputs
@@ -357,15 +384,25 @@ export const runComposeStep = async ({
       const durableRecord = persistedForSkip && typeof persistedForSkip === 'object' && !Array.isArray(persistedForSkip)
         ? { ...record, ...(persistedForSkip as RecordRow) }
         : record;
-      if (
-        !force
+      const memoizedHit = Boolean(
+        memoization
+        && memoizationDetails
+        && isMemoizationFresh({ cached, hashes: memoizationDetails, force })
+        && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
+      );
+      const unchangedHit = Boolean(
+        !memoization
+        && !force
         && String(cached?.dep_hash || '') === depHash
-        && hasAllDeclaredOutputs({ record: durableRecord, outputKeys })
-      ) {
+        && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
+      );
+      if (memoizedHit || unchangedHit) {
         summary.declared_output_writes[recordId] = Object.fromEntries(
           outputKeys.map((key) => [key, { provided: true, value: durableRecord[key] }]),
         );
-        summary.non_execution_reasons[recordId] = 'skipped_unchanged_inputs';
+        if (memoizedHit) summary.memoization_hits += 1;
+        summary.non_execution_reasons[recordId] = memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs';
+        emitActivity({ event: 'row_skipped', phase: 'compose', step: stepId, row: String(record.business_name || recordId), reason: memoizedHit ? 'memoization_hit' : 'fresh' });
         return;
       }
       const resultSchema = buildComposeResultSchema(step);
@@ -400,9 +437,9 @@ export const runComposeStep = async ({
         db,
         recordId,
         stepId,
-        depHash,
-        cacheTtl: '',
-        cacheTtlSeconds: 0,
+        ...(memoization && memoizationDetails
+          ? memoizationDetails
+          : { depHash, cacheTtl: '', cacheTtlSeconds: 0 }),
       });
       insertAsset({
         db,
@@ -434,6 +471,9 @@ export const runComposeStep = async ({
         Object.entries(composed.outputs).map(([key, value]) => [key, { provided: true, value }]),
       );
     } catch (error) {
+      if (memoizationConfigForStep(step as Record<string, unknown>)) {
+        db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
+      }
       const detail = error instanceof Error ? error.message : String(error);
       summary.failed += 1;
       summary.errors.push({ record_id: recordId, error: detail });

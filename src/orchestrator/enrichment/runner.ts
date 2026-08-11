@@ -491,35 +491,49 @@ export const memoizationInputValuesForRecord = ({
   record: Record<string, unknown>;
 }) => resolveStageInputs({ step: stepConfig, record }).values;
 
+export const memoizationHashesForResolvedInputs = ({
+  inputs,
+  materialConfig,
+}: {
+  inputs: Record<string, unknown>;
+  materialConfig: Record<string, unknown>;
+}) => {
+  const inputHash = stableHash({
+    version: 'step-memoization-v1',
+    inputs,
+    config: materialConfig,
+  });
+  return { depHash: inputHash, inputHash, policyHash: 'step-memoization-v1' };
+};
+
 const memoizationHashes = ({
   stepConfig,
   record,
 }: {
   stepConfig: Record<string, unknown>;
   record: Record<string, unknown>;
-}) => {
-  const inputHash = stableHash({
-    version: 'step-memoization-v1',
-    inputs: memoizationInputValuesForRecord({ stepConfig, record }),
-    config: materialEnrichConfig(stepConfig),
-  });
-  return { depHash: inputHash, inputHash, policyHash: 'step-memoization-v1' };
-};
+}) => memoizationHashesForResolvedInputs({
+  inputs: memoizationInputValuesForRecord({ stepConfig, record }),
+  materialConfig: materialEnrichConfig(stepConfig),
+});
 
-const isMemoizationFresh = ({
+export const isMemoizationFresh = ({
   cached,
+  hashes,
   stepConfig,
   record,
   force = false,
 }: {
   cached: any;
-  stepConfig: Record<string, unknown>;
-  record: Record<string, unknown>;
+  hashes?: { depHash: string; policyHash: string };
+  stepConfig?: Record<string, unknown>;
+  record?: Record<string, unknown>;
   force?: boolean;
 }) => {
   if (force || !cached) return false;
-  const hashes = memoizationHashes({ stepConfig, record });
-  if (String(cached.dep_hash || '') !== hashes.depHash || String(cached.policy_hash || '') !== hashes.policyHash) return false;
+  const resolvedHashes = hashes || (stepConfig && record ? memoizationHashes({ stepConfig, record }) : undefined);
+  if (!resolvedHashes) return false;
+  if (String(cached.dep_hash || '') !== resolvedHashes.depHash || String(cached.policy_hash || '') !== resolvedHashes.policyHash) return false;
   const ttl = Number(cached.cache_ttl_seconds || 0);
   if (ttl <= 0) return true;
   const updatedAt = new Date(String(cached.updated_at || 0)).getTime();
@@ -534,7 +548,7 @@ const memoizationHasSettledOutcome = ({
   statusColumn: string;
 }) => ['ok', 'empty'].includes(String(record[statusColumn] || '').trim().toLowerCase());
 
-const memoizationCacheDetails = ({
+export const memoizationCacheDetails = ({
   memoization,
   stepConfig,
   record,
@@ -544,6 +558,20 @@ const memoizationCacheDetails = ({
   record: Record<string, unknown>;
 }) => ({
   ...memoizationHashes({ stepConfig, record }),
+  cacheTtlSeconds: memoizationTtlSeconds(memoization),
+  cacheTtl: memoizationCacheTtl(memoization),
+});
+
+export const memoizationCacheDetailsForResolvedInputs = ({
+  memoization,
+  inputs,
+  materialConfig,
+}: {
+  memoization: StepMemoizationConfig;
+  inputs: Record<string, unknown>;
+  materialConfig: Record<string, unknown>;
+}) => ({
+  ...memoizationHashesForResolvedInputs({ inputs, materialConfig }),
   cacheTtlSeconds: memoizationTtlSeconds(memoization),
   cacheTtl: memoizationCacheTtl(memoization),
 });
