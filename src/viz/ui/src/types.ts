@@ -1,3 +1,5 @@
+import type { ReviewDetailSection } from '../../review-detail.js';
+
 export type RecordValue = string | number | boolean | null;
 export type RecordRow = Record<string, RecordValue>;
 
@@ -77,6 +79,7 @@ export type ReviewStage = {
   label: string;
   description: string;
   fields: string[];
+  detail?: ReviewDetailSection[];
   awaiting_count: number;
   sequence_counts: Array<{ sequence_name: string; count: number }>;
 };

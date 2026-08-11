@@ -963,6 +963,47 @@ const PipelineAssignStepSchema = z.object({
   ...PipelineWhenFields,
 }).partial({ description: true, depends_on: true, runs_after: true, rules: true, batch_size: true });
 
+const ReviewDetailRendererSchema = z.enum(['text', 'link', 'email', 'phone']);
+const ReviewDetailPathSchema = z.string().regex(
+  /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/,
+  'must be a simple dotted property path.',
+);
+const ReviewDetailFieldItemSchema = z.union([
+  z.string().min(1),
+  z.object({
+    field: z.string().min(1),
+    as: ReviewDetailRendererSchema.default('text'),
+  }),
+]);
+const ReviewDetailColumnSchema = z.union([
+  ReviewDetailPathSchema,
+  z.object({
+    field: ReviewDetailPathSchema,
+    as: ReviewDetailRendererSchema.default('text'),
+  }),
+]);
+const ReviewDetailSectionSchema = z.union([
+  z.object({
+    title: z.string().min(1),
+    items: z.array(ReviewDetailFieldItemSchema).min(1),
+  }),
+  z.object({
+    title: z.string().min(1),
+    from: z.string().min(1),
+    as: z.literal('list'),
+    item: z.object({
+      text: ReviewDetailPathSchema,
+      as: ReviewDetailRendererSchema.default('text'),
+    }),
+  }),
+  z.object({
+    title: z.string().min(1),
+    from: z.string().min(1),
+    as: z.literal('table'),
+    columns: z.array(ReviewDetailColumnSchema).min(1),
+  }),
+]);
+
 const PipelineReviewStepSchema = z.object({
   kind: z.literal('review'),
   id: z.string().min(1),
@@ -971,6 +1012,7 @@ const PipelineReviewStepSchema = z.object({
   runs_after: PipelineFilterStepSchema.shape.runs_after,
   label: z.string().default(''),
   fields: z.array(z.string()).default([]),
+  detail: z.array(ReviewDetailSectionSchema).min(1).optional(),
   inputs: StageInputsSchema,
   ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
@@ -2667,6 +2709,14 @@ const channelDailyCapValidationMessages = (input: Record<string, unknown>): stri
   return [...channelErrors, ...stepErrors];
 };
 
+const reviewDetailWarnings = (config: Record<string, unknown>): string[] => flattenPipelineSteps(config)
+  .filter((step) => String(step?.kind || '') === 'review')
+  .flatMap((step) => (
+    Array.isArray(step?.detail)
+      ? []
+      : [`Review step "${String(step?.id || 'unknown')}" should declare detail for the review panel.`]
+  ));
+
 export const normalizeConfig = (value, options: {
   listDir?: string;
   recordFields?: Iterable<string>;
@@ -2891,6 +2941,7 @@ export const normalizeConfig = (value, options: {
       ...unknownWarnings,
       ...stageInputs.warnings,
       ...repeatedScoreKeyWarnings(config),
+      ...reviewDetailWarnings(config),
     ])],
     config,
   };

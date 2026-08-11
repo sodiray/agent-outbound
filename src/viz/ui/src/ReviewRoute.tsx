@@ -10,6 +10,7 @@ import {
 } from './api.js';
 import { DetailDrawer } from './DetailDrawer.js';
 import { RouteNav } from './RouteNav.js';
+import { resolveReviewDetail, reviewDetailHref } from '../../review-detail.js';
 import type {
   MetaResponse,
   RecordDetail,
@@ -37,7 +38,7 @@ type DecisionHistoryItem = {
 type DecisionFailure = {
   stage_id: string;
   row_id: string;
-  business_name: string;
+  record_label: string;
   action: string;
   error: string;
   detail: string;
@@ -68,16 +69,7 @@ const displayValue = (value: RecordValue | undefined) => {
   return String(value);
 };
 
-const recordName = (record: RecordRow) => (
-  displayValue(record.business_name) || displayValue(record.name) || 'Unnamed record'
-);
-
-const isWebsiteField = (field: string) => field.toLowerCase().includes('website');
-
-const websiteHref = (value: string) => {
-  if (/^https?:\/\//i.test(value)) return value;
-  return `https://${value}`;
-};
+const recordName = (record: RecordRow) => rowId(record) ? `Record ${rowId(record)}` : 'Unnamed record';
 
 const isTypingTarget = (target: EventTarget | null) => {
   if (!(target instanceof HTMLElement)) return false;
@@ -123,8 +115,6 @@ const DetailFieldTable = ({
 }) => {
   const visibleFields = fields.filter((field) => (
     field !== '_row_id'
-    && field !== 'business_name'
-    && field !== 'name'
     && hasDisplayValue(record[field])
   ));
   if (visibleFields.length === 0) return null;
@@ -136,11 +126,7 @@ const DetailFieldTable = ({
           return (
             <tr key={field}>
               <th scope="row">{labelFor(field)}</th>
-              <td>
-                {isWebsiteField(field)
-                  ? <a href={websiteHref(value)} target="_blank" rel="noreferrer">{value}</a>
-                  : value}
-              </td>
+              <td>{value}</td>
             </tr>
           );
         })}
@@ -149,9 +135,79 @@ const DetailFieldTable = ({
   );
 };
 
+const DetailValue = ({
+  renderer,
+  value,
+}: {
+  renderer: 'text' | 'link' | 'email' | 'phone';
+  value: string;
+}) => {
+  if (renderer === 'text') return value;
+  return <a href={reviewDetailHref({ renderer, value })} target={renderer === 'link' ? '_blank' : undefined} rel={renderer === 'link' ? 'noreferrer' : undefined}>{value}</a>;
+};
+
+const DeclaredReviewDetail = ({
+  detail,
+  record,
+}: {
+  detail: NonNullable<MetaResponse['review_stages'][number]['detail']>;
+  record: RecordRow;
+}) => {
+  const sections = resolveReviewDetail({ detail, record });
+  return (
+    <>
+      {sections?.map((section, sectionIndex) => (
+        <section className="detail-section" key={`${section.title}-${sectionIndex}`}>
+          <div className="section-title">{section.title}</div>
+          {section.kind === 'fields' ? (
+            <table className="review-detail-fields">
+              <tbody>
+                {section.items.map((item) => (
+                  <tr key={item.field}>
+                    <th scope="row">{labelFor(item.field)}</th>
+                    <td><DetailValue renderer={item.renderer} value={item.value} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : null}
+          {section.kind === 'list' ? (
+            <ul className="review-detail-list">
+              {section.items.map((item, index) => (
+                <li key={`${item}-${index}`}><DetailValue renderer={section.renderer} value={item} /></li>
+              ))}
+            </ul>
+          ) : null}
+          {section.kind === 'table' ? (
+            <table className="review-detail-fields review-detail-entity-table">
+              <thead>
+                <tr>
+                  {section.columns.map((column) => <th key={column.field} scope="col">{labelFor(column.field)}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {section.rows.map((row, rowIndex) => (
+                  <tr key={rowIndex}>
+                    {row.map((value, columnIndex) => (
+                      <td key={section.columns[columnIndex].field}>
+                        {value === null ? '—' : <DetailValue renderer={section.columns[columnIndex].renderer} value={value} />}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : null}
+        </section>
+      ))}
+    </>
+  );
+};
+
 const ReviewDetail = ({
   rowIdValue,
   mapsApiKey,
+  detailDeclaration,
   deciding,
   undoLabel,
   canUndo,
@@ -161,6 +217,7 @@ const ReviewDetail = ({
 }: {
   rowIdValue: string;
   mapsApiKey: string;
+  detailDeclaration?: MetaResponse['review_stages'][number]['detail'];
   deciding: boolean;
   undoLabel: string;
   canUndo: boolean;
@@ -193,18 +250,19 @@ const ReviewDetail = ({
   }, [rowIdValue]);
 
   const record = detail?.record || null;
-  const coordinates = record ? recordCoordinates(record) : null;
-  const address = record
+  const hasDeclaredDetail = detailDeclaration !== undefined;
+  const coordinates = !hasDeclaredDetail && record ? recordCoordinates(record) : null;
+  const address = !hasDeclaredDetail && record
     ? displayValue(record.address) || displayValue(record.formattedAddress)
     : '';
-  const sourcedFields = detail?.field_classification.sourced || [];
-  const enrichedFields = detail?.field_classification.enriched || [];
-  const rawFields = detail?.field_classification.raw || [];
+  const sourcedFields = hasDeclaredDetail ? [] : detail?.field_classification.sourced || [];
+  const enrichedFields = hasDeclaredDetail ? [] : detail?.field_classification.enriched || [];
+  const rawFields = hasDeclaredDetail ? [] : detail?.field_classification.raw || [];
   const hasSourcedFields = Boolean(record && sourcedFields.some((field) => (
-    field !== 'business_name' && field !== 'name' && hasDisplayValue(record[field])
+    hasDisplayValue(record[field])
   )));
   const hasEnrichedFields = Boolean(record && enrichedFields.some((field) => (
-    field !== 'business_name' && field !== 'name' && hasDisplayValue(record[field])
+    hasDisplayValue(record[field])
   )));
   const rawValues = record
     ? rawFields.map((field) => ({ field, value: rawDisplayValue(record[field]) })).filter((item) => item.value)
@@ -224,11 +282,11 @@ const ReviewDetail = ({
             </div>
             <div className="review-detail-action-stack">
               <div className="review-detail-actions">
-                <button type="button" onClick={onApprove} disabled={deciding}>
-                  {deciding ? 'Saving…' : 'Approve'}
-                </button>
                 <button className="is-reject" type="button" onClick={onReject} disabled={deciding}>
                   Reject
+                </button>
+                <button type="button" onClick={onApprove} disabled={deciding}>
+                  {deciding ? 'Saving…' : 'Approve'}
                 </button>
               </div>
               <button
@@ -241,7 +299,8 @@ const ReviewDetail = ({
               </button>
             </div>
           </header>
-          {mapsApiKey && coordinates ? (
+          {hasDeclaredDetail ? <DeclaredReviewDetail detail={detailDeclaration || []} record={record} /> : null}
+          {!hasDeclaredDetail && mapsApiKey && coordinates ? (
             <section className="detail-section">
               <div className="section-title">Location</div>
               <div className="review-detail-map">
@@ -258,19 +317,19 @@ const ReviewDetail = ({
               </div>
             </section>
           ) : null}
-          {hasSourcedFields ? (
+          {!hasDeclaredDetail && hasSourcedFields ? (
             <section className="detail-section">
               <div className="section-title">What we know</div>
               <DetailFieldTable record={record} fields={sourcedFields} />
             </section>
           ) : null}
-          {hasEnrichedFields ? (
+          {!hasDeclaredDetail && hasEnrichedFields ? (
             <section className="detail-section">
               <div className="section-title">Enriched</div>
               <DetailFieldTable record={record} fields={enrichedFields} />
             </section>
           ) : null}
-          {rawValues.length > 0 ? (
+          {!hasDeclaredDetail && rawValues.length > 0 ? (
             <section className="detail-section">
               <div className="section-title">Raw data</div>
               <div className="review-detail-raw">
@@ -400,8 +459,8 @@ export const ReviewRoute = () => {
   const selectedRecord = activeRecords[cursor] || null;
   const activeFailures = isAllStages ? failures : failures.filter((failure) => failure.stage_id === activeStageId);
   const visibleFields = (activeStage?.fields || [])
-    .filter((field) => field !== '_row_id' && field !== 'business_name' && field !== 'name');
-  const sortFields = ['_row_id', 'business_name', 'name', 'sequence_name', 'routed_by', ...(activeStage?.fields || [])]
+    .filter((field) => field !== '_row_id');
+  const sortFields = ['_row_id', ...(activeStage?.fields || [])]
     .filter((field, index, fields) => fields.indexOf(field) === index)
     .filter((field) => meta?.columns.some((column) => column.key === field));
   const lastDecision = history.at(-1);
@@ -417,6 +476,9 @@ export const ReviewRoute = () => {
       && item.state === 'saving'
     ))
     : null;
+  const panelStage = panelRecord && isAllStages
+    ? meta?.review_stages.find((stage) => stage.id === reviewStageIdForRecord(panelRecord)) || null
+    : activeStage;
   const drawerFailure = (
     panelRecord
       ? activeFailures.find((failure) => failure.row_id === rowId(panelRecord))
@@ -565,7 +627,7 @@ export const ReviewRoute = () => {
         {
           stage_id: stageId,
           row_id: recordId,
-          business_name: recordName(record),
+          record_label: recordName(record),
           action: actionLabel(verdict),
           error: String((nextError as Error)?.message || nextError),
           detail: 'The lead was restored to its original place.',
@@ -630,7 +692,7 @@ export const ReviewRoute = () => {
         {
           stage_id: last.stage_id,
           row_id: last.row_id,
-          business_name: displayValue(last.record.business_name),
+          record_label: recordName(last.record),
           action: 'Undo',
           error: String((nextError as Error)?.message || nextError),
           detail: 'The decision remains in effect.',
@@ -813,7 +875,7 @@ export const ReviewRoute = () => {
                   <strong>{activeFailures.length} request{activeFailures.length === 1 ? '' : 's'} failed</strong>
                   {activeFailures.map((failure) => (
                     <span key={decisionKey(failure)}>
-                      {failure.action} failed for {failure.business_name} ({failure.row_id}): {failure.error} {failure.detail}
+                      {failure.action} failed for {failure.record_label} ({failure.row_id}): {failure.error} {failure.detail}
                     </span>
                   ))}
                 </div>
@@ -859,32 +921,11 @@ export const ReviewRoute = () => {
                               const value = displayValue(record[field]);
                               return (
                                 <td key={field} title={value}>
-                                  {value && isWebsiteField(field)
-                                    ? (
-                                      <a
-                                        href={websiteHref(value)}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        onClick={(event) => event.stopPropagation()}
-                                      >
-                                        {value}
-                                      </a>
-                                    )
-                                    : value}
+                                  {value}
                                 </td>
                               );
                             })}
                             <td className="review-table__actions">
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setCursor(index);
-                                  void applyDecision('approve', record);
-                                }}
-                              >
-                                Approve
-                              </button>
                               <button
                                 className="is-reject"
                                 type="button"
@@ -895,6 +936,16 @@ export const ReviewRoute = () => {
                                 }}
                               >
                                 Reject
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setCursor(index);
+                                  void applyDecision('approve', record);
+                                }}
+                              >
+                                Approve
                               </button>
                             </td>
                           </tr>
@@ -915,13 +966,14 @@ export const ReviewRoute = () => {
       >
         {drawerFailure ? (
           <div className="error-banner" role="alert">
-            {drawerFailure.action} failed for {drawerFailure.business_name}: {drawerFailure.error} {drawerFailure.detail}
+            {drawerFailure.action} failed for {drawerFailure.record_label}: {drawerFailure.error} {drawerFailure.detail}
           </div>
         ) : null}
         {panelRecord ? (
           <ReviewDetail
             rowIdValue={rowId(panelRecord)}
             mapsApiKey={meta.mapsApiKey}
+            detailDeclaration={panelStage?.detail}
             deciding={Boolean(panelDecision)}
             undoLabel={panelUndoLabel}
             canUndo={Boolean(lastDecision && lastDecision.state === 'saved' && !undoing)}

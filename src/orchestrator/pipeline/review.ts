@@ -9,12 +9,14 @@ import {
 } from '../runtime/db.js';
 import { flattenPipelineSteps } from '../lib/subpipelines.js';
 import { isAffirmativeFlag } from '../policy/booleanish.js';
+import type { ReviewDetailSection } from '../../viz/review-detail.js';
 
 export type ReviewStage = {
   id: string;
   label: string;
   description: string;
   fields: string[];
+  detail?: ReviewDetailSection[];
 };
 
 export type ReviewDecision = {
@@ -56,6 +58,7 @@ export const configuredReviewStages = (config: any): ReviewStage[] => (
       fields: Array.isArray(step?.fields)
         ? step.fields.map((field: unknown) => String(field || '').trim()).filter(Boolean)
         : [],
+      detail: Array.isArray(step?.detail) ? step.detail as ReviewDetailSection[] : undefined,
     };
   })
   .filter((stage) => stage.id);
@@ -217,7 +220,7 @@ export const getReviewQueue = ({
   const availableColumns = recordColumns(db);
   const stage = requireResolvedReviewStage({ db, config, stageId });
   const { pageLimit, pageOffset } = reviewPage({ limit, offset });
-  const fields = [...new Set(['_row_id', 'business_name', 'sequence_name', 'routed_by', ...stage.fields])]
+  const fields = [...new Set(['_row_id', ...stage.fields])]
     .filter((field) => availableColumns.has(field));
   const orderBy = reviewOrderBy({
     sort,
@@ -254,7 +257,7 @@ export const getReviewQueue = ({
   };
 };
 
-const REVIEW_IDENTITY_FIELDS = ['_row_id', 'business_name', 'name', 'sequence_name', 'routed_by'];
+const REVIEW_IDENTITY_FIELDS = ['_row_id'];
 
 const reviewPage = ({ limit, offset }: { limit: number; offset: number }) => {
   const requestedLimit = Number(limit);
@@ -334,9 +337,6 @@ export const getAllReviewQueue = ({
   const { pageLimit, pageOffset } = reviewPage({ limit, offset });
   const fields = [...new Set([
     '_row_id',
-    'business_name',
-    'sequence_name',
-    'routed_by',
     ...stages.flatMap((stage) => stage.fields),
   ])].filter((field) => availableColumns.has(field));
   const uniqueTotal = countAwaitingReviewRecords({ db, config });

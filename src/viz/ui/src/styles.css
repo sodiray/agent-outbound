@@ -1871,8 +1871,8 @@ kbd {
   margin-left: 0.35rem;
 }
 
-.review-table__actions button:first-child,
-.review-detail-actions button:first-child {
+.review-table__actions button:not(.is-reject),
+.review-detail-actions button:not(.is-reject) {
   border-color: rgba(62, 207, 111, 0.36);
   color: var(--green);
 }
@@ -1976,6 +1976,23 @@ kbd {
 .review-detail-fields td {
   color: var(--ink);
   overflow-wrap: anywhere;
+}
+
+.review-detail-list {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.review-detail-list li {
+  color: var(--ink);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.review-detail-entity-table th {
+  width: auto;
 }
 
 .review-detail-raw {
