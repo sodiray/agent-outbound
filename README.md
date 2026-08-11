@@ -22,7 +22,7 @@ The system is **tool-agnostic**. It discovers whatever MCP tools you have connec
 ## Prerequisites
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI installed
-- Node.js 18+
+- Node.js 20–24. Run `nvm use` to select the pinned Node version. Node 25 is not supported because `better-sqlite3` does not provide a compatible build for it.
 - At least one MCP tool connected to Claude Code (e.g., Google Maps, Hunter, Firecrawl, Gmail)
 
 ## Quick start

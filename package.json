@@ -57,6 +57,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20 <25"
   }
 }
