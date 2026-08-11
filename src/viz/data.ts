@@ -22,6 +22,7 @@ import { LEAD_STATUSES, leadStatus, leadStatusCaseSql } from '../orchestrator/ru
 import { getEnv } from '../orchestrator/runtime/env.js';
 import {
   clearReviewDecision,
+  getAllReviewQueue,
   getReviewQueue,
   getReviewStages,
   insertReviewDecision,
@@ -682,11 +683,34 @@ export const insertTerritoryNoteForViz = (listDir: string, territoryId: string, 
   }
 };
 
-export const getReviewQueueForViz = (listDir: string, stageId: string, limit = 100, offset = 0) => {
+export const getReviewQueueForViz = (
+  listDir: string,
+  stageId: string,
+  limit = 100,
+  offset = 0,
+  sort = '',
+  dir = '',
+) => {
   const db = openListDb({ listDir, readonly: true });
   try {
     const { config } = readConfig(listDir);
-    return getReviewQueue({ db, config, stageId, limit, offset });
+    return getReviewQueue({ db, config, stageId, limit, offset, sort, dir });
+  } finally {
+    db.close();
+  }
+};
+
+export const getAllReviewQueueForViz = (
+  listDir: string,
+  limit = 100,
+  offset = 0,
+  sort = '',
+  dir = '',
+) => {
+  const db = openListDb({ listDir, readonly: true });
+  try {
+    const { config } = readConfig(listDir);
+    return getAllReviewQueue({ db, config, limit, offset, sort, dir });
   } finally {
     db.close();
   }

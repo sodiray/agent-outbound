@@ -73,14 +73,20 @@ export const fetchRecords = ({ sort, dir, q, filters }: RecordsParams) => {
 
 export const fetchRecordDetail = (rowId: string) => getJson<RecordDetail>(`/api/records/${encodeURIComponent(rowId)}`);
 
-const fetchReviewQueuePage = (stageId: string, offset: number) => {
-  const params = new URLSearchParams({ limit: '500', offset: String(offset) });
-  return getJson<ReviewQueueResponse>(`/api/review/${encodeURIComponent(stageId)}?${params.toString()}`);
+type ReviewQueueParams = {
+  sort: string;
+  dir: SortDir;
 };
 
-export const fetchReviewQueue = async (stageId: string): Promise<ReviewQueueResponse> => {
+const fetchReviewQueuePage = (path: string, offset: number, { sort, dir }: ReviewQueueParams) => {
+  const params = new URLSearchParams({ limit: '500', offset: String(offset), dir });
+  if (sort) params.set('sort', sort);
+  return getJson<ReviewQueueResponse>(`${path}?${params.toString()}`);
+};
+
+const fetchCompleteReviewQueue = async (path: string, params: ReviewQueueParams): Promise<ReviewQueueResponse> => {
   const collect = async (offset: number, records: ReviewQueueResponse['records']): Promise<ReviewQueueResponse> => {
-    const page = await fetchReviewQueuePage(stageId, offset);
+    const page = await fetchReviewQueuePage(path, offset, params);
     const nextRecords = [...records, ...page.records];
     if (nextRecords.length >= page.total || page.records.length === 0) {
       return { ...page, limit: nextRecords.length, offset: 0, records: nextRecords };
@@ -89,6 +95,12 @@ export const fetchReviewQueue = async (stageId: string): Promise<ReviewQueueResp
   };
   return collect(0, []);
 };
+
+export const fetchReviewQueue = (stageId: string, params: ReviewQueueParams) => (
+  fetchCompleteReviewQueue(`/api/review/${encodeURIComponent(stageId)}`, params)
+);
+
+export const fetchAllReviewQueue = (params: ReviewQueueParams) => fetchCompleteReviewQueue('/api/review', params);
 
 export const submitReviewDecisions = (stageId: string, decisions: ReviewDecisionInput[]) => requestJson<ReviewDecisionBatchResponse>(
   `/api/review/${encodeURIComponent(stageId)}/decisions`,

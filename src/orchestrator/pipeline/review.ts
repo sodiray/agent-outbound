@@ -85,9 +85,9 @@ export const requireResolvedReviewStage = ({
   availableColumns: recordColumns(db),
 });
 
-const awaitingReviewWhere = () => `
+const awaitingReviewWhere = (stageCondition = 'event.step_id = ?') => `
   event.kind = 'review'
-  AND event.step_id = ?
+  AND ${stageCondition}
   AND event.passed = 0
   AND event.reason = 'awaiting_review'
   AND ${inPlayWhere('record')}
@@ -203,25 +203,29 @@ export const getReviewQueue = ({
   stageId,
   limit = 100,
   offset = 0,
+  sort,
+  dir,
 }: {
   db: any;
   config: any;
   stageId: string;
   limit?: number;
   offset?: number;
+  sort?: string;
+  dir?: string;
 }) => {
   const availableColumns = recordColumns(db);
   const stage = requireResolvedReviewStage({ db, config, stageId });
-  const requestedLimit = Number(limit);
-  const requestedOffset = Number(offset);
-  const pageLimit = Number.isFinite(requestedLimit)
-    ? Math.max(1, Math.min(500, Math.floor(requestedLimit)))
-    : 100;
-  const pageOffset = Number.isFinite(requestedOffset)
-    ? Math.max(0, Math.floor(requestedOffset))
-    : 0;
+  const { pageLimit, pageOffset } = reviewPage({ limit, offset });
   const fields = [...new Set(['_row_id', 'business_name', 'sequence_name', 'routed_by', ...stage.fields])]
     .filter((field) => availableColumns.has(field));
+  const orderBy = reviewOrderBy({
+    sort,
+    dir,
+    availableColumns,
+    stages: [stage],
+    includeStageTiebreaker: false,
+  });
   const rows = db.prepare(`
     WITH awaiting AS (
       SELECT event.record_id, MAX(event.occurred_at) AS parked_at
@@ -233,7 +237,7 @@ export const getReviewQueue = ({
     SELECT ${fields.map((field) => `record.${quoteIdent(field)}`).join(', ')}
     FROM awaiting
     JOIN records record ON record._row_id = awaiting.record_id
-    ORDER BY awaiting.parked_at ASC, record._row_id ASC
+    ORDER BY ${orderBy}
     LIMIT ? OFFSET ?
   `).all(stage.id, pageLimit, pageOffset);
   const total = countAwaitingReviewAtStage({ db, stageId: stage.id });
@@ -244,6 +248,159 @@ export const getReviewQueue = ({
       sequence_counts: countAwaitingReviewBySequence({ db, stageId: stage.id }),
     },
     total,
+    limit: pageLimit,
+    offset: pageOffset,
+    records: rows,
+  };
+};
+
+const REVIEW_IDENTITY_FIELDS = ['_row_id', 'business_name', 'name', 'sequence_name', 'routed_by'];
+
+const reviewPage = ({ limit, offset }: { limit: number; offset: number }) => {
+  const requestedLimit = Number(limit);
+  const requestedOffset = Number(offset);
+  return {
+    pageLimit: Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(500, Math.floor(requestedLimit)))
+      : 100,
+    pageOffset: Number.isFinite(requestedOffset)
+      ? Math.max(0, Math.floor(requestedOffset))
+      : 0,
+  };
+};
+
+const reviewOrderBy = ({
+  sort,
+  dir,
+  availableColumns,
+  stages,
+  includeStageTiebreaker,
+}: {
+  sort?: string;
+  dir?: string;
+  availableColumns: Set<string>;
+  stages: ReviewStage[];
+  includeStageTiebreaker: boolean;
+}) => {
+  const requestedSort = String(sort || '').trim();
+  const requestedDirection = String(dir || 'asc').trim().toLowerCase();
+  if (requestedDirection !== 'asc' && requestedDirection !== 'desc') {
+    throw new AgentOutboundError({
+      code: 'INVALID_ARGUMENT',
+      message: 'Review sort direction must be "asc" or "desc".',
+      retryable: false,
+    });
+  }
+  if (!requestedSort) {
+    return includeStageTiebreaker
+      ? 'awaiting.parked_at ASC, awaiting.stage_id ASC, record._row_id ASC'
+      : 'awaiting.parked_at ASC, record._row_id ASC';
+  }
+  const allowedFields = new Set([
+    ...REVIEW_IDENTITY_FIELDS,
+    ...stages.flatMap((stage) => stage.fields),
+  ].filter((field) => availableColumns.has(field)));
+  if (!allowedFields.has(requestedSort)) {
+    throw new AgentOutboundError({
+      code: 'INVALID_ARGUMENT',
+      message: `Unknown review sort field "${requestedSort}".`,
+      retryable: false,
+    });
+  }
+  const tiebreaker = includeStageTiebreaker
+    ? `awaiting.stage_id ASC, record._row_id ASC`
+    : 'record._row_id ASC';
+  return `record.${quoteIdent(requestedSort)} ${requestedDirection.toUpperCase()}, ${tiebreaker}`;
+};
+
+export const getAllReviewQueue = ({
+  db,
+  config,
+  limit = 100,
+  offset = 0,
+  sort,
+  dir,
+}: {
+  db: any;
+  config: any;
+  limit?: number;
+  offset?: number;
+  sort?: string;
+  dir?: string;
+}) => {
+  const availableColumns = recordColumns(db);
+  const stages = getReviewStages({ db, config });
+  const stageIds = stages.map((stage) => stage.id);
+  const { pageLimit, pageOffset } = reviewPage({ limit, offset });
+  const fields = [...new Set([
+    '_row_id',
+    'business_name',
+    'sequence_name',
+    'routed_by',
+    ...stages.flatMap((stage) => stage.fields),
+  ])].filter((field) => availableColumns.has(field));
+  const uniqueTotal = countAwaitingReviewRecords({ db, config });
+  const stage = {
+    id: 'all',
+    label: 'All stages',
+    description: 'Records awaiting a decision at any configured review stage.',
+    fields: fields.filter((field) => !REVIEW_IDENTITY_FIELDS.includes(field)),
+    awaiting_count: uniqueTotal,
+    sequence_counts: [],
+  };
+  if (stageIds.length === 0) {
+    return {
+      stage,
+      total: 0,
+      unique_total: 0,
+      limit: pageLimit,
+      offset: pageOffset,
+      records: [],
+    };
+  }
+  const placeholders = stageIds.map(() => '?').join(', ');
+  const orderBy = reviewOrderBy({
+    sort,
+    dir,
+    availableColumns,
+    stages,
+    includeStageTiebreaker: true,
+  });
+  const rows = db.prepare(`
+    WITH awaiting AS (
+      SELECT event.record_id, event.step_id AS stage_id, MAX(event.occurred_at) AS parked_at
+      FROM pipeline_events event
+      JOIN records record ON record._row_id = event.record_id
+      WHERE ${awaitingReviewWhere(`event.step_id IN (${placeholders})`)}
+      GROUP BY event.record_id, event.step_id
+    )
+    SELECT ${fields.map((field) => `record.${quoteIdent(field)}`).join(', ')},
+      awaiting.stage_id AS _review_stage_id
+    FROM awaiting
+    JOIN records record ON record._row_id = awaiting.record_id
+    ORDER BY ${orderBy}
+    LIMIT ? OFFSET ?
+  `).all(...stageIds, pageLimit, pageOffset).map((row: any) => {
+    const reviewStage = stages.find((candidate) => candidate.id === String(row._review_stage_id));
+    return {
+      ...row,
+      _review_stage_label: reviewStage?.label || String(row._review_stage_id || ''),
+    };
+  });
+  const total = Number(db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM (
+      SELECT event.record_id, event.step_id
+      FROM pipeline_events event
+      JOIN records record ON record._row_id = event.record_id
+      WHERE ${awaitingReviewWhere(`event.step_id IN (${placeholders})`)}
+      GROUP BY event.record_id, event.step_id
+    )
+  `).get(...stageIds)?.n || 0);
+  return {
+    stage,
+    total,
+    unique_total: uniqueTotal,
     limit: pageLimit,
     offset: pageOffset,
     records: rows,

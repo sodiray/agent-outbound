@@ -12,6 +12,7 @@ import {
   applyReviewDecisionsForViz,
   buildMeta,
   clearReviewDecisionForViz,
+  getAllReviewQueueForViz,
   getCounts,
   getProgress,
   getRecordDetail,
@@ -158,6 +159,22 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         c.req.param('stageId'),
         Number(c.req.query('limit') || 100),
         Number(c.req.query('offset') || 0),
+        String(c.req.query('sort') || ''),
+        String(c.req.query('dir') || ''),
+      ));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.get('/api/review', (c) => {
+    try {
+      return c.json(getAllReviewQueueForViz(
+        listDir,
+        Number(c.req.query('limit') || 100),
+        Number(c.req.query('offset') || 0),
+        String(c.req.query('sort') || ''),
+        String(c.req.query('dir') || ''),
       ));
     } catch (error) {
       return apiErrorResponse(c, error);

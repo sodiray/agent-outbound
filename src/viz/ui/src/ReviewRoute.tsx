@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { APIProvider, Map as GoogleMap, Marker } from '@vis.gl/react-google-maps';
 import {
   clearReviewDecision,
+  fetchAllReviewQueue,
   fetchMeta,
   fetchRecordDetail,
   fetchReviewQueue,
@@ -16,12 +17,18 @@ import type {
   RecordValue,
 } from './types.js';
 
+const ALL_STAGES_VIEW = 'all';
+const stageView = (stageId: string) => `stage:${stageId}`;
+const stageIdForView = (view: string) => view.startsWith('stage:') ? view.slice('stage:'.length) : '';
+
 type ReviewActionVerdict = 'approve' | 'reject';
 
 type DecisionHistoryItem = {
   sequence: number;
   stage_id: string;
   row_id: string;
+  view: string;
+  queue_key: string;
   verdict: ReviewActionVerdict;
   record: RecordRow;
   state: 'saving' | 'saved';
@@ -39,6 +46,8 @@ type DecisionFailure = {
 const DEFAULT_REJECT_REASON = 'reviewed: not a fit';
 
 const rowId = (record: RecordRow) => String(record._row_id ?? '');
+const reviewStageIdForRecord = (record: RecordRow) => String(record._review_stage_id ?? '');
+const queueRecordKey = (record: RecordRow) => `${reviewStageIdForRecord(record)}:${rowId(record)}`;
 const decisionKey = ({ stage_id, row_id }: { stage_id: string; row_id: string }) => `${stage_id}:${row_id}`;
 const labelFor = (key: string) => key
   .replace(/^_+/, '')
@@ -60,7 +69,7 @@ const displayValue = (value: RecordValue | undefined) => {
 };
 
 const recordName = (record: RecordRow) => (
-  displayValue(record.business_name) || displayValue(record.name) || 'Unnamed lead'
+  displayValue(record.business_name) || displayValue(record.name) || 'Unnamed record'
 );
 
 const isWebsiteField = (field: string) => field.toLowerCase().includes('website');
@@ -289,11 +298,11 @@ const restoreRecordInOrder = ({
   record: RecordRow;
   order: string[];
 }) => {
-  if (records.some((candidate) => rowId(candidate) === rowId(record))) return records;
+  if (records.some((candidate) => queueRecordKey(candidate) === queueRecordKey(record))) return records;
   const rank = new Map(order.map((id, index) => [id, index]));
   return [...records, record].sort((left, right) => (
-    (rank.get(rowId(left)) ?? Number.MAX_SAFE_INTEGER)
-    - (rank.get(rowId(right)) ?? Number.MAX_SAFE_INTEGER)
+    (rank.get(queueRecordKey(left)) ?? Number.MAX_SAFE_INTEGER)
+    - (rank.get(queueRecordKey(right)) ?? Number.MAX_SAFE_INTEGER)
   ));
 };
 
@@ -303,7 +312,10 @@ const actionInProgress = (verdict: ReviewActionVerdict) => verdict === 'approve'
 
 export const ReviewRoute = () => {
   const [meta, setMeta] = useState<MetaResponse | null>(null);
-  const [activeStageId, setActiveStageId] = useState('');
+  const [activeView, setActiveView] = useState('');
+  const [allStage, setAllStage] = useState<MetaResponse['review_stages'][number] | null>(null);
+  const [sort, setSort] = useState('');
+  const [dir, setDir] = useState<'asc' | 'desc'>('asc');
   const [queues, setQueues] = useState<Record<string, RecordRow[]>>({});
   const [loadingStageId, setLoadingStageId] = useState('');
   const [cursor, setCursor] = useState(0);
@@ -315,7 +327,7 @@ export const ReviewRoute = () => {
   const [panelRecord, setPanelRecord] = useState<RecordRow | null>(null);
   const rowRefs = useRef<Record<string, HTMLElement | null>>({});
   const queueOrder = useRef<Record<string, string[]>>({});
-  const loadedStages = useRef(new Set<string>());
+  const loadedQueues = useRef(new Set<string>());
   const inFlightDecisions = useRef(new Set<string>());
   const undoingRef = useRef(false);
   const actionSequence = useRef(0);
@@ -325,31 +337,37 @@ export const ReviewRoute = () => {
     fetchMeta()
       .then((nextMeta) => {
         setMeta(nextMeta);
-        setActiveStageId((current) => (
-          nextMeta.review_stages.some((stage) => stage.id === current)
+        setActiveView((current) => (
+          current === ALL_STAGES_VIEW || nextMeta.review_stages.some((stage) => stageView(stage.id) === current)
             ? current
-            : (nextMeta.review_stages[0]?.id || '')
+            : (nextMeta.review_stages[0] ? stageView(nextMeta.review_stages[0].id) : '')
         ));
       })
       .catch((nextError: Error) => setError(nextError.message));
   }, []);
 
   useEffect(() => {
-    if (!activeStageId || loadedStages.current.has(activeStageId)) return undefined;
+    const queueKey = `${activeView}:${sort}:${dir}`;
+    if (!activeView || loadedQueues.current.has(queueKey)) return undefined;
     const request = { cancelled: false };
-    setLoadingStageId(activeStageId);
+    setLoadingStageId(activeView);
     setError('');
-    fetchReviewQueue(activeStageId)
+    const stageId = stageIdForView(activeView);
+    const fetchQueue = activeView === ALL_STAGES_VIEW
+      ? fetchAllReviewQueue({ sort, dir })
+      : fetchReviewQueue(stageId, { sort, dir });
+    fetchQueue
       .then((queue) => {
         if (request.cancelled) return;
-        loadedStages.current.add(activeStageId);
-        queueOrder.current[activeStageId] = queue.records.map(rowId);
-        setQueues((current) => ({ ...current, [activeStageId]: queue.records }));
+        loadedQueues.current.add(queueKey);
+        queueOrder.current[queueKey] = queue.records.map(queueRecordKey);
+        setQueues((current) => ({ ...current, [queueKey]: queue.records }));
+        if (activeView === ALL_STAGES_VIEW) setAllStage(queue.stage);
         setMeta((current) => current
           ? {
             ...current,
             review_stages: current.review_stages.map((stage) => (
-              stage.id === activeStageId ? { ...stage, ...queue.stage } : stage
+              stage.id === stageId ? { ...stage, ...queue.stage } : stage
             )),
           }
           : current);
@@ -363,14 +381,29 @@ export const ReviewRoute = () => {
     return () => {
       request.cancelled = true;
     };
-  }, [activeStageId]);
+  }, [activeView, dir, sort]);
 
-  const activeStage = meta?.review_stages.find((stage) => stage.id === activeStageId) || null;
-  const activeRecords = queues[activeStageId] || [];
+  const activeStageId = stageIdForView(activeView);
+  const isAllStages = activeView === ALL_STAGES_VIEW;
+  const activeQueueKey = `${activeView}:${sort}:${dir}`;
+  const activeStage = isAllStages
+    ? allStage || {
+      id: 'all',
+      label: 'All stages',
+      description: 'Records awaiting a decision at any configured review stage.',
+      fields: [...new Set(meta?.review_stages.flatMap((stage) => stage.fields) || [])],
+      awaiting_count: 0,
+      sequence_counts: [],
+    }
+    : meta?.review_stages.find((stage) => stage.id === activeStageId) || null;
+  const activeRecords = queues[activeQueueKey] || [];
   const selectedRecord = activeRecords[cursor] || null;
-  const activeFailures = failures.filter((failure) => failure.stage_id === activeStageId);
+  const activeFailures = isAllStages ? failures : failures.filter((failure) => failure.stage_id === activeStageId);
   const visibleFields = (activeStage?.fields || [])
     .filter((field) => field !== '_row_id' && field !== 'business_name' && field !== 'name');
+  const sortFields = ['_row_id', 'business_name', 'name', 'sequence_name', 'routed_by', ...(activeStage?.fields || [])]
+    .filter((field, index, fields) => fields.indexOf(field) === index)
+    .filter((field) => meta?.columns.some((column) => column.key === field));
   const lastDecision = history.at(-1);
   const panelUndoLabel = !lastDecision
     ? 'Nothing to undo'
@@ -379,7 +412,7 @@ export const ReviewRoute = () => {
       : `Undo: ${actionPastTense(lastDecision.verdict)} ${recordName(lastDecision.record)}`;
   const panelDecision = panelRecord
     ? history.find((item) => (
-      item.stage_id === activeStageId
+      item.stage_id === (isAllStages ? reviewStageIdForRecord(panelRecord) : activeStageId)
       && item.row_id === rowId(panelRecord)
       && item.state === 'saving'
     ))
@@ -396,7 +429,7 @@ export const ReviewRoute = () => {
 
   useEffect(() => {
     if (!selectedRecord) return;
-    rowRefs.current[rowId(selectedRecord)]?.scrollIntoView({ block: 'nearest' });
+    rowRefs.current[queueRecordKey(selectedRecord)]?.scrollIntoView({ block: 'nearest' });
   }, [selectedRecord]);
 
   const adjustAwaitingCount = (stageId: string, delta: number, record: RecordRow) => {
@@ -426,21 +459,29 @@ export const ReviewRoute = () => {
       : current);
   };
 
-  const restoreRecord = (stageId: string, record: RecordRow) => {
+  const adjustAllAwaitingCount = (delta: number) => {
+    setAllStage((current) => current
+      ? { ...current, awaiting_count: Math.max(0, current.awaiting_count + delta) }
+      : current);
+  };
+
+  const restoreRecord = (queueKey: string, record: RecordRow) => {
     setQueues((current) => ({
       ...current,
-      [stageId]: restoreRecordInOrder({
-        records: current[stageId] || [],
+      [queueKey]: restoreRecordInOrder({
+        records: current[queueKey] || [],
         record,
-        order: queueOrder.current[stageId] || [],
+        order: queueOrder.current[queueKey] || [],
       }),
     }));
   };
 
-  const removeRecord = (stageId: string, recordId: string) => {
+  const removeRecord = (queueKey: string, stageId: string, recordId: string) => {
     setQueues((current) => ({
       ...current,
-      [stageId]: (current[stageId] || []).filter((record) => rowId(record) !== recordId),
+      [queueKey]: (current[queueKey] || []).filter((record) => (
+        rowId(record) !== recordId || (reviewStageIdForRecord(record) && reviewStageIdForRecord(record) !== stageId)
+      )),
     }));
   };
 
@@ -449,12 +490,17 @@ export const ReviewRoute = () => {
     record: RecordRow | null = panelRecord || selectedRecord,
   ) => {
     if (!record || !activeStage || undoingRef.current) return;
-    const stageId = activeStage.id;
+    const stageId = isAllStages ? reviewStageIdForRecord(record) : activeStage.id;
+    if (!stageId) return;
     const recordId = rowId(record);
     const key = decisionKey({ stage_id: stageId, row_id: recordId });
     if (inFlightDecisions.current.has(key)) return;
-    const decisionIndex = activeRecords.findIndex((candidate) => rowId(candidate) === recordId);
-    const remainingRecords = activeRecords.filter((candidate) => rowId(candidate) !== recordId);
+    const recordKey = queueRecordKey(record);
+    const changesAllAwaitingCount = isAllStages && !activeRecords.some((candidate) => (
+      rowId(candidate) === recordId && queueRecordKey(candidate) !== recordKey
+    ));
+    const decisionIndex = activeRecords.findIndex((candidate) => queueRecordKey(candidate) === recordKey);
+    const remainingRecords = activeRecords.filter((candidate) => queueRecordKey(candidate) !== recordKey);
     const nextIndex = Math.max(0, Math.min(
       decisionIndex < 0 ? cursor : decisionIndex,
       remainingRecords.length - 1,
@@ -469,13 +515,16 @@ export const ReviewRoute = () => {
       sequence,
       stage_id: stageId,
       row_id: recordId,
+      view: activeView,
+      queue_key: activeQueueKey,
       verdict,
       record,
       state: 'saving',
     };
     inFlightDecisions.current.add(key);
-    removeRecord(stageId, recordId);
+    removeRecord(activeQueueKey, stageId, recordId);
     adjustAwaitingCount(stageId, -1, record);
+    if (changesAllAwaitingCount) adjustAllAwaitingCount(-1);
     setHistory((current) => [...current, action]);
     setFailures((current) => current.filter((failure) => decisionKey(failure) !== key));
     setError('');
@@ -496,14 +545,19 @@ export const ReviewRoute = () => {
       if (latestActionSequence.current === sequence) {
         setMessage(`${actionPastTense(verdict)} ${recordName(record)}.`);
       }
+      loadedQueues.current.clear();
+      loadedQueues.current.add(activeQueueKey);
+      setQueues((current) => ({ [activeQueueKey]: current[activeQueueKey] || [] }));
+      if (!isAllStages) setAllStage(null);
       if (decisionCameFromPanel) {
         setCursor(nextIndex);
         setPanelRecord(nextRecord);
       }
     } catch (nextError) {
       inFlightDecisions.current.delete(key);
-      restoreRecord(stageId, record);
+      restoreRecord(activeQueueKey, record);
       adjustAwaitingCount(stageId, 1, record);
+      if (changesAllAwaitingCount) adjustAllAwaitingCount(1);
       setCursor(Math.max(0, decisionIndex));
       setHistory((current) => current.filter((item) => item.sequence !== sequence));
       setFailures((current) => [
@@ -535,23 +589,27 @@ export const ReviewRoute = () => {
 
     const key = decisionKey(last);
     const panelBeforeUndo = panelRecord;
-    const stageBeforeUndo = activeStageId;
+    const viewBeforeUndo = activeView;
     const cursorBeforeUndo = cursor;
-    const currentRecords = queues[last.stage_id] || [];
+    const currentRecords = queues[last.queue_key] || [];
+    const restoresAllAwaitingCount = last.view === ALL_STAGES_VIEW && !currentRecords.some((record) => (
+      rowId(record) === last.row_id
+    ));
     const restoredRecords = restoreRecordInOrder({
       records: currentRecords,
       record: last.record,
-      order: queueOrder.current[last.stage_id] || [],
+      order: queueOrder.current[last.queue_key] || [],
     });
-    const restoredIndex = Math.max(0, restoredRecords.findIndex((record) => rowId(record) === last.row_id));
+    const restoredIndex = Math.max(0, restoredRecords.findIndex((record) => queueRecordKey(record) === queueRecordKey(last.record)));
     undoingRef.current = true;
     setUndoing(true);
     setError('');
     setFailures((current) => current.filter((failure) => decisionKey(failure) !== key));
     setHistory((current) => current.filter((item) => item.sequence !== last.sequence));
-    restoreRecord(last.stage_id, last.record);
+    restoreRecord(last.queue_key, last.record);
     adjustAwaitingCount(last.stage_id, 1, last.record);
-    setActiveStageId(last.stage_id);
+    if (restoresAllAwaitingCount) adjustAllAwaitingCount(1);
+    setActiveView(last.view);
     setCursor(restoredIndex);
     if (panelRecord) setPanelRecord(last.record);
     setMessage(`Undoing ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordName(last.record)}…`);
@@ -560,10 +618,11 @@ export const ReviewRoute = () => {
       await clearReviewDecision(last.stage_id, last.row_id);
       setMessage(`Undid ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordName(last.record)}.`);
     } catch (nextError) {
-      removeRecord(last.stage_id, last.row_id);
+      removeRecord(last.queue_key, last.stage_id, last.row_id);
       adjustAwaitingCount(last.stage_id, -1, last.record);
+      if (restoresAllAwaitingCount) adjustAllAwaitingCount(-1);
       setHistory((current) => [...current, last].sort((left, right) => left.sequence - right.sequence));
-      setActiveStageId(stageBeforeUndo);
+      setActiveView(viewBeforeUndo);
       setCursor(cursorBeforeUndo);
       setPanelRecord(panelBeforeUndo);
       setFailures((current) => [
@@ -579,6 +638,10 @@ export const ReviewRoute = () => {
       ]);
       setMessage('');
     } finally {
+      loadedQueues.current.clear();
+      loadedQueues.current.add(last.queue_key);
+      setQueues((current) => ({ [last.queue_key]: current[last.queue_key] || [] }));
+      if (last.view !== ALL_STAGES_VIEW) setAllStage(null);
       undoingRef.current = false;
       setUndoing(false);
     }
@@ -644,7 +707,7 @@ export const ReviewRoute = () => {
         <div>
           <p className="eyebrow">Manual gate</p>
           <h1>Review queue</h1>
-          <p>Clear sourced leads before the pipeline spends money enriching them.</p>
+          <p>Make decisions on records awaiting a configured review stage.</p>
         </div>
         <div className="review-shortcuts" aria-label="Keyboard shortcuts">
           <span><kbd>J</kbd>/<kbd>K</kbd> or <kbd>↑</kbd>/<kbd>↓</kbd> move</span>
@@ -662,15 +725,29 @@ export const ReviewRoute = () => {
       ) : (
         <>
           <nav className="review-tabs" role="tablist" aria-label="Review stages">
+            <button
+              className={isAllStages ? 'is-active' : ''}
+              type="button"
+              role="tab"
+              aria-selected={isAllStages}
+              onClick={() => {
+                setActiveView(ALL_STAGES_VIEW);
+                setCursor(0);
+                setPanelRecord(null);
+              }}
+            >
+              <span>All stages</span>
+              <strong>{allStage?.awaiting_count ?? '…'}</strong>
+            </button>
             {meta.review_stages.map((stage) => (
               <button
-                className={stage.id === activeStageId ? 'is-active' : ''}
+                className={stageView(stage.id) === activeView ? 'is-active' : ''}
                 key={stage.id}
                 type="button"
                 role="tab"
-                aria-selected={stage.id === activeStageId}
+                aria-selected={stageView(stage.id) === activeView}
                 onClick={() => {
-                  setActiveStageId(stage.id);
+                  setActiveView(stageView(stage.id));
                   setCursor(0);
                   setPanelRecord(null);
                 }}
@@ -696,7 +773,28 @@ export const ReviewRoute = () => {
                   </div>
                 </div>
                 <div className="review-stage__actions">
-                  <span>{activeRecords.length} awaiting</span>
+                  <label className="review-sort">
+                    <span>Sort by</span>
+                    <select
+                      value={sort}
+                      onChange={(event) => {
+                        setSort(event.target.value);
+                        setCursor(0);
+                        setPanelRecord(null);
+                      }}
+                    >
+                      <option value="">Awaiting since</option>
+                      {sortFields.map((field) => <option key={field} value={field}>{labelFor(field)}</option>)}
+                    </select>
+                  </label>
+                  <label className="review-sort">
+                    <span>Direction</span>
+                    <select value={dir} onChange={(event) => { setDir(event.target.value as 'asc' | 'desc'); setCursor(0); setPanelRecord(null); }}>
+                      <option value="asc">Ascending</option>
+                      <option value="desc">Descending</option>
+                    </select>
+                  </label>
+                  <span>{isAllStages ? `${activeStage.awaiting_count} unique records` : `${activeRecords.length} awaiting`}</span>
                   <button
                     className="review-undo"
                     type="button"
@@ -721,12 +819,12 @@ export const ReviewRoute = () => {
                 </div>
               ) : null}
 
-              {loadingStageId === activeStageId && !queues[activeStageId] ? (
+              {loadingStageId === activeView && !queues[activeQueueKey] ? (
                 <div className="review-empty">Loading {activeStage.label}…</div>
               ) : activeRecords.length === 0 ? (
                 <div className="review-empty">
                   <h2>Nothing awaiting review</h2>
-                  <p>This stage is clear.</p>
+                  <p>{isAllStages ? 'Every configured review stage is clear.' : 'This stage is clear.'}</p>
                 </div>
               ) : (
                 <div className="review-table-shell">
@@ -734,21 +832,21 @@ export const ReviewRoute = () => {
                     <thead>
                       <tr>
                         <th className="review-table__position" scope="col">#</th>
-                        <th scope="col">Business name</th>
+                        <th scope="col">Record</th>
+                        {isAllStages ? <th scope="col">Awaiting stage</th> : null}
                         {visibleFields.map((field) => <th scope="col" key={field}>{labelFor(field)}</th>)}
                         <th className="review-table__actions" scope="col">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
                       {activeRecords.map((record, index) => {
-                        const id = rowId(record);
                         const selected = index === cursor;
                         return (
                           <tr
                             className={selected ? 'is-selected' : ''}
-                            key={id}
-                            ref={(node) => { rowRefs.current[id] = node; }}
-                            data-review-row={id}
+                            key={queueRecordKey(record)}
+                            ref={(node) => { rowRefs.current[queueRecordKey(record)] = node; }}
+                            data-review-row={queueRecordKey(record)}
                             onClick={() => {
                               setCursor(index);
                               setPanelRecord(record);
@@ -756,6 +854,7 @@ export const ReviewRoute = () => {
                           >
                             <td className="review-table__position">{index + 1}</td>
                             <td className="review-table__identity" title={recordName(record)}>{recordName(record)}</td>
+                            {isAllStages ? <td>{displayValue(record._review_stage_label)}</td> : null}
                             {visibleFields.map((field) => {
                               const value = displayValue(record[field]);
                               return (

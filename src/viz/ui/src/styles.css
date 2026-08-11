@@ -1708,6 +1708,17 @@ kbd {
   white-space: nowrap;
 }
 
+.review-sort {
+  display: grid;
+  gap: 0.2rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.review-sort select {
+  min-width: 8.5rem;
+}
+
 .review-sequence-counts {
   display: flex;
   flex-wrap: wrap;

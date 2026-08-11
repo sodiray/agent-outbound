@@ -101,6 +101,7 @@ export type RecordsResponse = {
 export type ReviewQueueResponse = {
   stage: ReviewStage;
   total: number;
+  unique_total?: number;
   limit: number;
   offset: number;
   records: RecordRow[];
