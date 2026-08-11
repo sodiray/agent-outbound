@@ -412,3 +412,37 @@ test('graded scoring keeps fully evidenced scores unchanged', async () => {
     db.close();
   }
 });
+
+test('legacy graded scoring retains full coverage for reduced multi-sample evidence', async () => {
+  const { db, listDir, record } = createContext();
+  const responses = [
+    sample({ grade: 8, reasoning: 'First full-evidence assessment.', evidenceId: 'obs_8' }),
+    sample({ grade: 6, reasoning: 'Second full-evidence assessment.', evidenceId: 'obs_6' }),
+    sample({ grade: 7, reasoning: 'Third full-evidence assessment.', evidenceId: 'obs_7' }),
+  ];
+  const state = { next: 0 };
+  const generateObject = async () => {
+    const response = responses[state.next];
+    state.next += 1;
+    return modelResult(response);
+  };
+
+  try {
+    const result = await scoreAxisCriteriaGraded({
+      db,
+      listDir,
+      record,
+      axis: 'score',
+      description: 'Evaluate commercial fit.',
+      criteria,
+      aiConfig: {},
+      samples: 3,
+      generateObject,
+    });
+
+    assert.equal(result.fit_coverage, 1);
+    assert.equal(result.score_status, 'fresh');
+  } finally {
+    db.close();
+  }
+});

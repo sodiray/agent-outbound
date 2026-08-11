@@ -94,7 +94,7 @@ const policyStep = {
   model: 'openrouter/anthropic/claude-haiku-4.5',
   depends_on: ['score_fit'],
   inputs: [
-    'fit_score', 'fit_breakdown', 'fit_breakdown_json', 'fit_reasoning',
+    'fit_score', 'fit_coverage', 'fit_breakdown', 'fit_breakdown_json', 'fit_reasoning',
     'fit_evidence_confidence', 'identity_confidence', 'classification_confidence', 'phone_confidence',
     'buyer_confidence', 'mail_confidence', 'mail_address_ready', 'timing_score', 'strong_signal_strength',
     'strong_signal_count', 'enrichment_cost_usd', 'treatment_tier', 'candidate_tier',
@@ -184,33 +184,38 @@ const writeTaxonomy = (root) => {
   }));
 };
 
-const runPolicyPipeline = async ({ pipeline }) => {
+const runPolicyPipeline = async ({
+  pipeline,
+  scoreSamples = 1,
+  scoreCriteria = () => treasureValleyFitModel.criteria.map((criterion, index) => ({
+    id: criterion.id,
+    grade: fitGrades[index],
+    assessable: true,
+    reasoning: 'Current score-stage evidence assessment.',
+    evidence_ids: ['current-score-stage-evidence'],
+  })),
+  recordInput = readyRecord,
+}) => {
   const root = listDir();
   writeTaxonomy(root);
   writeFileSync(join(root, 'outbound.yaml'), JSON.stringify({
     pipeline,
     policy: { fit_rule_version: treasureValleyFitModel.modelVersion },
-    score: { treatment: aTreatmentStrategy },
+    score: { samples: scoreSamples, treatment: aTreatmentStrategy },
   }));
   const db = openListDb({ listDir: root, readonly: false });
   ensureRecordColumns({ db, columns: ['fit_evidence_confidence', 'score_breakdown'] });
-  upsertRecord({ db, row: readyRecord });
+  upsertRecord({ db, row: recordInput });
   if (pipeline.some((step) => step.kind === 'score' && step.key === 'fit')) {
     await runScoreStage({
       db,
       listDir: root,
-      config: {},
+      config: { score: { samples: scoreSamples } },
       step: declaredFitStep,
-      rows: [readyRecord],
+      rows: [recordInput],
       generateObject: async () => ({
         object: {
-          criteria: treasureValleyFitModel.criteria.map((criterion, index) => ({
-            id: criterion.id,
-            grade: fitGrades[index],
-            assessable: true,
-            reasoning: 'Current score-stage evidence assessment.',
-            evidence_ids: ['current-score-stage-evidence'],
-          })),
+          criteria: scoreCriteria(),
           summary_reasoning: 'Current fit-stage score.',
         },
         usage: {},
@@ -221,8 +226,8 @@ const runPolicyPipeline = async ({ pipeline }) => {
   await runPipelineDataflow({ listDir: root });
   await runPipelineDataflow({ listDir: root });
   const check = openListDb({ listDir: root, readonly: true });
-  const record = check.prepare('SELECT * FROM records WHERE _row_id = ?').get(readyRecord._row_id);
-  const events = check.prepare('SELECT step_id, reason FROM pipeline_events WHERE record_id = ? ORDER BY occurred_at').all(readyRecord._row_id);
+  const record = check.prepare('SELECT * FROM records WHERE _row_id = ?').get(recordInput._row_id);
+  const events = check.prepare('SELECT step_id, reason FROM pipeline_events WHERE record_id = ? ORDER BY occurred_at').all(recordInput._row_id);
   check.close();
   return { root, record, events };
 };
@@ -251,6 +256,52 @@ test('pipeline policy_apply bands the persisted kind: score fit without reading 
     namedBuyer: first.named_buyer_status,
     affiliation: first.buyer_affiliation_status,
   }));
+});
+
+test('pipeline policy_apply uses full reduced multi-sample fit coverage instead of a stale zero', async () => {
+  const { record, events } = await runPolicyPipeline({
+    pipeline: [declaredFitStep, policyStep],
+    scoreSamples: 3,
+    recordInput: { ...readyRecord, _row_id: 'multi-sample-full-coverage', fit_coverage: 0 },
+  });
+  const breakdown = JSON.parse(record.fit_breakdown);
+  assert.equal(breakdown.samples, 3);
+  assert.equal(breakdown.sample_scores.length, 3);
+  assert.equal(breakdown.criteria.length, 6);
+  assert.equal(Math.round(breakdown.criteria.reduce(
+    (sum, criterion) => sum + (criterion.assessable ? criterion.weight : 0),
+    0,
+  ) * 1000) / 1000, 1);
+  assert.ok(breakdown.criteria.every((criterion) => criterion.evidence_ids.length > 0));
+  assert.equal(Number(record.fit_coverage), 1, JSON.stringify({ events, breakdown, reasons: record.treatment_reasons }));
+  assert.notEqual(record.treatment_tier, 'enrichment_hold', record.treatment_reasons);
+  assert.doesNotMatch(record.treatment_reasons, /fit_assessable_weight_below_0.5/);
+});
+
+test('pipeline policy_apply holds a reduced multi-sample fit below minimum coverage', async () => {
+  const { record } = await runPolicyPipeline({
+    pipeline: [declaredFitStep, policyStep],
+    scoreSamples: 3,
+    recordInput: { ...readyRecord, _row_id: 'multi-sample-partial-coverage', fit_coverage: 1 },
+    scoreCriteria: () => treasureValleyFitModel.criteria.map((criterion, index) => ({
+      id: criterion.id,
+      ...(index < 2
+        ? {
+          grade: 9,
+          assessable: true,
+          reasoning: 'Evidence supports this criterion.',
+          evidence_ids: [`evidence-${criterion.id}`],
+        }
+        : {
+          assessable: false,
+          reasoning: 'Evidence does not support this criterion.',
+          evidence_ids: [`evidence-${criterion.id}`],
+        }),
+    })),
+  });
+  assert.equal(Number(record.fit_coverage), 0.4);
+  assert.equal(record.treatment_tier, 'enrichment_hold');
+  assert.match(record.treatment_reasons, /fit_assessable_weight_below_0.5/);
 });
 
 test('pipeline policy_apply explicitly treats a pipeline without a fit stage as unscored', async () => {

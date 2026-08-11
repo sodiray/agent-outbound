@@ -111,6 +111,13 @@ const normalizedWeights = (criteria: ScoreCriterion[]): Map<string, number> => {
   return new Map(criteria.map((criterion) => [criterion.id, criterion.weight / total]));
 };
 
+const fitCoverageFor = (calculation: ScoreStageCalculation): number => (
+  Math.round(calculation.breakdown.criteria.reduce(
+    (sum, criterion) => sum + (criterion.assessable ? criterion.weight : 0),
+    0,
+  ) * 1e12) / 1e12
+);
+
 const calculationFor = ({
   criteria: configured,
   result,
@@ -245,6 +252,7 @@ export const persistScoreStageResult = ({
       { name: breakdownField, type: 'TEXT' },
       { name: reasoningField, type: 'TEXT' },
       { name: 'score_status', type: 'TEXT' },
+      ...(step.key === 'fit' ? [{ name: 'fit_coverage', type: 'REAL' }] : []),
     ],
   });
   const current = recordValue(db.prepare('SELECT * FROM records WHERE _row_id = ? OR id = ? LIMIT 1')
@@ -256,7 +264,10 @@ export const persistScoreStageResult = ({
     [breakdownField]: JSON.stringify(calculation.breakdown),
     [reasoningField]: calculation.reasoning,
     ...(calculation.score !== null ? { score_status: 'fresh' } : {}),
-    ...(step.key === 'fit' ? { score_breakdown: '' } : {}),
+    ...(step.key === 'fit' ? {
+      fit_coverage: fitCoverageFor(calculation),
+      score_breakdown: '',
+    } : {}),
   };
   upsertRecord({ db, row: patch });
   if (calculation.score !== null) {
