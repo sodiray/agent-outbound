@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -55,4 +55,40 @@ pipeline:
     { step_id: 'score_fit_final', reason: 'criteria_not_configured' },
   ]);
   assert.equal(record.fit_score, null);
+});
+
+test('score command reports canary-excluded records instead of silently narrowing the requested set', async () => {
+  const root = listDir();
+  mkdirSync(join(root, '.outbound'), { recursive: true });
+  writeFileSync(join(root, 'outbound.yaml'), `
+pipeline:
+  - kind: score
+    id: score_fit
+    key: fit
+    inputs: [business_name]
+    model: openrouter/anthropic/claude-haiku-4.5
+    criteria: []
+    outputs:${outputs('fit')}
+`);
+  const db = openListDb({ listDir: root, readonly: false });
+  upsertRecord({ db, row: { _row_id: 'score-canary-keep', business_name: 'Kept' } });
+  upsertRecord({ db, row: { _row_id: 'score-canary-excluded', business_name: 'Excluded' } });
+  db.close();
+  writeFileSync(join(root, '.outbound', 'canary.json'), JSON.stringify({
+    mode: 'canary',
+    allowlist_record_ids: ['score-canary-keep'],
+  }));
+
+  const result = await scoreCommand({ list: root, force: true });
+
+  assert.equal(result.records, 1);
+  assert.deepEqual(result.selection, {
+    requested: 2,
+    selected: 1,
+    excluded: [{
+      selector: 'canary_allowlist',
+      reason: 'record_id_not_allowlisted',
+      count: 1,
+    }],
+  });
 });

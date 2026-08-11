@@ -992,8 +992,9 @@ export const runPipelineDataflow = async ({
     // run before reachability reconciliation: an unreachable record can carry
     // the field or provider result that repairs its delivery state.
     // Filter canary before limit so excluded production rows cannot starve allowlist.
-    const rawInPlay = readInPlayRows({ db, where, limit: 0 });
-    const canaryRows = filterRecordsForCanary(rawInPlay, canaryConfig);
+    const requestedRows = readInPlayRows({ db, where, limit: 0, includeOptedOut: true });
+    const inPlayRows = requestedRows.filter((record) => String(record.sequence_status || '').trim().toLowerCase() !== 'opted_out');
+    const canaryRows = filterRecordsForCanary(inPlayRows, canaryConfig);
     const reachesContacts = canRepairReachability(steps);
     const reconciledRows = reachesContacts
       ? canaryRows
@@ -1006,6 +1007,39 @@ export const runPipelineDataflow = async ({
       ? reconciledRows.filter((record) => pipelineNameForRecord({ config, record }) === selectedPipeline)
       : reconciledRows;
     const selectedRowsWithLimit = Number(limit || 0) > 0 ? selectedRows.slice(0, Number(limit)) : selectedRows;
+    const selection = {
+      requested: requestedRows.length,
+      selected: selectedRowsWithLimit.length,
+      excluded: [
+        ...(requestedRows.length === inPlayRows.length ? [] : [{
+          selector: 'opted_out',
+          reason: 'sequence_status_opted_out',
+          count: requestedRows.length - inPlayRows.length,
+        }]),
+        ...(inPlayRows.length === canaryRows.length ? [] : [{
+          selector: 'canary_allowlist',
+          reason: canaryConfig.mode === 'strict' && canaryConfig.allowlist_record_ids.length === 0
+            ? 'strict_mode_empty_allowlist'
+            : 'record_id_not_allowlisted',
+          count: inPlayRows.length - canaryRows.length,
+        }]),
+        ...(canaryRows.length === reconciledRows.length ? [] : [{
+          selector: 'reachability',
+          reason: 'sequence_unreachable',
+          count: canaryRows.length - reconciledRows.length,
+        }]),
+        ...(reconciledRows.length === selectedRows.length ? [] : [{
+          selector: 'named_pipeline',
+          reason: 'pipeline_name_mismatch',
+          count: reconciledRows.length - selectedRows.length,
+        }]),
+        ...(selectedRows.length === selectedRowsWithLimit.length ? [] : [{
+          selector: 'limit',
+          reason: 'limit_reached',
+          count: selectedRows.length - selectedRowsWithLimit.length,
+        }]),
+      ],
+    };
     const rows = dryRun
       ? selectedRowsWithLimit
       : selectedRowsWithLimit.map((record) => {
@@ -1025,15 +1059,20 @@ export const runPipelineDataflow = async ({
         recordIds: rows.map((r) => getRecordRowId(r)).filter(Boolean),
       });
     }
-    if (dryRun) return simulatePipeline({
-      db,
-      listDir,
-      config,
-      steps: steps.map((entry) => ({ ...entry.step, id: entry.id })),
-      baseRows: rows,
-      force,
-      reapply,
-    });
+    if (dryRun) {
+      return {
+        ...simulatePipeline({
+          db,
+          listDir,
+          config,
+          steps: steps.map((entry) => ({ ...entry.step, id: entry.id })),
+          baseRows: rows,
+          force,
+          reapply,
+        }),
+        selection,
+      };
+    }
     const overridesByRecord = overridesByRecordMap({ db });
 
     const largestBatch = largestBatchSize(steps);
@@ -1045,6 +1084,7 @@ export const runPipelineDataflow = async ({
     const byStep: Record<string, number> = {};
     const summary = {
       records_in: rows.length,
+      selection,
       by_step: byStep,
       survivors: rows.length,
       declared_steps: declaredSteps.length,

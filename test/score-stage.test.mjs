@@ -115,6 +115,47 @@ test('score stage persists a genuine all-zero grade with its populated breakdown
   });
 });
 
+test('a successful forced score-stage rerun clears stale score status', async () => {
+  await withDb(async ({ db, root, record }) => {
+    ensureRecordColumns({
+      db,
+      columns: [
+        { name: 'score_status', type: 'TEXT' },
+        { name: 'site_text', type: 'TEXT' },
+      ],
+    });
+    db.prepare('UPDATE records SET score_status = ?, site_text = ? WHERE _row_id = ?')
+      .run('stale', record.site_text, record._row_id);
+    const stale = db.prepare('SELECT * FROM records WHERE _row_id = ?').get(record._row_id);
+    const outcomes = await runScoreStage({
+      db,
+      listDir: root,
+      config: {},
+      step: scoreStep,
+      rows: [stale],
+      force: true,
+      generateObject: async () => ({
+        object: {
+          criteria: [{
+            id: 'coordination',
+            grade: 8,
+            assessable: true,
+            reasoning: 'Current retrieval supports the grade.',
+            evidence_ids: ['obs-current'],
+          }],
+          summary_reasoning: 'Fresh score.',
+        },
+        usage: {},
+      }),
+    });
+    assert.equal(outcomes.get(record._row_id).passed, true);
+    assert.equal(
+      db.prepare('SELECT score_status FROM records WHERE _row_id = ?').get(record._row_id).score_status,
+      'fresh',
+    );
+  });
+});
+
 test('repeated score keys resolve in pipeline order and retain superseded values by stage', async () => {
   await withDb(async ({ db, record }) => {
     const early = persistScoreStageResult({
@@ -249,6 +290,7 @@ test('score stage with samples: 3 makes three grader calls and stores the median
               grade,
               assessable: true,
               reasoning: `draw grade ${grade}`,
+              evidence_ids: [`obs-${grade}`],
             }],
             summary_reasoning: `sample ${calls}`,
           },
@@ -263,6 +305,7 @@ test('score stage with samples: 3 makes three grader calls and stores the median
     assert.equal(stored.fit_score, 50);
     const breakdown = JSON.parse(stored.fit_breakdown);
     assert.equal(breakdown.criteria[0].grade, 5);
+    assert.deepEqual(breakdown.criteria[0].evidence_ids, ['obs-5']);
     assert.equal(breakdown.samples, 3);
   });
 });

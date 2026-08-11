@@ -117,12 +117,22 @@ export const pipelineStepId = (step: any, index: number) => (
   String(step?.id || '').trim() || `pipeline_step_${index + 1}`
 );
 
-export const readInPlayRows = ({ db, where = '', limit = 0 }: { db: any; where?: string; limit?: number }) => {
+export const readInPlayRows = ({
+  db,
+  where = '',
+  limit = 0,
+  includeOptedOut = false,
+}: {
+  db: any;
+  where?: string;
+  limit?: number;
+  includeOptedOut?: boolean;
+}) => {
   const whereSql = String(where || '').trim();
   const hasLimit = Number(limit || 0) > 0;
   const params = hasLimit ? [Number(limit || 0)] : [];
   const clauses = [
-    `SELECT * FROM records WHERE ${inPlayWhere()} AND sequence_status != 'opted_out'`,
+    `SELECT * FROM records WHERE ${inPlayWhere()}${includeOptedOut ? '' : " AND sequence_status != 'opted_out'"}`,
     whereSql ? `AND (${whereSql})` : '',
     'ORDER BY updated_at DESC',
     hasLimit ? 'LIMIT ?' : '',

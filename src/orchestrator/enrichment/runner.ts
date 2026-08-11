@@ -278,8 +278,15 @@ const MATERIAL_ENRICH_FIELDS = [
   'on_error',
 ] as const;
 
-/** Score-axis staleness keys written by scoring/runner (shouldRescore). */
+/** Legacy score-axis staleness keys written before score stages had configured ids. */
 export const SCORE_STALENESS_STEP_IDS = ['score:score', 'score:fit', 'score:trigger'] as const;
+
+export const configuredScoreStalenessStepIds = (config: Record<string, unknown>): string[] => (
+  [...new Set(flattenPipelineSteps(config)
+    .filter((step) => String(step?.kind || '').trim().toLowerCase() === 'score')
+    .map((step) => String(step?.id || '').trim())
+    .filter(Boolean))]
+);
 
 /**
  * Clear score cache after material evidence mutation so the next dataflow /
@@ -289,12 +296,18 @@ export const SCORE_STALENESS_STEP_IDS = ['score:score', 'score:fit', 'score:trig
 export const markScoringStale = ({
   db,
   recordId,
+  scoreStageIds = [],
 }: {
   db: any;
   recordId: string;
+  scoreStageIds?: string[];
 }): number => {
   const id = String(recordId || '').trim();
   if (!db || !id) return 0;
+  const configuredIds = [...new Set(scoreStageIds.map((stepId) => String(stepId || '').trim()).filter(Boolean))];
+  const configuredClause = configuredIds.length > 0
+    ? ` OR step_id IN (${configuredIds.map(() => '?').join(', ')})`
+    : '';
   try {
     const result = db.prepare(`
       DELETE FROM staleness
@@ -304,8 +317,9 @@ export const markScoringStale = ({
           OR step_id = 'score:fit'
           OR step_id = 'score:trigger'
           OR step_id LIKE 'score:%'
+          ${configuredClause}
         )
-    `).run(id);
+    `).run(id, ...configuredIds);
     return Number(result?.changes || 0);
   } catch {
     return 0;
@@ -1622,8 +1636,17 @@ export const executeEnrichmentStepOnRecords = async ({
       if (noContentReason) Object.assign(patch, absentDeclaredOutputsPatch(stepConfig));
       patch[statusColumn] = outcome;
       // Material retrieval → force next scoring pass (clear score:* staleness).
-      if (!failedEmpty && !noContentReason && evidencePatchIsMaterialRetrieval(patch)) {
-        markScoringStale({ db, recordId });
+      if (
+        !failedEmpty
+        && !noContentReason
+        && String(stepConfig.action || '').trim().toLowerCase() !== 'policy_apply'
+        && evidencePatchIsMaterialRetrieval(patch)
+      ) {
+        markScoringStale({
+          db,
+          recordId,
+          scoreStageIds: configuredScoreStalenessStepIds(config),
+        });
         Object.assign(patch, scoringStaleRecordPatch());
       }
       const merged = {
@@ -1996,7 +2019,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           const detail = `Skipping "${id}": missing dependency ${missingDeps.map((dep) => `"${dep}"`).join(', ')}`;
           emitActivity({ event: 'warning', phase: 'enrichment', step: id, detail });
           summary.errors.push({ step: id, warning: detail });
-          return { id, patches: [], failures: [], managesContacts };
+          return {
+            id,
+            patches: [],
+            failures: [],
+            managesContacts,
+            isPolicyApply: String(stepConfig.action || '').trim().toLowerCase() === 'policy_apply',
+          };
         }
         const declaredOutputs = getDeclaredOutputs(stepConfig);
         const legacyColumns = getLegacyColumns(stepConfig);
@@ -2278,7 +2307,13 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         }, concurrency);
 
         emitActivity({ event: 'step_complete', phase: 'enrichment', step: id });
-        return { id, patches, failures, managesContacts };
+        return {
+          id,
+          patches,
+          failures,
+          managesContacts,
+          isPolicyApply: String(stepConfig.action || '').trim().toLowerCase() === 'policy_apply',
+        };
       }));
 
       for (const result of levelResults) {
@@ -2298,9 +2333,14 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               !item.failedError
               && !item.skippedWhen
               && !item.skippedCeiling
+              && !result.isPolicyApply
               && evidencePatchIsMaterialRetrieval(patch)
             ) {
-              markScoringStale({ db, recordId: item.recordId });
+              markScoringStale({
+                db,
+                recordId: item.recordId,
+                scoreStageIds: configuredScoreStalenessStepIds(config),
+              });
               patch = { ...patch, ...scoringStaleRecordPatch() };
             }
             const merged = { ...currentRow, ...patch };

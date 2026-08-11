@@ -143,6 +143,27 @@ pipeline:
   assert.deepEqual(event, { passed: 0, reason: 'skipped:deferred_generate' });
 });
 
+test('pipeline dry-run reports opted-out records removed from its selected set', async () => {
+  const root = listDir();
+  writeFileSync(join(root, 'outbound.yaml'), 'pipeline: []\n');
+  const db = openListDb({ listDir: root, readonly: false });
+  upsertRecord({ db, row: { _row_id: 'pipeline-active', business_name: 'Active', sequence_status: 'idle' } });
+  upsertRecord({ db, row: { _row_id: 'pipeline-opted-out', business_name: 'Opted Out', sequence_status: 'opted_out' } });
+  db.close();
+
+  const result = await runPipelineDataflow({ listDir: root, dryRun: true });
+
+  assert.deepEqual(result.selection, {
+    requested: 2,
+    selected: 1,
+    excluded: [{
+      selector: 'opted_out',
+      reason: 'sequence_status_opted_out',
+      count: 1,
+    }],
+  });
+});
+
 test('a policy change re-applies to a record already active in its sequence', async () => {
   const root = listDir();
   const registryDir = join(root, 'build', 'registries');

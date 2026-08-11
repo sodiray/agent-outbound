@@ -209,6 +209,7 @@ const runPolicyPipeline = async ({ pipeline }) => {
             grade: fitGrades[index],
             assessable: true,
             reasoning: 'Current score-stage evidence assessment.',
+            evidence_ids: ['current-score-stage-evidence'],
           })),
           summary_reasoning: 'Current fit-stage score.',
         },

@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   markScoringStale,
+  configuredScoreStalenessStepIds,
   evidencePatchIsMaterialRetrieval,
   scoringStaleRecordPatch,
   writeStaleness,
@@ -25,7 +26,9 @@ import {
   openListDb,
   ensureRecordColumns,
   insertAsset,
+  upsertRecord,
 } from '../dist/orchestrator/runtime/db.js';
+import { executeEnrichmentStepOnRecords } from '../dist/orchestrator/enrichment/runner.js';
 import {
   declaredOutputWriteFailures,
   executeStepBatch,
@@ -317,6 +320,80 @@ test('markScoringStale deletes score:* staleness rows and scoringStaleRecordPatc
     db.prepare(`UPDATE records SET score_status = ? WHERE _row_id = ?`).run(patch.score_status, 'acct_rescore');
     const row = db.prepare('SELECT score_status FROM records WHERE _row_id = ?').get('acct_rescore');
     assert.equal(row.score_status, 'stale');
+  } finally {
+    db.close();
+  }
+});
+
+test('configured score stage ids are invalidated while legacy score:* ids remain supported', () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-configured-score-staleness-'));
+  const db = openListDb({ listDir });
+  const now = new Date().toISOString();
+  try {
+    upsertRecord({ db, row: { _row_id: 'configured-score-stage', business_name: 'Configured Score Stage' } });
+    for (const stepId of ['score_fit', 'score:fit', 'site_scrape']) {
+      db.prepare(`
+        INSERT INTO staleness (id, record_id, step_id, dep_hash, cache_ttl, cache_ttl_seconds, updated_at)
+        VALUES (?, ?, ?, 'old', '', 0, ?)
+      `).run(randomUUID(), 'configured-score-stage', stepId, now);
+    }
+
+    const scoreStageIds = configuredScoreStalenessStepIds({
+      pipeline: [{ kind: 'score', id: 'score_fit', key: 'fit' }],
+    });
+    assert.deepEqual(scoreStageIds, ['score_fit']);
+    const deleted = markScoringStale({ db, recordId: 'configured-score-stage', scoreStageIds });
+    assert.equal(deleted, 2);
+    assert.deepEqual(
+      db.prepare('SELECT step_id FROM staleness WHERE record_id = ?').all('configured-score-stage'),
+      [{ step_id: 'site_scrape' }],
+    );
+  } finally {
+    db.close();
+  }
+});
+
+test('material enrichment invalidates a configured score stage id', async () => {
+  const listDir = mkdtempSync(join(tmpdir(), 'ao-live-configured-score-staleness-'));
+  const db = openListDb({ listDir });
+  const now = new Date().toISOString();
+  try {
+    ensureRecordColumns({ db, columns: ['site_text', 'score_status'] });
+    upsertRecord({ db, row: { _row_id: 'live-configured-score-stage', business_name: 'Configured Stage' } });
+    db.prepare(`
+      INSERT INTO staleness (id, record_id, step_id, dep_hash, cache_ttl, cache_ttl_seconds, updated_at)
+      VALUES (?, ?, 'score_fit', 'old', '', 0, ?)
+    `).run(randomUUID(), 'live-configured-score-stage', now);
+    const record = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('live-configured-score-stage');
+    await executeEnrichmentStepOnRecords({
+      db,
+      listDir,
+      config: { pipeline: [{ kind: 'score', id: 'score_fit', key: 'fit' }] },
+      mcp: null,
+      toolCatalog: null,
+      step: {
+        id: 'site_retrieval',
+        kind: 'enrich',
+        action: 'tool_call',
+        outputs: { site_text: { type: 'string' } },
+      },
+      rows: [record],
+      executeAction: async () => ({
+        outputs: { site_text: 'Retrieved source content.' },
+        usage: {},
+        model: 'test',
+        provider: 'test',
+      }),
+    });
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS n FROM staleness WHERE record_id = ? AND step_id = ?')
+        .get('live-configured-score-stage', 'score_fit').n,
+      0,
+    );
+    assert.equal(
+      db.prepare('SELECT score_status FROM records WHERE _row_id = ?').get('live-configured-score-stage').score_status,
+      'stale',
+    );
   } finally {
     db.close();
   }

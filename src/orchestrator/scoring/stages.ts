@@ -58,6 +58,11 @@ const refreshedRows = ({ db, rows }: {
 type ScoreStageRunSummary = {
   records: number;
   score_stages: string[];
+  selection: {
+    requested: number;
+    selected: number;
+    excluded: Array<{ selector: string; reason: string; count: number }>;
+  };
   processed: number;
   skipped_unchanged: number;
   failed: number;
@@ -92,22 +97,41 @@ export const runConfiguredScoreStages = async ({
   const db = openListDb({ listDir, readonly: dryRun });
   try {
     const canary = loadCanaryConfig({ listDir });
-    const rows = filterRecordsForCanary(
-      rowsForScoreStages({ db, where: whereSql, limit: Math.max(0, Number(limit || 0)) }),
-      canary,
-    );
+    const requestedRows = rowsForScoreStages({ db, where: whereSql, limit: 0 });
+    const canaryRows = filterRecordsForCanary(requestedRows, canary);
+    const rows = Number(limit || 0) > 0 ? canaryRows.slice(0, Number(limit)) : canaryRows;
+    const selection = {
+      requested: requestedRows.length,
+      selected: rows.length,
+      excluded: [
+        ...(requestedRows.length === canaryRows.length ? [] : [{
+          selector: 'canary_allowlist',
+          reason: canary.mode === 'strict' && canary.allowlist_record_ids.length === 0
+            ? 'strict_mode_empty_allowlist'
+            : 'record_id_not_allowlisted',
+          count: requestedRows.length - canaryRows.length,
+        }]),
+        ...(canaryRows.length === rows.length ? [] : [{
+          selector: 'limit',
+          reason: 'limit_reached',
+          count: canaryRows.length - rows.length,
+        }]),
+      ],
+    };
     if (dryRun) {
       return {
         dry_run: true,
         records: rows.length,
         score_stages: stages.map((stage) => stage.id),
         where: whereSql,
+        selection,
       };
     }
     assertListAccessForMutation(listDir);
     const initial: ScoreStageRunState = {
       records: rows.length,
       score_stages: stages.map((stage) => stage.id),
+      selection,
       processed: 0,
       skipped_unchanged: 0,
       failed: 0,
