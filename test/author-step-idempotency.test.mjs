@@ -14,13 +14,14 @@ const listDir = () => mkdtempSync(join(tmpdir(), 'ao-author-idempotency-'));
 // An author-built step that spends money through a tool the engine has never
 // heard of. Approval gates the first invocation; idempotency is the only thing
 // that can stop the second.
-const purchaseStep = ({ idempotency } = {}) => ({
+const purchaseStep = ({ idempotency, memoize } = {}) => ({
   kind: 'enrich',
   id: 'purchase_gift_card',
   description: 'Purchase the approved gift card through the author-owned provider.',
   side_effecting: true,
   draft_approval_required: true,
   ...(idempotency ? { idempotency } : {}),
+  ...(memoize === undefined ? {} : { memoize }),
   action: 'tool_call',
   tool: {
     server: 'gift_cards',
@@ -109,14 +110,14 @@ test('a declared author effect is invoked once, not once per run', async () => {
 // Control: the same step without the declaration re-invokes every run. Without
 // this, the test above would pass just as well against a step that never runs.
 test('without the declaration the same effect re-runs every pass', async () => {
-  const step = purchaseStep();
+  const step = purchaseStep({ memoize: {} });
   const { db, root, record } = setup(step);
   const attempts = [];
   try {
     const { first, second } = await runApprovedTwice({ db, root, record, step, attempts });
     assert.equal(first?.passed, true);
     assert.equal(second?.passed, true);
-    assert.equal(attempts.length, 2, 'undeclared effects carry no duplicate-execution protection');
+    assert.equal(attempts.length, 2, 'side-effecting steps never gain duplicate-execution protection from memoization');
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM idempotency').get().n, 0);
   } finally {
     db.close();

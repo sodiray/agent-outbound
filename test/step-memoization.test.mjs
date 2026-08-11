@@ -23,7 +23,6 @@ const memoizedStep = (overrides = {}) => ({
   outputs: {
     lookup_result: { type: 'string', description: 'Settled lookup result.' },
   },
-  memoize: {},
   ...overrides,
 });
 
@@ -53,7 +52,7 @@ const execute = ({ db, root, step, executeAction, force = false }) => executeEnr
   force,
 });
 
-test('memoized enrich steps call their provider once and replay identical outputs for unchanged resolved inputs', async () => {
+test('enrich steps memoize by default and replay identical outputs for unchanged resolved inputs', async () => {
   let providerCalls = 0;
   const executeAction = async ({ record }) => {
     providerCalls += 1;
@@ -71,10 +70,31 @@ test('memoized enrich steps call their provider once and replay identical output
     assert.equal(second.non_execution_reasons['memoization-record'], 'memoization_hit');
     assert.equal(providerCalls, 1);
     assert.equal(currentRecord(db).lookup_result, firstOutput);
+    assert.equal(db.prepare('SELECT cache_ttl_seconds FROM staleness WHERE record_id = ? AND step_id = ?')
+      .get('memoization-record', step.id).cache_ttl_seconds, 90 * 86400);
 
     const forced = await execute({ db, root, step, executeAction, force: true });
     assert.equal(forced.processed, 1);
     assert.equal(providerCalls, 2, '--force bypasses a memoized result');
+  });
+});
+
+test('memoize: false opts out and re-executes each time', async () => {
+  let providerCalls = 0;
+  const executeAction = async () => {
+    providerCalls += 1;
+    return { outputs: { lookup_result: `result:${providerCalls}` }, usage: {} };
+  };
+
+  await withDb(async ({ db, root }) => {
+    const step = memoizedStep({ memoize: false });
+    await execute({ db, root, step, executeAction });
+    const second = await execute({ db, root, step, executeAction });
+
+    assert.equal(second.processed, 1);
+    assert.equal(second.memoization_hits, 0);
+    assert.equal(providerCalls, 2);
+    assert.equal(currentRecord(db).lookup_result, 'result:2');
   });
 });
 
@@ -94,6 +114,68 @@ test('memoized enrich steps invalidate when a declared input changes', async () 
     assert.equal(second.processed, 1);
     assert.equal(providerCalls, 2);
     assert.equal(currentRecord(db).lookup_result, 'result:https://two.example');
+  });
+});
+
+test('changing only tool arguments invalidates an enrich memoization result with byte-identical declared inputs', async () => {
+  let providerCalls = 0;
+  const executeAction = async () => {
+    providerCalls += 1;
+    return { outputs: { lookup_result: `result:${providerCalls}` }, usage: {} };
+  };
+
+  await withDb(async ({ db, root }) => {
+    const onePage = memoizedStep({
+      tool: { server: 'web', name: 'crawl_site' },
+      args: { max_pages: 1 },
+    });
+    const eightPages = { ...onePage, args: { max_pages: 8 } };
+
+    await execute({ db, root, step: onePage, executeAction });
+    const second = await execute({ db, root, step: eightPages, executeAction });
+
+    assert.equal(second.processed, 1);
+    assert.equal(providerCalls, 2);
+  });
+});
+
+test('changing only a model or description invalidates an enrich memoization result', async () => {
+  let providerCalls = 0;
+  const executeAction = async () => {
+    providerCalls += 1;
+    return { outputs: { lookup_result: `result:${providerCalls}` }, usage: {} };
+  };
+
+  await withDb(async ({ db, root }) => {
+    const initial = memoizedStep({ model: 'openai/gpt-4.1-mini', description: 'Classify the supplied website.' });
+    const changedModel = { ...initial, model: 'anthropic/claude-haiku-4.5' };
+    const changedDescription = { ...changedModel, description: 'Classify the supplied website with full coverage.' };
+
+    await execute({ db, root, step: initial, executeAction });
+    await execute({ db, root, step: changedModel, executeAction });
+    await execute({ db, root, step: changedDescription, executeAction });
+
+    assert.equal(providerCalls, 3);
+  });
+});
+
+test('v1 memoization entries never serve results under the v2 fingerprint scheme', async () => {
+  let providerCalls = 0;
+  const executeAction = async () => {
+    providerCalls += 1;
+    return { outputs: { lookup_result: `result:${providerCalls}` }, usage: {} };
+  };
+
+  await withDb(async ({ db, root }) => {
+    const step = memoizedStep();
+    await execute({ db, root, step, executeAction });
+    db.prepare('UPDATE staleness SET policy_hash = ? WHERE record_id = ? AND step_id = ?')
+      .run('step-memoization-v1', 'memoization-record', step.id);
+
+    const second = await execute({ db, root, step, executeAction });
+
+    assert.equal(second.processed, 1);
+    assert.equal(providerCalls, 2);
   });
 });
 
@@ -137,11 +219,26 @@ test('memoization config rejects unknown keys', () => {
     },
   ] });
   const invalid = normalizeConfig({ pipeline: [memoizedStep({ memoize: { ttl_dyas: 30 } })] });
+  const optOut = normalizeConfig({ pipeline: [memoizedStep({ memoize: false })] });
 
   assert.deepEqual(valid.errors, []);
   assert.deepEqual(validKinds.errors, []);
+  assert.deepEqual(optOut.errors, []);
   assert.ok(invalid.errors.length > 0);
   assert.match(invalid.error, /ttl_dyas|Unrecognized key/i);
+});
+
+test('side-effecting send steps cannot enable memoization', () => {
+  const result = normalizeConfig({ pipeline: [{
+    kind: 'send_email',
+    id: 'external_send',
+    side_effecting: true,
+    memoize: {},
+    inputs: [],
+  }] });
+
+  assert.ok(result.errors.length > 0);
+  assert.match(result.error, /memoization.*side-effecting|Expected never/i);
 });
 
 test('memoized generate steps replay their settled output and re-execute when a declared input changes', async () => {

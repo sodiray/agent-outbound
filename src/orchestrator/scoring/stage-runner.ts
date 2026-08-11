@@ -35,8 +35,8 @@ export type ScoreStage = {
   criteria?: ScoreCriterion[];
   inputs?: unknown;
   outputs?: Record<string, { type?: string }>;
-  memoize?: { ttl_days?: number };
-};
+  memoize?: { ttl_days?: number } | false;
+} & Record<string, unknown>;
 
 type ScoreStageDb = {
   prepare: (sql: string) => { run: (...values: unknown[]) => unknown; get: (...values: unknown[]) => unknown };
@@ -211,15 +211,6 @@ export const scoreStageDependencyHash = ({
   });
 };
 
-const scoreMemoizationMaterialConfig = ({ step, samples }: { step: ScoreStage; samples: number }) => ({
-  kind: 'score',
-  key: step.key,
-  model: step.model,
-  criteria: normalizedCriteria(step.criteria),
-  outputs: step.outputs || {},
-  samples: resolvedScoreSamples(samples),
-});
-
 export const persistScoreStageResult = ({
   db,
   record,
@@ -330,14 +321,16 @@ export const runScoreStage = async ({
     const withTruncation = (reason: string) => (
       [truncationNote, reason].filter(Boolean).join(';')
     );
-    const depHash = scoreStageDependencyHash({ step, record: initialRecord, samples: sampleCount });
     const memoization = memoizationConfigForStep(step as unknown as Record<string, unknown>);
     const cached = readStaleness({ db, recordId, stepId });
     const memoizationDetails = memoization
       ? memoizationCacheDetailsForResolvedInputs({
         memoization,
         inputs: inputs.values,
-        materialConfig: scoreMemoizationMaterialConfig({ step, samples: sampleCount }),
+        stepDefinition: {
+          step,
+          execution_config: { samples: sampleCount },
+        },
       })
       : undefined;
     // Score stages always write key-derived fields; prefer declared outputs when
@@ -357,18 +350,9 @@ export const runScoreStage = async ({
       && isMemoizationFresh({ cached, hashes: memoizationDetails, force })
       && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
     );
-    const unchangedHit = Boolean(
-      !memoization
-      && !force
-      && cached
-      && String((cached as { dep_hash?: unknown }).dep_hash || '') === depHash
-      && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
-    );
-    if (memoizedHit || unchangedHit) {
-      if (memoizedHit) {
-        emitActivity({ event: 'row_skipped', phase: 'scoring', step: stepId, row: String(initialRecord.business_name || recordId), reason: 'memoization_hit' });
-      }
-      outcomes.set(recordId, { passed: true, reason: memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs' });
+    if (memoizedHit) {
+      emitActivity({ event: 'row_skipped', phase: 'scoring', step: stepId, row: String(initialRecord.business_name || recordId), reason: 'memoization_hit' });
+      outcomes.set(recordId, { passed: true, reason: 'memoization_hit' });
       continue;
     }
     const criteria = normalizedCriteria(step.criteria);
@@ -387,14 +371,11 @@ export const runScoreStage = async ({
       if (criteria.length === 0) {
         const calculation = calculationFor({ criteria, result: null });
         const persisted = persistScoreStageResult({ db, record: initialRecord, step, calculation });
-        writeStaleness({
-          db,
-          recordId,
-          stepId,
-          ...(memoization && memoizationDetails
-            ? memoizationDetails
-            : { depHash, cacheTtl: '', cacheTtlSeconds: 0 }),
-        });
+        if (memoization && memoizationDetails) {
+          writeStaleness({ db, recordId, stepId, ...memoizationDetails });
+        } else {
+          db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
+        }
         const declaredOutputWrites = Object.fromEntries([
           [`${step.key}_score`, { provided: true, value: persisted[`${step.key}_score`] }],
           [`${step.key}_breakdown`, { provided: true, value: persisted[`${step.key}_breakdown`] }],
@@ -500,17 +481,14 @@ export const runScoreStage = async ({
         outcomes.set(recordId, { passed: false, errored: true, reason: 'not_graded' });
         continue;
       }
-      if (memoization && successfulSamples.length !== sampleCount) {
+      if (!memoization || successfulSamples.length !== sampleCount) {
         db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
       } else {
-        writeStaleness({
-          db,
-          recordId,
-          stepId,
-          ...(memoization && memoizationDetails
-            ? memoizationDetails
-            : { depHash, cacheTtl: '', cacheTtlSeconds: 0 }),
-        });
+        if (memoization && memoizationDetails) {
+          writeStaleness({ db, recordId, stepId, ...memoizationDetails });
+        } else {
+          db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
+        }
       }
       const declaredOutputWrites = Object.fromEntries([
         [`${step.key}_score`, { provided: true, value: persisted[`${step.key}_score`] }],
@@ -523,7 +501,7 @@ export const runScoreStage = async ({
         declaredOutputWrites,
       });
     } catch (error) {
-      if (memoization) db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
+      db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
       const reason = String((error as Error)?.message || error);
       const calculation = calculationFor({ criteria, result: null });
       try {

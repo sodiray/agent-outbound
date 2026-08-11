@@ -456,26 +456,42 @@ export const enrichRerunReason = ({
 };
 
 export type StepMemoizationConfig = {
-  ttl_days?: number;
+  ttl_days: number;
 };
 
-/**
- * `memoize` is intentionally presence-based: omitting it preserves the
- * historical enrichment staleness behavior for a step.
- */
+export const DEFAULT_STEP_MEMOIZATION_TTL_DAYS = 90;
+export const STEP_MEMOIZATION_FINGERPRINT_VERSION = 'step-memoization-v2';
+const MEMOIZATION_EXCLUDED_KINDS = new Set([
+  'send_email',
+  'send_sms',
+  'linkedin_connect',
+  'manual_task',
+]);
+
 export const memoizationConfigForStep = (stepConfig: Record<string, unknown>): StepMemoizationConfig | undefined => {
+  if (
+    stepConfig?.side_effecting === true
+    || MEMOIZATION_EXCLUDED_KINDS.has(String(stepConfig?.kind || '').trim().toLowerCase())
+  ) return undefined;
   const value = stepConfig?.memoize;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (value === false) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ttl_days: DEFAULT_STEP_MEMOIZATION_TTL_DAYS };
+  }
   const ttlDays = Number((value as Record<string, unknown>).ttl_days);
-  return Number.isFinite(ttlDays) && ttlDays > 0 ? { ttl_days: ttlDays } : {};
+  return {
+    ttl_days: Number.isFinite(ttlDays) && ttlDays > 0
+      ? ttlDays
+      : DEFAULT_STEP_MEMOIZATION_TTL_DAYS,
+  };
 };
 
 const memoizationTtlSeconds = (memoization: StepMemoizationConfig): number => (
-  memoization.ttl_days === undefined ? 0 : memoization.ttl_days * 86400
+  memoization.ttl_days * 86400
 );
 
 const memoizationCacheTtl = (memoization: StepMemoizationConfig): string => (
-  memoization.ttl_days === undefined ? '' : `${memoization.ttl_days}d`
+  `${memoization.ttl_days}d`
 );
 
 /**
@@ -491,30 +507,56 @@ export const memoizationInputValuesForRecord = ({
   record: Record<string, unknown>;
 }) => resolveStageInputs({ step: stepConfig, record }).values;
 
+const canonicalizeMemoizationValue = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalizeMemoizationValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalizeMemoizationValue(item)]),
+  );
+};
+
+/**
+ * Memoization is deliberately tied to the entire resolved definition, not a
+ * hand-maintained material-field list. Step fields are author instructions and
+ * provider contracts; adding one therefore invalidates an older result by
+ * default instead of silently leaving it outside the key.
+ */
 export const memoizationHashesForResolvedInputs = ({
   inputs,
-  materialConfig,
+  stepDefinition,
 }: {
   inputs: Record<string, unknown>;
-  materialConfig: Record<string, unknown>;
+  stepDefinition: Record<string, unknown>;
 }) => {
   const inputHash = stableHash({
-    version: 'step-memoization-v1',
+    version: STEP_MEMOIZATION_FINGERPRINT_VERSION,
     inputs,
-    config: materialConfig,
+    step: canonicalizeMemoizationValue(stepDefinition),
   });
-  return { depHash: inputHash, inputHash, policyHash: 'step-memoization-v1' };
+  return {
+    depHash: inputHash,
+    inputHash,
+    policyHash: STEP_MEMOIZATION_FINGERPRINT_VERSION,
+  };
 };
 
 const memoizationHashes = ({
   stepConfig,
   record,
+  executionConfig,
 }: {
   stepConfig: Record<string, unknown>;
   record: Record<string, unknown>;
+  executionConfig?: Record<string, unknown>;
 }) => memoizationHashesForResolvedInputs({
   inputs: memoizationInputValuesForRecord({ stepConfig, record }),
-  materialConfig: materialEnrichConfig(stepConfig),
+  stepDefinition: {
+    step: stepConfig,
+    execution_config: executionConfig || {},
+  },
 });
 
 export const isMemoizationFresh = ({
@@ -522,16 +564,20 @@ export const isMemoizationFresh = ({
   hashes,
   stepConfig,
   record,
+  executionConfig,
   force = false,
 }: {
   cached: any;
   hashes?: { depHash: string; policyHash: string };
   stepConfig?: Record<string, unknown>;
   record?: Record<string, unknown>;
+  executionConfig?: Record<string, unknown>;
   force?: boolean;
 }) => {
   if (force || !cached) return false;
-  const resolvedHashes = hashes || (stepConfig && record ? memoizationHashes({ stepConfig, record }) : undefined);
+  const resolvedHashes = hashes || (stepConfig && record
+    ? memoizationHashes({ stepConfig, record, executionConfig })
+    : undefined);
   if (!resolvedHashes) return false;
   if (String(cached.dep_hash || '') !== resolvedHashes.depHash || String(cached.policy_hash || '') !== resolvedHashes.policyHash) return false;
   const ttl = Number(cached.cache_ttl_seconds || 0);
@@ -552,12 +598,14 @@ export const memoizationCacheDetails = ({
   memoization,
   stepConfig,
   record,
+  executionConfig,
 }: {
   memoization: StepMemoizationConfig;
   stepConfig: Record<string, unknown>;
   record: Record<string, unknown>;
+  executionConfig?: Record<string, unknown>;
 }) => ({
-  ...memoizationHashes({ stepConfig, record }),
+  ...memoizationHashes({ stepConfig, record, executionConfig }),
   cacheTtlSeconds: memoizationTtlSeconds(memoization),
   cacheTtl: memoizationCacheTtl(memoization),
 });
@@ -565,13 +613,13 @@ export const memoizationCacheDetails = ({
 export const memoizationCacheDetailsForResolvedInputs = ({
   memoization,
   inputs,
-  materialConfig,
+  stepDefinition,
 }: {
   memoization: StepMemoizationConfig;
   inputs: Record<string, unknown>;
-  materialConfig: Record<string, unknown>;
+  stepDefinition: Record<string, unknown>;
 }) => ({
-  ...memoizationHashesForResolvedInputs({ inputs, materialConfig }),
+  ...memoizationHashesForResolvedInputs({ inputs, stepDefinition }),
   cacheTtlSeconds: memoizationTtlSeconds(memoization),
   cacheTtl: memoizationCacheTtl(memoization),
 });
@@ -1034,11 +1082,6 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
   const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
-  const declaredOutputs = getDeclaredOutputs(stepConfig || {});
-  const legacyColumns = getLegacyColumns(stepConfig || {});
-  const expectedOutputs = Object.keys(declaredOutputs).length > 0
-    ? declaredOutputs
-    : legacyColumns;
   const memoization = memoizationConfigForStep(stepConfig);
   const statusColumn = stepStatusColumn(id);
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
@@ -1047,11 +1090,11 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
     const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) { result.skip_when += 1; continue; }
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
-    const fresh = memoization
-      ? isMemoizationFresh({ cached, stepConfig, record, force })
-        && memoizationHasSettledOutcome({ record, statusColumn })
-      : isEnrichFresh({ cached, stepConfig, depValues: dependencyValuesForRecord({ stepConfig, record }), executionConfig, force })
-        && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn });
+    const fresh = Boolean(
+      memoization
+      && isMemoizationFresh({ cached, stepConfig, record, executionConfig, force })
+      && memoizationHasSettledOutcome({ record, statusColumn }),
+    );
     if (fresh) { result.skip_fresh += 1; continue; }
     result.would_enrich += 1;
   }
@@ -1430,18 +1473,18 @@ export const executeEnrichmentStepOnRecords = async ({
 
     const depValues = dependencyValuesForRecord({ stepConfig, record: currentRecord });
     const dependencyHashes = memoization
-      ? memoizationCacheDetails({ memoization, stepConfig, record: currentRecord })
+      ? memoizationCacheDetails({ memoization, stepConfig, record: currentRecord, executionConfig })
       : enrichDependencyHashes({ stepConfig, depValues, executionConfig });
     const cached = readStaleness({ db, recordId, stepId: id });
 
     const expectedOutputs = Object.keys(declaredOutputs).length > 0
       ? declaredOutputs
       : legacyColumns;
-    const fresh = memoization
-      ? isMemoizationFresh({ cached, stepConfig, record: currentRecord, force })
-        && memoizationHasSettledOutcome({ record: currentRecord, statusColumn })
-      : isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
-        && enrichStepHasDurableOutcome({ record: currentRecord, expectedOutputs, statusColumn });
+    const fresh = Boolean(
+      memoization
+      && isMemoizationFresh({ cached, stepConfig, record: currentRecord, executionConfig, force })
+      && memoizationHasSettledOutcome({ record: currentRecord, statusColumn }),
+    );
     if (fresh) {
       summary.skipped_fresh += 1;
       if (memoization) summary.memoization_hits += 1;
@@ -1571,7 +1614,7 @@ export const executeEnrichmentStepOnRecords = async ({
       }
       // Memoized steps treat an explicit empty provider response as a settled
       // negative result. Legacy staleness retains its historical retry behavior.
-      if (!noContentReason || memoization) {
+      if (memoization) {
         writeStaleness({
           db,
           recordId,
@@ -1627,7 +1670,7 @@ export const executeEnrichmentStepOnRecords = async ({
         executionConfig,
         permanent,
       });
-      if (memoization) clearStaleness({ db, recordId, stepId: id });
+      clearStaleness({ db, recordId, stepId: id });
       summary.failed += 1;
       summary.errors.push({ record_id: recordId, error: detail });
       summary.record_ids.push(recordId);
@@ -1680,20 +1723,7 @@ export const executeEnrichmentStepOnRecords = async ({
           last_error: ownedLastError({ error: detail, stepId: id }),
         };
         upsertRecord({ db, row: merged });
-        if (permanent && !memoization) {
-          writeStaleness({
-            db,
-            recordId,
-            stepId: id,
-            depHash: freshnessDepHash({ dependencyHashes, executionConfig }),
-            inputHash: dependencyHashes.inputHash,
-            policyHash: dependencyHashes.policyHash,
-            cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
-            cacheTtl: String(stepConfig?.cache || ''),
-          });
-        } else {
-          clearStaleness({ db, recordId, stepId: id });
-        }
+        clearStaleness({ db, recordId, stepId: id });
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: detail });
         summary.handled_errors.push(recordId);
@@ -2003,18 +2033,18 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
 
           const depValues = dependencyValuesForRecord({ stepConfig, record });
           const dependencyHashes = memoization
-            ? memoizationCacheDetails({ memoization, stepConfig, record })
+            ? memoizationCacheDetails({ memoization, stepConfig, record, executionConfig })
             : enrichDependencyHashes({ stepConfig, depValues, executionConfig });
           const cached = readStaleness({ db, recordId, stepId: id });
 
           const expectedOutputs = Object.keys(declaredOutputs).length > 0
             ? declaredOutputs
             : legacyColumns;
-          const fresh = memoization
-            ? isMemoizationFresh({ cached, stepConfig, record, force })
-              && memoizationHasSettledOutcome({ record, statusColumn })
-            : isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
-              && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn });
+          const fresh = Boolean(
+            memoization
+            && isMemoizationFresh({ cached, stepConfig, record, executionConfig, force })
+            && memoizationHasSettledOutcome({ record, statusColumn }),
+          );
           if (fresh) {
             summary.skipped_fresh += 1;
             emitActivity({ event: 'row_skipped', phase: 'enrichment', step: id, row: rowLabel, reason: memoization ? 'memoization_hit' : 'fresh' });

@@ -517,10 +517,15 @@ const StageInputsSchema = z.union([
   z.record(StageInputDefinitionSchema),
 ]).default([]);
 
-const StepMemoizationSchema = z.object({
-  /** Results never expire when ttl_days is omitted. */
+const StepMemoizationOptionsSchema = z.object({
+  /** Defaults to the bounded 90-day freshness window when omitted. */
   ttl_days: z.coerce.number().positive().finite().optional(),
 }).strict();
+
+const StepMemoizationSchema = z.union([
+  z.literal(false),
+  StepMemoizationOptionsSchema,
+]);
 
 export const StepConfigSchema = z.object({
   description: z.string().default(''),
@@ -967,8 +972,8 @@ const PipelineEnrichmentStepSchema = z.object({
   step_budget: z.coerce.number().int().min(1).max(40).default(8),
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
   cache: z.string().default(''),
-  // Opt-in result memoization. The engine fingerprints resolved declared inputs
-  // and replays persisted outputs while that fingerprint remains current.
+  // Result memoization is enabled by default; false opts out for deliberate
+  // re-derivation. The engine fingerprints the resolved step definition.
   memoize: StepMemoizationSchema.optional(),
   // Explicit staleness override: bump this string to force a recompute; otherwise
   // the staleness hash is derived from the step's material fields only, so cosmetic
@@ -1218,6 +1223,9 @@ const PipelineExternalStepFields = {
   side_effecting: z.literal(true, {
     errorMap: () => ({ message: 'Externally emitting steps must declare side_effecting: true.' }),
   }),
+  memoize: z.never({
+    message: 'Memoization is unavailable for side-effecting steps.',
+  }).optional(),
   template: z.union([z.string(), z.array(z.string())]).optional(),
   template_version: z.coerce.number().int().min(1).optional(),
   variables: z.record(z.any()).default({}),

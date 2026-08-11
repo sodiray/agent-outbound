@@ -35,7 +35,7 @@ type ComposeStep = {
   length?: { max_words?: number; max_sentences?: number };
   outputs?: Record<string, { type?: string; description?: string; append?: string }>;
   concurrency?: number;
-  memoize?: { ttl_days?: number };
+  memoize?: { ttl_days?: number } | false;
 };
 
 export const composeDependencyHash = ({ step, record }: { step: ComposeStep; record: RecordRow }) => stableHash({
@@ -48,16 +48,6 @@ export const composeDependencyHash = ({ step, record }: { step: ComposeStep; rec
     length: step.length || {},
     outputs: step.outputs || {},
   },
-});
-
-const composeMemoizationMaterialConfig = (step: ComposeStep) => ({
-  kind: 'compose',
-  model: step.model || '',
-  inputs: step.inputs || {},
-  structure: step.structure || {},
-  rules: step.rules || [],
-  length: step.length || {},
-  outputs: step.outputs || {},
 });
 
 export type ComposeGenerator = (input: {
@@ -366,13 +356,12 @@ export const runComposeStep = async ({
       }
       const inputs = declaredInputs({ step, record });
       const memoization = memoizationConfigForStep(step as Record<string, unknown>);
-      const depHash = composeDependencyHash({ step, record });
       const cached = readStaleness({ db, recordId, stepId });
       const memoizationDetails = memoization
         ? memoizationCacheDetailsForResolvedInputs({
           memoization,
           inputs,
-          materialConfig: composeMemoizationMaterialConfig(step),
+          stepDefinition: step as Record<string, unknown>,
         })
         : undefined;
       const outputKeys = Object.keys(step.outputs || {});
@@ -390,19 +379,13 @@ export const runComposeStep = async ({
         && isMemoizationFresh({ cached, hashes: memoizationDetails, force })
         && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
       );
-      const unchangedHit = Boolean(
-        !memoization
-        && !force
-        && String(cached?.dep_hash || '') === depHash
-        && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
-      );
-      if (memoizedHit || unchangedHit) {
+      if (memoizedHit) {
         summary.declared_output_writes[recordId] = Object.fromEntries(
           outputKeys.map((key) => [key, { provided: true, value: durableRecord[key] }]),
         );
         if (memoizedHit) summary.memoization_hits += 1;
-        summary.non_execution_reasons[recordId] = memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs';
-        emitActivity({ event: 'row_skipped', phase: 'compose', step: stepId, row: String(record.business_name || recordId), reason: memoizedHit ? 'memoization_hit' : 'fresh' });
+        summary.non_execution_reasons[recordId] = 'memoization_hit';
+        emitActivity({ event: 'row_skipped', phase: 'compose', step: stepId, row: String(record.business_name || recordId), reason: 'memoization_hit' });
         return;
       }
       const resultSchema = buildComposeResultSchema(step);
@@ -433,14 +416,11 @@ export const runComposeStep = async ({
         ? persisted as RecordRow
         : record;
       upsertRecord({ db, row: { ...current, ...composed.outputs } });
-      writeStaleness({
-        db,
-        recordId,
-        stepId,
-        ...(memoization && memoizationDetails
-          ? memoizationDetails
-          : { depHash, cacheTtl: '', cacheTtlSeconds: 0 }),
-      });
+      if (memoization && memoizationDetails) {
+        writeStaleness({ db, recordId, stepId, ...memoizationDetails });
+      } else {
+        db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
+      }
       insertAsset({
         db,
         rowId: recordId,
@@ -471,9 +451,7 @@ export const runComposeStep = async ({
         Object.entries(composed.outputs).map(([key, value]) => [key, { provided: true, value }]),
       );
     } catch (error) {
-      if (memoizationConfigForStep(step as Record<string, unknown>)) {
-        db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
-      }
+      db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
       const detail = error instanceof Error ? error.message : String(error);
       summary.failed += 1;
       summary.errors.push({ record_id: recordId, error: detail });

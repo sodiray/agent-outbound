@@ -82,7 +82,7 @@ Cache TTL (`cache: 90d`) provides time-based expiration on top of the hash check
 
 ## Step Result Memoization
 
-`memoize` is an opt-in cache for an individual `enrich` step's settled result. It is intended for expensive, repeatable lookups where re-running with the same declared inputs would purchase the same answer again.
+Step-result memoization is on by default for `enrich`, `generate`, `compose`, and `score` steps. It replays a settled result within a bounded freshness window so repeat runs do not purchase the same derivation again.
 
 ```yaml
 pipeline:
@@ -94,14 +94,16 @@ pipeline:
     outputs:
       account_result: { type: string, description: Lookup result, including an empty result. }
     memoize:
-      ttl_days: 30 # optional; omit for no expiry
+      ttl_days: 30 # optional; defaults to 90 days
 ```
 
-The fingerprint is built from the resolved declared inputs—the same values sent to the action. This supports both array and map input declarations; map aliases, literal values, and `max_chars` truncation participate in the key. Material execution configuration also participates, so changing the provider contract does not replay an incompatible old result.
+Set `memoize: false` on an individual supported step to deliberately re-derive on every run. Side-effecting and sending steps cannot enable memoization.
+
+The versioned fingerprint is built from the resolved declared inputs—the same values sent to the action—and the full resolved step definition plus execution context. This includes model, tool/server/tool-name, tool arguments, description, declared output schema, prompts, provider, mode, sample count, and future step settings. This supports both array and map input declarations; map aliases, literal values, and `max_chars` truncation participate in the key. Editing a step therefore invalidates its prior result.
 
 Both non-empty outputs and an explicit empty output are settled results and are memoized. Exceptions and provider failures are never memoized, including permanent provider errors: the next run tries again. A hit is recorded as a `memoization_hit` row-skipped activity event and in the pipeline step result's `memoization_hits` count. Run `pipeline <list> --force` to deliberately bypass memoization and refresh a result.
 
-This capability currently applies to `enrich` steps, whose runner has a common provider-action and persisted-output boundary. It deliberately does not apply to sending, manual, or other side-effecting step kinds.
+This capability applies to `enrich`, `generate`, `compose`, and `score` steps. It deliberately does not apply to sending, manual, or other side-effecting step kinds.
 
 ### Default TTLs per category
 
