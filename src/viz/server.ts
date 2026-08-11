@@ -25,6 +25,14 @@ import {
   queryRecords,
   restoreRejectedRecordForViz,
 } from './data.js';
+import {
+  approveDraftForViz,
+  editDraftForViz,
+  getDraftCountsForViz,
+  getDraftDetailForViz,
+  getDraftsForViz,
+  rejectDraftForViz,
+} from './drafts.js';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { flattenPipelineSteps, stepSubpipelineName } from '../orchestrator/lib/subpipelines.js';
 import { openListDb } from '../orchestrator/runtime/db.js';
@@ -201,6 +209,68 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         c.req.param('rowId'),
         String(c.req.query('stage') || ''),
       ));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.get('/api/drafts', (c) => {
+    try {
+      return c.json(getDraftsForViz(
+        listDir,
+        String(c.req.query('status') || 'pending_approval'),
+        Number(c.req.query('limit') || 100),
+        Number(c.req.query('offset') || 0),
+      ));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.get('/api/drafts/counts', (c) => {
+    try {
+      return c.json(getDraftCountsForViz(listDir));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.get('/api/drafts/:draftId', (c) => {
+    try {
+      return c.json(getDraftDetailForViz(listDir, c.req.param('draftId')));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.post('/api/drafts/:draftId/approve', async (c) => {
+    try {
+      return c.json(approveDraftForViz(listDir, c.req.param('draftId')));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.post('/api/drafts/:draftId/reject', async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      return c.json(rejectDraftForViz(
+        listDir,
+        c.req.param('draftId'),
+        String(body?.reason || ''),
+      ));
+    } catch (error) {
+      return apiErrorResponse(c, error);
+    }
+  });
+
+  app.post('/api/drafts/:draftId/edit', async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      return c.json(editDraftForViz(listDir, c.req.param('draftId'), {
+        subject: body?.subject !== undefined ? String(body.subject) : undefined,
+        body: body?.body !== undefined ? String(body.body) : undefined,
+      }));
     } catch (error) {
       return apiErrorResponse(c, error);
     }

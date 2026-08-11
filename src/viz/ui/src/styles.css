@@ -2068,6 +2068,124 @@ kbd {
   text-align: center;
 }
 
+.draft-detail-meta {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.draft-message-section {
+  border: 1px solid rgba(245, 213, 71, 0.22);
+  border-radius: 10px;
+  background: rgba(245, 213, 71, 0.04);
+  padding: 0.85rem 0.9rem;
+}
+
+.draft-message {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.draft-message__label {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.draft-message__subject strong {
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.draft-message__body pre {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(5, 6, 10, 0.35);
+  color: var(--ink);
+  padding: 0.85rem 0.95rem;
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-size: 0.86rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: none;
+}
+
+.draft-edit-toggle {
+  margin-top: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(232, 235, 242, 0.05);
+  color: var(--yellow);
+  padding: 0.3rem 0.65rem;
+  font-size: 0.74rem;
+}
+
+.draft-edit-form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.draft-edit-form label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.draft-edit-form label span {
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.draft-edit-form input,
+.draft-edit-form textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(5, 6, 10, 0.35);
+  color: var(--ink);
+  padding: 0.55rem 0.7rem;
+  font: inherit;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.draft-edit-form textarea {
+  resize: vertical;
+  min-height: 12rem;
+}
+
+.draft-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.draft-edit-actions button {
+  min-height: 1.9rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(232, 235, 242, 0.05);
+  color: var(--ink);
+  padding: 0.3rem 0.65rem;
+  font-size: 0.74rem;
+}
+
+.draft-edit-actions button:last-child {
+  border-color: rgba(62, 207, 111, 0.36);
+  color: var(--green);
+}
+
 .review-empty h2 {
   color: var(--ink);
   font-size: 1.05rem;

@@ -1318,6 +1318,8 @@ const PipelineExternalStepFields = {
   variables: z.record(z.any()).default({}),
   uses_asset: z.string().optional(),
   draft_approval_required: PipelineAuthorStepVocabulary.draft_approval_required,
+  // Same closed detail vocabulary as review steps — evidence for the draft approver.
+  detail: z.array(ReviewDetailSectionSchema).min(1).optional(),
   review: PipelineAuthorStepVocabulary.review,
   inputs: StageInputsSchema,
   config: ExternalStepConfigSchema.default({}),
@@ -1446,6 +1448,8 @@ export const SequenceStepSchema = z.preprocess((value) => {
   variables: z.record(z.any()).default({}),
   uses_asset: z.string().optional(),
   draft_approval_required: z.boolean().optional(),
+  // Evidence shown next to the draft in the operator approval panel.
+  detail: z.array(ReviewDetailSectionSchema).min(1).optional(),
   day: z.coerce.number().int().min(0).max(365).default(0),
   condition: z.string().optional(),
   defer: z.string().optional(),
@@ -1965,6 +1969,8 @@ const SequenceSchema = z.object({
   working_days: WorkingDaysSchema,
   non_working_day_policy: z.enum(NON_WORKING_DAY_POLICY_VALUES).default('shift_forward'),
   timezone: TimeZoneSchema.optional(),
+  // Fallback evidence for draft approval when a send step omits its own detail.
+  detail: z.array(ReviewDetailSectionSchema).min(1).optional(),
   steps: z.array(SequenceStepSchema).default([]),
 }).partial();
 
@@ -2737,13 +2743,50 @@ const channelDailyCapValidationMessages = (input: Record<string, unknown>): stri
   return [...channelErrors, ...stepErrors];
 };
 
-const reviewDetailWarnings = (config: Record<string, unknown>): string[] => flattenPipelineSteps(config)
-  .filter((step) => String(step?.kind || '') === 'review')
-  .flatMap((step) => (
-    Array.isArray(step?.detail)
-      ? []
-      : [`Review step "${String(step?.id || 'unknown')}" should declare detail for the review panel.`]
-  ));
+const isDraftApprovalRequiredStep = (step: Record<string, unknown>) => {
+  if (step.draft_approval_required === true) return true;
+  const nested = step.config;
+  return Boolean(nested && typeof nested === 'object' && !Array.isArray(nested)
+    && (nested as Record<string, unknown>).draft_approval_required === true);
+};
+
+const allConfiguredSteps = (config: Record<string, unknown>): Array<{ step: Record<string, unknown>; path: string }> => {
+  const pipeline = flattenPipelineSteps(config).map((step) => ({
+    step: step as Record<string, unknown>,
+    path: `pipeline.${String((step as any)?.id || 'unknown')}`,
+  }));
+  const sequences = Object.entries(
+    config.sequences && typeof config.sequences === 'object' && !Array.isArray(config.sequences)
+      ? config.sequences as Record<string, unknown>
+      : {},
+  ).flatMap(([name, sequence]) => {
+    if (!sequence || typeof sequence !== 'object' || Array.isArray(sequence)) return [];
+    const steps = Array.isArray((sequence as any).steps) ? (sequence as any).steps : [];
+    return steps.map((step: unknown, index: number) => ({
+      step: (step && typeof step === 'object' && !Array.isArray(step) ? step : {}) as Record<string, unknown>,
+      path: `sequences.${name}.steps[${index}]`,
+    }));
+  });
+  return [...pipeline, ...sequences];
+};
+
+const reviewDetailWarnings = (config: Record<string, unknown>): string[] => {
+  const reviewWarnings = flattenPipelineSteps(config)
+    .filter((step) => String(step?.kind || '') === 'review')
+    .flatMap((step) => (
+      Array.isArray(step?.detail)
+        ? []
+        : [`Review step "${String(step?.id || 'unknown')}" should declare detail for the review panel.`]
+    ));
+  const draftWarnings = allConfiguredSteps(config)
+    .filter(({ step }) => isDraftApprovalRequiredStep(step))
+    .flatMap(({ step }) => (
+      Array.isArray(step.detail)
+        ? []
+        : [`Send step "${String(step.id || 'unknown')}" with draft_approval_required should declare detail for the draft approval panel.`]
+    ));
+  return [...reviewWarnings, ...draftWarnings];
+};
 
 export const normalizeConfig = (value, options: {
   listDir?: string;

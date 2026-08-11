@@ -1,5 +1,7 @@
 import type {
   ActiveFilter,
+  DraftDetailResponse,
+  DraftsListResponse,
   MetaResponse,
   RecordDetail,
   RecordsResponse,
@@ -118,6 +120,56 @@ export const clearReviewDecision = (stageId: string, rowId: string) => {
     { method: 'DELETE' },
   );
 };
+
+export const fetchDrafts = ({
+  status = 'pending_approval',
+  limit = 200,
+  offset = 0,
+}: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}) => {
+  const params = new URLSearchParams({
+    status,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return getJson<DraftsListResponse>(`/api/drafts?${params.toString()}`);
+};
+
+export const fetchDraftDetail = (draftId: string) => (
+  getJson<DraftDetailResponse>(`/api/drafts/${encodeURIComponent(draftId)}`)
+);
+
+export const approveDraft = (draftId: string) => requestJson<Record<string, unknown>>(
+  `/api/drafts/${encodeURIComponent(draftId)}/approve`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  },
+);
+
+export const rejectDraft = (draftId: string, reason = '') => requestJson<Record<string, unknown>>(
+  `/api/drafts/${encodeURIComponent(draftId)}/reject`,
+  {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  },
+);
+
+export const editDraft = (draftId: string, patch: { subject?: string; body?: string }) => (
+  requestJson<Record<string, unknown>>(
+    `/api/drafts/${encodeURIComponent(draftId)}/edit`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    },
+  )
+);
 
 export const fetchRejectedSources = () => getJson<RejectedSourcesResponse>('/api/rejected/sources');
 
