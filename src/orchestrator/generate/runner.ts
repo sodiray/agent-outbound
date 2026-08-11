@@ -70,15 +70,6 @@ type GenerateStepInput = Record<string, unknown>;
 type GenerateRecord = Record<string, unknown>;
 type Logger = (event: Record<string, unknown>) => void;
 
-const CLAIM_ENGINE_OUTPUT_FIELDS = new Set([
-  'claim_audit_passed',
-  'claim_audit_json',
-  'claim_audit_asset_hash',
-  'permitted_claim_packet_json',
-  'claim_packet_assemble_error',
-  'catalog_evidence_json',
-]);
-
 /** Engine-owned pipeline outcome when a generate step produces no usable declared outputs. */
 export const EMPTY_DECLARED_OUTPUTS_REASON = 'empty_declared_outputs';
 
@@ -315,9 +306,7 @@ export const isGenerateFresh = ({
 }) => {
   if (force || !cached) return false;
   const stepConfig = enrichmentStepConfig(step);
-  const expectedOutputs = Object.fromEntries(
-    Object.entries(getDeclaredOutputs(stepConfig)).filter(([key]) => !CLAIM_ENGINE_OUTPUT_FIELDS.has(key)),
-  );
+  const expectedOutputs = getDeclaredOutputs(stepConfig);
   if (
     outputOutcomeFor({ outputs: record, expectedOutputs }) === 'empty'
     && outputOutcomeFor({ outputs: assetOutputs, expectedOutputs }) === 'empty'
@@ -403,9 +392,7 @@ export const runGenerateStep = async ({
 }) => {
   const id = String(stepId || step?.id || '').trim() || 'generate';
   const stepConfig = enrichmentStepConfig(step);
-  const declaredOutputs = Object.fromEntries(
-    Object.entries(getDeclaredOutputs(stepConfig)).filter(([key]) => !CLAIM_ENGINE_OUTPUT_FIELDS.has(key)),
-  );
+  const declaredOutputs = getDeclaredOutputs(stepConfig);
   const outputZod = buildOutputZodSchema(declaredOutputs, {});
   const effectiveConcurrency = Number(concurrency || stepConfig.concurrency || 3);
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
@@ -524,11 +511,7 @@ export const runGenerateStep = async ({
     const assetOutputs = outputsFromAsset(existing);
     // Merge asset + record so outputs that landed only on one side still count.
     const preservedOutputs = { ...currentRecord, ...assetOutputs };
-    const freshnessOutputKeys = Object.keys(
-      Object.fromEntries(
-        Object.entries(getDeclaredOutputs(stepConfig)).filter(([key]) => !CLAIM_ENGINE_OUTPUT_FIELDS.has(key)),
-      ),
-    );
+    const freshnessOutputKeys = Object.keys(getDeclaredOutputs(stepConfig));
     const memoizedHit = Boolean(
       memoization
       && memoizationDetails

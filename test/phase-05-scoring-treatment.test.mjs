@@ -435,7 +435,6 @@ test('phase-05 readiness: enforce_readiness hard-blocks non-ready send_email', (
     fit_evidence_confidence: 70,
     next_action_json: JSON.stringify({ action_id: 'na_1', action_type: 'send_email' }),
     preliminary_snapshot: 'snap',
-    claim_audit_passed: 1,
   };
 
   const hard = guardChannelExecution({
@@ -529,7 +528,6 @@ test('phase-05 readiness: declared tier channel policy is enforced', () => {
     buying_center_role: 'owner',
     next_action_json: JSON.stringify({ action_id: 'na_ok', action_type: 'send_email' }),
     preliminary_snapshot: 'snap',
-    claim_audit_passed: 1,
   };
   const ok = guardChannelExecution({
     config: {
@@ -1400,7 +1398,6 @@ test('phase-05 cost-ledger: ceilings feed readiness; overspend does not authoriz
         }),
       ),
       preliminary_snapshot: 'snap',
-      claim_audit_passed: 1,
       next_action_json: JSON.stringify({ action_id: 'na_cost', action_type: 'send_email' }),
     },
     recomputeFitFromBreakdown: true,
@@ -1429,7 +1426,6 @@ test('phase-05 cost-ledger: ceilings feed readiness; overspend does not authoriz
       cost_ledger_json: JSON.stringify(ledger),
       next_action_json: JSON.stringify({ action_id: 'na_cost2', action_type: 'send_email' }),
       preliminary_snapshot: 'snap',
-      claim_audit_passed: 1,
     },
     stepKind: 'send_email',
     intent: 'send',
@@ -1473,7 +1469,6 @@ test('phase-05 complete-when: one evidence bundle → all eight outcomes; score 
     company_resolution: 'resolved',
     enrichment_cost_usd: 0.2,
     preliminary_snapshot: 'public site + maps',
-    claim_audit_passed: 1,
   };
 
   const a = applyOutboundPolicy({ record, recomputeFitFromBreakdown: true });

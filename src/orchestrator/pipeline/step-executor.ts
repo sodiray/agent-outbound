@@ -77,15 +77,6 @@ const textValue = (value: unknown, fallback = '') => {
   return text;
 };
 
-const CLAIM_ENGINE_OUTPUT_FIELDS = new Set([
-  'claim_audit_passed',
-  'claim_audit_json',
-  'claim_audit_asset_hash',
-  'permitted_claim_packet_json',
-  'claim_packet_assemble_error',
-  'catalog_evidence_json',
-]);
-
 const outcomeFor = (value: { passed?: unknown; reason?: unknown; errored?: unknown }): StepExecutionOutcome => ({
   passed: Boolean(value.passed),
   reason: String(value.reason || ''),
@@ -1242,7 +1233,6 @@ const executeStepBatchUnchecked = async (
             return value;
           };
           for (const key of Object.keys(declared)) {
-            if (CLAIM_ENGINE_OUTPUT_FIELDS.has(key)) continue;
             const existing = row[key];
             if (existing !== undefined && existing !== null && String(existing).trim() !== '') {
               outputs[key] = coerceFixture(key, existing);

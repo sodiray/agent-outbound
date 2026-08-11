@@ -152,7 +152,6 @@ const createList = (recordOverrides = {}) => {
     treatment_tier: 'A',
     eligibility_outcome: 'eligible',
     preliminary_snapshot: 'phase07 readiness snapshot',
-    claim_audit_passed: 1,
     linkedin_url: 'https://www.linkedin.com/in/pat-owner-phase07',
     linkedin_confidence: 70,
     suppressed: 0,
@@ -169,7 +168,7 @@ const createList = (recordOverrides = {}) => {
     columns: [
       'identity_confidence', 'email_confidence', 'email_verification_confidence',
       'treatment_tier', 'eligibility_outcome', 'preliminary_snapshot',
-      'claim_audit_passed', 'linkedin_url', 'linkedin_confidence', 'suppressed',
+      'linkedin_url', 'linkedin_confidence', 'suppressed',
       'contact_email', 'contact_name', 'next_action_json', 'active_contact_id',
       'named_buyer_status', 'observed_buyer_name', 'buyer_affiliation_status', 'buying_center_role',
     ],
@@ -178,11 +177,11 @@ const createList = (recordOverrides = {}) => {
     INSERT INTO records (
       _row_id, business_name, sequence_name, sequence_status, contact_email, contact_name,
       fit_score, identity_confidence, email_confidence, email_verification_confidence,
-      treatment_tier, eligibility_outcome, preliminary_snapshot, claim_audit_passed,
+      treatment_tier, eligibility_outcome, preliminary_snapshot,
       linkedin_url, linkedin_confidence, suppressed, next_action_json, active_contact_id,
       named_buyer_status, observed_buyer_name, buyer_affiliation_status, buying_center_role,
       _created_at, _updated_at, created_at, updated_at
-    ) VALUES (?, ?, 'default', 'idle', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, 'default', 'idle', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     base._row_id,
     base.business_name,
@@ -195,7 +194,6 @@ const createList = (recordOverrides = {}) => {
     base.treatment_tier,
     base.eligibility_outcome,
     base.preliminary_snapshot,
-    base.claim_audit_passed,
     base.linkedin_url,
     base.linkedin_confidence,
     base.suppressed,

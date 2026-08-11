@@ -61,3 +61,31 @@ test('a database written before the suppression identifier columns still opens',
   assert.ok(columns.includes('identifier_type') && columns.includes('identifier_value'));
   db.close();
 });
+
+/**
+ * Pre-claim-engine-removal databases still carry drafts.claim_audit_passed (and
+ * sibling binding hashes). CREATE TABLE IF NOT EXISTS is a no-op on those tables,
+ * and open must not fail merely because the extra columns exist. Schema setup no
+ * longer creates them for new databases, and must not drop them from old ones.
+ */
+test('a database that still has drafts.claim_audit_passed still opens', () => {
+  const listDir = agedList((db) => {
+    db.exec("ALTER TABLE drafts ADD COLUMN claim_packet_hash TEXT DEFAULT ''");
+    db.exec("ALTER TABLE drafts ADD COLUMN claim_audit_version TEXT DEFAULT ''");
+    db.exec("ALTER TABLE drafts ADD COLUMN preliminary_snapshot_hash TEXT DEFAULT ''");
+    db.exec('ALTER TABLE drafts ADD COLUMN claim_audit_passed INTEGER DEFAULT 0');
+  });
+
+  const db = openListDb({ listDir, readonly: false });
+  const columns = db.prepare('PRAGMA table_info(drafts)').all().map((c) => c.name);
+  assert.ok(
+    columns.includes('claim_audit_passed'),
+    'legacy claim_audit_passed is tolerated, not dropped',
+  );
+  assert.ok(columns.includes('claim_packet_hash'));
+  assert.ok(columns.includes('claim_audit_version'));
+  assert.ok(columns.includes('preliminary_snapshot_hash'));
+  // New content-binding columns must still be ensured on the aged table.
+  assert.ok(columns.includes('content_binding_json'));
+  db.close();
+});
