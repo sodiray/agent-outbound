@@ -18,6 +18,7 @@ import {
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { getRecordDetail } from '../dist/viz/data.js';
 import { assignTreatmentAndMail } from '../dist/orchestrator/policy/treatment.js';
+import { applyOutboundPolicy } from '../dist/orchestrator/policy/apply-record.js';
 import { readConfig } from '../dist/orchestrator/lib/config.js';
 import { treasureValleyFitModel } from './fixtures/fit-model.mjs';
 import { treasureValleyTreatmentStrategy } from './fixtures/treatment-strategy.mjs';
@@ -235,7 +236,7 @@ const runPolicyPipeline = async ({
 test('pipeline policy_apply bands the persisted kind: score fit without reading a stale score_breakdown', async () => {
   const { root, record: first, events } = await runPolicyPipeline({ pipeline: [declaredFitStep, policyStep] });
   assert.equal(first.fit_score, 76.5, JSON.stringify({ events, calculation: first.fit_calculation_json }));
-  assert.equal(Number(first.fit_evidence_confidence), 75);
+  assert.equal(Number(first.fit_evidence_confidence), 100);
   // Retired score_breakdown must be cleared — policy must band the current
   // score-stage fit, not the stale retired-column payload seeded above.
   assert.equal(first.score_breakdown, '');
@@ -256,6 +257,46 @@ test('pipeline policy_apply bands the persisted kind: score fit without reading 
     namedBuyer: first.named_buyer_status,
     affiliation: first.buyer_affiliation_status,
   }));
+});
+
+test('pipeline policy_apply keeps configured fit evidence confidence at zero without evidence ids', async () => {
+  const { record } = await runPolicyPipeline({
+    pipeline: [declaredFitStep, policyStep],
+    recordInput: {
+      ...readyRecord,
+      _row_id: 'configured-fit-without-evidence-ids',
+      fit_evidence_confidence: 100,
+    },
+    scoreCriteria: () => treasureValleyFitModel.criteria.map((criterion, index) => ({
+      id: criterion.id,
+      grade: fitGrades[index],
+      assessable: true,
+      reasoning: 'A grade without source identifiers is not evidence-backed.',
+      evidence_ids: [],
+    })),
+  });
+  assert.equal(Number(record.fit_evidence_confidence), 0);
+  assert.equal(record.treatment_tier, 'enrichment_hold');
+  assert.match(record.treatment_reasons, /fit_evidence_band=below40/);
+});
+
+test('legacy score-breakdown evidence confidence semantics remain unchanged', () => {
+  const breakdown = treasureValleyFitModel.criteria.map((criterion, index) => ({
+    id: criterion.id,
+    grade: fitGrades[index],
+    reasoning: 'Legacy criterion reasoning.',
+    evidence_ids: [`legacy-evidence-${criterion.id}`],
+  }));
+  const result = applyOutboundPolicy({
+    record: {
+      _row_id: 'legacy-fit-evidence-confidence',
+      fit_score: 76.5,
+      score_breakdown: JSON.stringify(breakdown),
+    },
+    recomputeFitFromBreakdown: true,
+    fitModel: treasureValleyFitModel,
+  });
+  assert.equal(result.patch.fit_evidence_confidence, 100);
 });
 
 test('pipeline policy_apply uses full reduced multi-sample fit coverage instead of a stale zero', async () => {

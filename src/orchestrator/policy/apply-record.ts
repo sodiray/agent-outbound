@@ -454,10 +454,11 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const rowId = String(record._row_id || record.id || 'unknown');
   const fitModelConfigured = fitModelComponentIds(input.fitModel).length > 0;
   const recomputeFit = input.recomputeFitFromBreakdown === true;
-  const selected = recomputeFit
-    ? selectFitBreakdownSource(record, input.fitModel)
-    : { breakdown: [], source: 'none' as const, hasCommercialComponents: false };
+  // Policy projection must refresh evidence confidence from the persisted fit
+  // stage output even when it is not recalculating the stored fit score.
+  const selected = selectFitBreakdownSource(record, input.fitModel);
   const breakdown = selected.breakdown;
+  const hasConfiguredFitBreakdown = selected.hasCommercialComponents && breakdown.length > 0;
   const fitComponents = selected.hasCommercialComponents
     ? fitComponentsFromBreakdown(breakdown, input.fitModel)
     : [];
@@ -515,7 +516,7 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   // components cited no evidence stored 0, and 0 is a number, so re-scoring it
   // successfully could never lift it back out of enrichment_hold. The comment
   // below already promised "until re-scored" — this makes that true.
-  let fitEvidence = recomputeFit && hasCommercialFit && breakdown.length
+  let fitEvidence = hasConfiguredFitBreakdown
     ? deriveFitEvidenceConfidence(breakdown, input.fitModel)
     : num(record.fit_evidence_confidence, null);
   // Legacy scores without declared fit components: low evidence until re-scored.
@@ -656,26 +657,19 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
   const thinEvidenceByConf = fitEvidence != null && Number(fitEvidence) < 40;
   const fitIds = new Set(fitModelComponentIds(input.fitModel));
   const fitBreakdownItems = breakdown.filter((b) => fitIds.has(String(b.id || '')));
-  const thinEvidenceByIds = recomputeFit
-    &&
-    fitBreakdownItems.length > 0
+  const thinEvidenceByIds = fitBreakdownItems.length > 0
     && fitBreakdownItems.every((b) => {
       const ids = Array.isArray(b.evidence_ids) ? b.evidence_ids.filter(Boolean) : [];
       return ids.length === 0 || b.missing || b.unknown;
     });
   // Also when commercial fit was graded but deriveFitEvidenceConfidence is 0 (no ids).
-  const thinEvidenceDerivedZero = recomputeFit
-    &&
-    hasCommercialFit
-    && breakdown.length > 0
+  const thinEvidenceDerivedZero = hasConfiguredFitBreakdown
     && deriveFitEvidenceConfidence(breakdown, input.fitModel) === 0;
   const anyMissingComponent = recomputeFit
     &&
     hasCommercialFit
     && fitComponents.some((c) => c.missing || !(c.evidence_ids && c.evidence_ids.length));
-  const allUnknownComponents = recomputeFit
-    &&
-    hasCommercialFit
+  const allUnknownComponents = hasCommercialFit
     && fitComponents.length > 0
     && fitComponents.every((c) => c.missing || !(c.evidence_ids && c.evidence_ids.length));
   // Fully thin / all-unknown → enrichment_hold (never invent Tier D as weak scored fit).
@@ -1348,6 +1342,8 @@ export function applyOutboundPolicy(input: PolicyApplyInput): PolicyApplyResult 
     ...(!fitModelConfigured || recomputeFit ? {
       fit_score: !fitModelConfigured || insufficientFitCoverage || fitNotGraded ? null : fitScore,
       fit_coverage: fitCoverage ?? '',
+    } : {}),
+    ...(!fitModelConfigured || recomputeFit || hasConfiguredFitBreakdown ? {
       fit_evidence_confidence: fitEvidence ?? '',
     } : {}),
     candidate_tier: candidate.candidate_tier,
