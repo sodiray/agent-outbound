@@ -30,10 +30,20 @@ sequences:
   return listDir;
 };
 
+const isoOffsetFromNow = (offsetMs) => new Date(Date.now() + offsetMs).toISOString();
+
 test('record show never presents future successful channel events as occurred for an opted-out lead', () => {
   const listDir = createList();
   const db = openListDb({ listDir, readonly: false });
-  const now = '2026-08-09T14:44:00.000Z';
+  const now = new Date().toISOString();
+  const plannedDraftAt = isoOffsetFromNow(60 * 60 * 1000);
+  const plannedSendAt = isoOffsetFromNow(2 * 60 * 60 * 1000);
+  const laterPlannedSendAt = isoOffsetFromNow(96 * 60 * 60 * 1000);
+  const plannedVisitAt = isoOffsetFromNow(3 * 60 * 60 * 1000);
+  assert.ok(
+    [plannedDraftAt, plannedSendAt, laterPlannedSendAt, plannedVisitAt]
+      .every((plannedAt) => Date.parse(plannedAt) > Date.now()),
+  );
   db.prepare(`
     INSERT INTO records (
       _row_id, business_name, suppressed, suppressed_reason, sequence_status,
@@ -44,10 +54,10 @@ test('record show never presents future successful channel events as occurred fo
     INSERT INTO channel_events (
       event_id, row_id, channel, event_type, action, disposition, occurred_at, created_at
     ) VALUES
-      ('planned_draft', 'opted_out_lead', 'email', 'draft_created', 'draft_created', 'ok', '2026-08-11T16:00:00.000Z', ?),
-      ('planned_send_1', 'opted_out_lead', 'email', 'executed', 'executed', 'ok', '2026-08-11T17:00:00.000Z', ?),
-      ('planned_send_2', 'opted_out_lead', 'email', 'executed', 'executed', 'ok', '2026-08-15T16:00:00.000Z', ?)
-  `).run(now, now, now);
+      ('planned_draft', 'opted_out_lead', 'email', 'draft_created', 'draft_created', 'ok', ?, ?),
+      ('planned_send_1', 'opted_out_lead', 'email', 'executed', 'executed', 'ok', ?, ?),
+      ('planned_send_2', 'opted_out_lead', 'email', 'executed', 'executed', 'ok', ?, ?)
+  `).run(plannedDraftAt, now, plannedSendAt, now, laterPlannedSendAt, now);
   db.prepare(`
     INSERT INTO routes (id, route_date, status, total_drive_minutes, summary_json, created_at, updated_at)
     VALUES ('route_1', '2026-08-11', 'planned', 0, '{}', ?, ?)
@@ -55,8 +65,8 @@ test('record show never presents future successful channel events as occurred fo
   db.prepare(`
     INSERT INTO route_stops (
       id, route_id, record_id, stop_order, scheduled_time, created_at, updated_at
-    ) VALUES ('planned_visit', 'route_1', 'opted_out_lead', 1, '2026-08-11T18:00:00.000Z', ?, ?)
-  `).run(now, now);
+    ) VALUES ('planned_visit', 'route_1', 'opted_out_lead', 1, ?, ?, ?)
+  `).run(plannedVisitAt, now, now);
   db.close();
 
   const shown = recordShowCommand({ list: listDir, rowId: 'opted_out_lead', include: 'events' });
@@ -72,7 +82,9 @@ test('record show never presents future successful channel events as occurred fo
 test('record show reports planned entries by tense and keeps their disposition non-successful', () => {
   const listDir = createList();
   const db = openListDb({ listDir, readonly: false });
-  const now = '2026-08-08T14:44:00.000Z';
+  const now = new Date().toISOString();
+  const plannedEmailAt = isoOffsetFromNow(60 * 60 * 1000);
+  assert.ok(Date.parse(plannedEmailAt) > Date.now());
   db.prepare(`
     INSERT INTO records (_row_id, business_name, sequence_status, _created_at, _updated_at, created_at, updated_at)
     VALUES ('active_lead', 'Active Lead', 'active', ?, ?, ?, ?)
@@ -85,7 +97,7 @@ test('record show reports planned entries by tense and keeps their disposition n
       channel: 'email',
       event_type: 'executed',
       disposition: 'ok',
-      occurred_at: '2026-08-11T17:00:00.000Z',
+      occurred_at: plannedEmailAt,
     },
   });
   const stored = db.prepare(`
@@ -110,7 +122,8 @@ test('record show reports planned entries by tense and keeps their disposition n
 test('timeline distinguishes evidenced engine sends from author-declared dispatches', () => {
   const listDir = createList();
   const db = openListDb({ listDir, readonly: false });
-  const at = '2026-08-08T14:44:00.000Z';
+  const at = isoOffsetFromNow(-60 * 60 * 1000);
+  assert.ok(Date.parse(at) < Date.now());
   db.prepare(`
     INSERT INTO records (_row_id, business_name, sequence_status, _created_at, _updated_at, created_at, updated_at)
     VALUES ('provenance_lead', 'Provenance Lead', 'active', ?, ?, ?, ?)
