@@ -121,7 +121,7 @@ test('table detail preserves partial entities and marks missing cells for displa
     record: {
       participants: JSON.stringify([
         { name: 'Avery', role: 'Owner', email: 'avery@example.test' },
-        { name: 'Blair', email: 'blair@example.test' },
+        { name: 'Blair' },
         { ignored: true },
       ]),
     },
@@ -137,7 +137,7 @@ test('table detail preserves partial entities and marks missing cells for displa
     ],
     rows: [
       ['Avery', 'Owner', 'avery@example.test'],
-      ['Blair', null, 'blair@example.test'],
+      ['Blair', null, null],
     ],
   }]);
 });
@@ -193,6 +193,7 @@ test('declared website embeds resolve safe URLs and disclose their external-prev
 
   assert.deepEqual(sections, [{ kind: 'embed', title: 'Website', url: 'https://example.test/about' }]);
   assert.deepEqual(resolveReviewDetail({ detail, record: {} }), []);
+  assert.deepEqual(resolveReviewDetail({ detail, record: { prospect_site: '  ' } }), []);
   assert.deepEqual(resolveReviewDetail({ detail, record: { prospect_site: 'javascript:alert(1)' } }), []);
 
   const reviewRoute = readFileSync(new URL('../src/viz/ui/src/ReviewRoute.tsx', import.meta.url), 'utf8');
@@ -221,6 +222,66 @@ test('declared fields can retain empty values when explicitly requested', () => 
     detail: [{ title: 'No signals', items: ['prospect_site', 'secondary_site'] }],
     record: { prospect_site: '', secondary_site: null },
   }), []);
+});
+
+test('empty declared actionable fields render an inert placeholder', () => {
+  const sections = resolveReviewDetail({
+    detail: [{
+      title: 'Contact',
+      items: [
+        { field: 'website', as: 'link', show_when_empty: true },
+        { field: 'email', as: 'email', show_when_empty: true },
+        { field: 'phone', as: 'phone', show_when_empty: true },
+      ],
+    }],
+    record: { website: '', email: undefined, phone: '  ' },
+  });
+
+  assert.deepEqual(sections, [{
+    kind: 'fields',
+    title: 'Contact',
+    items: [
+      { field: 'website', renderer: 'text', value: '—' },
+      { field: 'email', renderer: 'text', value: '—' },
+      { field: 'phone', renderer: 'text', value: '—' },
+    ],
+  }]);
+  const output = JSON.stringify(sections);
+  assert.equal(output.includes('href'), false);
+  assert.equal(output.includes('mailto:'), false);
+  assert.equal(output.includes('tel:'), false);
+  assert.equal(output.includes('xn--'), false);
+});
+
+test('non-empty declared actionable fields retain their targets', () => {
+  const sections = resolveReviewDetail({
+    detail: [{
+      title: 'Contact',
+      items: [
+        { field: 'website', as: 'link', show_when_empty: true },
+        { field: 'email', as: 'email', show_when_empty: true },
+        { field: 'phone', as: 'phone', show_when_empty: true },
+      ],
+    }],
+    record: {
+      website: 'example.test',
+      email: 'operator@example.test',
+      phone: '+1 555 0100',
+    },
+  });
+
+  assert.deepEqual(sections, [{
+    kind: 'fields',
+    title: 'Contact',
+    items: [
+      { field: 'website', renderer: 'link', value: 'example.test' },
+      { field: 'email', renderer: 'email', value: 'operator@example.test' },
+      { field: 'phone', renderer: 'phone', value: '+1 555 0100' },
+    ],
+  }]);
+  assert.equal(reviewDetailHref({ renderer: 'link', value: 'example.test' }), 'https://example.test');
+  assert.equal(reviewDetailHref({ renderer: 'email', value: 'operator@example.test' }), 'mailto:operator@example.test');
+  assert.equal(reviewDetailHref({ renderer: 'phone', value: '+1 555 0100' }), 'tel:+1 555 0100');
 });
 
 test('review detail validates its closed renderer vocabulary and warns when absent', () => {

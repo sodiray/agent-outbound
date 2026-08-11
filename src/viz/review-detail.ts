@@ -202,7 +202,7 @@ const resolveFields = ({
     return [{
       field: normalized.field,
       ...(normalized.label ? { label: normalized.label } : {}),
-      renderer: normalized.as || 'text',
+      renderer: value === null ? 'text' : normalized.as || 'text',
       value: value || '—',
       ...(normalized.link_text ? { link_text: normalized.link_text } : {}),
     }];
