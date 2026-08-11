@@ -109,7 +109,10 @@ const collectTokens = (value: unknown): string[] => {
 
 const conditionFields = (predicate: any): string[] => {
   const conditions = Array.isArray(predicate?.conditions) ? predicate.conditions : [];
-  return conditions.map((condition: any) => String(condition?.field || '').trim()).filter(Boolean);
+  return conditions.flatMap((condition: any) => [
+    String(condition?.field || '').trim(),
+    String(condition?.value_field || '').trim(),
+  ]).filter(Boolean);
 };
 
 const promptPathCandidates = (promptFile: string, options: PipelineGraphOptions) => {
@@ -447,6 +450,31 @@ export const abandonedStateReadWarnings = (config: any, options: PipelineGraphOp
     });
     return Array.from(byField.entries()).map(([field, sources]) => (
       `pipeline.${id} (${kind}) reads field "${field}" (${[...new Set(sources)].join(', ')}), but no current pipeline step produces it and no known non-pipeline source supplies it.`
+    ));
+  });
+};
+
+export const fieldComparisonReferenceErrors = (config: any, options: PipelineGraphOptions = {}): string[] => {
+  const produced = new Set(producedFieldsByStep(config).map((producer) => producer.field));
+  const supplied = configuredRecordFields(config, options);
+  return pipelineSteps(config).flatMap((step: any) => {
+    const id = stepId(step);
+    const kind = String(step?.kind || '').trim();
+    if (!id) return [];
+    const predicates = [
+      { conditions: step?.conditions, path: 'conditions' },
+      { conditions: step?.when?.conditions, path: 'when.conditions' },
+      ...(Array.isArray(step?.rules) ? step.rules.map((rule: any, index: number) => ({
+        conditions: rule?.conditions,
+        path: `rules[${index}].conditions`,
+      })) : []),
+    ];
+    return predicates.flatMap(({ conditions, path }) => (
+      Array.isArray(conditions) ? conditions.flatMap((condition: any, index: number) => {
+        const field = String(condition?.value_field || '').trim();
+        if (!field || produced.has(field) || supplied.has(field)) return [];
+        return [`pipeline.${id} (${kind}) ${path}[${index}].value_field references "${field}", but no current pipeline step produces it and no known non-pipeline source supplies it.`];
+      }) : []
     ));
   });
 };

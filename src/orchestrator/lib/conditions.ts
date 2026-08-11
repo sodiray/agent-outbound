@@ -88,7 +88,8 @@ const fmtVal = (value: any) => {
 export const evaluateFieldCheck = ({ row, condition }: { row: any; condition: any }) => {
   const field = String(condition?.field || '').trim();
   const operator = String(condition?.operator || '').trim();
-  const target = condition?.value;
+  const valueField = String(condition?.value_field || '').trim();
+  const target = valueField ? row?.[valueField] : condition?.value;
   const actual = field ? row?.[field] : undefined;
 
   if (!field || !operator) {
@@ -96,6 +97,11 @@ export const evaluateFieldCheck = ({ row, condition }: { row: any; condition: an
   }
 
   const label = humanizeField(field);
+  const targetLabel = valueField ? humanizeField(valueField) : '';
+
+  if (valueField && (target === null || target === undefined || (typeof target === 'string' && target.trim() === ''))) {
+    return { passed: false, reason: `${targetLabel} is empty (a comparison value is required)` };
+  }
 
   if (operator === 'is_not_empty') {
     const passed = !(actual === null || actual === undefined || String(actual).trim() === '');

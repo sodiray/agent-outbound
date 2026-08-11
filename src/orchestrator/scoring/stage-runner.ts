@@ -321,6 +321,7 @@ export const runScoreStage = async ({
     const withTruncation = (reason: string) => (
       [truncationNote, reason].filter(Boolean).join(';')
     );
+    const depHash = scoreStageDependencyHash({ step, record: initialRecord, samples: sampleCount });
     const memoization = memoizationConfigForStep(step as unknown as Record<string, unknown>);
     const cached = readStaleness({ db, recordId, stepId });
     const memoizationDetails = memoization
@@ -350,9 +351,18 @@ export const runScoreStage = async ({
       && isMemoizationFresh({ cached, hashes: memoizationDetails, force })
       && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
     );
-    if (memoizedHit) {
-      emitActivity({ event: 'row_skipped', phase: 'scoring', step: stepId, row: String(initialRecord.business_name || recordId), reason: 'memoization_hit' });
-      outcomes.set(recordId, { passed: true, reason: 'memoization_hit' });
+    const unchangedHit = Boolean(
+      !memoization
+      && !force
+      && cached
+      && String((cached as { dep_hash?: unknown }).dep_hash || '') === depHash
+      && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
+    );
+    if (memoizedHit || unchangedHit) {
+      if (memoizedHit) {
+        emitActivity({ event: 'row_skipped', phase: 'scoring', step: stepId, row: String(initialRecord.business_name || recordId), reason: 'memoization_hit' });
+      }
+      outcomes.set(recordId, { passed: true, reason: memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs' });
       continue;
     }
     const criteria = normalizedCriteria(step.criteria);
@@ -371,11 +381,14 @@ export const runScoreStage = async ({
       if (criteria.length === 0) {
         const calculation = calculationFor({ criteria, result: null });
         const persisted = persistScoreStageResult({ db, record: initialRecord, step, calculation });
-        if (memoization && memoizationDetails) {
-          writeStaleness({ db, recordId, stepId, ...memoizationDetails });
-        } else {
-          db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
-        }
+        writeStaleness({
+          db,
+          recordId,
+          stepId,
+          ...(memoization && memoizationDetails
+            ? memoizationDetails
+            : { depHash, cacheTtl: '', cacheTtlSeconds: 0 }),
+        });
         const declaredOutputWrites = Object.fromEntries([
           [`${step.key}_score`, { provided: true, value: persisted[`${step.key}_score`] }],
           [`${step.key}_breakdown`, { provided: true, value: persisted[`${step.key}_breakdown`] }],
@@ -481,14 +494,17 @@ export const runScoreStage = async ({
         outcomes.set(recordId, { passed: false, errored: true, reason: 'not_graded' });
         continue;
       }
-      if (!memoization || successfulSamples.length !== sampleCount) {
+      if (memoization && successfulSamples.length !== sampleCount) {
         db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
       } else {
-        if (memoization && memoizationDetails) {
-          writeStaleness({ db, recordId, stepId, ...memoizationDetails });
-        } else {
-          db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
-        }
+        writeStaleness({
+          db,
+          recordId,
+          stepId,
+          ...(memoization && memoizationDetails
+            ? memoizationDetails
+            : { depHash, cacheTtl: '', cacheTtlSeconds: 0 }),
+        });
       }
       const declaredOutputWrites = Object.fromEntries([
         [`${step.key}_score`, { provided: true, value: persisted[`${step.key}_score`] }],
@@ -501,7 +517,7 @@ export const runScoreStage = async ({
         declaredOutputWrites,
       });
     } catch (error) {
-      db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
+      if (memoization) db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
       const reason = String((error as Error)?.message || error);
       const calculation = calculationFor({ criteria, result: null });
       try {

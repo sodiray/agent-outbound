@@ -48,6 +48,7 @@ import {
   parseExtra,
   readStaleness,
   shouldRunForRecord,
+  ttlToSeconds,
   whenPredicateForStep,
   writeStaleness,
 } from '../enrichment/runner.js';
@@ -504,6 +505,11 @@ export const runGenerateStep = async ({
     const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
     const inputRecord = mergedRecordForEnrichment({ db, record: currentRecord });
     const memoization = memoizationConfigForStep(stepConfig);
+    const dependencyHashes = enrichDependencyHashes({
+      stepConfig,
+      depValues: dependencyValuesFor({ stepConfig, record: currentRecord }),
+      executionConfig,
+    });
     const cached = readStaleness({ db, recordId, stepId: id });
     const memoizationDetails = memoization
       ? memoizationCacheDetailsForResolvedInputs({
@@ -534,15 +540,28 @@ export const runGenerateStep = async ({
         || hasAllDeclaredOutputs({ record: preservedOutputs, outputKeys: freshnessOutputKeys })
       ),
     );
-    if (memoizedHit) {
+    const unchangedHit = Boolean(
+      !memoization
+      && existing
+      && isGenerateFresh({
+        cached,
+        step,
+        record: currentRecord,
+        assetOutputs,
+        executionConfig,
+        force,
+      })
+      && hasAllDeclaredOutputs({ record: preservedOutputs, outputKeys: freshnessOutputKeys }),
+    );
+    if (memoizedHit || unchangedHit) {
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({
         stepConfig,
         outputs: assetOutputs,
       });
       summary.skipped_fresh += 1;
       if (memoizedHit) summary.memoization_hits += 1;
-      summary.non_execution_reasons[recordId] = 'memoization_hit';
-      emit({ logger, event: { event: 'row_skipped', phase: 'generate', step: id, row: rowLabel, reason: 'memoization_hit' } });
+      summary.non_execution_reasons[recordId] = memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs';
+      emit({ logger, event: { event: 'row_skipped', phase: 'generate', step: id, row: rowLabel, reason: memoizedHit ? 'memoization_hit' : 'fresh' } });
       return;
     }
 
@@ -676,11 +695,7 @@ export const runGenerateStep = async ({
           provider: String(executionResult.provider || ''),
           usage: executionResult.usage,
         });
-        if (memoization && memoizationDetails) {
-          writeStaleness({ db, recordId, stepId: id, ...memoizationDetails });
-        } else {
-          clearGenerateStaleness({ db, recordId, stepId: id });
-        }
+        clearGenerateStaleness({ db, recordId, stepId: id });
         summary.processed += 1;
         if (existing) summary.updated += 1;
         if (!existing) summary.inserted += 1;
@@ -741,11 +756,18 @@ export const runGenerateStep = async ({
         provider: String(executionResult.provider || ''),
         usage: executionResult.usage,
       });
-      if (memoization && memoizationDetails) {
-        writeStaleness({ db, recordId, stepId: id, ...memoizationDetails });
-      } else {
-        clearGenerateStaleness({ db, recordId, stepId: id });
-      }
+      writeStaleness({
+        db,
+        recordId,
+        stepId: id,
+        ...(memoization && memoizationDetails
+          ? memoizationDetails
+          : {
+            ...dependencyHashes,
+            cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
+            cacheTtl: String(stepConfig.cache || ''),
+          }),
+      });
       summary.processed += 1;
       if (existing) summary.updated += 1;
       if (!existing) summary.inserted += 1;

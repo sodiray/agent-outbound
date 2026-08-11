@@ -47,8 +47,13 @@ const effectiveConfig = (step: StageLike): StageLike => ({ ...step, ...asRecord(
 const conditionReferences = (value: unknown, source: string): StageInputReference[] => {
   const conditions: unknown[] = Array.isArray(asRecord(value).conditions) ? asRecord(value).conditions as unknown[] : [];
   return conditions.flatMap((condition) => {
-    const field = fieldRoot(asRecord(condition).field);
-    return field ? [{ field, source }] : [];
+    const record = asRecord(condition);
+    const field = fieldRoot(record.field);
+    const valueField = fieldRoot(record.value_field);
+    return [
+      ...(field ? [{ field, source }] : []),
+      ...(valueField ? [{ field: valueField, source: `${source}.value_field` }] : []),
+    ];
   });
 };
 
@@ -152,7 +157,7 @@ export const declaredStageInputs = (stepValue: unknown): string[] => {
     ? strings(inputs)
     : referencesForInputMap(inputs, 'inputs').map((reference) => reference.field);
   const contactSourceField = text(step.kind).toLowerCase() === 'contact_source'
-    ? [fieldRoot(config.field)].filter(Boolean)
+    ? [fieldRoot(config.field), fieldRoot(config.name_field), fieldRoot(config.title_field)].filter(Boolean)
     : [];
   return [...new Set([...explicit, ...contactSourceField])];
 };
@@ -381,7 +386,11 @@ export const stageInputReferences = (stepValue: unknown, options: StageInputDiag
   if (kind === 'contact_source') {
     return [
       ...direct,
-      ...[fieldRoot(config.field)].filter(Boolean).map((field) => ({ field, source: 'contact source' })),
+      ...[
+        [fieldRoot(config.field), 'contact source'],
+        [fieldRoot(config.name_field), 'contact source name'],
+        [fieldRoot(config.title_field), 'contact source title'],
+      ].filter(([field]) => field).map(([field, source]) => ({ field, source })),
     ];
   }
   if (kind === 'compose') return [...direct, ...referencesForInputMap(config.inputs, 'inputs')];

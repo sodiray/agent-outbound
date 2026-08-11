@@ -475,6 +475,14 @@ export const memoizationConfigForStep = (stepConfig: Record<string, unknown>): S
   ) return undefined;
   const value = stepConfig?.memoize;
   if (value === false) return undefined;
+  if (value === undefined) {
+    const kind = String(stepConfig?.kind || '').trim().toLowerCase();
+    const action = String(stepConfig?.action || '').trim().toLowerCase();
+    // These paths have their own durable freshness semantics: policy inputs
+    // are external to the step definition, provider failures are retry guards,
+    // and the model stages retain their declared-output freshness contracts.
+    if (kind !== 'enrich' || action === 'policy_apply' || action === 'email_verification') return undefined;
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return { ttl_days: DEFAULT_STEP_MEMOIZATION_TTL_DAYS };
   }
@@ -592,7 +600,7 @@ const memoizationHasSettledOutcome = ({
 }: {
   record: Record<string, unknown>;
   statusColumn: string;
-}) => ['ok', 'empty'].includes(String(record[statusColumn] || '').trim().toLowerCase());
+}) => String(record[statusColumn] || '').trim().toLowerCase() === 'ok';
 
 export const memoizationCacheDetails = ({
   memoization,
@@ -1090,11 +1098,22 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
     const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) { result.skip_when += 1; continue; }
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
-    const fresh = Boolean(
-      memoization
-      && isMemoizationFresh({ cached, stepConfig, record, executionConfig, force })
-      && memoizationHasSettledOutcome({ record, statusColumn }),
-    );
+    const fresh = memoization
+      ? isMemoizationFresh({ cached, stepConfig, record, executionConfig, force })
+        && memoizationHasSettledOutcome({ record, statusColumn })
+      : isEnrichFresh({
+        cached,
+        stepConfig,
+        depValues: dependencyValuesForRecord({ stepConfig, record }),
+        executionConfig,
+        force,
+      }) && enrichStepHasDurableOutcome({
+        record,
+        expectedOutputs: Object.keys(getDeclaredOutputs(stepConfig)).length > 0
+          ? getDeclaredOutputs(stepConfig)
+          : getLegacyColumns(stepConfig),
+        statusColumn,
+      });
     if (fresh) { result.skip_fresh += 1; continue; }
     result.would_enrich += 1;
   }
@@ -1480,11 +1499,15 @@ export const executeEnrichmentStepOnRecords = async ({
     const expectedOutputs = Object.keys(declaredOutputs).length > 0
       ? declaredOutputs
       : legacyColumns;
-    const fresh = Boolean(
-      memoization
-      && isMemoizationFresh({ cached, stepConfig, record: currentRecord, executionConfig, force })
-      && memoizationHasSettledOutcome({ record: currentRecord, statusColumn }),
-    );
+    const permanentFailureFresh = isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
+      && String(currentRecord[statusColumn] || '').trim().toLowerCase() === 'failed';
+    const fresh = memoization
+      ? permanentFailureFresh || (
+        isMemoizationFresh({ cached, stepConfig, record: currentRecord, executionConfig, force })
+        && memoizationHasSettledOutcome({ record: currentRecord, statusColumn })
+      )
+      : isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
+        && enrichStepHasDurableOutcome({ record: currentRecord, expectedOutputs, statusColumn });
     if (fresh) {
       summary.skipped_fresh += 1;
       if (memoization) summary.memoization_hits += 1;
@@ -1612,9 +1635,7 @@ export const executeEnrichmentStepOnRecords = async ({
       if (String(stepConfig.action || '').trim().toLowerCase() !== 'decision_makers') {
         upsertPrimaryContactIfPresent({ db, record: merged });
       }
-      // Memoized steps treat an explicit empty provider response as a settled
-      // negative result. Legacy staleness retains its historical retry behavior.
-      if (memoization) {
+      if (!noContentReason) {
         writeStaleness({
           db,
           recordId,
@@ -1670,7 +1691,6 @@ export const executeEnrichmentStepOnRecords = async ({
         executionConfig,
         permanent,
       });
-      clearStaleness({ db, recordId, stepId: id });
       summary.failed += 1;
       summary.errors.push({ record_id: recordId, error: detail });
       summary.record_ids.push(recordId);
@@ -1723,7 +1743,20 @@ export const executeEnrichmentStepOnRecords = async ({
           last_error: ownedLastError({ error: detail, stepId: id }),
         };
         upsertRecord({ db, row: merged });
-        clearStaleness({ db, recordId, stepId: id });
+        if (permanent) {
+          writeStaleness({
+            db,
+            recordId,
+            stepId: id,
+            depHash: freshnessDepHash({ dependencyHashes, executionConfig }),
+            inputHash: dependencyHashes.inputHash,
+            policyHash: dependencyHashes.policyHash,
+            cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
+            cacheTtl: String(stepConfig?.cache || ''),
+          });
+        } else {
+          clearStaleness({ db, recordId, stepId: id });
+        }
         summary.failed += 1;
         summary.errors.push({ record_id: recordId, error: detail });
         summary.handled_errors.push(recordId);
@@ -1988,6 +2021,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           cacheTtl: string;
           skippedWhen?: boolean;
           skippedCeiling?: boolean;
+          skipStaleness?: boolean;
           failedError?: string;
           permanentFailure?: boolean;
         }> = [];
@@ -2040,11 +2074,11 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           const expectedOutputs = Object.keys(declaredOutputs).length > 0
             ? declaredOutputs
             : legacyColumns;
-          const fresh = Boolean(
-            memoization
-            && isMemoizationFresh({ cached, stepConfig, record, executionConfig, force })
-            && memoizationHasSettledOutcome({ record, statusColumn }),
-          );
+          const fresh = memoization
+            ? isMemoizationFresh({ cached, stepConfig, record, executionConfig, force })
+              && memoizationHasSettledOutcome({ record, statusColumn })
+            : isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
+              && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn });
           if (fresh) {
             summary.skipped_fresh += 1;
             emitActivity({ event: 'row_skipped', phase: 'enrichment', step: id, row: rowLabel, reason: memoization ? 'memoization_hit' : 'fresh' });
@@ -2164,8 +2198,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               cacheTtlSeconds: memoization ? memoizationTtlSeconds(memoization) : ttlToSeconds(stepConfig.cache),
               cacheTtl: memoization ? memoizationCacheTtl(memoization) : String(stepConfig.cache || ''),
               skippedWhen: false,
-              // No durable cache for empty provider payloads — force re-run.
-              ...(!memoization && noContentReason ? { failedError: noContentReason, permanentFailure: false } : {}),
+              skipStaleness: Boolean(noContentReason),
             });
           } catch (error) {
             recordErroredProviderToolCost({
@@ -2211,7 +2244,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 skippedWhen: false,
                 failedError: detail,
                 // Permanent failures keep staleness (write); retryable clear it.
-                permanentFailure: !memoization && permanent,
+                permanentFailure: permanent,
               });
               emitActivity({ event: 'error', phase: 'enrichment', step: id, row: rowLabel, detail, non_retryable: permanent });
               return;
@@ -2222,7 +2255,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               recordId,
               rowLabel,
               error: detail,
-              permanentFailure: !memoization && permanent,
+              permanentFailure: permanent,
               dependencyHashes: {
                 depHash: !memoization && permanent
                   ? freshnessDepHash({ dependencyHashes, executionConfig })
@@ -2288,6 +2321,8 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               } else {
                 clearStaleness({ db, recordId: item.recordId, stepId: result.id });
               }
+            } else if (item.skipStaleness) {
+              clearStaleness({ db, recordId: item.recordId, stepId: result.id });
             } else if (!item.skippedWhen && !item.skippedCeiling) {
               writeStaleness({
                 db,

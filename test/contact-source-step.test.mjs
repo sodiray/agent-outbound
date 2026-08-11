@@ -7,8 +7,10 @@ import test from 'node:test';
 import { executeStepBatch } from '../dist/orchestrator/pipeline/step-executor.js';
 import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { evaluateSequenceReachability } from '../dist/orchestrator/policy/sequence-reachability.js';
+import { denormalizedFieldsFromContact } from '../dist/orchestrator/policy/load-contacts.js';
 import { ensureRecordColumns, openListDb, upsertContact, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
+import { resolveStepTemplate } from '../dist/orchestrator/lib/templates.js';
 
 const listDir = () => mkdtempSync(join(tmpdir(), 'agent-outbound-contact-source-'));
 
@@ -45,26 +47,78 @@ const execute = async ({ db, root, record, step = contactSourceStep() }) => (
   )
 ).get('contact_source_record');
 
-test('contact source creates a reachable pipeline-supplied contact from its declared field', async () => {
-  assert.deepEqual(normalizeConfig({ pipeline: [contactSourceStep()] }).errors, []);
-  await withDb({ published_email: 'admin@acme.example' }, async ({ db, root, record }) => {
-    const outcome = await execute({ db, root, record });
+test('contact source projects declared name and title fields into template-ready contact fields', async () => {
+  const step = contactSourceStep({ name_field: 'published_name', title_field: 'published_title' });
+  assert.deepEqual(normalizeConfig({ pipeline: [step] }).errors, []);
+  await withDb({
+    published_email: 'admin@acme.example',
+    published_name: 'Avery Example',
+    published_title: 'Editor',
+  }, async ({ db, root, record }) => {
+    const outcome = await execute({ db, root, record, step });
     const contact = db.prepare('SELECT * FROM contacts WHERE row_id = ?').get('contact_source_record');
     const persisted = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('contact_source_record');
+    const projected = denormalizedFieldsFromContact(contact);
+    const rendered = resolveStepTemplate({
+      config: {
+        templates: {
+          greeting: {
+            versions: [{ version: 1, subject: 'Hello {{contact_first_name}}', body: '{{contact_title}}' }],
+          },
+        },
+      },
+      step: { template: 'greeting' },
+      record: { ...persisted, ...projected },
+    });
 
     assert.equal(outcome.passed, true);
     assert.equal(contact.email, 'admin@acme.example');
+    assert.equal(contact.full_name, 'Avery Example');
+    assert.equal(contact.title, 'Editor');
     assert.equal(contact.role, 'primary');
     assert.equal(contact.source, 'pipeline');
     assert.equal(contact.email_verification_status, 'pipeline_supplied');
     assert.equal(Number(contact.email_verification_confidence), 0);
     assert.equal(persisted.contact_email, 'admin@acme.example');
+    assert.equal(projected.contact_first_name, 'Avery');
+    assert.equal(rendered.subject, 'Hello Avery');
+    assert.equal(rendered.body, 'Editor');
     assert.equal(evaluateSequenceReachability({ record: persisted, contacts: [contact] }).reachable, true);
   });
 });
 
-test('a provider-verified contact stays primary when a contact source supplies another address', async () => {
-  await withDb({ published_email: 'office@acme.example' }, async ({ db, root, record }) => {
+test('a blank declared name or title does not erase an existing pipeline contact value', async () => {
+  const step = contactSourceStep({ name_field: 'published_name', title_field: 'published_title' });
+  await withDb({
+    published_email: 'admin@acme.example',
+    published_name: 'Avery Example',
+    published_title: 'Editor',
+  }, async ({ db, root, record }) => {
+    await execute({ db, root, record, step });
+    const populated = db.prepare('SELECT * FROM contacts WHERE row_id = ?').get('contact_source_record');
+
+    await execute({
+      db,
+      root,
+      step,
+      record: { ...record, published_name: ' ', published_title: '' },
+    });
+    const retained = db.prepare('SELECT * FROM contacts WHERE row_id = ?').get('contact_source_record');
+
+    assert.equal(populated.full_name, 'Avery Example');
+    assert.equal(populated.title, 'Editor');
+    assert.equal(retained.full_name, 'Avery Example');
+    assert.equal(retained.title, 'Editor');
+  });
+});
+
+test('a contact source does not modify an existing non-pipeline contact', async () => {
+  const step = contactSourceStep({ name_field: 'published_name', title_field: 'published_title' });
+  await withDb({
+    published_email: 'office@acme.example',
+    published_name: 'Pipeline Name',
+    published_title: 'Pipeline Title',
+  }, async ({ db, root, record }) => {
     upsertContact({
       db,
       contact: {
@@ -79,7 +133,7 @@ test('a provider-verified contact stays primary when a contact source supplies a
       },
     });
 
-    const outcome = await execute({ db, root, record });
+    const outcome = await execute({ db, root, record, step });
     const contacts = db.prepare('SELECT * FROM contacts WHERE row_id = ? ORDER BY email').all('contact_source_record');
     const persisted = db.prepare('SELECT * FROM records WHERE _row_id = ?').get('contact_source_record');
     const supplied = contacts.find((contact) => contact.email === 'office@acme.example');
@@ -96,12 +150,20 @@ test('a provider-verified contact stays primary when a contact source supplies a
     const overwriteAttempt = await execute({
       db,
       root,
-      record: { ...persisted, published_email: 'pat@acme.example' },
+      step,
+      record: {
+        ...persisted,
+        published_email: 'pat@acme.example',
+        published_name: 'Changed Name',
+        published_title: 'Changed Title',
+      },
     });
     const unchanged = db.prepare('SELECT * FROM contacts WHERE email = ?').get('pat@acme.example');
     assert.equal(overwriteAttempt.reason, 'contact_source_existing_contact');
     assert.equal(unchanged.source, 'apollo');
     assert.equal(unchanged.email_verification_status, 'verified');
+    assert.equal(unchanged.full_name, 'Pat Owner');
+    assert.equal(unchanged.title, 'Owner');
   });
 });
 

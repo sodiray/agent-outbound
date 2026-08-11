@@ -356,6 +356,7 @@ export const runComposeStep = async ({
       }
       const inputs = declaredInputs({ step, record });
       const memoization = memoizationConfigForStep(step as Record<string, unknown>);
+      const depHash = composeDependencyHash({ step, record });
       const cached = readStaleness({ db, recordId, stepId });
       const memoizationDetails = memoization
         ? memoizationCacheDetailsForResolvedInputs({
@@ -379,13 +380,19 @@ export const runComposeStep = async ({
         && isMemoizationFresh({ cached, hashes: memoizationDetails, force })
         && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
       );
-      if (memoizedHit) {
+      const unchangedHit = Boolean(
+        !memoization
+        && !force
+        && String(cached?.dep_hash || '') === depHash
+        && hasAllDeclaredOutputs({ record: durableRecord, outputKeys }),
+      );
+      if (memoizedHit || unchangedHit) {
         summary.declared_output_writes[recordId] = Object.fromEntries(
           outputKeys.map((key) => [key, { provided: true, value: durableRecord[key] }]),
         );
         if (memoizedHit) summary.memoization_hits += 1;
-        summary.non_execution_reasons[recordId] = 'memoization_hit';
-        emitActivity({ event: 'row_skipped', phase: 'compose', step: stepId, row: String(record.business_name || recordId), reason: 'memoization_hit' });
+        summary.non_execution_reasons[recordId] = memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs';
+        emitActivity({ event: 'row_skipped', phase: 'compose', step: stepId, row: String(record.business_name || recordId), reason: memoizedHit ? 'memoization_hit' : 'fresh' });
         return;
       }
       const resultSchema = buildComposeResultSchema(step);
@@ -416,11 +423,14 @@ export const runComposeStep = async ({
         ? persisted as RecordRow
         : record;
       upsertRecord({ db, row: { ...current, ...composed.outputs } });
-      if (memoization && memoizationDetails) {
-        writeStaleness({ db, recordId, stepId, ...memoizationDetails });
-      } else {
-        db.prepare('DELETE FROM staleness WHERE record_id = ? AND step_id = ?').run(recordId, stepId);
-      }
+      writeStaleness({
+        db,
+        recordId,
+        stepId,
+        ...(memoization && memoizationDetails
+          ? memoizationDetails
+          : { depHash, cacheTtl: '', cacheTtlSeconds: 0 }),
+      });
       insertAsset({
         db,
         rowId: recordId,

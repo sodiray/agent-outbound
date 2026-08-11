@@ -892,6 +892,8 @@ const executeContactSourceBatch = (
   rows: Array<Record<string, unknown>>,
 ) => {
   const field = textValue(step.field);
+  const nameField = textValue(step.name_field);
+  const titleField = textValue(step.title_field);
   const outcomes = new Map<string, StepExecutionOutcome>();
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
@@ -900,6 +902,8 @@ const executeContactSourceBatch = (
         db: ctx.db as Parameters<typeof promoteContactSource>[0]['db'],
         record: row,
         field,
+        nameField,
+        titleField,
         role: step.role,
         stepId,
         contactPolicy: ctx.config?.contact_policy as Parameters<typeof promoteContactSource>[0]['contactPolicy'],

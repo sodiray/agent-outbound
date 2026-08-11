@@ -5,7 +5,7 @@ import {
   normalizeWorkingDayToken,
   SEQUENCE_WORKING_DAY_VALUES,
 } from '../orchestrator/lib/working-days.js';
-import { abandonedStateReadWarnings, validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib/pipeline-graph.js';
+import { abandonedStateReadWarnings, fieldComparisonReferenceErrors, validatePipelineGraph, validateRouterConfig } from '../orchestrator/lib/pipeline-graph.js';
 import { LEGACY_MODEL_HINTS } from '../orchestrator/runtime/models.js';
 import { findProhibitedSteps } from '../orchestrator/policy/pipeline-prohibitions.js';
 import { stageInputDiagnosticMessages } from '../orchestrator/lib/stage-inputs.js';
@@ -815,12 +815,18 @@ const FieldCheckConditionSchema = z.object({
   operator: z.enum(['is_not_empty', 'is_empty', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'contains', 'matches', 'not_matches', 'in', 'not_in']),
   value: z.any().optional(),
   value_file: z.string().min(1).optional(),
+  value_field: z.string().trim().min(1).optional(),
 }).superRefine((condition, ctx) => {
-  if (condition.value !== undefined && condition.value_file !== undefined) {
+  const configuredValues = [
+    condition.value !== undefined ? 'value' : '',
+    condition.value_file !== undefined ? 'value_file' : '',
+    condition.value_field !== undefined ? 'value_field' : '',
+  ].filter(Boolean);
+  if (configuredValues.length > 1) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: 'field_check condition cannot specify both value and value_file.',
-      path: ['value_file'],
+      message: 'field_check condition can specify only one of value, value_file, or value_field.',
+      path: ['value_field'],
     });
   }
   if (condition.value_file !== undefined && condition.operator !== 'in' && condition.operator !== 'not_in') {
@@ -828,6 +834,16 @@ const FieldCheckConditionSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'field_check value_file requires operator "in" or "not_in".',
       path: ['value_file'],
+    });
+  }
+  if (
+    condition.value_field !== undefined
+    && !['contains', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte'].includes(condition.operator)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `field_check value_field does not support operator "${condition.operator}".`,
+      path: ['value_field'],
     });
   }
 });
@@ -1066,6 +1082,8 @@ const PipelineContactSourceStepSchema = z.object({
   depends_on: z.array(z.string()).default([]),
   runs_after: z.array(z.string()).default([]),
   field: z.string().trim().min(1),
+  name_field: z.string().trim().min(1).optional(),
+  title_field: z.string().trim().min(1).optional(),
   role: z.enum(['primary', 'secondary']).default('primary'),
   ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
@@ -2854,6 +2872,7 @@ export const normalizeConfig = (value, options: {
     ...prohibitionErrors,
     ...optOutErrors,
     ...stageInputs.errors,
+    ...fieldComparisonReferenceErrors(config, options),
     ...scoreStageErrors,
     ...emailVerificationStepValidationMessages(config),
     ...retiredGlobalScoreCriteriaErrors(config),

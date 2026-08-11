@@ -25,7 +25,7 @@ const settledVerificationStatus = (value: unknown) => {
 };
 
 /**
- * Promote a pipeline-declared record field into an email-only contact.
+ * Promote pipeline-declared record fields into a contact.
  * Pipeline values retain non-provider provenance and can never modify an
  * existing non-pipeline contact with the same email.
  */
@@ -33,6 +33,8 @@ export const promoteContactSource = ({
   db,
   record,
   field,
+  nameField,
+  titleField,
   role,
   stepId,
   contactPolicy,
@@ -40,12 +42,16 @@ export const promoteContactSource = ({
   db: ContactSourceDb;
   record: Record<string, unknown>;
   field: string;
+  nameField?: string;
+  titleField?: string;
   role: unknown;
   stepId: string;
   contactPolicy?: Parameters<typeof upsertContact>[0]['contactPolicy'];
 }): ContactSourceResult => {
   const recordId = getRecordRowId(record);
   const email = text(record[field]).toLowerCase();
+  const fullName = text(nameField ? record[nameField] : '');
+  const title = text(titleField ? record[titleField] : '');
   if (!recordId) return { promoted: false, reason: 'contact_source_missing_record_id' };
   if (!email) return { promoted: false, reason: 'contact_source_empty' };
 
@@ -66,6 +72,8 @@ export const promoteContactSource = ({
     contact: {
       record_id: recordId,
       email,
+      ...(fullName ? { full_name: fullName } : {}),
+      ...(title ? { title } : {}),
       role: contactRole(role),
       source: 'pipeline',
       source_query: `pipeline:${stepId}:${field}`,
