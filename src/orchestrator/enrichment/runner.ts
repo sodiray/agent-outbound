@@ -681,6 +681,44 @@ export const getLegacyColumns = (stepConfig: any): Record<string, string> => {
     : {};
 };
 
+export const getOutputFields = (stepConfig: any): Record<string, string> => (
+  stepConfig?.output_fields && typeof stepConfig.output_fields === 'object' && !Array.isArray(stepConfig.output_fields)
+    ? stepConfig.output_fields as Record<string, string>
+    : {}
+);
+
+export const outputTargetFor = ({
+  name,
+  legacyColumns,
+  outputFields,
+}: {
+  name: string;
+  legacyColumns: Record<string, string>;
+  outputFields: Record<string, string>;
+}): string => (
+  String(legacyColumns[name] || outputFields[name] || '').trim() || name
+);
+
+const canonicalDeclaredOutputs = ({
+  stepConfig,
+  outputs,
+}: {
+  stepConfig: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+}): Record<string, unknown> => {
+  const declaredOutputs = getDeclaredOutputs(stepConfig);
+  const legacyColumns = getLegacyColumns(stepConfig);
+  const outputFields = getOutputFields(stepConfig);
+  const canonical = { ...outputs };
+  for (const name of Object.keys(declaredOutputs)) {
+    if (Object.hasOwn(canonical, name)) continue;
+    const target = outputTargetFor({ name, legacyColumns, outputFields });
+    if (!Object.hasOwn(outputs, target)) continue;
+    canonical[name] = outputs[target];
+  }
+  return canonical;
+};
+
 const nullableEnum = (values: [string, ...string[]]) => z.preprocess((value) => {
   if (value === null || value === undefined || value === '') return null;
   return value;
@@ -875,6 +913,7 @@ const applyOutputs = ({ step, outputs }) => {
   const stepConfig = enrichmentStepConfig(step);
   const declaredOutputs = getDeclaredOutputs(stepConfig);
   const legacyColumns = getLegacyColumns(stepConfig);
+  const outputFields = getOutputFields(stepConfig);
   const action = String(stepConfig.action || '').trim().toLowerCase();
 
   if (action === 'policy_apply') {
@@ -889,8 +928,13 @@ const applyOutputs = ({ step, outputs }) => {
   }
 
   for (const [name, def] of Object.entries(declaredOutputs)) {
-    if (!(name in (outputs || {}))) continue;
-    patch[name] = coerceForSqlite(outputs?.[name], def.type);
+    const target = outputTargetFor({ name, legacyColumns, outputFields });
+    const legacyTarget = String(legacyColumns[name] || '').trim();
+    const value = Object.hasOwn(outputs || {}, name)
+      ? outputs[name]
+      : outputs?.[target];
+    if (value === undefined) continue;
+    patch[target] = coerceForSqlite(value, legacyTarget ? 'string' : def.type);
   }
 
   // Deprecated compatibility path: map output key -> distinct column name.
@@ -907,19 +951,26 @@ const applyOutputs = ({ step, outputs }) => {
 export const declaredOutputWritesFor = ({
   stepConfig,
   outputs,
+  persistedPatch,
 }: {
   stepConfig: Record<string, unknown>;
   outputs: Record<string, unknown>;
+  persistedPatch?: Record<string, unknown>;
 }): Record<string, { provided: boolean; value: unknown }> => {
   const declaredOutputs = getDeclaredOutputs(stepConfig);
   const legacyColumns = getLegacyColumns(stepConfig);
+  const outputFields = getOutputFields(stepConfig);
   return Object.fromEntries(Object.entries(declaredOutputs).map(([name, definition]) => {
-    const mappedTarget = String(legacyColumns[name] || '').trim();
-    const target = mappedTarget || name;
-    const provided = Object.prototype.hasOwnProperty.call(outputs, name);
+    const target = outputTargetFor({ name, legacyColumns, outputFields });
+    const legacyTarget = String(legacyColumns[name] || '').trim();
+    const provided = persistedPatch
+      ? Object.hasOwn(persistedPatch, target) && !isBlank(persistedPatch[target])
+      : Object.hasOwn(outputs, name);
     return [target, {
       provided,
-      value: provided ? coerceForSqlite(outputs[name], mappedTarget ? 'string' : definition.type) : undefined,
+      value: provided
+        ? (persistedPatch ? persistedPatch[target] : coerceForSqlite(outputs[name], legacyTarget ? 'string' : definition.type))
+        : undefined,
     }];
   }));
 };
@@ -935,10 +986,10 @@ export const declaredOutputWritesFor = ({
 export const absentDeclaredOutputsPatch = (stepConfig: Record<string, unknown>): Record<string, null> => {
   const declaredOutputs = getDeclaredOutputs(stepConfig);
   const legacyColumns = getLegacyColumns(stepConfig);
+  const outputFields = getOutputFields(stepConfig);
   const patch: Record<string, null> = {};
   for (const name of Object.keys(declaredOutputs)) {
-    const mappedTarget = String(legacyColumns[name] || '').trim();
-    patch[mappedTarget || name] = null;
+    patch[outputTargetFor({ name, legacyColumns, outputFields })] = null;
   }
   for (const target of Object.values(legacyColumns)) {
     const column = String(target || '').trim();
@@ -1592,9 +1643,10 @@ export const executeEnrichmentStepOnRecords = async ({
       const noContentReason = String((result as any)?.reason || '').trim() === PROVIDER_RETURNED_NO_CONTENT_REASON
         ? PROVIDER_RETURNED_NO_CONTENT_REASON
         : '';
-      const outputs = noContentReason ? {} : (result.outputs || {});
+      const outputs = noContentReason
+        ? {}
+        : canonicalDeclaredOutputs({ stepConfig, outputs: result.outputs || {} });
       const outcome = noContentReason ? 'empty' : outputOutcomeFor({ outputs, expectedOutputs });
-      summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs });
 
       recordCostEvent({
         db,
@@ -1654,6 +1706,11 @@ export const executeEnrichmentStepOnRecords = async ({
         ...patch,
         ...clearedLastErrorPatch({ record: currentRow, stepId: id }),
       };
+      summary.declared_output_writes[recordId] = declaredOutputWritesFor({
+        stepConfig,
+        outputs,
+        persistedPatch: patch,
+      });
       upsertRecord({ db, row: merged });
       if (String(stepConfig.action || '').trim().toLowerCase() !== 'decision_makers') {
         upsertPrimaryContactIfPresent({ db, record: merged });

@@ -22,6 +22,12 @@ const getLegacyColumns = (stepConfig: any): Record<string, string> => (
   (stepConfig?.columns && typeof stepConfig.columns === 'object') ? stepConfig.columns : {}
 );
 
+const getOutputFields = (stepConfig: any): Record<string, string> => (
+  stepConfig?.output_fields && typeof stepConfig.output_fields === 'object' && !Array.isArray(stepConfig.output_fields)
+    ? stepConfig.output_fields as Record<string, string>
+    : {}
+);
+
 const sqliteTypeForOutput = (type: 'string' | 'number' | 'integer' | 'boolean') => {
   if (type === 'integer') return 'INTEGER';
   if (type === 'number') return 'REAL';
@@ -32,9 +38,10 @@ const sqliteTypeForOutput = (type: 'string' | 'number' | 'integer' | 'boolean') 
 export const getTargetColumnsForStepConfig = (stepConfig: any): Array<{ name: string; type: string }> => {
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
   const legacyColumns = getLegacyColumns(stepConfig || {});
+  const outputFields = getOutputFields(stepConfig || {});
   const mapped = Object.entries(declaredOutputs)
     .map(([name, def]) => ({
-      name: String(name || '').trim(),
+      name: String(legacyColumns[name] || outputFields[name] || name || '').trim(),
       type: sqliteTypeForOutput(def.type),
     }))
     .concat(
