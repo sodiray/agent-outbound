@@ -10,7 +10,13 @@ import {
 } from './api.js';
 import { DetailDrawer } from './DetailDrawer.js';
 import { RouteNav } from './RouteNav.js';
-import { resolveReviewDetail, reviewDetailHref } from '../../review-detail.js';
+import { resolveReviewDetail, reviewDetailHref, reviewDetailLinkText } from '../../review-detail.js';
+import {
+  reviewIdentityAddsInformation,
+  reviewLabelFor,
+  reviewRecordName,
+  shouldShowReviewIdentityColumn,
+} from '../../review-presentation.js';
 import type {
   MetaResponse,
   RecordDetail,
@@ -50,12 +56,7 @@ const rowId = (record: RecordRow) => String(record._row_id ?? '');
 const reviewStageIdForRecord = (record: RecordRow) => String(record._review_stage_id ?? '');
 const queueRecordKey = (record: RecordRow) => `${reviewStageIdForRecord(record)}:${rowId(record)}`;
 const decisionKey = ({ stage_id, row_id }: { stage_id: string; row_id: string }) => `${stage_id}:${row_id}`;
-const labelFor = (key: string) => key
-  .replace(/^_+/, '')
-  .split(/[_\s-]+/)
-  .filter(Boolean)
-  .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
-  .join(' ') || key;
+const labelFor = reviewLabelFor;
 
 const hasDisplayValue = (value: RecordValue | undefined) => (
   value !== null
@@ -69,7 +70,7 @@ const displayValue = (value: RecordValue | undefined) => {
   return String(value);
 };
 
-const recordName = (record: RecordRow) => rowId(record) ? `Record ${rowId(record)}` : 'Unnamed record';
+const recordName = (record: RecordRow, titleField?: string) => reviewRecordName({ record, titleField });
 
 const isTypingTarget = (target: EventTarget | null) => {
   if (!(target instanceof HTMLElement)) return false;
@@ -138,12 +139,23 @@ const DetailFieldTable = ({
 const DetailValue = ({
   renderer,
   value,
+  linkText,
 }: {
   renderer: 'text' | 'link' | 'email' | 'phone';
   value: string;
+  linkText?: string;
 }) => {
   if (renderer === 'text') return value;
-  return <a href={reviewDetailHref({ renderer, value })} target={renderer === 'link' ? '_blank' : undefined} rel={renderer === 'link' ? 'noreferrer' : undefined}>{value}</a>;
+  return (
+    <a
+      href={reviewDetailHref({ renderer, value })}
+      title={renderer === 'link' ? value : undefined}
+      target={renderer === 'link' ? '_blank' : undefined}
+      rel={renderer === 'link' ? 'noreferrer' : undefined}
+    >
+      {reviewDetailLinkText({ renderer, value, linkText })}
+    </a>
+  );
 };
 
 const DeclaredReviewDetail = ({
@@ -164,8 +176,8 @@ const DeclaredReviewDetail = ({
               <tbody>
                 {section.items.map((item) => (
                   <tr key={item.field}>
-                    <th scope="row">{labelFor(item.field)}</th>
-                    <td><DetailValue renderer={item.renderer} value={item.value} /></td>
+                    <th scope="row">{item.label || labelFor(item.field)}</th>
+                    <td><DetailValue renderer={item.renderer} value={item.value} linkText={item.link_text} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -174,7 +186,7 @@ const DeclaredReviewDetail = ({
           {section.kind === 'list' ? (
             <ul className="review-detail-list">
               {section.items.map((item, index) => (
-                <li key={`${item}-${index}`}><DetailValue renderer={section.renderer} value={item} /></li>
+                <li key={`${item}-${index}`}><DetailValue renderer={section.renderer} value={item} linkText={section.link_text} /></li>
               ))}
             </ul>
           ) : null}
@@ -182,7 +194,7 @@ const DeclaredReviewDetail = ({
             <table className="review-detail-fields review-detail-entity-table">
               <thead>
                 <tr>
-                  {section.columns.map((column) => <th key={column.field} scope="col">{labelFor(column.field)}</th>)}
+                  {section.columns.map((column) => <th key={column.field} scope="col">{column.label || labelFor(column.field)}</th>)}
                 </tr>
               </thead>
               <tbody>
@@ -190,7 +202,7 @@ const DeclaredReviewDetail = ({
                   <tr key={rowIndex}>
                     {row.map((value, columnIndex) => (
                       <td key={section.columns[columnIndex].field}>
-                        {value === null ? '—' : <DetailValue renderer={section.columns[columnIndex].renderer} value={value} />}
+                        {value === null ? '—' : <DetailValue renderer={section.columns[columnIndex].renderer} value={value} linkText={section.columns[columnIndex].link_text} />}
                       </td>
                     ))}
                   </tr>
@@ -208,6 +220,7 @@ const ReviewDetail = ({
   rowIdValue,
   mapsApiKey,
   detailDeclaration,
+  titleField,
   deciding,
   undoLabel,
   canUndo,
@@ -218,6 +231,7 @@ const ReviewDetail = ({
   rowIdValue: string;
   mapsApiKey: string;
   detailDeclaration?: MetaResponse['review_stages'][number]['detail'];
+  titleField?: string;
   deciding: boolean;
   undoLabel: string;
   canUndo: boolean;
@@ -277,7 +291,7 @@ const ReviewDetail = ({
           <header className="detail-header review-detail-header">
             <div>
               <p className="eyebrow">Awaiting review</p>
-              <h2>{recordName(record)}</h2>
+              <h2>{recordName(record, titleField)}</h2>
               {address ? <p>{address}</p> : null}
             </div>
             <div className="review-detail-action-stack">
@@ -460,6 +474,19 @@ export const ReviewRoute = () => {
   const activeFailures = isAllStages ? failures : failures.filter((failure) => failure.stage_id === activeStageId);
   const visibleFields = (activeStage?.fields || [])
     .filter((field) => field !== '_row_id');
+  const titleFieldForRecord = (record: Record<string, unknown>) => {
+    const stage = isAllStages
+      ? meta?.review_stages.find((candidate) => candidate.id === String(record._review_stage_id ?? ''))
+      : activeStage;
+    return stage?.title_field;
+  };
+  const recordLabel = (record: RecordRow) => recordName(record, titleFieldForRecord(record));
+  const showIdentityColumn = shouldShowReviewIdentityColumn({
+    isAllStages,
+    records: activeRecords,
+    titleFieldForRecord,
+    visibleFields,
+  });
   const sortFields = ['_row_id', ...(activeStage?.fields || [])]
     .filter((field, index, fields) => fields.indexOf(field) === index)
     .filter((field) => meta?.columns.some((column) => column.key === field));
@@ -467,8 +494,8 @@ export const ReviewRoute = () => {
   const panelUndoLabel = !lastDecision
     ? 'Nothing to undo'
     : lastDecision.state === 'saving'
-      ? `${actionInProgress(lastDecision.verdict)} ${recordName(lastDecision.record)}…`
-      : `Undo: ${actionPastTense(lastDecision.verdict)} ${recordName(lastDecision.record)}`;
+      ? `${actionInProgress(lastDecision.verdict)} ${recordLabel(lastDecision.record)}…`
+      : `Undo: ${actionPastTense(lastDecision.verdict)} ${recordLabel(lastDecision.record)}`;
   const panelDecision = panelRecord
     ? history.find((item) => (
       item.stage_id === (isAllStages ? reviewStageIdForRecord(panelRecord) : activeStageId)
@@ -590,7 +617,7 @@ export const ReviewRoute = () => {
     setHistory((current) => [...current, action]);
     setFailures((current) => current.filter((failure) => decisionKey(failure) !== key));
     setError('');
-    setMessage(`${actionInProgress(verdict)} ${recordName(record)}…`);
+    setMessage(`${actionInProgress(verdict)} ${recordLabel(record)}…`);
 
     try {
       const response = await submitReviewDecisions(stageId, [{
@@ -605,7 +632,7 @@ export const ReviewRoute = () => {
         item.sequence === sequence ? { ...item, state: 'saved' } : item
       )));
       if (latestActionSequence.current === sequence) {
-        setMessage(`${actionPastTense(verdict)} ${recordName(record)}.`);
+        setMessage(`${actionPastTense(verdict)} ${recordLabel(record)}.`);
       }
       loadedQueues.current.clear();
       loadedQueues.current.add(activeQueueKey);
@@ -627,7 +654,7 @@ export const ReviewRoute = () => {
         {
           stage_id: stageId,
           row_id: recordId,
-          record_label: recordName(record),
+          record_label: recordLabel(record),
           action: actionLabel(verdict),
           error: String((nextError as Error)?.message || nextError),
           detail: 'The lead was restored to its original place.',
@@ -674,11 +701,11 @@ export const ReviewRoute = () => {
     setActiveView(last.view);
     setCursor(restoredIndex);
     if (panelRecord) setPanelRecord(last.record);
-    setMessage(`Undoing ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordName(last.record)}…`);
+    setMessage(`Undoing ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordLabel(last.record)}…`);
 
     try {
       await clearReviewDecision(last.stage_id, last.row_id);
-      setMessage(`Undid ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordName(last.record)}.`);
+      setMessage(`Undid ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordLabel(last.record)}.`);
     } catch (nextError) {
       removeRecord(last.queue_key, last.stage_id, last.row_id);
       adjustAwaitingCount(last.stage_id, -1, last.record);
@@ -692,7 +719,7 @@ export const ReviewRoute = () => {
         {
           stage_id: last.stage_id,
           row_id: last.row_id,
-          record_label: recordName(last.record),
+          record_label: recordLabel(last.record),
           action: 'Undo',
           error: String((nextError as Error)?.message || nextError),
           detail: 'The decision remains in effect.',
@@ -894,7 +921,7 @@ export const ReviewRoute = () => {
                     <thead>
                       <tr>
                         <th className="review-table__position" scope="col">#</th>
-                        <th scope="col">Record</th>
+                        {showIdentityColumn ? <th scope="col">Record</th> : null}
                         {isAllStages ? <th scope="col">Awaiting stage</th> : null}
                         {visibleFields.map((field) => <th scope="col" key={field}>{labelFor(field)}</th>)}
                         <th className="review-table__actions" scope="col">Actions</th>
@@ -915,7 +942,15 @@ export const ReviewRoute = () => {
                             }}
                           >
                             <td className="review-table__position">{index + 1}</td>
-                            <td className="review-table__identity" title={recordName(record)}>{recordName(record)}</td>
+                            {showIdentityColumn ? (
+                              <td className="review-table__identity" title={recordLabel(record)}>
+                                {reviewIdentityAddsInformation({
+                                  record,
+                                  titleField: titleFieldForRecord(record),
+                                  visibleFields,
+                                }) ? recordLabel(record) : ''}
+                              </td>
+                            ) : null}
                             {isAllStages ? <td>{displayValue(record._review_stage_label)}</td> : null}
                             {visibleFields.map((field) => {
                               const value = displayValue(record[field]);
@@ -974,6 +1009,7 @@ export const ReviewRoute = () => {
             rowIdValue={rowId(panelRecord)}
             mapsApiKey={meta.mapsApiKey}
             detailDeclaration={panelStage?.detail}
+            titleField={panelStage?.title_field}
             deciding={Boolean(panelDecision)}
             undoLabel={panelUndoLabel}
             canUndo={Boolean(lastDecision && lastDecision.state === 'saved' && !undoing)}

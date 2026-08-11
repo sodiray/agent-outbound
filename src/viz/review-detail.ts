@@ -5,16 +5,21 @@ export type ReviewDetailRenderer = typeof REVIEW_DETAIL_RENDERERS[number];
 export type ReviewDetailFieldItem = {
   field: string;
   as?: ReviewDetailRenderer;
+  label?: string;
+  link_text?: string;
 };
 
 export type ReviewDetailListItem = {
   text: string;
   as?: ReviewDetailRenderer;
+  link_text?: string;
 };
 
 export type ReviewDetailColumn = {
   field: string;
   as?: ReviewDetailRenderer;
+  label?: string;
+  link_text?: string;
 };
 
 export type ReviewDetailSection =
@@ -39,18 +44,30 @@ export type ResolvedReviewDetailSection =
   | {
     kind: 'fields';
     title: string;
-    items: Array<{ field: string; renderer: ReviewDetailRenderer; value: string }>;
+    items: Array<{
+      field: string;
+      label?: string;
+      renderer: ReviewDetailRenderer;
+      value: string;
+      link_text?: string;
+    }>;
   }
   | {
     kind: 'list';
     title: string;
     renderer: ReviewDetailRenderer;
+    link_text?: string;
     items: string[];
   }
   | {
     kind: 'table';
     title: string;
-    columns: Array<{ field: string; renderer: ReviewDetailRenderer }>;
+    columns: Array<{
+      field: string;
+      label?: string;
+      renderer: ReviewDetailRenderer;
+      link_text?: string;
+    }>;
     rows: Array<Array<string | null>>;
   };
 
@@ -116,8 +133,10 @@ const resolveFields = ({
     if (value === null) return [];
     return [{
       field: normalized.field,
+      ...(normalized.label ? { label: normalized.label } : {}),
       renderer: normalized.as || 'text',
       value,
+      ...(normalized.link_text ? { link_text: normalized.link_text } : {}),
     }];
   });
   return items.length > 0 ? { kind: 'fields', title: section.title, items } : null;
@@ -137,7 +156,13 @@ const resolveList = ({
     return value === null ? [] : [value];
   });
   return items.length > 0
-    ? { kind: 'list', title: section.title, renderer: section.item.as || 'text', items }
+    ? {
+      kind: 'list',
+      title: section.title,
+      renderer: section.item.as || 'text',
+      ...(section.item.link_text ? { link_text: section.item.link_text } : {}),
+      items,
+    }
     : null;
 };
 
@@ -152,7 +177,9 @@ const resolveTable = ({
   if (!source) return null;
   const columns = section.columns.map(columnItem).map((column) => ({
     field: column.field,
+    ...(column.label ? { label: column.label } : {}),
     renderer: column.as || 'text',
+    ...(column.link_text ? { link_text: column.link_text } : {}),
   }));
   const rows = source.flatMap((element) => {
     const row = columns.map((column) => displayValue(readPath(element, column.field)));
@@ -188,4 +215,22 @@ export const reviewDetailHref = ({ renderer, value }: { renderer: ReviewDetailRe
   if (renderer === 'phone') return `tel:${value}`;
   if (renderer === 'link') return /^https?:\/\//i.test(value) ? value : `https://${value}`;
   return '';
+};
+
+export const reviewDetailLinkText = ({
+  renderer,
+  value,
+  linkText,
+}: {
+  renderer: ReviewDetailRenderer;
+  value: string;
+  linkText?: string;
+}) => {
+  if (renderer !== 'link') return value;
+  if (linkText?.trim()) return linkText.trim();
+  try {
+    return new URL(reviewDetailHref({ renderer, value })).hostname || 'Open link';
+  } catch {
+    return 'Open link';
+  }
 };

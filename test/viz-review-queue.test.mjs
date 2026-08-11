@@ -10,8 +10,8 @@ import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestra
 
 const CONFIG = {
   pipeline: [
-    { kind: 'review', id: 'review_alpha', label: 'Alpha review', fields: ['priority'] },
-    { kind: 'review', id: 'review_beta', label: 'Beta review', fields: ['category'] },
+    { kind: 'review', id: 'review_alpha', label: 'Alpha review', fields: ['priority'], title_field: 'venue_title' },
+    { kind: 'review', id: 'review_beta', label: 'Beta review', fields: ['category'], title_field: 'account_label' },
   ],
 };
 
@@ -25,13 +25,15 @@ pipeline:
     id: review_alpha
     label: Alpha review
     fields: [priority]
+    title_field: venue_title
   - kind: review
     id: review_beta
     label: Beta review
     fields: [category]
+    title_field: account_label
 `);
   const db = openListDb({ listDir, readonly: false });
-  ensureRecordColumns({ db, columns: ['priority', 'category'] });
+  ensureRecordColumns({ db, columns: ['priority', 'category', 'venue_title', 'account_label'] });
   const records = [
     { id: 'alpha-1', priority: '2', category: 'one', stage: 'review_alpha' },
     { id: 'alpha-2', priority: '1', category: 'two', stage: 'review_alpha' },
@@ -49,6 +51,8 @@ pipeline:
         business_name: `Record ${record.id}`,
         priority: record.priority,
         category: record.category,
+        venue_title: `Venue ${record.id}`,
+        account_label: `Account ${record.id}`,
       },
     });
   });
@@ -113,6 +117,28 @@ test('review queue sorting accepts declared fields in both directions and remain
     const pagedIds = [...firstPage.records, ...secondPage.records, ...thirdPage.records].map((record) => record._row_id);
     assert.deepEqual(pagedIds, ascending.records.map((record) => record._row_id));
     assert.equal(new Set(pagedIds).size, ascending.total);
+  } finally {
+    db.close();
+  }
+});
+
+test('review queues project declared title fields even when they are not table fields', () => {
+  const { db } = createQueue();
+  try {
+    const singleStage = getReviewQueue({
+      db,
+      config: CONFIG,
+      stageId: 'review_alpha',
+      limit: 100,
+    });
+    assert.equal(singleStage.stage.title_field, 'venue_title');
+    assert.equal(singleStage.records[0].venue_title, 'Venue alpha-1');
+    assert.deepEqual(singleStage.stage.fields, ['priority']);
+
+    const allStages = getAllReviewQueue({ db, config: CONFIG, limit: 100 });
+    assert.deepEqual(allStages.stage.fields, ['priority', 'category']);
+    assert.equal(allStages.records[0].venue_title, 'Venue alpha-1');
+    assert.equal(allStages.records.at(-1).account_label, 'Account beta-1');
   } finally {
     db.close();
   }

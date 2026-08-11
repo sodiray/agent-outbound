@@ -973,6 +973,8 @@ const ReviewDetailFieldItemSchema = z.union([
   z.object({
     field: z.string().min(1),
     as: ReviewDetailRendererSchema.default('text'),
+    label: z.string().min(1).optional(),
+    link_text: z.string().min(1).optional(),
   }),
 ]);
 const ReviewDetailColumnSchema = z.union([
@@ -980,6 +982,8 @@ const ReviewDetailColumnSchema = z.union([
   z.object({
     field: ReviewDetailPathSchema,
     as: ReviewDetailRendererSchema.default('text'),
+    label: z.string().min(1).optional(),
+    link_text: z.string().min(1).optional(),
   }),
 ]);
 const ReviewDetailSectionSchema = z.union([
@@ -994,6 +998,7 @@ const ReviewDetailSectionSchema = z.union([
     item: z.object({
       text: ReviewDetailPathSchema,
       as: ReviewDetailRendererSchema.default('text'),
+      link_text: z.string().min(1).optional(),
     }),
   }),
   z.object({
@@ -1012,6 +1017,7 @@ const PipelineReviewStepSchema = z.object({
   runs_after: PipelineFilterStepSchema.shape.runs_after,
   label: z.string().default(''),
   fields: z.array(z.string()).default([]),
+  title_field: z.string().min(1).optional(),
   detail: z.array(ReviewDetailSectionSchema).min(1).optional(),
   inputs: StageInputsSchema,
   ...PipelineAuthorStepVocabulary,

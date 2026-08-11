@@ -79,6 +79,7 @@ export type ReviewStage = {
   label: string;
   description: string;
   fields: string[];
+  title_field?: string;
   detail?: ReviewDetailSection[];
   awaiting_count: number;
   sequence_counts: Array<{ sequence_name: string; count: number }>;

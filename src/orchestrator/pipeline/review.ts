@@ -16,6 +16,7 @@ export type ReviewStage = {
   label: string;
   description: string;
   fields: string[];
+  title_field?: string;
   detail?: ReviewDetailSection[];
 };
 
@@ -51,6 +52,7 @@ export const configuredReviewStages = (config: any): ReviewStage[] => (
   .map((step: any) => {
     const id = String(step?.id || '').trim();
     const label = String(step?.label || '').trim();
+    const titleField = String(step?.title_field || '').trim();
     return {
       id,
       label: label || id,
@@ -58,6 +60,7 @@ export const configuredReviewStages = (config: any): ReviewStage[] => (
       fields: Array.isArray(step?.fields)
         ? step.fields.map((field: unknown) => String(field || '').trim()).filter(Boolean)
         : [],
+      ...(titleField ? { title_field: titleField } : {}),
       detail: Array.isArray(step?.detail) ? step.detail as ReviewDetailSection[] : undefined,
     };
   })
@@ -183,7 +186,10 @@ export const countAwaitingReviewRecords = ({ db, config }: { db: any; config: an
 export const reviewStageFieldWarnings = ({ db, config }: { db: any; config: any }) => {
   const availableColumns = recordColumns(db);
   return configuredReviewStages(config).flatMap((stage) => {
-    const missing = [...new Set(stage.fields)].filter((field) => !availableColumns.has(field));
+    const missing = [...new Set([
+      ...stage.fields,
+      ...(stage.title_field ? [stage.title_field] : []),
+    ])].filter((field) => !availableColumns.has(field));
     if (missing.length === 0) return [];
     return [`Review step "${stage.id}" fields do not exist on records: ${missing.map((field) => `"${field}"`).join(', ')}.`];
   });
@@ -220,7 +226,7 @@ export const getReviewQueue = ({
   const availableColumns = recordColumns(db);
   const stage = requireResolvedReviewStage({ db, config, stageId });
   const { pageLimit, pageOffset } = reviewPage({ limit, offset });
-  const fields = [...new Set(['_row_id', ...stage.fields])]
+  const fields = [...new Set(['_row_id', ...stage.fields, ...(stage.title_field ? [stage.title_field] : [])])]
     .filter((field) => availableColumns.has(field));
   const orderBy = reviewOrderBy({
     sort,
@@ -338,13 +344,15 @@ export const getAllReviewQueue = ({
   const fields = [...new Set([
     '_row_id',
     ...stages.flatMap((stage) => stage.fields),
+    ...stages.flatMap((stage) => stage.title_field ? [stage.title_field] : []),
   ])].filter((field) => availableColumns.has(field));
   const uniqueTotal = countAwaitingReviewRecords({ db, config });
   const stage = {
     id: 'all',
     label: 'All stages',
     description: 'Records awaiting a decision at any configured review stage.',
-    fields: fields.filter((field) => !REVIEW_IDENTITY_FIELDS.includes(field)),
+    fields: [...new Set(stages.flatMap((candidate) => candidate.fields))]
+      .filter((field) => !REVIEW_IDENTITY_FIELDS.includes(field) && availableColumns.has(field)),
     awaiting_count: uniqueTotal,
     sequence_counts: [],
   };
