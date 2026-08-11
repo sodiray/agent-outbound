@@ -38,11 +38,6 @@ const unitCostUsd = (value: unknown) => {
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
 };
 
-const settledVerificationStatus = (value: unknown) => {
-  const status = normalizedStatus(value);
-  return Boolean(status) && !['pipeline_supplied', 'unchecked'].includes(status);
-};
-
 const persistedVerificationOutputs = (contact: Record<string, unknown>) => ({
   email_verification_status: text(contact.email_verification_status),
   email_verification_confidence: boundedConfidence(contact.email_verification_confidence),
@@ -128,15 +123,6 @@ export const executeEmailVerificationAction = async ({
     WHERE row_id = ? AND lower(email) = ?
     LIMIT 1
   `).get(recordId, email) as Record<string, unknown> | undefined;
-  if (existing && settledVerificationStatus(existing.email_verification_status)) {
-    return {
-      outputs: persistedVerificationOutputs(existing),
-      artifacts: { skipped: true, reason: 'verification_settled', email },
-      usage: verificationUsage({ provider: text(stepConfig.provider), usdCost: 0 }),
-      provider: text(stepConfig.provider),
-    };
-  }
-
   const provider = emailVerificationProvider || resolveEmailVerificationProvider({
     provider: text(stepConfig.provider),
   });

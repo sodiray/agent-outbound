@@ -517,6 +517,11 @@ const StageInputsSchema = z.union([
   z.record(StageInputDefinitionSchema),
 ]).default([]);
 
+const StepMemoizationSchema = z.object({
+  /** Results never expire when ttl_days is omitted. */
+  ttl_days: z.coerce.number().positive().finite().optional(),
+}).strict();
+
 export const StepConfigSchema = z.object({
   description: z.string().default(''),
   id: z.string().default(''),
@@ -524,6 +529,7 @@ export const StepConfigSchema = z.object({
   step_budget: z.coerce.number().int().min(1).max(40).default(8),
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
   cache: z.string().default(''),
+  memoize: StepMemoizationSchema.optional(),
   tool: ToolSpecSchema.optional(),
   // tool_call provider waterfall: try primary tool, then each entry in order on
   // retryable failure. Alias: fallback_tools. Fail closed after all fail.
@@ -961,6 +967,9 @@ const PipelineEnrichmentStepSchema = z.object({
   step_budget: z.coerce.number().int().min(1).max(40).default(8),
   concurrency: z.coerce.number().int().min(1).max(200).default(10),
   cache: z.string().default(''),
+  // Opt-in result memoization. The engine fingerprints resolved declared inputs
+  // and replays persisted outputs while that fingerprint remains current.
+  memoize: StepMemoizationSchema.optional(),
   // Explicit staleness override: bump this string to force a recompute; otherwise
   // the staleness hash is derived from the step's material fields only, so cosmetic
   // edits (description, concurrency, etc.) never re-run already-enriched records.
@@ -997,6 +1006,7 @@ const PipelineEnrichmentStepSchema = z.object({
   step_budget: true,
   concurrency: true,
   cache: true,
+  memoize: true,
   cache_key: true,
   action: true,
   provider: true,

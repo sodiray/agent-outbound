@@ -156,12 +156,12 @@ test('a checked negative is durable and distinct from an unchecked pipeline-supp
   });
 });
 
-test('email verification honors the enrichment ceiling and never re-verifies a settled address', async () => {
+test('email verification honors the enrichment ceiling and memoizes a settled address', async () => {
   const provider = fakeProvider({ kind: 'verdict', verification: { status: 'verified', confidence: 100, reason: '' } });
 
   await withDb({ published_email: 'owner@acme.example' }, async ({ db, root }) => {
     await execute({ db, root, step: contactSourceStep, provider });
-    await execute({ db, root, step: verificationStep(), provider });
+    await execute({ db, root, step: verificationStep({ memoize: {} }), provider });
     const settled = db.prepare('SELECT * FROM contacts WHERE row_id = ?').get('email_verification_record');
     assert.equal(settled.email_verification_status, 'verified');
 
@@ -169,14 +169,14 @@ test('email verification honors the enrichment ceiling and never re-verifies a s
     const repromoted = db.prepare('SELECT * FROM contacts WHERE row_id = ?').get('email_verification_record');
     assert.equal(repromoted.email_verification_status, 'verified');
 
-    const repeated = await execute({ db, root, step: verificationStep(), provider, force: true });
+    const repeated = await execute({ db, root, step: verificationStep({ memoize: {} }), provider, force: true });
     assert.equal(repeated.passed, true);
-    assert.deepEqual(provider.calls, ['owner@acme.example']);
+    assert.deepEqual(provider.calls, ['owner@acme.example', 'owner@acme.example']);
     assert.equal(db.prepare(`
       SELECT COALESCE(SUM(usd_cost), 0) AS total
       FROM cost_events
       WHERE record_id = ? AND step_id = ?
-    `).get('email_verification_record', 'pipeline_enrich:verify_published_email').total, 0.05);
+    `).get('email_verification_record', 'pipeline_enrich:verify_published_email').total, 0.1);
   });
 
   const blockedProvider = fakeProvider({ kind: 'verdict', verification: { status: 'valid', confidence: 100, reason: '' } });

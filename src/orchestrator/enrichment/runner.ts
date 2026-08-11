@@ -455,6 +455,99 @@ export const enrichRerunReason = ({
   return '';
 };
 
+export type StepMemoizationConfig = {
+  ttl_days?: number;
+};
+
+/**
+ * `memoize` is intentionally presence-based: omitting it preserves the
+ * historical enrichment staleness behavior for a step.
+ */
+export const memoizationConfigForStep = (stepConfig: Record<string, unknown>): StepMemoizationConfig | undefined => {
+  const value = stepConfig?.memoize;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const ttlDays = Number((value as Record<string, unknown>).ttl_days);
+  return Number.isFinite(ttlDays) && ttlDays > 0 ? { ttl_days: ttlDays } : {};
+};
+
+const memoizationTtlSeconds = (memoization: StepMemoizationConfig): number => (
+  memoization.ttl_days === undefined ? 0 : memoization.ttl_days * 86400
+);
+
+const memoizationCacheTtl = (memoization: StepMemoizationConfig): string => (
+  memoization.ttl_days === undefined ? '' : `${memoization.ttl_days}d`
+);
+
+/**
+ * The resolver is the single source of truth for inputs delivered to the
+ * action. Hashing its output means array and map declarations have identical
+ * memoization semantics, including map aliases, literals, and max_chars.
+ */
+export const memoizationInputValuesForRecord = ({
+  stepConfig,
+  record,
+}: {
+  stepConfig: Record<string, unknown>;
+  record: Record<string, unknown>;
+}) => resolveStageInputs({ step: stepConfig, record }).values;
+
+const memoizationHashes = ({
+  stepConfig,
+  record,
+}: {
+  stepConfig: Record<string, unknown>;
+  record: Record<string, unknown>;
+}) => {
+  const inputHash = stableHash({
+    version: 'step-memoization-v1',
+    inputs: memoizationInputValuesForRecord({ stepConfig, record }),
+    config: materialEnrichConfig(stepConfig),
+  });
+  return { depHash: inputHash, inputHash, policyHash: 'step-memoization-v1' };
+};
+
+const isMemoizationFresh = ({
+  cached,
+  stepConfig,
+  record,
+  force = false,
+}: {
+  cached: any;
+  stepConfig: Record<string, unknown>;
+  record: Record<string, unknown>;
+  force?: boolean;
+}) => {
+  if (force || !cached) return false;
+  const hashes = memoizationHashes({ stepConfig, record });
+  if (String(cached.dep_hash || '') !== hashes.depHash || String(cached.policy_hash || '') !== hashes.policyHash) return false;
+  const ttl = Number(cached.cache_ttl_seconds || 0);
+  if (ttl <= 0) return true;
+  const updatedAt = new Date(String(cached.updated_at || 0)).getTime();
+  return (Date.parse(nowIso()) - updatedAt) / 1000 <= ttl;
+};
+
+const memoizationHasSettledOutcome = ({
+  record,
+  statusColumn,
+}: {
+  record: Record<string, unknown>;
+  statusColumn: string;
+}) => ['ok', 'empty'].includes(String(record[statusColumn] || '').trim().toLowerCase());
+
+const memoizationCacheDetails = ({
+  memoization,
+  stepConfig,
+  record,
+}: {
+  memoization: StepMemoizationConfig;
+  stepConfig: Record<string, unknown>;
+  record: Record<string, unknown>;
+}) => ({
+  ...memoizationHashes({ stepConfig, record }),
+  cacheTtlSeconds: memoizationTtlSeconds(memoization),
+  cacheTtl: memoizationCacheTtl(memoization),
+});
+
 const normalizeOutputType = (raw: any): 'string' | 'number' | 'integer' | 'boolean' => {
   const type = String(raw || 'string').trim().toLowerCase();
   if (type === 'number' || type === 'integer' || type === 'boolean') return type;
@@ -918,6 +1011,7 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
   const expectedOutputs = Object.keys(declaredOutputs).length > 0
     ? declaredOutputs
     : legacyColumns;
+  const memoization = memoizationConfigForStep(stepConfig);
   const statusColumn = stepStatusColumn(id);
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
   const result = { would_enrich: 0, skip_fresh: 0, skip_when: 0 };
@@ -925,10 +1019,12 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
     const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) { result.skip_when += 1; continue; }
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
-    if (
-      isEnrichFresh({ cached, stepConfig, depValues: dependencyValuesForRecord({ stepConfig, record }), executionConfig, force })
-      && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn })
-    ) { result.skip_fresh += 1; continue; }
+    const fresh = memoization
+      ? isMemoizationFresh({ cached, stepConfig, record, force })
+        && memoizationHasSettledOutcome({ record, statusColumn })
+      : isEnrichFresh({ cached, stepConfig, depValues: dependencyValuesForRecord({ stepConfig, record }), executionConfig, force })
+        && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn });
+    if (fresh) { result.skip_fresh += 1; continue; }
     result.would_enrich += 1;
   }
   return result;
@@ -1247,6 +1343,7 @@ export const executeEnrichmentStepOnRecords = async ({
   const id = String(stepId || step?.id || '').trim() || 'enrich';
   const stepConfig = enrichmentStepConfig(step);
   const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
+  const memoization = memoizationConfigForStep(stepConfig);
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
   const legacyColumns = getLegacyColumns(stepConfig || {});
   const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
@@ -1268,6 +1365,7 @@ export const executeEnrichmentStepOnRecords = async ({
   const summary = {
     processed: 0,
     skipped_fresh: 0,
+    memoization_hits: 0,
     skipped_when: 0,
     skipped_ceiling: 0,
     failed: 0,
@@ -1303,18 +1401,24 @@ export const executeEnrichmentStepOnRecords = async ({
     }
 
     const depValues = dependencyValuesForRecord({ stepConfig, record: currentRecord });
-    const dependencyHashes = enrichDependencyHashes({ stepConfig, depValues, executionConfig });
+    const dependencyHashes = memoization
+      ? memoizationCacheDetails({ memoization, stepConfig, record: currentRecord })
+      : enrichDependencyHashes({ stepConfig, depValues, executionConfig });
     const cached = readStaleness({ db, recordId, stepId: id });
 
     const expectedOutputs = Object.keys(declaredOutputs).length > 0
       ? declaredOutputs
       : legacyColumns;
-    if (
-      isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
-      && enrichStepHasDurableOutcome({ record: currentRecord, expectedOutputs, statusColumn })
-    ) {
+    const fresh = memoization
+      ? isMemoizationFresh({ cached, stepConfig, record: currentRecord, force })
+        && memoizationHasSettledOutcome({ record: currentRecord, statusColumn })
+      : isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
+        && enrichStepHasDurableOutcome({ record: currentRecord, expectedOutputs, statusColumn });
+    if (fresh) {
       summary.skipped_fresh += 1;
-      summary.non_execution_reasons[recordId] = 'skipped:fresh';
+      if (memoization) summary.memoization_hits += 1;
+      summary.non_execution_reasons[recordId] = memoization ? 'memoization_hit' : 'skipped:fresh';
+      emitActivity({ event: 'row_skipped', phase: 'pipeline', step: id, row: rowLabel, reason: memoization ? 'memoization_hit' : 'fresh' });
       return;
     }
 
@@ -1437,16 +1541,16 @@ export const executeEnrichmentStepOnRecords = async ({
       if (String(stepConfig.action || '').trim().toLowerCase() !== 'decision_makers') {
         upsertPrimaryContactIfPresent({ db, record: merged });
       }
-      // No-content is not a durable success: leave staleness unset so the step re-runs
-      // on the next pass (same composition as d3cbc3e absent declared outputs).
-      if (!noContentReason) {
+      // Memoized steps treat an explicit empty provider response as a settled
+      // negative result. Legacy staleness retains its historical retry behavior.
+      if (!noContentReason || memoization) {
         writeStaleness({
           db,
           recordId,
           stepId: id,
           ...dependencyHashes,
-          cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
-          cacheTtl: String(stepConfig?.cache || ''),
+          cacheTtlSeconds: memoization ? memoizationTtlSeconds(memoization) : ttlToSeconds(stepConfig?.cache),
+          cacheTtl: memoization ? memoizationCacheTtl(memoization) : String(stepConfig?.cache || ''),
         });
       } else {
         clearStaleness({ db, recordId, stepId: id });
@@ -1495,6 +1599,7 @@ export const executeEnrichmentStepOnRecords = async ({
         executionConfig,
         permanent,
       });
+      if (memoization) clearStaleness({ db, recordId, stepId: id });
       summary.failed += 1;
       summary.errors.push({ record_id: recordId, error: detail });
       summary.record_ids.push(recordId);
@@ -1547,7 +1652,7 @@ export const executeEnrichmentStepOnRecords = async ({
           last_error: ownedLastError({ error: detail, stepId: id }),
         };
         upsertRecord({ db, row: merged });
-        if (permanent) {
+        if (permanent && !memoization) {
           writeStaleness({
             db,
             recordId,
@@ -1839,6 +1944,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
         }> = [];
         const snapshot = [...recordState.values()];
         const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
+        const memoization = memoizationConfigForStep(stepConfig);
 
         await mapWithConcurrency(snapshot, async (record) => {
           const recordId = getRecordRowId(record);
@@ -1868,17 +1974,22 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
           }
 
           const depValues = dependencyValuesForRecord({ stepConfig, record });
-          const dependencyHashes = enrichDependencyHashes({ stepConfig, depValues, executionConfig });
+          const dependencyHashes = memoization
+            ? memoizationCacheDetails({ memoization, stepConfig, record })
+            : enrichDependencyHashes({ stepConfig, depValues, executionConfig });
           const cached = readStaleness({ db, recordId, stepId: id });
 
           const expectedOutputs = Object.keys(declaredOutputs).length > 0
             ? declaredOutputs
             : legacyColumns;
-          if (
-            isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
-            && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn })
-          ) {
+          const fresh = memoization
+            ? isMemoizationFresh({ cached, stepConfig, record, force })
+              && memoizationHasSettledOutcome({ record, statusColumn })
+            : isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
+              && enrichStepHasDurableOutcome({ record, expectedOutputs, statusColumn });
+          if (fresh) {
             summary.skipped_fresh += 1;
+            emitActivity({ event: 'row_skipped', phase: 'enrichment', step: id, row: rowLabel, reason: memoization ? 'memoization_hit' : 'fresh' });
             return;
           }
 
@@ -1992,11 +2103,11 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               rowLabel,
               patch,
               ...dependencyHashes,
-              cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
-              cacheTtl: String(stepConfig.cache || ''),
+              cacheTtlSeconds: memoization ? memoizationTtlSeconds(memoization) : ttlToSeconds(stepConfig.cache),
+              cacheTtl: memoization ? memoizationCacheTtl(memoization) : String(stepConfig.cache || ''),
               skippedWhen: false,
               // No durable cache for empty provider payloads — force re-run.
-              ...(noContentReason ? { failedError: noContentReason, permanentFailure: false } : {}),
+              ...(!memoization && noContentReason ? { failedError: noContentReason, permanentFailure: false } : {}),
             });
           } catch (error) {
             recordErroredProviderToolCost({
@@ -2032,17 +2143,17 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
                 recordId,
                 rowLabel,
                 patch,
-                depHash: permanent
+                depHash: !memoization && permanent
                   ? freshnessDepHash({ dependencyHashes, executionConfig })
                   : dependencyHashes.depHash,
                 inputHash: dependencyHashes.inputHash,
                 policyHash: dependencyHashes.policyHash,
-                cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
-                cacheTtl: String(stepConfig.cache || ''),
+                cacheTtlSeconds: memoization ? memoizationTtlSeconds(memoization) : ttlToSeconds(stepConfig.cache),
+                cacheTtl: memoization ? memoizationCacheTtl(memoization) : String(stepConfig.cache || ''),
                 skippedWhen: false,
                 failedError: detail,
                 // Permanent failures keep staleness (write); retryable clear it.
-                permanentFailure: permanent,
+                permanentFailure: !memoization && permanent,
               });
               emitActivity({ event: 'error', phase: 'enrichment', step: id, row: rowLabel, detail, non_retryable: permanent });
               return;
@@ -2053,16 +2164,16 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               recordId,
               rowLabel,
               error: detail,
-              permanentFailure: permanent,
+              permanentFailure: !memoization && permanent,
               dependencyHashes: {
-                depHash: permanent
+                depHash: !memoization && permanent
                   ? freshnessDepHash({ dependencyHashes, executionConfig })
                   : dependencyHashes.depHash,
                 inputHash: dependencyHashes.inputHash,
                 policyHash: dependencyHashes.policyHash,
               },
-              cacheTtlSeconds: ttlToSeconds(stepConfig.cache),
-              cacheTtl: String(stepConfig.cache || ''),
+              cacheTtlSeconds: memoization ? memoizationTtlSeconds(memoization) : ttlToSeconds(stepConfig.cache),
+              cacheTtl: memoization ? memoizationCacheTtl(memoization) : String(stepConfig.cache || ''),
             });
             emitActivity({
               event: 'error',

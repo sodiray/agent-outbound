@@ -80,6 +80,29 @@ When `depends_on` uses qualified references (e.g., `website_research.owner_name`
 
 Cache TTL (`cache: 90d`) provides time-based expiration on top of the hash check.
 
+## Step Result Memoization
+
+`memoize` is an opt-in cache for an individual `enrich` step's settled result. It is intended for expensive, repeatable lookups where re-running with the same declared inputs would purchase the same answer again.
+
+```yaml
+pipeline:
+  - kind: enrich
+    id: account_lookup
+    inputs:
+      domain: { from: domain }
+      lookup_mode: { value: primary }
+    outputs:
+      account_result: { type: string, description: Lookup result, including an empty result. }
+    memoize:
+      ttl_days: 30 # optional; omit for no expiry
+```
+
+The fingerprint is built from the resolved declared inputs—the same values sent to the action. This supports both array and map input declarations; map aliases, literal values, and `max_chars` truncation participate in the key. Material execution configuration also participates, so changing the provider contract does not replay an incompatible old result.
+
+Both non-empty outputs and an explicit empty output are settled results and are memoized. Exceptions and provider failures are never memoized, including permanent provider errors: the next run tries again. A hit is recorded as a `memoization_hit` row-skipped activity event and in the pipeline step result's `memoization_hits` count. Run `pipeline <list> --force` to deliberately bypass memoization and refresh a result.
+
+This capability currently applies to `enrich` steps, whose runner has a common provider-action and persisted-output boundary. It deliberately does not apply to sending, manual, or other side-effecting step kinds.
+
 ### Default TTLs per category
 
 | Category | TTL |
