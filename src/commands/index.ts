@@ -963,12 +963,15 @@ const renderPipelineReport = (report: any) => {
     ? `${report.overview.errored} records (${report.overview.errored_attempts} attempts)`
     : `${report.overview.errored}`;
   const stepLines = report.steps.map((step: any) => [
-    step.step_id,
+    // An inert step is the headline, not a footnote: it was reached and decided
+    // nothing for anybody, which every other column renders as healthy.
+    String(step.health || 'ok') === 'inert' ? `INERT ${step.step_id}` : step.step_id,
     step.kind,
     `eval=${step.evaluated}`,
     `pass=${step.passed}`,
     `drop=${step.dropped}`,
     `flag=${step.flagged}`,
+    `skip=${step.skipped}${(step.skip_reasons || []).length > 0 ? `(${step.skip_reasons[0].reason})` : ''}`,
     `err=${step.errored}`,
     `llm=${step.llm_calls}`,
     `batches=${step.batches}`,
@@ -1085,13 +1088,57 @@ export const pipelineReportCommand = ({ list, run = 'latest' }) => {
         ...events.map((event: any) => String(event.record_id || '')),
         ...errors.map((error: any) => String(error.record_id || '')),
       ]);
+      // A skip is not an outcome. `passed = 0` covers both "this step ran and
+      // said no" and "this step never ran at all", and counting them together
+      // reported a step that decided nothing as if it had decided everything:
+      // 2,758 records shown as dropped where 2,758 were skips and 26 were real
+      // failures. A gate that cannot run is the failure mode most worth seeing,
+      // so it gets its own column rather than being folded into the verdicts.
+      const isSkip = (event: any) => /^skipped/i.test(String(event.reason || ''));
+      const decided = events.filter((event: any) => !isSkip(event));
+      const skippedIds = events.filter(isSkip).map((event: any) => String(event.record_id || ''));
+      const skipped = distinctCount(skippedIds);
+      // "Could not run" vs "did not need to run". Only the first is a problem:
+      // a step skipped for already_resolved / unchanged_inputs / fresh ran
+      // earlier and its verdict still stands.
+      const isBlocked = (event: any) => /^skipped:(upstream_errored|unresolved_dependencies|record_dropped)/i
+        .test(String(event.reason || ''));
+      const blocked = distinctCount(events.filter(isBlocked).map((event: any) => String(event.record_id || '')));
+      const passed = distinctCount(decided.filter((event: any) => Number(event.passed || 0) === 1).map((event: any) => String(event.record_id || '')));
+      const dropped = distinctCount(decided.filter((event: any) => Number(event.passed || 0) === 0 && step.dropGate).map((event: any) => String(event.record_id || '')));
+      const flagged = distinctCount(decided.filter((event: any) => Number(event.passed || 0) === 0 && !step.dropGate).map((event: any) => String(event.record_id || '')));
+      const skipReasons = [...events.filter(isSkip).reduce((counts: Map<string, number>, event: any) => {
+        const reason = String(event.reason || '').trim() || 'skipped';
+        return counts.set(reason, Number(counts.get(reason) || 0) + 1);
+      }, new Map<string, number>())]
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 3)
+        .map(([reason, count]) => ({ reason, count }));
       return {
         step_id: step.id,
         kind: step.kind,
         evaluated,
-        passed: distinctCount(events.filter((event: any) => Number(event.passed || 0) === 1).map((event: any) => String(event.record_id || ''))),
-        dropped: distinctCount(events.filter((event: any) => Number(event.passed || 0) === 0 && step.dropGate).map((event: any) => String(event.record_id || ''))),
-        flagged: distinctCount(events.filter((event: any) => Number(event.passed || 0) === 0 && !step.dropGate).map((event: any) => String(event.record_id || ''))),
+        passed,
+        dropped,
+        flagged,
+        skipped,
+        blocked,
+        skip_reasons: skipReasons,
+        // A step earns "inert" by being reached, deciding nothing for anybody,
+        // and skipping because it COULD NOT run rather than because it already
+        // had. That distinction is the whole signal: `already_resolved` and
+        // `unchanged_inputs` mean the step ran earlier and its verdict stands,
+        // which is idempotency and healthy. `upstream_errored` and
+        // `unresolved_dependencies` mean the gate was never consulted at all,
+        // and reads identically to a healthy step in every other column.
+        // Reserved for the unambiguous case: the step decided nobody, and every
+        // skip it took was a blocked one. A step that is partly blocked and
+        // partly settled still shows its `blocked` count, but does not raise
+        // the alarm -- an alarm that fires on partial blockage is an alarm
+        // operators learn to scroll past.
+        health: evaluated > 0 && blocked > 0 && blocked === skipped && passed + dropped + flagged === 0
+          ? 'inert'
+          : 'ok',
         errored: errors.length,
         llm_calls: costs.length,
         batches: stats.count,
