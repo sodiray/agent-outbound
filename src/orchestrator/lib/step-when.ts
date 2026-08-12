@@ -5,6 +5,8 @@ type StepLike = Record<string, unknown>;
 type WhenOutcome = {
   passed: boolean;
   reason: string;
+  /** False when the step was not run for this record (see StepExecutionOutcome). */
+  executed?: boolean;
 };
 
 const asRecord = (value: unknown): StepLike => (
@@ -48,6 +50,9 @@ export const shouldRunForRecord = ({
 
 export const skippedWhenOutcome = (outcome: WhenOutcome): WhenOutcome => ({
   passed: true,
+  // The `when` predicate did not match: the step was never invoked for this
+  // record. Stated as a value, not inferred from the reason prefix below.
+  executed: false,
   reason: `skipped:${String(outcome.reason || 'when_not_matched')}`,
 });
 

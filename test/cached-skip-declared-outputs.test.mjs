@@ -73,15 +73,32 @@ test('without write claims the guard demands every declared output — the defec
   assert.deepEqual(failures, ['website', 'user_rating_count']);
 });
 
-test('memoization_hit does not escape the declared-output guard by name', () => {
-  // 'skipped:fresh' escapes the guard because it starts with "skipped".
-  // 'memoization_hit' does not, and must not be given an exemption: generate
-  // and compose emit the same reason on cache hits WITH real write claims,
-  // and their check is meaningful. Cached paths earn safety by attaching
-  // claims, not by renaming their outcome.
-  assert.equal(shouldGuardDeclaredOutputWrites({ passed: true, reason: 'skipped:fresh' }), false);
+test('no reason spelling escapes the declared-output guard', () => {
+  // The guard used to exempt any reason starting with "skipped", which is why
+  // 'skipped:fresh' escaped and 'memoization_hit' — the same branch, respelled —
+  // did not. Non-execution is now a stated value, so both spellings are
+  // identical to the guard and neither is exempt on its own.
+  assert.equal(shouldGuardDeclaredOutputWrites({ passed: true, reason: 'skipped:fresh' }), true);
   assert.equal(shouldGuardDeclaredOutputWrites({ passed: true, reason: 'memoization_hit' }), true);
   assert.equal(shouldGuardDeclaredOutputWrites({ passed: true, reason: '' }), true);
+
+  // Stating non-execution exempts, whatever the reason says.
+  assert.equal(
+    shouldGuardDeclaredOutputWrites({ passed: true, executed: false, reason: 'memoization_hit' }),
+    false,
+  );
+
+  // A cache hit that CLAIMS it produced a value is still checked, executed or
+  // not — a claim is checkable, and generate/compose/extract make real ones.
+  assert.equal(
+    shouldGuardDeclaredOutputWrites({
+      passed: true,
+      executed: false,
+      reason: 'memoization_hit',
+      declaredOutputWrites: { website: { provided: true, value: 'https://example.com' } },
+    }),
+    true,
+  );
 });
 
 test('the real memoized enrich path attaches provided:false claims for blank optional outputs', async () => {

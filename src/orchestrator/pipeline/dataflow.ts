@@ -613,6 +613,8 @@ const unchangedGenerateOutcome = ({
   if (!hasAllDeclaredOutputs({ record: current, outputKeys })) return null;
   return {
     passed: true,
+    // Nothing ran; the provided:true claims below are still checked by the guard.
+    executed: false,
     reason: 'skipped_unchanged_inputs',
     declaredOutputWrites: Object.fromEntries(outputKeys.map((name) => [name, {
       provided: true,

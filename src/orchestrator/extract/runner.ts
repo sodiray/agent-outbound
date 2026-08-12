@@ -247,7 +247,7 @@ export const executeExtractStepOnRecords = ({
   step: ExtractStep;
   rows: Array<Record<string, unknown>>;
   force?: boolean;
-}): Map<string, { passed: boolean; reason: string; errored?: boolean; declaredOutputWrites: Record<string, { provided: boolean; value: unknown }> }> => {
+}): Map<string, { passed: boolean; reason: string; errored?: boolean; executed?: boolean; declaredOutputWrites: Record<string, { provided: boolean; value: unknown }> }> => {
   const config = step.config && typeof step.config === 'object' && !Array.isArray(step.config)
     ? { ...step, ...(step.config as Record<string, unknown>) }
     : step;
@@ -255,7 +255,7 @@ export const executeExtractStepOnRecords = ({
   const extractor = text(config.using);
   const select = text(config.select || 'first');
   const sourceFields = sourceFieldsFor(config.from);
-  const outcomes = new Map<string, { passed: boolean; reason: string; errored?: boolean; declaredOutputWrites: Record<string, { provided: boolean; value: unknown }> }>();
+  const outcomes = new Map<string, { passed: boolean; reason: string; errored?: boolean; executed?: boolean; declaredOutputWrites: Record<string, { provided: boolean; value: unknown }> }>();
   if (!EXTRACTOR_NAMES.includes(extractor as ExtractorName) || !['first', 'last', 'all'].includes(select) || sourceFields.length === 0 || Object.keys(outputs).length === 0) {
     rows.forEach((row) => {
       outcomes.set(getRecordRowId(row), {
@@ -289,6 +289,7 @@ export const executeExtractStepOnRecords = ({
       if (requiredSkip) {
         outcomes.set(recordId, {
           passed: true,
+          executed: false,
           reason: requiredSkip,
           declaredOutputWrites: {},
         });
@@ -312,6 +313,7 @@ export const executeExtractStepOnRecords = ({
       ) {
         outcomes.set(recordId, {
           passed: true,
+          executed: false,
           reason: 'skipped_unchanged_inputs',
           declaredOutputWrites: Object.fromEntries(outputKeys.map((name) => [name, {
             provided: true,

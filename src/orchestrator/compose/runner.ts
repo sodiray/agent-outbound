@@ -337,6 +337,13 @@ export const runComposeStep = async ({
     errors: [] as Array<{ record_id: string; error: string }>,
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
     non_execution_reasons: {} as Record<string, string>,
+    /**
+     * Records this step did no work for — unusable required inputs, or a
+     * cache/memoization hit. Distinct from `non_execution_reasons`, which also
+     * carries notes for rows that DID run (input_truncated). Callers turn this
+     * into `StepExecutionOutcome.executed`.
+     */
+    non_executed: {} as Record<string, true>,
   };
   await mapWithConcurrency(rows, async (record) => {
     const recordId = getRecordRowId(record);
@@ -347,6 +354,7 @@ export const runComposeStep = async ({
       const requiredSkip = requiredInputNonExecutionReason(resolved);
       if (requiredSkip) {
         summary.non_execution_reasons[recordId] = requiredSkip;
+        summary.non_executed[recordId] = true;
         return;
       }
       // max_chars clamp is not a skip; record it so oversized inputs stay visible.
@@ -392,6 +400,9 @@ export const runComposeStep = async ({
         );
         if (memoizedHit) summary.memoization_hits += 1;
         summary.non_execution_reasons[recordId] = memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs';
+        // Cache hit: nothing ran. The provided:true claims above stay checkable
+        // and the guard still checks them.
+        summary.non_executed[recordId] = true;
         emitActivity({ event: 'row_skipped', phase: 'compose', step: stepId, row: String(record.business_name || recordId), reason: memoizedHit ? 'memoization_hit' : 'fresh' });
         return;
       }

@@ -38,6 +38,19 @@ export type StepExecutionOutcome = {
   reason: string;
   errored?: boolean;
   parked?: boolean;
+  /**
+   * Did this step actually run for this record?
+   *
+   * `false` is a runner stating "I did no work here" — a `when` predicate that
+   * did not match, a cache/memoization hit, an idempotency claim already
+   * spent, a channel the record may not be contacted on. Absent means executed
+   * (see `didExecuteStep`), because that is the fail-closed default: the
+   * declared-output guard stays armed for any runner that has not said
+   * otherwise. Non-execution used to be inferred by regex-matching `reason`,
+   * which silently stopped covering the branch the moment someone spelled a
+   * new reason ('memoization_hit' vs 'skipped:fresh').
+   */
+  executed?: boolean;
   declaredOutputWrites?: Record<string, { provided: boolean; value: unknown }>;
 };
 
@@ -168,7 +181,6 @@ export const declaredOutputWriteFailures = ({
   });
 };
 
-const NON_EXECUTION_REASONS = /^(channel_not_permitted:|sequence_outbound_gated|skipped)/i;
 const HARD_REJECTED_ACTION_SKIP = /\b(prohibits?|prohibited|forbidden)\b/i;
 
 const WHEN_GATED_STEP_KINDS = new Set([
@@ -318,7 +330,8 @@ const executeWithIdempotency = async (
       continue;
     }
     if (claim.status === 'sent') {
-      outcomes.set(recordId, { passed: true, reason: 'skipped_idempotent_already_executed' });
+      // The claim was already spent: this run did nothing for this record.
+      outcomes.set(recordId, { passed: true, executed: false, reason: 'skipped_idempotent_already_executed' });
       continue;
     }
     if (claim.status === 'uncertain') {
@@ -329,7 +342,7 @@ const executeWithIdempotency = async (
       });
       continue;
     }
-    outcomes.set(recordId, { passed: false, reason: `skipped_idempotency_${claim.reason}` });
+    outcomes.set(recordId, { passed: false, executed: false, reason: `skipped_idempotency_${claim.reason}` });
   }
 
   if (claimed.length === 0) return outcomes;
@@ -417,8 +430,32 @@ const executeWithAuthorApproval = async (
   }));
 };
 
+/**
+ * Did the step run for this record? Absent means yes — see StepExecutionOutcome.
+ */
+export const didExecuteStep = (outcome: { executed?: boolean }): boolean => outcome.executed !== false;
+
+/** Does the outcome assert it produced at least one declared output value? */
+export const claimsDeclaredOutput = (outcome: StepExecutionOutcome): boolean => (
+  Object.values(outcome.declaredOutputWrites || {}).some((write) => write?.provided === true)
+);
+
+/**
+ * Guard the declared-output writes of this outcome?
+ *
+ * Two independent reasons to look: the step ran (so it owes its declared
+ * outputs the normal check), or it claims it produced a value (a cache hit
+ * asserting the record still holds the cached outputs — that claim is
+ * checkable and worth checking whether or not the step ran).
+ *
+ * A step that did not run AND claims nothing is exempt. That exemption used to
+ * be spelled as a regex over `reason`, so every new spelling of "did not
+ * execute" silently fell out of it and hit the strict fallback in
+ * `declaredOutputWriteFailures`, which hard-errors any record whose optional
+ * declared outputs are legitimately blank.
+ */
 export const shouldGuardDeclaredOutputWrites = (outcome: StepExecutionOutcome): boolean => (
-  outcome.passed && !outcome.errored && !NON_EXECUTION_REASONS.test(String(outcome.reason || ''))
+  outcome.passed && !outcome.errored && (didExecuteStep(outcome) || claimsDeclaredOutput(outcome))
 );
 
 const guardDeclaredOutputWrites = (
@@ -431,9 +468,10 @@ const guardDeclaredOutputWrites = (
   const db = ctx.db as QueryableDb;
   const guarded = new Map<string, StepExecutionOutcome>();
   for (const [recordId, outcome] of outcomes) {
-    const guardCachedGenerate = step.kind === 'generate'
-      && String(outcome.reason || '') === 'skipped_unchanged_inputs';
-    if (!guardCachedGenerate && !shouldGuardDeclaredOutputWrites(outcome)) {
+    // Cached generate skips are still guarded — not by their reason string, but
+    // because they claim `provided: true` values from the preserved asset, and
+    // shouldGuardDeclaredOutputWrites checks anything that claims a value.
+    if (!shouldGuardDeclaredOutputWrites(outcome)) {
       guarded.set(recordId, outcome);
       continue;
     }
@@ -549,6 +587,9 @@ const executeEnrichBatch = async (
   const recordedNonSuccess = result.recorded_non_success && typeof result.recorded_non_success === 'object'
     ? result.recorded_non_success as Record<string, string>
     : {};
+  const nonExecuted = result.non_executed && typeof result.non_executed === 'object'
+    ? result.non_executed as Record<string, true>
+    : {};
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
     const failure = failures.get(recordId);
@@ -568,6 +609,7 @@ const executeEnrichBatch = async (
         passed: false,
         reason: nonSuccessReason,
         errored: false,
+        executed: !nonExecuted[recordId],
         declaredOutputWrites: declaredOutputWrites[recordId],
       });
       return;
@@ -575,6 +617,7 @@ const executeEnrichBatch = async (
     outcomes.set(recordId, {
       passed: true,
       reason: nonExecutionReasons[recordId] || '',
+      executed: !nonExecuted[recordId],
       declaredOutputWrites: declaredOutputWrites[recordId],
     });
   });
@@ -629,6 +672,9 @@ const executeGenerateBatch = async (
   const recordedNonSuccess = result.recorded_non_success && typeof result.recorded_non_success === 'object'
     ? result.recorded_non_success as Record<string, string>
     : {};
+  const nonExecuted = result.non_executed && typeof result.non_executed === 'object'
+    ? result.non_executed as Record<string, true>
+    : {};
   const outcomes = new Map<string, StepExecutionOutcome>();
   rows.forEach((row) => {
     const recordId = getRecordRowId(row);
@@ -645,6 +691,7 @@ const executeGenerateBatch = async (
         passed: false,
         reason: nonSuccessReason,
         errored: false,
+        executed: !nonExecuted[recordId],
         declaredOutputWrites: declaredOutputWrites[recordId],
       });
       return;
@@ -652,6 +699,7 @@ const executeGenerateBatch = async (
     outcomes.set(recordId, {
       passed: true,
       reason: nonExecutionReasons[recordId] || '',
+      executed: !nonExecuted[recordId],
       declaredOutputWrites: declaredOutputWrites[recordId],
     });
   });
@@ -718,6 +766,7 @@ const executeComposeBatch = async (
       : {
         passed: true,
         reason: result.non_execution_reasons[recordId] || '',
+        executed: !result.non_executed[recordId],
         declaredOutputWrites: result.declared_output_writes[recordId],
       });
   });
@@ -1084,10 +1133,12 @@ const executeSequenceActionBatch = async (
         }] as const;
       }
       if (status === 'skipped' && /^channel_not_permitted:/i.test(reason)) {
+        // The channel is closed for this record: nothing was sent, nothing ran.
         return [
           recordId,
           {
             passed: true,
+            executed: false,
             reason,
             errored: false,
           },
@@ -1176,7 +1227,8 @@ const executeStepBatchUnchecked = async (
     // Always park — never LLM-execute a human task.
     return new Map(rows.map((row) => [
       getRecordRowId(row),
-      { passed: false, reason: 'awaiting_manual' },
+      // A human task is never LLM-executed: the engine ran nothing here.
+      { passed: false, executed: false, reason: 'awaiting_manual' },
     ]));
   }
 

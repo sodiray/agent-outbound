@@ -219,8 +219,10 @@ test('declared-output guard still errors for a meaningful claimed write absent f
 });
 
 test('declared-output guard permits a channel refusal', () => {
+  // The exemption is the `executed: false` statement, not the reason spelling.
   assert.equal(shouldGuardDeclaredOutputWrites({
     passed: true,
+    executed: false,
     reason: 'channel_not_permitted:readiness_not_ready',
   }), false);
 });
@@ -228,6 +230,21 @@ test('declared-output guard permits a channel refusal', () => {
 test('declared-output guard permits a non-executed step', () => {
   assert.equal(shouldGuardDeclaredOutputWrites({
     passed: true,
+    executed: false,
     reason: 'skipped_when_not_matched',
   }), false);
+});
+
+test('the reason string no longer grants an exemption on its own', () => {
+  // The defect class this replaced: a reason that LOOKS like a skip escaped the
+  // guard, and a new spelling of the same branch silently did not. Neither the
+  // familiar spelling nor a novel one exempts anything now.
+  assert.equal(shouldGuardDeclaredOutputWrites({
+    passed: true,
+    reason: 'skipped_when_not_matched',
+  }), true);
+  assert.equal(shouldGuardDeclaredOutputWrites({
+    passed: true,
+    reason: 'memoization_hit',
+  }), true);
 });

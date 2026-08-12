@@ -1529,6 +1529,14 @@ export const executeEnrichmentStepOnRecords = async ({
     record_ids: [] as string[],
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
     non_execution_reasons: {} as Record<string, string>,
+    /**
+     * Records for which this step did no work at all — `when` did not match, a
+     * cache/memoization hit, a budget ceiling. Distinct from
+     * `non_execution_reasons`, which also carries reasons for rows that DID
+     * run (rerun notes, empty-payload outcomes). Callers turn this into
+     * `StepExecutionOutcome.executed`.
+     */
+    non_executed: {} as Record<string, true>,
     /** Recorded non-pass reasons (not hard errors): empty provider payload, etc. */
     recorded_non_success: {} as Record<string, string>,
   };
@@ -1551,6 +1559,7 @@ export const executeEnrichmentStepOnRecords = async ({
       summary.skipped_when += 1;
       summary.record_ids.push(recordId);
       summary.non_execution_reasons[recordId] = skippedWhenOutcome(whenOutcome).reason;
+      summary.non_executed[recordId] = true;
       emitActivity({ event: 'row_skipped', phase: 'pipeline', step: id, row: rowLabel, reason: String(whenOutcome.reason || 'when_not_matched') });
       return;
     }
@@ -1579,13 +1588,14 @@ export const executeEnrichmentStepOnRecords = async ({
       // A cached skip executed nothing, so it claims nothing. Without this the
       // outcome reaches guardDeclaredOutputWrites with no write map, and the
       // guard falls back to requiring every declared output on the record —
-      // the MUST semantic this file's own comments reject. `skipped:fresh`
-      // escapes that guard by name; `memoization_hit` does not, so a memoized
-      // step whose optional outputs are legitimately blank (no Google reviews,
-      // no website) was hard-errored and stranded every dependent step.
-      // generate/compose/extract already attach claims on their cached paths.
+      // the MUST semantic this file's own comments reject. That is how a
+      // memoized step whose optional outputs are legitimately blank (no Google
+      // reviews, no website) was hard-errored and stranded every dependent
+      // step. The `non_executed` mark below says the same thing a second way,
+      // so the exemption no longer depends on how the reason is spelled.
       summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
       summary.non_execution_reasons[recordId] = memoization ? 'memoization_hit' : 'skipped:fresh';
+      summary.non_executed[recordId] = true;
       emitActivity({ event: 'row_skipped', phase: 'pipeline', step: id, row: rowLabel, reason: memoization ? 'memoization_hit' : 'fresh' });
       return;
     }
@@ -1629,6 +1639,8 @@ export const executeEnrichmentStepOnRecords = async ({
         summary.skipped_ceiling += 1;
         summary.record_ids.push(recordId);
         summary.non_execution_reasons[recordId] = `skipped:${reason}`;
+        // Budget ceiling: the step's work never happened for this record.
+        summary.non_executed[recordId] = true;
         emitActivity({
           event: 'row_skipped',
           phase: 'pipeline',
@@ -1644,6 +1656,11 @@ export const executeEnrichmentStepOnRecords = async ({
         const reason = `skipped:provider_no_opinion:${result.no_opinion_reason}`;
         summary.processed += 1;
         summary.record_ids.push(recordId);
+        // The provider DID run — it just returned no verdict — so this is not a
+        // non-execution. It produced no declared output either, so it says so
+        // explicitly (every claim provided:false) rather than leaving the write
+        // map absent, which the guard reads as "every declared output required".
+        summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
         summary.non_execution_reasons[recordId] = reason;
         emitActivity({ event: 'row_complete', phase: 'pipeline', step: id, row: rowLabel, outcome: reason });
         return { outcome: 'no_opinion', attempt };

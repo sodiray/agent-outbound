@@ -412,6 +412,13 @@ export const runGenerateStep = async ({
     record_ids: [] as string[],
     declared_output_writes: {} as Record<string, Record<string, { provided: boolean; value: unknown }>>,
     non_execution_reasons: {} as Record<string, string>,
+    /**
+     * Records this step did no work for — `when` did not match, the asset is
+     * locked, a cache/memoization hit. Distinct from `non_execution_reasons`,
+     * which also carries reasons for rows that DID run. Callers turn this into
+     * `StepExecutionOutcome.executed`.
+     */
+    non_executed: {} as Record<string, true>,
     /** Structural non-success completions (on_error: empty) — not hard failures, not passes. */
     recorded_non_success: {} as Record<string, string>,
   };
@@ -428,6 +435,7 @@ export const runGenerateStep = async ({
       summary.skipped_when += 1;
       summary.record_ids.push(recordId);
       summary.non_execution_reasons[recordId] = skippedWhenOutcome(whenOutcome).reason;
+      summary.non_executed[recordId] = true;
       emit({ logger, event: { event: 'row_skipped', phase: 'generate', step: id, row: rowLabel, reason: String(whenOutcome.reason || 'when_not_matched') } });
       return;
     }
@@ -439,6 +447,8 @@ export const runGenerateStep = async ({
       });
       summary.skipped_locked += 1;
       summary.non_execution_reasons[recordId] = 'skipped_locked_asset';
+      // A locked asset is preserved, not regenerated: nothing ran here.
+      summary.non_executed[recordId] = true;
       return;
     }
 
@@ -544,6 +554,10 @@ export const runGenerateStep = async ({
       summary.skipped_fresh += 1;
       if (memoizedHit) summary.memoization_hits += 1;
       summary.non_execution_reasons[recordId] = memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs';
+      // Cache hit: nothing ran. The provided:true claims above are still
+      // checked by the guard, because a claim is checkable whether or not the
+      // step executed.
+      summary.non_executed[recordId] = true;
       emit({ logger, event: { event: 'row_skipped', phase: 'generate', step: id, row: rowLabel, reason: memoizedHit ? 'memoization_hit' : 'fresh' } });
       return;
     }

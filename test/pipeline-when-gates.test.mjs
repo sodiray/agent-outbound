@@ -203,7 +203,12 @@ test('newly gated kinds execute matches and return the shared skip outcome for n
       assert.ok(skipped, `${step.kind} skipped outcome`);
       assert.doesNotMatch(String(matched.reason || ''), /^skipped:/i, `${step.kind} must execute matching records`);
       assert.deepEqual(
-        { passed: skipped.passed, reason: skipped.reason, errored: skipped.errored },
+        {
+          passed: skipped.passed,
+          executed: skipped.executed,
+          reason: skipped.reason,
+          errored: skipped.errored,
+        },
         { ...expectedSkip(currentRecords[1], root), errored: undefined },
         `${step.kind} must use the shared skip outcome`,
       );
@@ -227,7 +232,12 @@ test('enrich, generate, and newly gated steps report the identical when-skip sha
     for (const step of cases) {
       const outcome = (await executeStepBatch(context, step, step.id, [skipped])).get('tier_b');
       assert.deepEqual(
-        { passed: outcome.passed, reason: outcome.reason, errored: outcome.errored },
+        {
+          passed: outcome.passed,
+          executed: outcome.executed,
+          reason: outcome.reason,
+          errored: outcome.errored,
+        },
         expected,
         step.kind,
       );

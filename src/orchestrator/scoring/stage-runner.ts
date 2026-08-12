@@ -326,7 +326,7 @@ export const runScoreStage = async ({
     ? config.score as Record<string, unknown>
     : {};
   const sampleCount = resolvedScoreSamples(scoreConfig.samples);
-  const outcomes = new Map<string, { passed: boolean; reason: string; errored?: boolean; declaredOutputWrites?: Record<string, { provided: boolean; value: unknown }> }>();
+  const outcomes = new Map<string, { passed: boolean; reason: string; errored?: boolean; executed?: boolean; declaredOutputWrites?: Record<string, { provided: boolean; value: unknown }> }>();
   for (const initialRecord of rows) {
     const recordId = getRecordRowId(initialRecord);
     const inputs = resolveStageInputs({ step, record: initialRecord });
@@ -334,7 +334,7 @@ export const runScoreStage = async ({
     if (requiredSkip) {
       // Non-execution (not a confident grade): same gate as missing required,
       // with a distinct reason token when the input is present but below min_chars.
-      outcomes.set(recordId, { passed: true, reason: requiredSkip });
+      outcomes.set(recordId, { passed: true, executed: false, reason: requiredSkip });
       continue;
     }
     // Truncation is not a skip — surface it on the run reason so oversized
@@ -384,7 +384,17 @@ export const runScoreStage = async ({
       if (memoizedHit) {
         emitActivity({ event: 'row_skipped', phase: 'scoring', step: stepId, row: String(initialRecord.business_name || recordId), reason: 'memoization_hit' });
       }
-      outcomes.set(recordId, { passed: true, reason: memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs' });
+      // No grade was computed here, so this outcome claims no declared output.
+      // Saying `executed: false` is what earns the exemption from the
+      // declared-output guard; until now the exemption came only from the
+      // cache predicate above happening to require hasAllDeclaredOutputs, so
+      // the day that predicate loosened this branch would have started
+      // hard-erroring records with a legitimately blank declared output.
+      outcomes.set(recordId, {
+        passed: true,
+        executed: false,
+        reason: memoizedHit ? 'memoization_hit' : 'skipped_unchanged_inputs',
+      });
       continue;
     }
     const criteria = normalizedCriteria(step.criteria);
