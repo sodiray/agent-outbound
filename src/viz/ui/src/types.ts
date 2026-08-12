@@ -1,7 +1,4 @@
-import type {
-  ResolvedReviewDetailSection,
-  ReviewDetailSection,
-} from '../../review-detail.js';
+import type { ReviewDetailSection } from '../../review-detail.js';
 
 export type RecordValue = string | number | boolean | null;
 export type RecordRow = Record<string, RecordValue>;
@@ -112,49 +109,6 @@ export type ReviewQueueResponse = {
   limit: number;
   offset: number;
   records: RecordRow[];
-};
-
-export type DraftContentEquivalence = {
-  status: string;
-  reason?: string;
-};
-
-export type DraftRow = {
-  draft_id: string;
-  row_id: string;
-  sequence_name?: string;
-  step_number?: number;
-  step_id?: string;
-  channel?: string;
-  status: string;
-  subject?: string;
-  body?: string;
-  reason?: string;
-  business_name?: string;
-  content_source?: string;
-  content_equivalence?: DraftContentEquivalence;
-  detail_declaration?: ReviewDetailSection[];
-  detail_sections?: ResolvedReviewDetailSection[] | null;
-  created_at?: string;
-  updated_at?: string;
-  [key: string]: unknown;
-};
-
-export type DraftsListResponse = {
-  status: string;
-  total: number;
-  limit: number;
-  offset: number;
-  next_cursor: string | null;
-  counts: Record<string, number>;
-  drafts: DraftRow[];
-};
-
-export type DraftDetailResponse = {
-  draft: DraftRow;
-  record: RecordRow;
-  detail_declaration?: ReviewDetailSection[];
-  detail_sections?: ResolvedReviewDetailSection[] | null;
 };
 
 export type ReviewVerdict = 'pass' | 'drop';

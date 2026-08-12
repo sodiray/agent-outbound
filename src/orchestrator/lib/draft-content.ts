@@ -47,8 +47,7 @@ const resolveToolCallArguments = ({
   );
 };
 
-/** Resolve a step from its sequence first, then the flattened pipeline. */
-export const configuredSequenceStep = ({
+const configuredSequenceStep = ({
   config,
   sequenceName,
   stepId,
@@ -68,23 +67,6 @@ export const configuredSequenceStep = ({
     String(candidate.id || '') === stepId
   ));
   return pipelineStep || null;
-};
-
-/** Detail sections declared for draft approval (step first, then sequence). */
-export const draftDetailDeclaration = ({
-  config,
-  sequenceName,
-  stepId,
-}: {
-  config: Record<string, unknown>;
-  sequenceName: string;
-  stepId: string;
-}): unknown[] | undefined => {
-  const step = configuredSequenceStep({ config, sequenceName, stepId });
-  if (step && Array.isArray(step.detail) && step.detail.length > 0) return step.detail;
-  const sequence = asRecord(asRecord(config.sequences)[sequenceName]);
-  if (Array.isArray(sequence.detail) && sequence.detail.length > 0) return sequence.detail;
-  return undefined;
 };
 
 export const hashRenderedOutboundContent = ({
