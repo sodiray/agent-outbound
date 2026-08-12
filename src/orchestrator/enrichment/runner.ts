@@ -1576,6 +1576,15 @@ export const executeEnrichmentStepOnRecords = async ({
     if (fresh) {
       summary.skipped_fresh += 1;
       if (memoization) summary.memoization_hits += 1;
+      // A cached skip executed nothing, so it claims nothing. Without this the
+      // outcome reaches guardDeclaredOutputWrites with no write map, and the
+      // guard falls back to requiring every declared output on the record —
+      // the MUST semantic this file's own comments reject. `skipped:fresh`
+      // escapes that guard by name; `memoization_hit` does not, so a memoized
+      // step whose optional outputs are legitimately blank (no Google reviews,
+      // no website) was hard-errored and stranded every dependent step.
+      // generate/compose/extract already attach claims on their cached paths.
+      summary.declared_output_writes[recordId] = declaredOutputWritesFor({ stepConfig, outputs: {} });
       summary.non_execution_reasons[recordId] = memoization ? 'memoization_hit' : 'skipped:fresh';
       emitActivity({ event: 'row_skipped', phase: 'pipeline', step: id, row: rowLabel, reason: memoization ? 'memoization_hit' : 'fresh' });
       return;
