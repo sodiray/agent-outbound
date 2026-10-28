@@ -2,6 +2,7 @@ import { Link, useLocation } from 'react-router-dom';
 
 const LINKS = [
   { to: '/', label: 'Table' },
+  { to: '/pipeline', label: 'Pipeline' },
   { to: '/map', label: 'Map' },
   { to: '/review', label: 'Review' },
   { to: '/sequences', label: 'Sequences' },

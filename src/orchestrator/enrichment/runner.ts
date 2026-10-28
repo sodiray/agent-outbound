@@ -13,6 +13,7 @@ import { mapWithConcurrency } from '../lib/concurrency.js';
 import { readToolCatalog } from '../lib/tool-catalog.js';
 import { getTargetColumnsForStepConfig } from '../lib/step-columns.js';
 import { resolveStageInputs } from '../lib/stage-inputs.js';
+import { stageInputRecord } from '../lib/stage-inputs.js';
 import { flattenPipelineSteps, stepStatusColumn } from '../lib/subpipelines.js';
 import { isBudgetExceededError } from '../runtime/contract.js';
 import { assertPhaseModelReferences } from '../lib/model-validation.js';
@@ -423,6 +424,39 @@ export const enrichDependencyHashes = ({
   };
 };
 
+const PAID_TOOL_INPUT_FINGERPRINT = 'paid-tool-inputs-v1';
+
+const paidToolEffect = (stepConfig: Record<string, unknown>): boolean => {
+  const specs = [stepConfig.tool, ...(Array.isArray(stepConfig.waterfall) ? stepConfig.waterfall : []), ...(Array.isArray(stepConfig.fallback_tools) ? stepConfig.fallback_tools : [])]
+    .filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value));
+  return specs.some((spec) => {
+    const effect = spec.effect && typeof spec.effect === 'object' ? spec.effect as Record<string, unknown> : {};
+    const effectClass = String(effect.class || '').trim().toLowerCase();
+    return effectClass === 'data_enrichment'
+      || effectClass === 'external_mutation'
+      || effectClass === 'human_contact'
+      || (effectClass === 'data_lookup' && Number(stepConfig.unit_cost_usd || 0) > 0);
+  });
+};
+
+const paidToolInputHashes = ({ stepConfig, record }: { stepConfig: Record<string, unknown>; record: Record<string, unknown> }) => {
+  const args = { ...(stepConfig.args && typeof stepConfig.args === 'object' ? stepConfig.args as Record<string, unknown> : {}) };
+  const mapped = stepConfig.args_map && typeof stepConfig.args_map === 'object' ? stepConfig.args_map as Record<string, unknown> : {};
+  const inputs = stageInputRecord({ step: { kind: 'enrich', ...stepConfig }, record });
+  for (const [name, field] of Object.entries(mapped)) {
+    const value = inputs[String(field || '').trim()];
+    if (value !== undefined && value !== null && String(value).trim() !== '') args[name] = value;
+  }
+  const inputHash = stableHash({ version: PAID_TOOL_INPUT_FINGERPRINT, args });
+  return { inputHash, policyHash: PAID_TOOL_INPUT_FINGERPRINT, depHash: inputHash };
+};
+
+const paidToolFresh = ({ cached, stepConfig, record, force }: { cached: any; stepConfig: Record<string, unknown>; record: Record<string, unknown>; force: boolean }) => {
+  if (force || stepConfig.rerun === true || !cached) return false;
+  if (String(cached.policy_hash || '') !== PAID_TOOL_INPUT_FINGERPRINT) return true;
+  return String(cached.input_hash || cached.dep_hash || '') === paidToolInputHashes({ stepConfig, record }).inputHash;
+};
+
 export const enrichDepHash = (stepConfig: any, depValues: Record<string, any> = {}, executionConfig?: Record<string, unknown>) =>
   executionConfig === undefined
     ? stableHash({ depValues, config: materialEnrichConfig(stepConfig) })
@@ -787,6 +821,25 @@ export const outputOutcomeFor = ({ outputs, expectedOutputs }: { outputs: any; e
   return hasAnyValue ? 'ok' : 'empty';
 };
 
+const enrichOutputOutcomeFor = ({
+  outputs,
+  expectedOutputs,
+  stepConfig,
+}: {
+  outputs: Record<string, unknown>;
+  expectedOutputs: Record<string, unknown>;
+  stepConfig: Record<string, unknown>;
+}) => {
+  if (outputOutcomeFor({ outputs, expectedOutputs }) === 'ok') return 'ok';
+  const legacyColumns = getLegacyColumns(stepConfig);
+  const outputFields = getOutputFields(stepConfig);
+  const hasExplicitDeclaredOutput = Object.keys(expectedOutputs).some((name) => (
+    Object.hasOwn(outputs, name)
+    || Object.hasOwn(outputs, outputTargetFor({ name, legacyColumns, outputFields }))
+  ));
+  return hasExplicitDeclaredOutput ? 'ok' : 'empty';
+};
+
 const declaredOutputsHaveAnyValue = ({ record, expectedOutputs }: { record: Record<string, unknown>; expectedOutputs: Record<string, unknown> }) => {
   const expectedNames = Object.keys(expectedOutputs || {});
   if (expectedNames.length === 0) return true;
@@ -963,9 +1016,10 @@ export const declaredOutputWritesFor = ({
   return Object.fromEntries(Object.entries(declaredOutputs).map(([name, definition]) => {
     const target = outputTargetFor({ name, legacyColumns, outputFields });
     const legacyTarget = String(legacyColumns[name] || '').trim();
+    const outputWasProvided = Object.hasOwn(outputs, name) || Object.hasOwn(outputs, target);
     const provided = persistedPatch
-      ? Object.hasOwn(persistedPatch, target) && !isBlank(persistedPatch[target])
-      : Object.hasOwn(outputs, name);
+      ? outputWasProvided && Object.hasOwn(persistedPatch, target)
+      : outputWasProvided;
     return [target, {
       provided,
       value: provided
@@ -1011,8 +1065,9 @@ const ensureEvidenceColumns = (db: any) => {
 };
 
 /**
- * Apply tool/enrich outputs without clobbering prior non-blank fields with empties,
- * and attach immutable retrieval snapshot + observations (or tool_failure).
+ * Apply tool/enrich outputs and attach immutable retrieval snapshot + observations
+ * (or tool_failure). Successful declared empty values are writes; failure paths
+ * preserve prior non-blank values.
  */
 const applyOutputsWithEvidence = ({
   db,
@@ -1044,7 +1099,11 @@ const applyOutputsWithEvidence = ({
         outputs,
       });
   const action = String(stepConfig.action || '').trim().toLowerCase();
-  const preservedPatch = preservePriorNonBlankFields({ record, patch: rawPatch });
+  const preservedPatch = preservePriorNonBlankFields({
+    record,
+    patch: rawPatch,
+    allowBlankKeys: failed ? [] : Object.keys(rawPatch),
+  });
   const patch: Record<string, unknown> = action === 'policy_apply' && Object.hasOwn(rawPatch, 'fit_score')
     ? { ...preservedPatch, fit_score: rawPatch.fit_score }
     : preservedPatch;
@@ -1156,6 +1215,7 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
   const stepConfig = enrichmentStepConfig(step);
   const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
   const memoization = memoizationConfigForStep(stepConfig);
+  const paidTool = paidToolEffect(stepConfig);
   const statusColumn = stepStatusColumn(id);
   const whenPredicate = whenPredicateForStep({ step, stepConfig });
   const result = { would_enrich: 0, skip_fresh: 0, skip_when: 0 };
@@ -1163,7 +1223,9 @@ export const countEnrichWorkForStep = ({ db, listDir = '', config = {}, step, st
     const whenOutcome = shouldRunForRecord({ record, predicate: whenPredicate, listDir });
     if (!whenOutcome.passed) { result.skip_when += 1; continue; }
     const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: id });
-    const fresh = memoization
+    const fresh = paidTool
+      ? paidToolFresh({ cached, stepConfig, record, force })
+      : memoization
       ? isMemoizationFresh({ cached, stepConfig, record, executionConfig, force })
         && memoizationHasSettledOutcome({ record, statusColumn })
       : isEnrichFresh({
@@ -1499,6 +1561,7 @@ export const executeEnrichmentStepOnRecords = async ({
   const stepConfig = enrichmentStepConfig(step);
   const executionConfig = executionConfigForEnrichmentStep({ stepConfig, config, listDir });
   const memoization = memoizationConfigForStep(stepConfig);
+  const paidTool = paidToolEffect(stepConfig);
   const declaredOutputs = getDeclaredOutputs(stepConfig || {});
   const legacyColumns = getLegacyColumns(stepConfig || {});
   const outputZod = buildOutputZodSchema(declaredOutputs, legacyColumns);
@@ -1565,7 +1628,9 @@ export const executeEnrichmentStepOnRecords = async ({
     }
 
     const depValues = dependencyValuesForRecord({ stepConfig, record: currentRecord });
-    const dependencyHashes = memoization
+    const dependencyHashes = paidTool
+      ? paidToolInputHashes({ stepConfig, record: currentRecord })
+      : memoization
       ? memoizationCacheDetails({ memoization, stepConfig, record: currentRecord, executionConfig })
       : enrichDependencyHashes({ stepConfig, depValues, executionConfig });
     const cached = readStaleness({ db, recordId, stepId: id });
@@ -1575,7 +1640,9 @@ export const executeEnrichmentStepOnRecords = async ({
       : legacyColumns;
     const permanentFailureFresh = isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
       && String(currentRecord[statusColumn] || '').trim().toLowerCase() === 'failed';
-    const fresh = memoization
+    const fresh = paidTool
+      ? paidToolFresh({ cached, stepConfig, record: currentRecord, force })
+      : memoization
       ? permanentFailureFresh || (
         isMemoizationFresh({ cached, stepConfig, record: currentRecord, executionConfig, force })
         && memoizationHasSettledOutcome({ record: currentRecord, statusColumn })
@@ -1583,6 +1650,16 @@ export const executeEnrichmentStepOnRecords = async ({
       : isEnrichFresh({ cached, stepConfig, depValues, executionConfig, force })
         && enrichStepHasDurableOutcome({ record: currentRecord, expectedOutputs, statusColumn });
     if (fresh) {
+      if (paidTool && String(cached?.policy_hash || '') !== PAID_TOOL_INPUT_FINGERPRINT) {
+        writeStaleness({
+          db,
+          recordId,
+          stepId: id,
+          ...paidToolInputHashes({ stepConfig, record: currentRecord }),
+          cacheTtlSeconds: ttlToSeconds(stepConfig?.cache),
+          cacheTtl: String(stepConfig?.cache || ''),
+        });
+      }
       summary.skipped_fresh += 1;
       if (memoization) summary.memoization_hits += 1;
       // A cached skip executed nothing, so it claims nothing. Without this the
@@ -1672,7 +1749,7 @@ export const executeEnrichmentStepOnRecords = async ({
       const outputs = noContentReason
         ? {}
         : canonicalDeclaredOutputs({ stepConfig, outputs: result.outputs || {} });
-      const outcome = noContentReason ? 'empty' : outputOutcomeFor({ outputs, expectedOutputs });
+      const outcome = noContentReason ? 'empty' : enrichOutputOutcomeFor({ outputs, expectedOutputs, stepConfig });
 
       recordCostEvent({
         db,
@@ -1747,8 +1824,8 @@ export const executeEnrichmentStepOnRecords = async ({
           recordId,
           stepId: id,
           ...dependencyHashes,
-          cacheTtlSeconds: memoization ? memoizationTtlSeconds(memoization) : ttlToSeconds(stepConfig?.cache),
-          cacheTtl: memoization ? memoizationCacheTtl(memoization) : String(stepConfig?.cache || ''),
+          cacheTtlSeconds: memoization && !paidTool ? memoizationTtlSeconds(memoization) : ttlToSeconds(stepConfig?.cache),
+          cacheTtl: memoization && !paidTool ? memoizationCacheTtl(memoization) : String(stepConfig?.cache || ''),
         });
       } else {
         clearStaleness({ db, recordId, stepId: id });
@@ -2256,7 +2333,7 @@ export const runEnrichment = async ({ listDir, stepId = '', where = '', limit = 
               ? PROVIDER_RETURNED_NO_CONTENT_REASON
               : '';
             const outputs = noContentReason ? {} : (result.outputs || {});
-            const outcome = noContentReason ? 'empty' : outputOutcomeFor({ outputs, expectedOutputs });
+            const outcome = noContentReason ? 'empty' : enrichOutputOutcomeFor({ outputs, expectedOutputs, stepConfig });
             if (
               !noContentReason
               && outcome === 'empty'

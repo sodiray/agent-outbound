@@ -123,3 +123,16 @@ rebuild the UI) to pick up backend changes.
   tight enough for a 60px sticky column. Dropped/unscored rows show a muted "—".
 - Sticky offsets: outcome left:0 (44px), fit left:44px (60px), name left:104px; the right-edge
   divider stays on the name column (last frozen).
+
+## 2026-10-24 Pipeline canvas and review panel
+
+- The viewer has a Pipeline route alongside the table. It presents the configured pipeline as an automatic top-down graph whose dependencies use the same explicit and inferred graph logic as validation; conditional branches and `on_event` turns stay visible as conditional edges and labelled per-event groups.
+- Nodes show kind, identity, tool/model, live progression counts, recorded spend, and active-run state. Review nodes make a nonzero awaiting-decision count prominent.
+- A selected node opens the existing standard right-side drawer over the canvas. Non-review drawers show definition, counts, and records at the step; review drawers provide the stage queue, record detail/timeline, editable `edit_fields`, previous/next navigation, decisions, and undo.
+- Pipeline selection is deep-linkable with `step` and `record` query parameters. Review decisions use the same validation and mutation path as the CLI, including configured edit-field enforcement.
+
+## 2026-10-25 Review stays on the Review page
+
+- The pipeline page does not host review. A top-level review node's panel shows its definition, awaiting count, and a **Review Leads · N** button that opens `/review?stage=<stage_id>` with that tab active. Everything about review lives on the Review page; everything about the pipeline and its steps lives on the Pipeline page (product owner, 2026-10-25).
+- The Review page carries its active stage tab in the URL (`?stage=`), so links from the pipeline and reloads land on the right tab.
+- The decision-safety gate (`src/viz/review-gate.ts`) applies on the Review page: a decision targets only the record on screen (the selected row, or the open detail once it has loaded), one decision or undo is in flight at a time, Space/Enter on a focused control act on that control, and held keys never decide.

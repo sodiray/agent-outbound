@@ -7,6 +7,7 @@ import { ReviewRoute } from './ReviewRoute.js';
 import { RejectedRoute } from './RejectedRoute.js';
 import { SequencesRoute } from './SequencesRoute.js';
 import { ManualRoute } from './ManualRoute.js';
+import { PipelineRoute } from './PipelineRoute.js';
 import './styles.css';
 
 createRoot(document.getElementById('root') as HTMLElement).render(
@@ -15,6 +16,7 @@ createRoot(document.getElementById('root') as HTMLElement).render(
       <Routes>
         <Route path="/" element={<App />} />
         <Route path="/map" element={<MapRoute />} />
+        <Route path="/pipeline" element={<PipelineRoute />} />
         <Route path="/review" element={<ReviewRoute />} />
         <Route path="/sequences" element={<SequencesRoute />} />
         <Route path="/manual" element={<ManualRoute />} />

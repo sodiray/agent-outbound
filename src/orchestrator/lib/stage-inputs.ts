@@ -159,7 +159,15 @@ export const declaredStageInputs = (stepValue: unknown): string[] => {
   const contactSourceField = text(step.kind).toLowerCase() === 'contact_source'
     ? [fieldRoot(config.field), fieldRoot(config.name_field), fieldRoot(config.title_field)].filter(Boolean)
     : [];
-  return [...new Set([...explicit, ...contactSourceField])];
+  const kind = text(step.kind).toLowerCase();
+  const decideState = kind === 'decide' ? strings(step.state) : [];
+  const reviewFields = kind === 'review'
+    ? [
+      ...referencesForReview(step).map((reference) => reference.field),
+      ...conditionReferences(step.when, 'when').map((reference) => reference.field),
+    ]
+    : [];
+  return [...new Set([...explicit, ...contactSourceField, ...decideState, ...reviewFields])];
 };
 
 export type StageInputTruncation = {
@@ -374,6 +382,8 @@ export const stageInputReferences = (stepValue: unknown, options: StageInputDiag
     ...referencesForArgsMap(config.args_map),
     ...actionReferences(step, config),
   ];
+  if (kind === 'action') return [...direct, ...referencesForArgsMap(config.args_map)];
+  if (kind === 'await_event') return [...direct, { field: text(config.reference_field), source: 'reference_field' }];
   if (kind === 'extract') {
     const from = Array.isArray(config.from) ? config.from : [config.from];
     return [
@@ -394,6 +404,12 @@ export const stageInputReferences = (stepValue: unknown, options: StageInputDiag
     ];
   }
   if (kind === 'compose') return [...direct, ...referencesForInputMap(config.inputs, 'inputs')];
+  if (kind === 'decide') {
+    return [
+      ...direct,
+      ...strings(step.state).map((field) => ({ field, source: 'state' })),
+    ];
+  }
   if (kind === 'assign') {
     const rules = Array.isArray(config.rules) ? config.rules : [];
     return [

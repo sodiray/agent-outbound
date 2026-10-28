@@ -17,7 +17,7 @@ import { normalizeExcludeRules } from '../lib/source-exclude.js';
 import { getMcpClient } from '../runtime/mcp.js';
 import { logSourcingEvent, openListDb } from '../runtime/db.js';
 import { emitActivity } from '../runtime/activity.js';
-import { getIdentityFields } from './dedup.js';
+import { createDedupRunState, getIdentityFields } from './dedup.js';
 import {
   dedupRowsByKey,
   loadExistingDedupValues,
@@ -266,6 +266,17 @@ export const sourceTerritory = async ({ listDir, territoryId, opts = {} }: { lis
   const identityFields = getIdentityFields(config);
   const excludeRules = normalizeExcludeRules(config?.source?.exclude);
   const dedupKey = normalizeDedupKey(config?.source?.dedup_key || 'place_id');
+  const dedupConfig = {
+    dedupKey,
+    aiDedup: config?.source?.ai_dedup,
+    maxCandidates: Number(config?.source?.ai_dedup_max_candidates || 3),
+    fields: config?.source?.ai_dedup_fields,
+    maxCharsPerField: config?.source?.ai_dedup_max_chars_per_field,
+    context: config?.source?.ai_dedup_context,
+  };
+  const dedupRunState = createDedupRunState({
+    maxCalls: Number(config?.source?.ai_dedup_max_calls ?? 100),
+  });
   const nearDuplicate = config?.source?.near_duplicate || {};
   const state = {
     calls: 0,
@@ -377,6 +388,8 @@ export const sourceTerritory = async ({ listDir, territoryId, opts = {} }: { lis
       listName: config?.list?.name || 'list',
       listDir,
       aiConfig: config?.ai || {},
+      dedupConfig,
+      dedupRunState,
       excludeRules,
       nearDuplicate,
     });

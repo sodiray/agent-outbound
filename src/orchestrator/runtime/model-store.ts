@@ -7,6 +7,7 @@ export const MODELS_SCHEMA_VERSION = '1.0.0';
 export type ProviderModelState = {
   provider: string;
   models: string[];
+  capabilities: Record<string, string[]>;
   updated_at: string;
 };
 
@@ -23,6 +24,18 @@ const normalizeModelList = (models: string[]) => Array.from(new Set(
     .map((item) => String(item || '').trim())
     .filter(Boolean)
 )).sort((a, b) => a.localeCompare(b));
+
+const normalizeCapabilities = (capabilities: unknown, models: string[]) => Object.fromEntries(
+  Object.entries(capabilities && typeof capabilities === 'object' ? capabilities : {})
+    .flatMap(([rawModelId, parameters]): Array<[string, string[]]> => {
+      const modelId = String(rawModelId || '').trim();
+      if (!modelId || !models.includes(modelId)) return [];
+      const normalized = Array.from(new Set((Array.isArray(parameters) ? parameters : [])
+        .map((parameter) => String(parameter || '').trim().toLowerCase())
+        .filter(Boolean))).sort((left, right) => left.localeCompare(right));
+      return [[modelId, normalized]];
+    }),
+);
 
 export const defaultModelsState = (): ModelsState => ({
   schema_version: MODELS_SCHEMA_VERSION,
@@ -44,6 +57,7 @@ export const readModelsState = (): ModelsState => {
       normalizedProviders[provider] = {
         provider,
         models: normalizeModelList(modelList),
+        capabilities: normalizeCapabilities((value as any)?.capabilities, normalizeModelList(modelList)),
         updated_at: String((value as any)?.updated_at || parsed?.updated_at || ''),
       };
     }
@@ -70,8 +84,12 @@ export const writeModelsState = (state: ModelsState) => {
     const provider = String(providerId || '').trim().toLowerCase();
     if (!provider) continue;
     normalized.providers[provider] = {
-      provider,
-      models: normalizeModelList(Array.isArray((value as any)?.models) ? (value as any).models : []),
+        provider,
+        models: normalizeModelList(Array.isArray((value as any)?.models) ? (value as any).models : []),
+        capabilities: normalizeCapabilities(
+          (value as any)?.capabilities,
+          normalizeModelList(Array.isArray((value as any)?.models) ? (value as any).models : []),
+        ),
       updated_at: String((value as any)?.updated_at || normalized.updated_at),
     };
   }
@@ -84,25 +102,44 @@ export const setProviderModels = ({
   state,
   providerId,
   models,
+  capabilities,
 }: {
   state: ModelsState;
   providerId: string;
   models: string[];
+  capabilities?: Record<string, string[]>;
 }) => {
   const provider = String(providerId || '').trim().toLowerCase();
   if (!provider) return state;
+  const normalizedModels = normalizeModelList(models || []);
+  const capabilitySource = capabilities === undefined
+    ? state.providers?.[provider]?.capabilities || {}
+    : capabilities;
   const next = {
     ...state,
     providers: {
       ...(state?.providers || {}),
       [provider]: {
         provider,
-        models: normalizeModelList(models || []),
+        models: normalizedModels,
+        capabilities: normalizeCapabilities(capabilitySource, normalizedModels),
         updated_at: nowIso(),
       },
     },
   };
   return next;
+};
+
+export const modelParameterSupport = ({ modelRef, parameter }: { modelRef: string; parameter: string }): 'supported' | 'unsupported' | 'unknown' => {
+  const text = String(modelRef || '').trim();
+  const slash = text.indexOf('/');
+  if (slash <= 0) return 'unknown';
+  const provider = text.slice(0, slash).toLowerCase();
+  if (provider !== 'openrouter') return 'supported';
+  const modelId = text.slice(slash + 1);
+  const capabilities = readModelsState().providers?.[provider]?.capabilities;
+  if (!capabilities || !Object.prototype.hasOwnProperty.call(capabilities, modelId)) return 'unknown';
+  return capabilities[modelId].includes(String(parameter || '').trim().toLowerCase()) ? 'supported' : 'unsupported';
 };
 
 export const listSupportedModels = ({

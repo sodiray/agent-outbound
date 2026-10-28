@@ -157,6 +157,7 @@ All paths in config and step descriptions are **relative to the list directory**
 - `architecture.md` — layered model, action modules, capability prompts, CLI/serve interface, data flow, config schema
 - `runtime.md` — SDK + MCP reference (client, auth, tools, action convention, serve mode, polling, errors, SQLite client)
 - `storage.md` — SQLite schema overview, WAL concurrency, single-schema definition, backup
+- `viewer.md` — local viewer stack, pipeline graph contract, panels, and live state
 - `data-schema.md` — table-by-table column reference
 - `integrations.md` — tool reference format, auth, versioning
 - `performance.md` — prioritized performance optimization plan (config-time tool resolution, parallel enrichment, dependency DAG, batch filters, prompt caching)

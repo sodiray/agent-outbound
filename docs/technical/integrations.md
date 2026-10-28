@@ -4,7 +4,7 @@ Integration behavior is tool-agnostic. See `tool-agnosticism.md` for the enginee
 
 ## Principles
 
-- Product code never hardcodes vendor/tool names for capabilities.
+- Product code never hardcodes vendor/tool names for capabilities. External tools and event continuation use provider-neutral contracts; see [External tools](./external-tools.md).
 - Config author discovers, resolves, and pins toolkits/tools at config time.
 - Resolved tool slugs and schemas are stored in the config (`tool.tools` + `tool_catalog`).
 - At runtime, tool schemas are read from the config. No Composio discovery calls at runtime.
@@ -38,3 +38,5 @@ See `runtime.md § Tool Loading` and `performance.md § Priority 1`.
 ## Runtime Execution
 
 `loadTools` reads schemas from the config's `tool_catalog`, synthesizes Vercel AI SDK tool definitions, and binds `execute()` to `COMPOSIO_MULTI_EXECUTE_TOOL`. No provider lookup tables are used by orchestrator code.
+
+For a generic side-effecting `action`, a command tool may return the reserved control object `{"ao_outcome":"deferred","reason":"<short text>","retry_after":"<optional ISO-8601 timestamp>"}` on successful JSON stdout. The object has no other keys, writes no record outputs, releases the idempotency claim, and leaves the action deferred until its optional retry time. Any malformed or mixed result is treated as an uncertain external effect, not as a retryable defer.

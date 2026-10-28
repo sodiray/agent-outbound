@@ -1,5 +1,5 @@
 import { AgentOutboundError } from './contract.js';
-import { assertSupportedModel } from './model-store.js';
+import { assertSupportedModel, modelParameterSupport } from './model-store.js';
 import { getProviderById, getProviderCredentials, type RuntimeProvider } from './providers.js';
 
 export const LEGACY_MODEL_HINTS: Record<string, string> = {
@@ -124,12 +124,14 @@ export const resolveRuntimeModel = async ({
   aiConfig = {},
   enforceSupported = true,
   reasoning = false,
+  temperature,
 }: {
   model?: string;
   role?: ActionRole;
   aiConfig?: any;
   enforceSupported?: boolean;
   reasoning?: boolean;
+  temperature?: number;
 }) => {
   const resolved = resolveConfiguredModelRef({ model, role, aiConfig });
   const parsed = parseProviderModel(resolved.modelRef);
@@ -148,7 +150,10 @@ export const resolveRuntimeModel = async ({
   if (enforceSupported) {
     assertSupportedModel(parsed.modelRef);
   }
-  const providerOptions = provider.getProviderOptions ? provider.getProviderOptions(parsed.modelId, { reasoning }) : {};
+  const acceptedTemperature = temperature !== undefined && modelParameterSupport({ modelRef: parsed.modelRef, parameter: 'temperature' }) === 'supported'
+    ? temperature
+    : undefined;
+  const providerOptions = provider.getProviderOptions ? provider.getProviderOptions(parsed.modelId, { reasoning, temperature: acceptedTemperature }) : {};
   const built = await provider.buildModel(parsed.modelId, credentials.apiKey, credentials.baseURL, providerOptions);
   return {
     provider,

@@ -261,15 +261,19 @@ const persistAiDedup = ({
       identityHash: result.identity_hash,
     });
   }
-  recordCostEvent({
-    db,
-    listDir,
-    recordId,
-    stepId: 'sourcing:dedup',
-    model: text(result.model),
-    provider: text(result.provider),
-    usage: result.usage || null,
-  });
+  const confirmations = Array.isArray(result.confirmations) ? result.confirmations : [];
+  const costs = confirmations.length > 0 ? confirmations : [result];
+  for (const confirmation of costs) {
+    recordCostEvent({
+      db,
+      listDir,
+      recordId,
+      stepId: 'sourcing:dedup',
+      model: text(confirmation.model),
+      provider: text(confirmation.provider),
+      usage: confirmation.usage || null,
+    });
+  }
 };
 
 export const resolveLinkedinCompany = async ({

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import { executeEnrichmentStepOnRecords } from '../dist/orchestrator/enrichment/
 import { runGenerateStep } from '../dist/orchestrator/generate/runner.js';
 import { runComposeStep } from '../dist/orchestrator/compose/runner.js';
 import { runScoreStage } from '../dist/orchestrator/scoring/stage-runner.js';
+import { runPipelineDataflow } from '../dist/orchestrator/pipeline/dataflow.js';
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 import { normalizeConfig } from '../dist/schemas/config.js';
 
@@ -52,6 +53,73 @@ const execute = ({ db, root, step, executeAction, force = false }) => executeEnr
   force,
 });
 
+const memoizationPipelineYaml = ({ includeDomain = false } = {}) => `
+ai:
+  default_model: openrouter/anthropic/claude-haiku-4.5
+sequences:
+  default: { steps: [] }
+pipeline:
+  - kind: wait
+    id: deferred_branch
+    after: 99d
+  - kind: review
+    id: exa_only_review
+    when: { match: all, conditions: [{ field: apollo_person_id, operator: matches, value: '^exa:' }] }
+    depends_on: [deferred_branch]
+    fields: [business_name]
+  - kind: enrich
+    id: verify_contact_email
+    action: linkedin_company_resolution
+    inputs: [linkedin_name, linkedin_headline, linkedin_urn, business_name, city, address, source_query, sourced_at]
+    output_map:
+      company_resolution: company_resolution
+      ${includeDomain ? 'linkedin_company_url: linkedin_company_url' : ''}
+    outputs:
+      company_resolution: { type: string, description: Company resolution. }
+      ${includeDomain ? 'linkedin_company_url: { type: string, description: LinkedIn company URL. }' : ''}
+  - kind: filter
+    id: corporate_email
+    type: field_check
+    on_fail: drop
+    depends_on: [verify_contact_email]
+    inputs: [${includeDomain ? 'linkedin_company_url' : 'company_resolution'}]
+    conditions:
+      - field: ${includeDomain ? 'linkedin_company_url' : 'company_resolution'}
+        operator: is_not_empty
+  - kind: review
+    id: review_contact
+    depends_on: [corporate_email]
+    label: Contact review
+    inputs: [company_resolution${includeDomain ? ', linkedin_company_url' : ''}]
+    fields: [company_resolution${includeDomain ? ', linkedin_company_url' : ''}]
+`;
+
+const parkedReviewPipelineYaml = ({ includeInsertedStep = false } = {}) => `
+ai:
+  default_model: openrouter/anthropic/claude-haiku-4.5
+sequences:
+  default: { steps: [] }
+pipeline:
+  - kind: enrich
+    id: settled_lookup
+    action: linkedin_company_resolution
+    output_map: { linkedin_company_url: linkedin_company_url }
+    outputs: { linkedin_company_url: { type: string, description: Settled lookup result. } }
+    inputs: [linkedin_name, linkedin_headline, linkedin_urn, business_name, city, address, source_query, sourced_at]
+  ${includeInsertedStep ? `- kind: enrich
+    id: inserted_lookup
+    action: linkedin_company_resolution
+    output_map: { company_resolution: company_resolution }
+    outputs: { company_resolution: { type: string, description: Newly requested review value. } }
+    inputs: [linkedin_name, linkedin_headline, linkedin_urn, business_name, city, address, source_query, sourced_at]` : ''}
+  - kind: review
+    id: approve_handoff
+    depends_on: [${includeInsertedStep ? 'settled_lookup, inserted_lookup' : 'settled_lookup'}]
+    fields: [linkedin_company_url${includeInsertedStep ? ', company_resolution' : ''}]
+score:
+  criteria: []
+`;
+
 test('enrich steps memoize by default and replay identical outputs for unchanged resolved inputs', async () => {
   let providerCalls = 0;
   const executeAction = async ({ record }) => {
@@ -77,6 +145,175 @@ test('enrich steps memoize by default and replay identical outputs for unchanged
     assert.equal(forced.processed, 1);
     assert.equal(providerCalls, 2, '--force bypasses a memoized result');
   });
+});
+
+test('adding a declared enrich output invalidates a memoized result while an unchanged declaration stays memoized', async () => {
+  const provider = { calls: 0 };
+  const executeAction = async ({ stepConfig }) => {
+    provider.calls += 1;
+    const outputs = { lookup_result: `result:${provider.calls}` };
+    if (Object.hasOwn(stepConfig.outputs, 'lookup_domain')) outputs.lookup_domain = 'one.example';
+    return { outputs, usage: {} };
+  };
+
+  await withDb(async ({ db, root }) => {
+    const initial = memoizedStep();
+    const withNewOutput = {
+      ...initial,
+      outputs: {
+        ...initial.outputs,
+        lookup_domain: { type: 'string', description: 'Domain from the settled lookup result.' },
+      },
+    };
+
+    await execute({ db, root, step: initial, executeAction });
+    const changed = await execute({ db, root, step: withNewOutput, executeAction });
+    const unchanged = await execute({ db, root, step: withNewOutput, executeAction });
+
+    assert.equal(changed.processed, 1);
+    assert.equal(changed.memoization_hits, 0);
+    assert.equal(currentRecord(db).lookup_domain, 'one.example');
+    assert.equal(unchanged.memoization_hits, 1);
+    assert.equal(provider.calls, 2);
+  });
+});
+
+test('pipeline re-executes a passed enrich step after its declared output set changes', async () => {
+  const root = listDir();
+  const fixtureBefore = process.env.AO_PIPELINE_FIXTURE;
+  writeFileSync(join(root, 'outbound.yaml'), memoizationPipelineYaml());
+  const db = openListDb({ listDir: root, readonly: false });
+  ensureRecordColumns({ db, columns: ['website', 'company_resolution', 'linkedin_company_url'] });
+  upsertRecord({
+    db,
+    row: {
+      _row_id: 'pipeline-memoization-record',
+      business_name: 'Pipeline Memo Inc.',
+      sequence_status: 'active',
+      website: 'https://one.example',
+    },
+  });
+  db.close();
+  process.env.AO_PIPELINE_FIXTURE = '1';
+
+  try {
+    await runPipelineDataflow({ listDir: root });
+    writeFileSync(join(root, 'outbound.yaml'), memoizationPipelineYaml({ includeDomain: true }));
+    await runPipelineDataflow({ listDir: root });
+    await runPipelineDataflow({ listDir: root });
+
+    const check = openListDb({ listDir: root, readonly: true });
+    const record = check.prepare('SELECT linkedin_company_url FROM records WHERE _row_id = ?')
+      .get('pipeline-memoization-record');
+    const enrichEvents = check.prepare(`
+      SELECT reason FROM pipeline_events
+      WHERE record_id = ? AND step_id = ? AND passed = 1
+      ORDER BY rowid ASC
+    `).all('pipeline-memoization-record', 'verify_contact_email');
+    const toolExecutions = check.prepare(`
+      SELECT COUNT(*) AS count FROM cost_events
+      WHERE record_id = ? AND step_id = ?
+    `).get('pipeline-memoization-record', 'pipeline_enrich:verify_contact_email');
+    check.close();
+
+    assert.equal(record.linkedin_company_url, 'https://www.linkedin.com/company/fixture');
+    assert.deepEqual(enrichEvents.map((event) => event.reason), ['', '', 'memoization_hit']);
+    assert.equal(toolExecutions.count, 2);
+  } finally {
+    if (fixtureBefore === undefined) delete process.env.AO_PIPELINE_FIXTURE;
+    else process.env.AO_PIPELINE_FIXTURE = fixtureBefore;
+  }
+});
+
+test('a pending review admits a newly inserted upstream enrich exactly once and dry-run predicts it', async () => {
+  const root = listDir();
+  const fixtureBefore = process.env.AO_PIPELINE_FIXTURE;
+  writeFileSync(join(root, 'outbound.yaml'), parkedReviewPipelineYaml());
+  const db = openListDb({ listDir: root, readonly: false });
+  upsertRecord({
+    db,
+    row: { _row_id: 'parked-review-record', business_name: 'Parked Review Inc.', sequence_status: 'idle' },
+  });
+  db.close();
+  process.env.AO_PIPELINE_FIXTURE = '1';
+
+  try {
+    await runPipelineDataflow({ listDir: root });
+    writeFileSync(join(root, 'outbound.yaml'), parkedReviewPipelineYaml({ includeInsertedStep: true }));
+
+    const preview = await runPipelineDataflow({ listDir: root, dryRun: true });
+    const previewed = preview.steps.find((step) => step.id === 'inserted_lookup');
+    assert.equal(previewed?.would_enrich, 1);
+
+    const result = await runPipelineDataflow({ listDir: root });
+    assert.equal(result.by_step.inserted_lookup, previewed.would_enrich);
+
+    const check = openListDb({ listDir: root, readonly: true });
+    const record = check.prepare('SELECT company_resolution FROM records WHERE _row_id = ?').get('parked-review-record');
+    const executions = check.prepare(`
+      SELECT COUNT(*) AS count FROM pipeline_events
+      WHERE record_id = ? AND step_id = ? AND passed = 1
+    `).get('parked-review-record', 'inserted_lookup');
+    const awaiting = check.prepare(`
+      SELECT COUNT(*) AS count FROM pipeline_events
+      WHERE record_id = ? AND step_id = ? AND reason = 'awaiting_review'
+    `).get('parked-review-record', 'approve_handoff');
+    check.close();
+
+    assert.equal(record.company_resolution, 'resolved');
+    assert.equal(executions.count, 1);
+    assert.equal(awaiting.count, 1, 'the record remains at the same pending review');
+  } finally {
+    if (fixtureBefore === undefined) delete process.env.AO_PIPELINE_FIXTURE;
+    else process.env.AO_PIPELINE_FIXTURE = fixtureBefore;
+  }
+});
+
+test('an approved review preserves its decision while an inserted enrich does not replay settled paid work', async () => {
+  const root = listDir();
+  const fixtureBefore = process.env.AO_PIPELINE_FIXTURE;
+  writeFileSync(join(root, 'outbound.yaml'), parkedReviewPipelineYaml());
+  const db = openListDb({ listDir: root, readonly: false });
+  upsertRecord({
+    db,
+    row: { _row_id: 'approved-review-record', business_name: 'Approved Review Inc.', sequence_status: 'idle' },
+  });
+  db.close();
+  process.env.AO_PIPELINE_FIXTURE = '1';
+
+  try {
+    await runPipelineDataflow({ listDir: root });
+    const approvalDb = openListDb({ listDir: root, readonly: false });
+    approvalDb.prepare(`
+      INSERT INTO overrides (id, record_id, kind, step_id, reason, created_by, created_at)
+      VALUES (?, ?, 'keep', 'approve_handoff', 'approved before pipeline update', 'review:approve_handoff', ?)
+    `).run('approved-review-override', 'approved-review-record', new Date().toISOString());
+    approvalDb.close();
+
+    writeFileSync(join(root, 'outbound.yaml'), parkedReviewPipelineYaml({ includeInsertedStep: true }));
+    await runPipelineDataflow({ listDir: root });
+
+    const check = openListDb({ listDir: root, readonly: true });
+    const settledExecutions = check.prepare(`
+      SELECT COUNT(*) AS count FROM pipeline_events
+      WHERE record_id = ? AND step_id = ? AND passed = 1
+    `).get('approved-review-record', 'settled_lookup');
+    const insertedExecutions = check.prepare(`
+      SELECT COUNT(*) AS count FROM pipeline_events
+      WHERE record_id = ? AND step_id = ? AND passed = 1
+    `).get('approved-review-record', 'inserted_lookup');
+    const decision = check.prepare(`
+      SELECT kind FROM overrides WHERE record_id = ? AND step_id = ? AND (cleared_at IS NULL OR cleared_at = '')
+    `).get('approved-review-record', 'approve_handoff');
+    check.close();
+
+    assert.equal(settledExecutions.count, 2, 'the second event is a memoization hit, not a tool replay');
+    assert.equal(insertedExecutions.count, 1);
+    assert.equal(decision.kind, 'keep');
+  } finally {
+    if (fixtureBefore === undefined) delete process.env.AO_PIPELINE_FIXTURE;
+    else process.env.AO_PIPELINE_FIXTURE = fixtureBefore;
+  }
 });
 
 test('memoize: false opts out and re-executes each time', async () => {

@@ -146,12 +146,14 @@ const applyProviderModels = ({
   xaiModels = [],
   openaiModels = [],
   openrouterModels = [],
+  openrouterCapabilities = {},
 }: {
   anthropicModels?: string[];
   deepinfraModels?: string[];
   xaiModels?: string[];
   openaiModels?: string[];
   openrouterModels?: string[];
+  openrouterCapabilities?: Record<string, string[]>;
 }) => {
   let state = readModelsState();
   state = setProviderModels({
@@ -178,6 +180,7 @@ const applyProviderModels = ({
     state,
     providerId: 'openrouter',
     models: openrouterModels,
+    capabilities: openrouterCapabilities,
   });
   return writeModelsState(state);
 };
@@ -399,7 +402,7 @@ export const modelsRefreshCommand = async ({
   }
   const openrouterList = openrouterCredentials.apiKey
     ? await listOpenRouterModels(openrouterCredentials)
-    : { ok: false, error: 'not configured', models: [] as string[] };
+    : { ok: false, error: 'not configured', models: [] as string[], capabilities: {} as Record<string, string[]> };
   if (openrouterCredentials.apiKey && !openrouterList.ok) {
     throw new Error(`OpenRouter refresh failed: ${openrouterList.error}`);
   }
@@ -433,6 +436,7 @@ export const modelsRefreshCommand = async ({
     xaiModels: xaiKey ? (xaiList.models || []) : (current.providers?.xai?.models || []),
     openaiModels: openaiKey ? (openaiList.models || []) : (current.providers?.openai?.models || []),
     openrouterModels: openrouterCredentials.apiKey ? (openrouterList.models || []) : (current.providers?.openrouter?.models || []),
+    openrouterCapabilities: openrouterCredentials.apiKey ? (openrouterList.capabilities || {}) : (current.providers?.openrouter?.capabilities || {}),
   });
 
   return {
@@ -826,7 +830,7 @@ export const removeCommand = ({ list, row = '', where = '', keepTop = 0, sortBy 
   }
 };
 
-export const pipelineCommand = async ({ list, where = '', limit = 0, pipelineName = '', dryRun = false, sample = 0, force = false, reapply = false, concurrency = 0 }) => {
+export const pipelineCommand = async ({ list, where = '', limit = 0, pipelineName = '', dryRun = false, sample = 0, force = false, reapply = false, rerunSteps = [], concurrency = 0 }) => {
   const listDir = resolveListDir(list);
   const loaded = readConfig(listDir);
   assertPhaseModelReferences({ config: loaded.config, phase: 'pipeline' });
@@ -857,6 +861,7 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, pipelineNam
       dryRun: true,
       force,
       reapply,
+      rerunSteps,
       concurrency: Number(concurrency || 0) || undefined,
     });
     return {
@@ -878,6 +883,7 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, pipelineNam
           where: whereSql,
           limit: sampleN,
           pipelineName,
+          rerunSteps,
           concurrency: Number(concurrency || 0) || undefined,
         });
         return {
@@ -899,6 +905,7 @@ export const pipelineCommand = async ({ list, where = '', limit = 0, pipelineNam
     pipelineName,
     force,
     reapply,
+    rerunSteps,
     concurrency: Number(concurrency || 0) || undefined,
   });
   return {
@@ -2308,6 +2315,7 @@ export {
 export {
   rejectedListCommand,
   rejectedRestoreCommand,
+  rejectedRestoreGateCommand,
   rejectedSourcesCommand,
 } from './rejected.js';
 

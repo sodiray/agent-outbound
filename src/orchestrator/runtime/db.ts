@@ -2152,7 +2152,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
     ));
     const fields = [...knownFields, ...dynamicFields];
 
-    const setSql = fields.map((field) => `${field} = @${field}`).join(', ');
+    const setSql = fields.map((field) => `${quoteIdentifier(field)} = @${field}`).join(', ');
     db.prepare(`UPDATE records SET ${setSql}, updated_at = @updated_at WHERE _row_id = @_row_id_current`).run({
       ...row,
       _row_id: row._row_id || rowId,
@@ -2411,7 +2411,7 @@ export const upsertRecord = ({ db, row: inputRow }) => {
   });
 
   if (dynamicFields.length > 0) {
-    const setSql = dynamicFields.map((field) => `${field} = @${field}`).join(', ');
+    const setSql = dynamicFields.map((field) => `${quoteIdentifier(field)} = @${field}`).join(', ');
     db.prepare(`UPDATE records SET ${setSql}, updated_at = @updated_at WHERE _row_id = @_row_id_current`).run({
       ...row,
       _row_id_current: rowId,
@@ -3940,6 +3940,8 @@ const defaultForColumnType = (type) => {
   return "''";
 };
 
+export const quoteIdentifier = (value: string) => `"${String(value).replaceAll('"', '""')}"`;
+
 export const ensureRecordColumns = ({ db, columns = [] }) => {
   const existing = new Set(
     db.prepare("PRAGMA table_info(records)").all().map((row) => String(row.name || ''))
@@ -3954,8 +3956,10 @@ export const ensureRecordColumns = ({ db, columns = [] }) => {
     if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(column)) continue;
 
     const type = normalizeColumnType(typeof raw === 'string' ? 'TEXT' : raw?.type);
-    const defaultValue = defaultForColumnType(type);
-    db.exec(`ALTER TABLE records ADD COLUMN ${column} ${type} DEFAULT ${defaultValue};`);
+    const defaultValue = typeof raw === 'object' && raw?.nullable === true
+      ? 'NULL'
+      : defaultForColumnType(type);
+    db.exec(`ALTER TABLE records ADD COLUMN ${quoteIdentifier(column)} ${type} DEFAULT ${defaultValue};`);
     existing.add(column);
   }
 };
@@ -4064,7 +4068,15 @@ export const upsertSearchTask = ({ db, task }) => {
 };
 
 export const listPendingSearchTasks = ({ db }) => (
-  db.prepare("SELECT * FROM search_tasks WHERE status = 'pending' ORDER BY id").all()
+  db.prepare(`
+    SELECT * FROM search_tasks
+    WHERE status = 'pending'
+    ORDER BY
+      CASE WHEN COALESCE(last_run_at, '') = '' AND COALESCE(attempt_count, 0) = 0 THEN 0 ELSE 1 END,
+      COALESCE(attempt_count, 0),
+      COALESCE(last_run_at, ''),
+      id
+  `).all()
 );
 
 export const listSearchTasks = ({ db }) => (

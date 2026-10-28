@@ -297,6 +297,14 @@ Starts a persistent Node process that:
 
 Without `serve`, everything still works via CLI — polling runs whenever the operator invokes `sequence run`.
 
+### `view` (local viewer)
+
+```
+agent-outbound view <list> [--port 7788]
+```
+
+`view` is a separate local Hono server for the isolated Vite/React viewer. It serves the list table, pipeline canvas, operational queues, and record/review panels from the list's SQLite state; it is not the `serve` action API and does not run the polling scheduler. The command rebuilds and copies the viewer bundle when needed, then opens the local viewer unless `--no-open` is supplied. See `viewer.md`.
+
 ### The Main Claude Agent Calling In
 
 `/outbound` in Claude Code defaults to running CLI commands via Bash. When `serve` is detected running (via the list's `.outbound/.serve/port` file), the main agent can route its calls through the HTTP endpoint instead — same action names, same arguments. Operator sees no difference.
@@ -382,7 +390,7 @@ See `runtime.md` for the full flow. Summary:
 
 ## Events: Polling Only
 
-Reply detection and delivery-confirmation flows all run via **polling**. Consumer MCP does not expose trigger or webhook subscriptions, and agent-outbound does not listen for external events.
+Reply detection and delivery-confirmation flows all run via **polling**. Consumer MCP does not expose trigger or webhook subscriptions, and agent-outbound does not listen for external events. Pollers ingest normalized event envelopes and invoke the normal pipeline runner for matched records. `await_event` consumes a configured event once; `on_event` opens a durable, turn-scoped inner graph for every matching event.
 
 - **Reply detection.** `sequence run` invokes the pinned reply-detection tool (e.g. `GMAIL_LIST_MESSAGES` with a `since:<last-check>` filter), compares message IDs against sent threads, and writes `channel_events` rows for matches.
 - **Delivery tracking.** `sequence run` iterates `channel_events` with non-final delivery states and invokes provider status tools (`LOB_GET_POSTCARD`, `TELNYX_GET_MESSAGE_STATUS`) to refresh.

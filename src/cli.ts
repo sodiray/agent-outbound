@@ -63,6 +63,7 @@ import {
   sequencesListCommand,
   rejectedListCommand,
   rejectedRestoreCommand,
+  rejectedRestoreGateCommand,
   rejectedSourcesCommand,
   pipelineShowCommand,
   queryCommand,
@@ -148,6 +149,7 @@ import {
   generateCommand,
   routePlanCommand,
 } from './commands/index.js';
+import { externalCommand, turnsCommand } from './commands/external.js';
 import { onboardCommand } from './commands/onboard.js';
 import { validateAnthropicKey } from './orchestrator/runtime/anthropic.js';
 import { listDeepInfraModels } from './orchestrator/runtime/deepinfra.js';
@@ -333,6 +335,9 @@ const printHelp = () => {
   process.stdout.write(`  pending release|dismiss <pending-id> --reason REASON [--list LIST]\n`);
   process.stdout.write(`  pending resolve <pending-id> --reason REASON [--evidence-json JSON] [--actions-json JSON] [--list LIST]\n`);
   process.stdout.write(`  pending snooze <pending-id> --until ISO --reason REASON [--list LIST]\n`);
+  process.stdout.write(`  events ingest|list|resolve LIST [--file JSON] [--source SOURCE --id ID --row ROW]\n`);
+  process.stdout.write(`  turns LIST [--record ID] [--block ID]                                      # event turn history\n`);
+  process.stdout.write(`  operations list|reconcile LIST [--file RECEIPT]\n`);
   process.stdout.write(`  monitor [--list LIST | --all-lists] [--interval-seconds N] [--once]\n`);
   process.stdout.write(`  attio-domains [--out contacted-domains.txt] [--list LIST]\n`);
   process.stdout.write(`  query <list> --sql "SELECT ..."\n`);
@@ -365,12 +370,13 @@ const printHelp = () => {
   process.stdout.write(`  override show <list> <record>                                               # decision history for one lead\n`);
   process.stdout.write(`  review stages <list>                                                        # configured review stages and awaiting counts\n`);
   process.stdout.write(`  review list <list> --stage ID [--limit N] [--offset N]                      # records awaiting a stage verdict\n`);
-  process.stdout.write(`  review approve <list> <record> --stage ID [--reason TEXT]                   # approve a record at a review stage (alias: pass)\n`);
+  process.stdout.write(`  review approve <list> <record> --stage ID [--reason TEXT] [--set field=value] # approve a record at a review stage (alias: pass)\n`);
   process.stdout.write(`  review reject <list> <record> --stage ID --reason TEXT                      # reject a record at a review stage (alias: drop)\n`);
   process.stdout.write(`  review clear <list> <record> --stage ID                                     # clear a review verdict\n`);
   process.stdout.write(`  rejected sources <list>                                                     # rejection sources and counts\n`);
   process.stdout.write(`  rejected list <list> [--source ID] [--limit N] [--offset N]                 # rejected records, optionally filtered by source\n`);
   process.stdout.write(`  rejected restore <list> <record> [--reason TEXT]                            # restore a rejected record; reason required for gate/score rejects\n`);
+  process.stdout.write(`  rejected restore <list> --gate ID [--where SQL] --reason TEXT               # clear automatic rejections without keep overrides\n`);
   process.stdout.write(`  pipeline show <list> [--format json|summary]\n`);
   process.stdout.write(`  pipeline report <list> [--json] [--run latest]\n`);
   process.stdout.write(`  route show <list> --date YYYY-MM-DD [--include enrichment,contacts,prior-touches]\n`);
@@ -390,7 +396,7 @@ const printHelp = () => {
   process.stdout.write(`  remove <list> --row ROW_ID\n`);
   process.stdout.write(`  remove <list> --where SQL\n`);
   process.stdout.write(`  remove <list> --keep-top N [--sort-by COLUMN]\n`);
-  process.stdout.write(`  pipeline <list> [--where SQL] [--limit N] [--dry-run] [--sample N] [--concurrency N]\n`);
+  process.stdout.write(`  pipeline <list> [--where SQL] [--limit N] [--dry-run] [--sample N] [--concurrency N] [--rerun-step ID]\n`);
   process.stdout.write(`  score <list> [--where SQL] [--dry-run] [--sample N] [--force]\n`);
   process.stdout.write(`  generate <list> [--where SQL] [--step ID] [--dry-run] [--sample N] [--force]\n`);
   process.stdout.write(`  run <list> [--more N]\n`);
@@ -1032,6 +1038,28 @@ const run = async () => {
     return;
   }
 
+  if (command === 'events' || command === 'operations') {
+    const action = String(argv.shift() || '');
+    const list = String(argv.shift() || '');
+    const file = consumeFlag(argv, '--file', '');
+    const source = consumeFlag(argv, '--source', '');
+    const id = consumeFlag(argv, '--id', '');
+    const recordId = consumeFlag(argv, '--row', '');
+    const status = consumeFlag(argv, '--status', '');
+    setResponseContext({ command: `${command} ${action}`, list });
+    out()(externalCommand({ list, group: command, action, file, source, id, recordId, status }));
+    return;
+  }
+
+  if (command === 'turns') {
+    const list = String(argv.shift() || '');
+    const recordId = consumeFlag(argv, '--record', '');
+    const blockId = consumeFlag(argv, '--block', '');
+    setResponseContext({ command: 'turns', list });
+    out()(turnsCommand({ list, recordId, blockId }));
+    return;
+  }
+
   if (command === 'monitor') {
     const allLists = hasFlag(argv, '--all-lists');
     const once = hasFlag(argv, '--once');
@@ -1185,8 +1213,13 @@ const run = async () => {
       const ref = String(argv.shift() || '');
       const stage = consumeFlag(argv, '--stage', '');
       const reason = consumeFlag(argv, '--reason', '');
+      const edits = Object.fromEntries(consumeFlags(argv, '--set').map((entry) => {
+        const index = entry.indexOf('=');
+        if (index <= 0) throw new Error('--set must use field=value.');
+        return [entry.slice(0, index), entry.slice(index + 1)];
+      }));
       setResponseContext({ command: `review ${sub}`, list });
-      out()(reviewPassCommand({ list, ref, stage, reason }));
+      out()(reviewPassCommand({ list, ref, stage, reason, edits }));
       return;
     }
     if (sub === 'reject' || sub === 'drop') {
@@ -1228,9 +1261,15 @@ const run = async () => {
     }
     if (sub === 'restore') {
       const list = String(argv.shift() || '');
-      const ref = String(argv.shift() || '');
+      const ref = String(argv[0] || '').startsWith('--') ? '' : String(argv.shift() || '');
       const reason = consumeFlag(argv, '--reason', '');
+      const gate = consumeFlag(argv, '--gate', '');
+      const where = consumeFlag(argv, '--where', '');
       setResponseContext({ command: 'rejected restore', list });
+      if (gate) {
+        out()(rejectedRestoreGateCommand({ list, gate, where, reason }));
+        return;
+      }
       out()(rejectedRestoreCommand({ list, ref, reason }));
       return;
     }
@@ -1927,17 +1966,18 @@ const run = async () => {
     const dryRun = hasFlag(argv, '--dry-run');
     const force = hasFlag(argv, '--force');
     const reapply = hasFlag(argv, '--reapply');
+    const rerunSteps = consumeFlags(argv, '--rerun-step');
     const sample = toNumber(consumeFlag(argv, '--sample', '0'), 0);
     const concurrency = toNumber(consumeFlag(argv, '--concurrency', '0'), 0);
     const delegated = await callServeAction('pipeline', {
-      list, where, limit, dryRun, sample, force, reapply, concurrency,
+      list, where, limit, dryRun, sample, force, reapply, rerunSteps, concurrency,
     }, list);
     if (delegated) {
       out()(delegated);
       return;
     }
     out()(await pipelineCommand({
-      list, where, limit, dryRun, sample, force, reapply, concurrency,
+      list, where, limit, dryRun, sample, force, reapply, rerunSteps, concurrency,
     }));
     return;
   }

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { ActionRole } from './models.js';
 import { resolveRuntimeModel } from './models.js';
+import { modelParameterSupport } from './model-store.js';
 import { loadTools, type ToolCatalog, type ToolSpec } from './tools.js';
 import { collectProviderToolUsage, type ProviderToolUsage } from './providers/usage.js';
 import { emitLive } from './activity.js';
@@ -142,6 +143,7 @@ export type GenerateObjectWithToolsInput = {
   listDir?: string;
   maxSteps?: number;
   reasoning?: boolean;
+  temperature?: number;
 };
 
 // Models routinely emit long markdown values with RAW control characters
@@ -369,14 +371,20 @@ export const generateObjectWithTools = async ({
   listDir = '',
   maxSteps = 8,
   reasoning = false,
+  temperature,
 }: GenerateObjectWithToolsInput) => {
   await ensureAiDeps();
+  const deterministicRole = role === 'evaluation' || role === 'research';
+  const requestedTemperature = temperature === undefined
+    ? (deterministicRole ? 0 : undefined)
+    : temperature;
   const resolved = await resolveRuntimeModel({
     model,
     role,
     aiConfig,
     enforceSupported: true,
     reasoning,
+    temperature: requestedTemperature,
   });
   const selectedModel = resolved.built;
 
@@ -390,7 +398,7 @@ export const generateObjectWithTools = async ({
   const schemaInstruction = `After completing all work, return ONLY a JSON object matching this schema:\n${schemaDescription}\nNo extra text.`;
   const toolSystem = [system, schemaInstruction].filter(Boolean).join('\n\n');
   const providerOptions = resolved.providerOptions || {};
-  const withProviderOptions = Object.keys(providerOptions || {}).length > 0
+  const withProviderOptions = resolved.providerId !== 'openrouter' && Object.keys(providerOptions || {}).length > 0
     ? { providerOptions }
     : {};
 
@@ -399,10 +407,20 @@ export const generateObjectWithTools = async ({
   // Sampling was never pinned, and one unchanged record scored differently on
   // identical runs — enough to cross a configured contact threshold. Copywriting
   // keeps the provider default; variety is the point there.
-  const deterministicRole = role === 'evaluation' || role === 'research';
-  // OpenRouter reasoning models reject temperature; grading determinism comes
-  // from median-of-N sampling (score.samples), not temperature.
-  const sampling = deterministicRole && resolved.providerId !== 'openrouter' ? { temperature: 0 } : {};
+  const temperatureSupport = requestedTemperature === undefined
+    ? 'supported'
+    : modelParameterSupport({ modelRef: resolved.modelRef, parameter: 'temperature' });
+  const sampling = requestedTemperature !== undefined && temperatureSupport === 'supported' && resolved.providerId !== 'openrouter'
+    ? { temperature: requestedTemperature }
+    : {};
+  if (requestedTemperature !== undefined && temperatureSupport !== 'supported' && process.env.AO_DEBUG_LLM) {
+    console.error('[AO_DEBUG_LLM] temperature omitted', JSON.stringify({
+      task,
+      model: resolved.modelRef,
+      requested_temperature: requestedTemperature,
+      capability: temperatureSupport,
+    }));
+  }
   const preferPlainTextObject = !hasTools && resolved.providerId === 'deepinfra';
   const providerToolUsage: { current: ProviderToolUsage | null } = { current: null };
 

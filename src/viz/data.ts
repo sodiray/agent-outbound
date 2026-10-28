@@ -2,7 +2,10 @@ import { basename } from 'node:path';
 import { readConfig } from '../orchestrator/lib/config.js';
 import { recordScore } from '../orchestrator/lib/record.js';
 import { getTargetColumnsForStepConfig } from '../orchestrator/lib/step-columns.js';
-import { flattenPipelineSteps, stepStatusColumn } from '../orchestrator/lib/subpipelines.js';
+import { flattenPipelineSteps, stepStatusColumn, SUBPIPELINE_LOCAL_ID_FIELD } from '../orchestrator/lib/subpipelines.js';
+import { inferPipelineEdges } from '../orchestrator/lib/pipeline-graph.js';
+import { declaredStageInputs } from '../orchestrator/lib/stage-inputs.js';
+import { stepConfigForWhen, whenPredicateForStep } from '../orchestrator/lib/step-when.js';
 import { resolvePipelineFitModel } from '../orchestrator/scoring/fit-model.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import {
@@ -10,28 +13,28 @@ import {
   getBriefForRecord,
   getRecordById,
   getTerritoryNotes,
+  inPlayWhere,
   insertTerritoryNote,
   listFieldOverridesForRecord,
   listInteractionsForRecord,
   listOverridesForRecord,
   OVERRIDE_GATE,
   openListDb,
-  reconcileOverrides,
 } from '../orchestrator/runtime/db.js';
 import { LEAD_STATUSES, leadStatus, leadStatusCaseSql } from '../orchestrator/runtime/status.js';
 import { getEnv } from '../orchestrator/runtime/env.js';
 import {
-  clearReviewDecision,
+  awaitingReviewWhere,
+  configuredReviewStages,
+  countAwaitingReviewAtStage,
+  countAwaitingReviewBySequence,
   getAllReviewQueue,
-  getReviewQueue,
   getReviewStages,
-  insertReviewDecision,
+  isRecordAwaitingReview,
   requireResolvedReviewStage,
-  reviewDecisionResult,
-  reviewRecordDecisionState,
-  reviewRecordLabel,
   type ReviewDecision,
 } from '../orchestrator/pipeline/review.js';
+import { reviewClearCommand, reviewDropCommand, reviewPassCommand } from '../commands/review.js';
 import {
   DEFAULT_REJECTED_RESTORE_REASON,
   getRejectedRecords,
@@ -683,6 +686,139 @@ export const insertTerritoryNoteForViz = (listDir: string, territoryId: string, 
   }
 };
 
+// Numeric sort candidates for a review queue: numeric record columns plus step
+// outputs declared as numbers. Dynamically added columns are TEXT, so the queue
+// sort casts values rather than trusting the column affinity.
+const numericRecordFields = (columns: Array<{ key: string; dbType: string }>, config: any) => {
+  const declared = new Set(flattenPipelineSteps(config).flatMap((step: any) => outputEntries(step)
+    .filter(([, spec]: any) => ['number', 'integer'].includes(String(spec?.type || '').toLowerCase()))
+    .map(([field]) => String(field))));
+  return columns
+    .filter((column) => column.key !== '_row_id' && !BOOLEAN_COLUMNS.has(column.key) && !INTERNAL_RECORD_FIELDS.has(column.key))
+    .filter((column) => NUMERIC_COLUMNS.has(column.key) || /REAL|INT|NUM/i.test(column.dbType) || declared.has(column.key))
+    .map((column) => column.key);
+};
+
+const REVIEW_QUEUE_PAGE_MAX = 500;
+const REVIEW_VERDICTS: Record<string, 'pass' | 'drop'> = { approve: 'pass', pass: 'pass', reject: 'drop', drop: 'drop' };
+
+// on_event review steps run once per event turn. Their state lives in
+// event_turn_steps and the CLI decides them there (completing the turn on a
+// reject), not with an override. The viewer has no queue with the in-play and
+// latest-turn semantics those decisions need, so it refuses them outright
+// rather than writing an override that means something else. A bare step id is
+// refused too: the CLI routes it to the event-turn path.
+const eventTurnReviewSteps = (config: any) => [...new Map(
+  [...(Array.isArray(config?.pipeline) ? config.pipeline : []), ...flattenPipelineSteps(config)]
+    .filter((block: any) => isPlainObject(block) && textOf(block.kind) === ON_EVENT_KIND)
+    .flatMap((block: any) => (Array.isArray(block.steps) ? block.steps : [])
+      .filter((step: any) => isPlainObject(step) && textOf(step.kind) === 'review' && textOf(step.id))
+      .map((step: any) => ({ blockId: textOf(block.id), stepId: textOf(step.id), nodeId: `${textOf(block.id)}.${textOf(step.id)}` })))
+    .map((step: { blockId: string; stepId: string; nodeId: string }) => [step.nodeId, step] as const),
+).values()];
+
+const refuseEventTurnReviewStage = (config: any, stageId: string) => {
+  const id = textOf(stageId);
+  const step = eventTurnReviewSteps(config).find((candidate) => candidate.nodeId === id || candidate.stepId === id);
+  if (!step) return;
+  throw new AgentOutboundError({
+    code: 'INVALID_ARGUMENT',
+    message: `Review step "${step.stepId}" runs inside the on_event block "${step.blockId}", once per event turn. The viewer does not list, decide, or undo event-turn reviews; use \`agent-outbound review list|approve|reject|clear <list> --stage ${step.stepId}\`.`,
+    retryable: false,
+  });
+};
+
+// One page of a review queue in one SQL statement: membership is the exported
+// awaitingReviewWhere predicate (the one getReviewQueue and the CLI use), and
+// ordering, the total, and paging happen in the same query. With `around`, the
+// page returned is the one holding that record, so the panel can open any
+// record in the queue and move across page boundaries.
+export const reviewQueuePageForViz = ({
+  db,
+  config,
+  stageId,
+  limit = 100,
+  offset = 0,
+  sort = '',
+  dir = '',
+  around = '',
+}: {
+  db: any;
+  config: any;
+  stageId: string;
+  limit?: number;
+  offset?: number;
+  sort?: string;
+  dir?: string;
+  around?: string;
+}) => {
+  refuseEventTurnReviewStage(config, stageId);
+  const stage = requireResolvedReviewStage({ db, config, stageId });
+  const direction = textOf(dir || 'asc').toLowerCase();
+  if (direction !== 'asc' && direction !== 'desc') {
+    throw new AgentOutboundError({ code: 'INVALID_ARGUMENT', message: 'Review sort direction must be "asc" or "desc".', retryable: false });
+  }
+  const pageLimit = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(REVIEW_QUEUE_PAGE_MAX, Math.floor(Number(limit)))) : 100;
+  const requestedOffset = Number.isFinite(Number(offset)) ? Math.max(0, Math.floor(Number(offset))) : 0;
+  const columns = getRecordColumns(db);
+  const realColumns = new Set(columns.map((column) => column.key));
+  const numericSortFields = numericRecordFields(columns, config);
+  const requestedSort = textOf(sort);
+  const numeric = Boolean(requestedSort) && numericSortFields.includes(requestedSort);
+  if (requestedSort && !numeric && requestedSort !== '_row_id' && !stage.fields.includes(requestedSort)) {
+    throw new AgentOutboundError({ code: 'INVALID_ARGUMENT', message: `Unknown review sort field "${requestedSort}".`, retryable: false });
+  }
+  const column = `record.${quoteIdent(requestedSort)}`;
+  // Numeric sorts cast (dynamic columns are TEXT) and put empty values last.
+  const orderBy = !requestedSort
+    ? 'awaiting.parked_at ASC, record._row_id ASC'
+    : numeric
+      ? `CASE WHEN ${column} IS NULL OR TRIM(CAST(${column} AS TEXT)) = '' THEN 1 ELSE 0 END ASC, CAST(${column} AS REAL) ${direction.toUpperCase()}, record._row_id ASC`
+      : `${column} ${direction.toUpperCase()}, record._row_id ASC`;
+  const awaiting = `awaiting AS (
+    SELECT event.record_id, MAX(event.occurred_at) AS parked_at
+    FROM pipeline_events event
+    JOIN records record ON record._row_id = event.record_id
+    WHERE ${awaitingReviewWhere()}
+    GROUP BY event.record_id
+  )`;
+  const fields = [...new Set(['_row_id', ...stage.fields, stage.title_field || '', requestedSort])]
+    .filter((field) => field && realColumns.has(field));
+  const anchor = textOf(around);
+  // One read transaction, so the anchor position and the page share a snapshot.
+  return db.transaction(() => {
+    const anchorRow = anchor ? db.prepare(`
+      WITH ${awaiting},
+      ordered AS (
+        SELECT record._row_id AS row_id, ROW_NUMBER() OVER (ORDER BY ${orderBy}) - 1 AS position
+        FROM awaiting
+        JOIN records record ON record._row_id = awaiting.record_id
+      )
+      SELECT position FROM ordered WHERE row_id = ?
+    `).get(stage.id, anchor) : undefined;
+    const aroundPosition = anchorRow ? Number(anchorRow.position) : null;
+    const pageOffset = aroundPosition === null ? requestedOffset : Math.floor(aroundPosition / pageLimit) * pageLimit;
+    const rows = normalizedRows(db.prepare(`
+      WITH ${awaiting}
+      SELECT ${fields.map((field) => `record.${quoteIdent(field)}`).join(', ')}, COUNT(*) OVER () AS __queue_total
+      FROM awaiting
+      JOIN records record ON record._row_id = awaiting.record_id
+      ORDER BY ${orderBy}
+      LIMIT ? OFFSET ?
+    `).all(stage.id, pageLimit, pageOffset));
+    const total = rows.length > 0 ? Number(rows[0].__queue_total || 0) : countAwaitingReviewAtStage({ db, stageId: stage.id });
+    return {
+      stage: { ...stage, awaiting_count: total, sequence_counts: countAwaitingReviewBySequence({ db, stageId: stage.id }) },
+      total,
+      limit: pageLimit,
+      offset: pageOffset,
+      records: rows.map(({ __queue_total, ...row }: any) => row),
+      ...(anchor ? { around: anchor, around_position: aroundPosition } : {}),
+      numeric_sort_fields: numericSortFields,
+    };
+  })();
+};
+
 export const getReviewQueueForViz = (
   listDir: string,
   stageId: string,
@@ -690,11 +826,12 @@ export const getReviewQueueForViz = (
   offset = 0,
   sort = '',
   dir = '',
+  around = '',
 ) => {
   const db = openListDb({ listDir, readonly: true });
   try {
     const { config } = readConfig(listDir);
-    return getReviewQueue({ db, config, stageId, limit, offset, sort, dir });
+    return reviewQueuePageForViz({ db, config, stageId, limit, offset, sort, dir, around });
   } finally {
     db.close();
   }
@@ -716,6 +853,20 @@ export const getAllReviewQueueForViz = (
   }
 };
 
+const reviewEditsInput = (raw: unknown): Record<string, string> => {
+  if (raw === undefined || raw === null) return {};
+  if (!isPlainObject(raw)) {
+    throw new AgentOutboundError({ code: 'INVALID_ARGUMENT', message: 'Review edits must be an object of field: value.', retryable: false });
+  }
+  return Object.fromEntries(Object.entries(raw).map(([field, value]) => [field, String(value ?? '')]));
+};
+
+// Decisions run through the CLI's own commands (`review approve` / `review
+// reject`), so every stage kind behaves as it does there: edit validation, the
+// audit entry, the override, and reconciliation. The viewer adds two
+// preconditions: the stage is not an event-turn review, and the record is
+// awaiting this stage now, so a stale screen can never pre-approve a record
+// that has not reached the gate.
 export const applyReviewDecisionsForViz = (listDir: string, stageId: string, decisions: unknown) => {
   if (!Array.isArray(decisions)) {
     throw new AgentOutboundError({
@@ -731,76 +882,803 @@ export const applyReviewDecisionsForViz = (listDir: string, stageId: string, dec
       retryable: false,
     });
   }
-  const db = openListDb({ listDir, readonly: false });
+  const { config } = readConfig(listDir);
+  refuseEventTurnReviewStage(config, stageId);
+  const lookup = openListDb({ listDir, readonly: true });
+  const stage = (() => {
+    try {
+      return requireResolvedReviewStage({ db: lookup, config, stageId });
+    } finally {
+      lookup.close();
+    }
+  })();
+  const results = (decisions as ReviewDecision[]).map((input, index) => {
+    const ref = String(input?.row_id || '');
+    const requestedVerdict = String(input?.verdict || '').trim().toLowerCase();
+    try {
+      const verdict = REVIEW_VERDICTS[requestedVerdict];
+      if (!verdict) {
+        throw new AgentOutboundError({
+          code: 'INVALID_ARGUMENT',
+          message: `Unknown review verdict "${requestedVerdict}". Expected approve/pass or reject/drop.`,
+          retryable: false,
+        });
+      }
+      const edits = reviewEditsInput((input as any)?.edits);
+      if (verdict === 'drop' && Object.keys(edits).length > 0) {
+        throw new AgentOutboundError({
+          code: 'INVALID_ARGUMENT',
+          message: 'Edits apply only to an approval; a reject records none (as with `review reject`).',
+          retryable: false,
+        });
+      }
+      const check = openListDb({ listDir, readonly: true });
+      try {
+        if (!isRecordAwaitingReview({ db: check, recordId: ref, stageId: stage.id })) {
+          throw new AgentOutboundError({
+            code: 'INVALID_ARGUMENT',
+            message: `Record "${ref}" is not awaiting review at "${stage.id}".`,
+            retryable: false,
+          });
+        }
+      } finally {
+        check.close();
+      }
+      const reason = String(input?.reason || '');
+      const outcome: any = verdict === 'pass'
+        ? reviewPassCommand({ list: listDir, ref, stage: stage.id, reason, edits })
+        : reviewDropCommand({ list: listDir, ref, stage: stage.id, reason });
+      return {
+        ok: true,
+        index,
+        row_id: String(outcome.row_id || ''),
+        verdict: outcome.verdict,
+        override_id: String(outcome.override_id || ''),
+        record: outcome.record,
+        state: outcome.state,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        index,
+        row_id: ref,
+        verdict: requestedVerdict,
+        error: String((error as Error)?.message || error),
+      };
+    }
+  });
+  return {
+    stage,
+    requested: decisions.length,
+    applied: results.filter((result) => result.ok).length,
+    failed: results.filter((result) => !result.ok).length,
+    results,
+  };
+};
+
+// Undo is the CLI's `review clear` for the stage and record the history entry
+// names.
+export const clearReviewDecisionForViz = (listDir: string, rowId: string, stageId: string) => {
+  const { config } = readConfig(listDir);
+  refuseEventTurnReviewStage(config, stageId);
+  return reviewClearCommand({ list: listDir, ref: rowId, stage: stageId });
+};
+
+// --- Pipeline canvas ---------------------------------------------------------
+//
+// Node counts describe each record's current state at a step. pipeline_events
+// keeps history, so a record's state is its latest *outcome* row for the step;
+// see docs/technical/viewer.md for the classification of every reason.
+
+const SOURCE_NODE_ID = 'source';
+const ON_EVENT_KIND = 'on_event';
+const PER_EVENT_GROUP_LABEL = 'per event';
+// The table view's live-run rule (App.tsx `runActive`): a `running` row whose
+// heartbeat is older than this belongs to a process that is gone.
+const LIVE_RUN_MAX_AGE_MS = 8000;
+
+// Rows dataflow.ts writes for every step a run did not attempt
+// (notAttemptedReason / onStepNotAttempted, the deferred-generate marker, and the
+// legacy upstream_skipped marker). They say why a run passed the step by; they
+// never replace the outcome the record already has there.
+const NOT_ATTEMPTED_REASONS = [
+  'skipped:record_dropped',
+  'skipped:already_resolved',
+  'skipped:pending',
+  'skipped:not_applicable',
+  'skipped:not_time_ready',
+  'skipped:not_scheduled',
+  'skipped:deferred_generate',
+];
+const NOT_ATTEMPTED_PREFIXES = [
+  'skipped:upstream_errored:',
+  'skipped:unresolved_dependencies:',
+  'skipped:unsupported_step_kind:',
+  'skipped:upstream_skipped:',
+];
+const UPSTREAM_ERRORED_PREFIX = 'skipped:upstream_errored:';
+// passed = 1 rows whose reason starts with `skipped:` but are not the `when`
+// predicate: a fresh cache hit or a provider that answered without a verdict
+// (the step ran), and enrichment budget ceilings (the step did not run).
+const RAN_SKIP_REASONS = ['skipped:fresh'];
+const RAN_SKIP_PREFIXES = ['skipped:provider_no_opinion:'];
+const BUDGET_SKIP_REASONS = [
+  'skipped:enrichment_ceiling',
+  'skipped:enrichment_budget_not_configured',
+  'skipped:enrichment_budget_tier_not_configured',
+];
+// manual.ts closes a park that stopped applying with skipped:not_applicable[:…];
+// work-item-applicability.ts marks the `when` case as when_not_matched.
+const PARK_CLOSED_REASON = 'skipped:not_applicable';
+const PARK_CLOSED_WHEN_PREFIX = 'skipped:not_applicable:when_not_matched';
+const WAITING_REASONS = [
+  'awaiting_review',
+  'awaiting_manual',
+  'awaiting_external_event',
+  'wake_at',
+  'Awaiting author step approval.',
+];
+const PIPELINE_STEP_STATES = ['waiting', 'deferred', 'passed', 'dropped', 'skipped_when', 'skipped_other', 'failed', 'blocked_by_error', 'errored'] as const;
+type PipelineStepState = typeof PIPELINE_STEP_STATES[number];
+
+// Cost rows carry the writer's namespace (`pipeline_enrich:<step>`, …); see the
+// recordCostEvent callers. Sourcing spend belongs to the source node.
+const COST_STEP_PREFIXES = ['pipeline_enrich:', 'pipeline_filter_batch:', 'pipeline_filter:', 'pipeline:compose:', 'enrich:', 'generate:'];
+const SOURCING_COST_PREFIX = 'sourcing:';
+// on_event turn steps execute as `<block>:<turn_index>:<step>`.
+const TURN_SCOPED_STEP_ID = /^(.+):\d+:([^:]+)$/;
+
+const WHEN_OPERATOR_TEXT: Record<string, string> = {
+  eq: '=',
+  neq: '≠',
+  gt: '>',
+  gte: '≥',
+  lt: '<',
+  lte: '≤',
+  in: 'in',
+  not_in: 'not in',
+  contains: 'contains',
+  matches: 'matches',
+  not_matches: 'not matches',
+  is_empty: 'is empty',
+  is_not_empty: 'is not empty',
+};
+
+type PipelineCounts = Record<PipelineStepState, number> & { awaiting_review: number };
+
+type PipelineGroup = { id: string; label: string; parent_id: string };
+
+type PipelineStepDefinition = {
+  id: string;
+  localId: string;
+  step: any;
+  explicit: string[];
+  inferred: string[];
+  group?: PipelineGroup;
+};
+
+const textOf = (value: unknown) => String(value ?? '').trim();
+const stringsOf = (value: unknown) => (Array.isArray(value) ? value.map(textOf).filter(Boolean) : []);
+const isPlainObject = (value: unknown): value is Record<string, any> => Boolean(value && typeof value === 'object' && !Array.isArray(value));
+const sqlString = (value: string) => `'${value.replaceAll("'", "''")}'`;
+const sqlList = (values: string[]) => values.map(sqlString).join(', ');
+const globPrefix = (column: string, prefix: string) => `${column} GLOB ${sqlString(`${prefix}*`)}`;
+const emptyPipelineCounts = (): PipelineCounts => ({
+  waiting: 0,
+  deferred: 0,
+  passed: 0,
+  dropped: 0,
+  skipped_when: 0,
+  skipped_other: 0,
+  failed: 0,
+  blocked_by_error: 0,
+  errored: 0,
+  awaiting_review: 0,
+});
+
+const whenConditionValue = (condition: any) => {
+  const valueField = textOf(condition?.value_field);
+  if (valueField) return `field ${valueField}`;
+  const valueFile = textOf(condition?.value_file);
+  if (valueFile) return `values in ${valueFile}`;
+  if (condition?.value === '') return '""';
+  return formatConditionValue(condition?.value);
+};
+
+const summarizeWhenPredicate = (predicate: any) => {
+  const conditions = Array.isArray(predicate?.conditions) ? predicate.conditions : [];
+  const joiner = textOf(predicate?.match).toLowerCase() === 'any' ? ' or ' : ' and ';
+  return conditions.map((condition: any) => {
+    const field = textOf(condition?.field);
+    const rawOperator = textOf(condition?.operator);
+    const operator = WHEN_OPERATOR_TEXT[rawOperator] || rawOperator.replaceAll('_', ' ');
+    if (rawOperator === 'is_empty' || rawOperator === 'is_not_empty') return `${field} ${operator}`.trim();
+    return [field, operator, whenConditionValue(condition)].filter(Boolean).join(' ');
+  }).filter(Boolean).join(joiner);
+};
+
+const pipelineWhen = (step: any) => {
+  const predicate = whenPredicateForStep({ step, stepConfig: stepConfigForWhen(step) });
+  const summary = predicate ? summarizeWhenPredicate(predicate) : '';
+  return summary ? { summary } : undefined;
+};
+
+const pipelineToolOrModel = (step: any) => {
+  const config = isPlainObject(step?.config) ? { ...step, ...step.config } : step;
+  if (textOf(config?.model)) return textOf(config.model);
+  const tool = isPlainObject(config?.tool) ? config.tool : {};
+  const tools = stringsOf(tool.tools).length > 0 ? stringsOf(tool.tools) : stringsOf([tool.tool]);
+  return [textOf(tool.server), tools.join(', ')].filter(Boolean).join(' · ') || undefined;
+};
+
+const pipelineStepOutputs = (step: any) => {
+  const config = isPlainObject(step?.config) ? step.config : step;
+  return [...new Set([
+    ...Object.keys(isPlainObject(config?.outputs) ? config.outputs : {}),
+    ...getTargetColumnsForStepConfig(config).map((column: any) => String(column?.name || '')),
+  ])].filter(Boolean);
+};
+
+const turnStepDefinitions = (block: any, blockExplicit: string[], blockInferred: string[]): PipelineStepDefinition[] => {
+  const blockId = textOf(block?.id);
+  const children = (Array.isArray(block?.steps) ? block.steps : []).filter((child: unknown) => isPlainObject(child) && textOf(child.id));
+  const localIds = new Set(children.map((child: any) => textOf(child.id)));
+  const scoped = (localId: string) => `${blockId}.${localId}`;
+  const group = { id: blockId, label: PER_EVENT_GROUP_LABEL, parent_id: blockExplicit[0] || blockInferred[0] || SOURCE_NODE_ID };
+  return children.map((child: any) => {
+    const declared = [...new Set([...stringsOf(child.depends_on), ...stringsOf(child.runs_after)])]
+      .map((dependency) => (localIds.has(dependency) ? scoped(dependency) : dependency));
+    // A turn's first steps hang off the step that opens the turn.
+    return {
+      id: scoped(textOf(child.id)),
+      localId: textOf(child.id),
+      step: child,
+      explicit: declared.length > 0 ? declared : blockExplicit,
+      inferred: declared.length > 0 ? [] : blockInferred,
+      group,
+    };
+  });
+};
+
+const pipelineStepDefinitions = (config: any, listDir: string): PipelineStepDefinition[] => {
+  const inferred = inferPipelineEdges(config, { listDir });
+  return flattenPipelineSteps(config).flatMap((step: any) => {
+    const id = textOf(step?.id);
+    if (!id) return [];
+    const explicit = [...new Set([...stringsOf(step.depends_on), ...stringsOf(step.runs_after)])];
+    const inferredDependencies = [...(inferred.get(id) || [])].map(String).filter((dependency) => !explicit.includes(dependency));
+    if (textOf(step.kind) === ON_EVENT_KIND) return turnStepDefinitions(step, explicit, inferredDependencies);
+    return [{
+      id,
+      localId: textOf(step[SUBPIPELINE_LOCAL_ID_FIELD]) || id,
+      step,
+      explicit,
+      inferred: inferredDependencies,
+    }];
+  });
+};
+
+const pipelineEdges = (definitions: PipelineStepDefinition[]) => {
+  const ids = new Set(definitions.map((definition) => definition.id));
+  // A dependency on an on_event block means "after its turn": its sink steps.
+  const groupSinks = new Map<string, string[]>();
+  definitions.filter((definition) => definition.group).forEach((definition) => {
+    const groupId = definition.group!.id;
+    const members = definitions.filter((candidate) => candidate.group?.id === groupId);
+    const sinks = members.filter((member) => !members.some((other) => other.explicit.includes(member.id))).map((member) => member.id);
+    groupSinks.set(groupId, sinks);
+  });
+  const sourcesFor = (dependency: string) => (ids.has(dependency) ? [dependency] : groupSinks.get(dependency) || []);
+  const seen = new Set<string>();
+  const edges = definitions.flatMap((definition) => (
+    [
+      ...definition.explicit.map((dependency) => ({ dependency, origin: 'explicit' as const })),
+      ...definition.inferred.map((dependency) => ({ dependency, origin: 'inferred' as const })),
+    ].flatMap(({ dependency, origin }) => sourcesFor(dependency).map((from) => ({ from, to: definition.id, origin })))
+  )).filter((edge) => {
+    const key = `${edge.from}->${edge.to}`;
+    if (edge.from === edge.to || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const targets = new Set(edges.map((edge) => edge.to));
+  const all = [
+    ...definitions
+      .filter((definition) => !targets.has(definition.id))
+      .map((definition) => ({ from: SOURCE_NODE_ID, to: definition.id, origin: 'source' as const })),
+    ...edges,
+  ];
+  // Inferred dependencies mostly restate an ordering the explicit graph already
+  // guarantees. Mark an inferred edge `implied` when its target is reachable
+  // from its source through other edges, so the canvas can leave it undrawn.
+  const successors = new Map<string, string[]>();
+  all.forEach((edge) => successors.set(edge.from, [...(successors.get(edge.from) || []), edge.to]));
+  const reachable = new Map<string, Set<string>>();
+  const reach = (id: string, visiting = new Set<string>()): Set<string> => {
+    const cached = reachable.get(id);
+    if (cached) return cached;
+    if (visiting.has(id)) return new Set();
+    visiting.add(id);
+    const found = new Set<string>();
+    (successors.get(id) || []).forEach((next) => {
+      found.add(next);
+      reach(next, visiting).forEach((descendant) => found.add(descendant));
+    });
+    visiting.delete(id);
+    reachable.set(id, found);
+    return found;
+  };
+  return all.map((edge) => (
+    edge.origin === 'inferred'
+      && (successors.get(edge.from) || []).some((next) => next !== edge.to && reach(next).has(edge.to))
+      ? { ...edge, implied: true }
+      : edge
+  ));
+};
+
+const inPlayRecordSql = () => `(${inPlayWhere('record')} AND COALESCE(record.sequence_status, '') != 'opted_out')`;
+
+// Dropped at this step: the gate that disqualified the record, or a review
+// rejection (reconcileOverrides drops it under OVERRIDE_GATE, attributed through
+// the override's `review:<step>` author).
+const droppedAtStepSql = (stepExpression: string) => `(
+  COALESCE(record.disqualified_at, '') <> ''
+  AND (
+    record.disqualified_gate = ${stepExpression}
+    OR (
+      record.disqualified_gate = ${sqlString(OVERRIDE_GATE)}
+      AND EXISTS (
+        SELECT 1 FROM overrides verdict
+        WHERE verdict.record_id = record._row_id
+          AND verdict.kind = 'drop'
+          AND verdict.step_id = ''
+          AND COALESCE(verdict.cleared_at, '') = ''
+          AND verdict.created_by = 'review:' || ${stepExpression}
+      )
+    )
+  )
+)`;
+
+// State of a passed = 1 row (pipeline_events) or a `skipped` turn step.
+const passedStateSql = ({ reason, kind, sideEffecting }: { reason: string; kind: string; sideEffecting: string }) => `CASE
+  WHEN ${reason} NOT GLOB 'skipped:*' THEN 'passed'
+  WHEN ${reason} IN (${sqlList(RAN_SKIP_REASONS)}) OR ${RAN_SKIP_PREFIXES.map((prefix) => globPrefix(reason, prefix)).join(' OR ')} THEN 'passed'
+  WHEN ${reason} IN (${sqlList(BUDGET_SKIP_REASONS)}) THEN 'skipped_other'
+  WHEN ${globPrefix(reason, PARK_CLOSED_WHEN_PREFIX)} THEN 'skipped_when'
+  WHEN ${reason} = ${sqlString(PARK_CLOSED_REASON)} OR ${globPrefix(reason, `${PARK_CLOSED_REASON}:`)} THEN 'skipped_other'
+  WHEN ${kind} = 'manual_task' AND ${sideEffecting} = 1 THEN 'skipped_other'
+  ELSE 'skipped_when'
+END`;
+
+const waitingReasonSql = (reason: string) => `(
+  ${reason} IN (${sqlList(WAITING_REASONS)})
+  OR ${globPrefix(reason, 'wake_at:')}
+  OR lower(${reason}) LIKE '%pending approval%'
+  OR lower(${reason}) LIKE '%approval required%'
+)`;
+
+// One row per (record, step) the record has history at, with its state there.
+// Unscoped, both placeholders are bound to null and match every step.
+const stepStateSql = (db: any, scoped: boolean) => {
+  const notAttempted = `(event.passed = 0 AND (
+    COALESCE(event.reason, '') IN (${sqlList(NOT_ATTEMPTED_REASONS)})
+    OR ${NOT_ATTEMPTED_PREFIXES.map((prefix) => globPrefix('event.reason', prefix)).join(' OR ')}
+  ))`;
+  const errors = tableExists(db, 'errored_events')
+    ? `SELECT record_id, step_id, MAX(occurred_at) AS errored_at FROM errored_events ${scoped ? 'WHERE step_id = ?' : 'WHERE ? IS NULL'} GROUP BY record_id, step_id`
+    : `SELECT NULL AS record_id, NULL AS step_id, NULL AS errored_at WHERE ? IS NULL AND 0`;
+  const keptAtReview = `EXISTS (
+    SELECT 1 FROM overrides verdict
+    WHERE verdict.record_id = keyed.record_id
+      AND verdict.kind = 'keep'
+      AND COALESCE(verdict.cleared_at, '') = ''
+      AND (verdict.step_id = keyed.step_id OR verdict.step_id = '')
+  )`;
+  return `
+    WITH ranked AS (
+      SELECT
+        event.record_id,
+        event.step_id,
+        event.kind,
+        event.passed,
+        COALESCE(event.reason, '') AS reason,
+        COALESCE(event.side_effecting, 0) AS side_effecting,
+        event.occurred_at,
+        ${notAttempted} AS not_attempted,
+        ROW_NUMBER() OVER (
+          PARTITION BY event.record_id, event.step_id
+          ORDER BY ${notAttempted} ASC, event.occurred_at DESC, event.rowid DESC
+        ) AS position
+      FROM pipeline_events event
+      ${scoped ? 'WHERE event.step_id = ?' : 'WHERE ? IS NULL'}
+    ),
+    latest AS (SELECT * FROM ranked WHERE position = 1),
+    errors AS (${errors}),
+    keyed AS (
+      SELECT latest.record_id, latest.step_id, latest.kind, latest.passed, latest.reason,
+        latest.side_effecting, latest.occurred_at, latest.not_attempted, errors.errored_at
+      FROM latest
+      LEFT JOIN errors ON errors.record_id = latest.record_id AND errors.step_id = latest.step_id
+      UNION ALL
+      SELECT errors.record_id, errors.step_id, NULL, NULL, '', 0, NULL, NULL, errors.errored_at
+      FROM errors
+      WHERE NOT EXISTS (
+        SELECT 1 FROM pipeline_events seen
+        WHERE seen.record_id = errors.record_id AND seen.step_id = errors.step_id
+      )
+    )
+    SELECT
+      keyed.record_id,
+      keyed.step_id,
+      keyed.reason,
+      MAX(COALESCE(keyed.occurred_at, ''), COALESCE(keyed.errored_at, '')) AS state_at,
+      CASE
+        WHEN ${droppedAtStepSql('keyed.step_id')} THEN 'dropped'
+        WHEN keyed.passed = 0 AND ${globPrefix('keyed.reason', 'deferred:')} THEN 'deferred'
+        WHEN keyed.errored_at IS NOT NULL
+          AND (keyed.occurred_at IS NULL OR keyed.not_attempted = 1 OR keyed.errored_at >= keyed.occurred_at)
+          THEN CASE WHEN ${inPlayRecordSql()} THEN 'errored' ELSE 'left' END
+        WHEN keyed.not_attempted = 1
+          THEN CASE WHEN ${globPrefix('keyed.reason', UPSTREAM_ERRORED_PREFIX)} AND ${inPlayRecordSql()} THEN 'blocked_by_error' ELSE 'not_reached' END
+        WHEN keyed.passed = 1
+          THEN ${passedStateSql({ reason: 'keyed.reason', kind: 'keyed.kind', sideEffecting: 'keyed.side_effecting' })}
+        WHEN ${waitingReasonSql('keyed.reason')} THEN CASE
+          WHEN keyed.kind = 'review' AND ${keptAtReview} THEN 'passed'
+          WHEN ${inPlayRecordSql()} THEN 'waiting'
+          ELSE 'left'
+        END
+        ELSE 'failed'
+      END AS state
+    FROM keyed
+    JOIN records record ON record._row_id = keyed.record_id
+  `;
+};
+
+// stepStateSql always has two placeholders (events, errors); null means every step.
+const stepStateParams = (stepId: string | null) => [stepId, stepId];
+
+// on_event turn steps live in event_turn_steps, one row per turn; a record's
+// state is its latest turn's row. Scoped by `?` = node id (`<block>.<step>`).
+const turnStepStateSql = (scoped: boolean) => `
+  WITH latest_turn AS (
+    SELECT turn.turn_id, turn.record_id, turn.block_id,
+      ROW_NUMBER() OVER (PARTITION BY turn.record_id, turn.block_id ORDER BY turn.turn_index DESC) AS position
+    FROM event_turns turn
+    WHERE turn.status <> 'ignored'
+  ),
+  turn_steps AS (
+    SELECT latest_turn.record_id, latest_turn.block_id || '.' || step.step_id AS step_id,
+      step.kind, step.status, COALESCE(step.reason, '') AS reason, step.occurred_at
+    FROM latest_turn
+    JOIN event_turn_steps step ON step.turn_id = latest_turn.turn_id
+    WHERE latest_turn.position = 1
+  )
+  SELECT turn_steps.record_id, turn_steps.step_id, turn_steps.reason, turn_steps.occurred_at AS state_at,
+    CASE turn_steps.status
+      WHEN 'passed' THEN 'passed'
+      WHEN 'skipped' THEN CASE
+        WHEN turn_steps.reason GLOB 'skipped:*'
+          THEN ${passedStateSql({ reason: 'turn_steps.reason', kind: 'turn_steps.kind', sideEffecting: '0' })}
+        ELSE 'skipped_other'
+      END
+      WHEN 'errored' THEN CASE WHEN ${inPlayRecordSql()} THEN 'errored' ELSE 'left' END
+      WHEN 'awaiting_review' THEN CASE WHEN ${inPlayRecordSql()} THEN 'waiting' ELSE 'left' END
+      WHEN 'parked' THEN CASE WHEN ${inPlayRecordSql()} THEN 'waiting' ELSE 'left' END
+      ELSE 'failed'
+    END AS state
+  FROM turn_steps
+  JOIN records record ON record._row_id = turn_steps.record_id
+  ${scoped ? 'WHERE turn_steps.step_id = ?' : ''}
+`;
+
+const hasTurnTables = (db: any) => tableExists(db, 'event_turns') && tableExists(db, 'event_turn_steps');
+
+const droppedCountsByStep = (db: any) => normalizedRows(db.prepare(`
+  SELECT step_id, COUNT(DISTINCT record_id) AS dropped
+  FROM (
+    SELECT disqualified_gate AS step_id, _row_id AS record_id
+    FROM records
+    WHERE COALESCE(disqualified_at, '') <> ''
+      AND COALESCE(disqualified_gate, '') NOT IN ('', ${sqlString(OVERRIDE_GATE)})
+    UNION ALL
+    SELECT substr(verdict.created_by, ${'review:'.length + 1}) AS step_id, record._row_id AS record_id
+    FROM records record
+    JOIN overrides verdict ON verdict.record_id = record._row_id
+    WHERE COALESCE(record.disqualified_at, '') <> ''
+      AND record.disqualified_gate = ${sqlString(OVERRIDE_GATE)}
+      AND verdict.kind = 'drop'
+      AND verdict.step_id = ''
+      AND COALESCE(verdict.cleared_at, '') = ''
+      AND verdict.created_by GLOB 'review:*'
+  )
+  GROUP BY step_id
+`).all());
+
+const pipelineStepCounts = (db: any) => {
+  const byStep = new Map<string, PipelineCounts>();
+  const add = (stepId: string, state: string, count: number) => {
+    if (!(PIPELINE_STEP_STATES as readonly string[]).includes(state)) return;
+    const counts = byStep.get(stepId) || emptyPipelineCounts();
+    counts[state as PipelineStepState] += count;
+    byStep.set(stepId, counts);
+  };
+  if (tableExists(db, 'pipeline_events')) {
+    normalizedRows(db.prepare(`
+      SELECT step_id, state, COUNT(*) AS count FROM (${stepStateSql(db, false)})
+      WHERE state <> 'dropped'
+      GROUP BY step_id, state
+    `).all(...stepStateParams(null))).forEach((row: any) => add(String(row.step_id), String(row.state), Number(row.count || 0)));
+  }
+  if (hasTurnTables(db)) {
+    normalizedRows(db.prepare(`
+      SELECT step_id, state, COUNT(*) AS count FROM (${turnStepStateSql(false)}) GROUP BY step_id, state
+    `).all()).forEach((row: any) => add(String(row.step_id), String(row.state), Number(row.count || 0)));
+  }
+  droppedCountsByStep(db).forEach((row: any) => add(String(row.step_id), 'dropped', Number(row.dropped || 0)));
+  return byStep;
+};
+
+// Every configured review stage with its queue count, from one grouped query
+// over the queue's own predicate (awaitingReviewWhere), so each count equals
+// GET /api/review/:stageId `total`.
+const resolvedReviewStagesWithCounts = (db: any, config: any) => {
+  const columns = new Set(getRecordColumns(db).map((column) => column.key));
+  const stages = configuredReviewStages(config).map((stage) => ({
+    ...stage,
+    fields: [...new Set(stage.fields)].filter((field) => columns.has(field)),
+  }));
+  const counts = new Map<string, number>();
+  if (stages.length > 0 && tableExists(db, 'pipeline_events')) {
+    normalizedRows(db.prepare(`
+      SELECT event.step_id AS stage_id, COUNT(DISTINCT event.record_id) AS awaiting
+      FROM pipeline_events event
+      JOIN records record ON record._row_id = event.record_id
+      WHERE ${awaitingReviewWhere(`event.step_id IN (${stages.map(() => '?').join(', ')})`)}
+      GROUP BY event.step_id
+    `).all(...stages.map((stage) => stage.id))).forEach((row: any) => counts.set(String(row.stage_id), Number(row.awaiting || 0)));
+  }
+  return new Map(stages.map((stage) => [stage.id, { ...stage, awaiting_count: counts.get(stage.id) || 0 }]));
+};
+
+const costNodeId = (raw: string, nodeIds: Set<string>) => {
+  if (raw.startsWith(SOURCING_COST_PREFIX)) return SOURCE_NODE_ID;
+  const prefix = COST_STEP_PREFIXES.find((candidate) => raw.startsWith(candidate)) || '';
+  const id = raw.slice(prefix.length);
+  if (nodeIds.has(id)) return id;
+  const turn = id.match(TURN_SCOPED_STEP_ID);
+  return turn && nodeIds.has(`${turn[1]}.${turn[2]}`) ? `${turn[1]}.${turn[2]}` : '';
+};
+
+type PipelineSpend = { spend_usd: number | null; spend_calls: number; unpriced_calls: number };
+
+const pipelineSpend = (db: any, nodeIds: Set<string>) => {
+  const rows = tableExists(db, 'cost_events') ? normalizedRows(db.prepare(`
+    SELECT step_id,
+      SUM(usd_cost) AS spend_usd,
+      COUNT(*) AS calls,
+      SUM(CASE WHEN usd_cost IS NULL THEN 1 ELSE 0 END) AS unpriced
+    FROM cost_events
+    GROUP BY step_id
+  `).all()) : [];
+  const byNode = new Map<string, PipelineSpend>();
+  // Cost rows no node claims (a removed step, an unknown writer). Unpriced ones
+  // are listed too, so missing spend is visible rather than silently absent.
+  const unattributed: Array<{ step_id: string; spend_usd: number | null; calls: number; unpriced_calls: number }> = [];
+  rows.forEach((row: any) => {
+    const raw = String(row.step_id || '');
+    const priced = row.spend_usd === null || row.spend_usd === undefined ? null : Number(row.spend_usd);
+    const nodeId = costNodeId(raw, nodeIds);
+    if (!nodeId) {
+      unattributed.push({ step_id: raw, spend_usd: priced, calls: Number(row.calls || 0), unpriced_calls: Number(row.unpriced || 0) });
+      return;
+    }
+    const current = byNode.get(nodeId) || { spend_usd: null, spend_calls: 0, unpriced_calls: 0 };
+    byNode.set(nodeId, {
+      spend_usd: priced === null ? current.spend_usd : (current.spend_usd || 0) + priced,
+      spend_calls: current.spend_calls + Number(row.calls || 0),
+      unpriced_calls: current.unpriced_calls + Number(row.unpriced || 0),
+    });
+  });
+  return {
+    byNode,
+    unattributed,
+    unattributedUsd: unattributed.reduce((total, item) => total + (item.spend_usd || 0), 0),
+    unattributedUnpriced: unattributed.reduce((total, item) => total + item.unpriced_calls, 0),
+  };
+};
+
+const latestRunState = (db: any) => (
+  tableExists(db, 'run_state') ? db.prepare('SELECT * FROM run_state ORDER BY updated_at DESC LIMIT 1').get() || null : null
+);
+
+const runAgeMs = (row: any) => {
+  const updatedAtMs = Date.parse(String(row?.updated_at || ''));
+  return Number.isFinite(updatedAtMs) ? Math.max(0, Date.now() - updatedAtMs) : null;
+};
+
+const liveActiveStep = (db: any, nodeIds: Set<string>) => {
+  const run = latestRunState(db);
+  if (!run || String(run.status || '') !== 'running') return '';
+  const age = runAgeMs(run);
+  if (age !== null && age >= LIVE_RUN_MAX_AGE_MS) return '';
+  const stepId = textOf(run.active_step);
+  return nodeIds.has(stepId) && stepId !== SOURCE_NODE_ID ? stepId : '';
+};
+
+const sourceStrategies = (config: any) => [
+  ...(Array.isArray(config?.source?.strategies) ? config.source.strategies : []),
+  ...(Array.isArray(config?.source?.searches) ? config.source.searches : []),
+].filter(isPlainObject).map((strategy: any) => ({
+  id: textOf(strategy.id),
+  kind: textOf(strategy.kind),
+  ...(pipelineToolOrModel(strategy) ? { tool_or_model: pipelineToolOrModel(strategy) } : {}),
+})).filter((strategy) => strategy.id || strategy.kind);
+
+const sourceNode = ({ db, config, spend }: { db: any; config: any; spend?: PipelineSpend }) => {
+  const total = Number(db.prepare('SELECT COUNT(*) AS count FROM records').get()?.count || 0);
+  const bySource = hasTableColumn(db, 'records', 'source')
+    ? normalizedRows(db.prepare(`
+      SELECT COALESCE(NULLIF(TRIM(source), ''), 'unknown') AS source, COUNT(*) AS count
+      FROM records GROUP BY 1 ORDER BY count DESC, source ASC
+    `).all()).map((row: any) => ({ source: String(row.source), count: Number(row.count || 0) }))
+    : [];
+  const strategies = sourceStrategies(config);
+  const tools = [...new Set(strategies.map((strategy) => strategy.tool_or_model).filter(Boolean))];
+  return {
+    id: SOURCE_NODE_ID,
+    label: 'Source',
+    description: textOf(config?.source?.description),
+    kind: 'source',
+    ...(tools.length > 0 ? { tool_or_model: tools.join(' + ') } : {}),
+    inputs: [],
+    outputs: [...sourceOutputKeys(config)],
+    depends_on: [],
+    inferred_depends_on: [],
+    sources: strategies,
+    source_counts: bySource,
+    counts: { ...emptyPipelineCounts(), passed: total },
+    spend_usd: spend?.spend_usd ?? null,
+    spend_calls: spend?.spend_calls || 0,
+    unpriced_calls: spend?.unpriced_calls || 0,
+  };
+};
+
+export const getPipelineForViz = (listDir: string) => {
+  const db = openListDb({ listDir, readonly: true });
   try {
     const { config } = readConfig(listDir);
-    const stage = requireResolvedReviewStage({ db, config, stageId });
-    const write = db.transaction(() => {
-      const outcomes = (decisions as ReviewDecision[]).map((input, index) => {
-        try {
-          return {
-            ok: true,
-            index,
-            decision: insertReviewDecision({
-              db,
-              config,
-              ref: String(input?.row_id || ''),
-              stageId: stage.id,
-              verdict: String(input?.verdict || ''),
-              reason: String(input?.reason || ''),
-            }),
-          };
-        } catch (error) {
-          return {
-            ok: false,
-            index,
-            row_id: String(input?.row_id || ''),
-            verdict: String(input?.verdict || ''),
-            error: String((error as Error)?.message || error),
-          };
-        }
-      });
-      reconcileOverrides({ db });
-      return outcomes.map((outcome: any) => outcome.ok
-        ? { ok: true, index: outcome.index, ...reviewDecisionResult({ db, decision: outcome.decision }) }
-        : outcome);
+    const definitions = pipelineStepDefinitions(config, listDir);
+    const nodeIds = new Set([SOURCE_NODE_ID, ...definitions.map((definition) => definition.id)]);
+    const reviewStages = resolvedReviewStagesWithCounts(db, config);
+    const counts = pipelineStepCounts(db);
+    const spend = pipelineSpend(db, nodeIds);
+    const stepNodes = definitions.map((definition) => {
+      const { id, step } = definition;
+      const kind = textOf(step.kind);
+      const stage = definition.group ? undefined : reviewStages.get(id);
+      const stepCounts = counts.get(id) || emptyPipelineCounts();
+      // A review stage's waiting records ARE its queue: the same count the review
+      // API and CLI report (the awaitingReviewWhere predicate).
+      const reviewCounts = stage
+        ? { waiting: Number(stage.awaiting_count || 0), awaiting_review: Number(stage.awaiting_count || 0) }
+        : kind === 'review' ? { awaiting_review: stepCounts.waiting } : {};
+      const stepSpend = spend.byNode.get(id);
+      const toolOrModel = pipelineToolOrModel(step);
+      const when = pipelineWhen(step);
+      return {
+        id,
+        label: textOf(step.label) || definition.localId,
+        description: textOf(step.description),
+        kind,
+        ...(toolOrModel ? { tool_or_model: toolOrModel } : {}),
+        ...(when ? { when } : {}),
+        inputs: declaredStageInputs(step),
+        outputs: pipelineStepOutputs(step),
+        depends_on: definition.explicit,
+        inferred_depends_on: definition.inferred,
+        ...(stage ? {
+          review: {
+            fields: stage.fields,
+            edit_fields: stage.edit_fields,
+            ...(stage.title_field ? { title_field: stage.title_field } : {}),
+          },
+        } : {}),
+        ...(definition.group ? { group: definition.group } : {}),
+        counts: { ...stepCounts, ...reviewCounts },
+        spend_usd: stepSpend?.spend_usd ?? null,
+        spend_calls: stepSpend?.spend_calls || 0,
+        unpriced_calls: stepSpend?.unpriced_calls || 0,
+      };
     });
-    const results = write();
+    const groups = [...new Map(definitions.filter((definition) => definition.group).map((definition) => [definition.group!.id, definition.group!])).values()];
     return {
-      stage,
-      requested: decisions.length,
-      applied: results.filter((result: any) => result.ok).length,
-      failed: results.filter((result: any) => !result.ok).length,
-      results,
+      nodes: [sourceNode({ db, config, spend: spend.byNode.get(SOURCE_NODE_ID) }), ...stepNodes],
+      edges: pipelineEdges(definitions),
+      groups,
+      active_step: liveActiveStep(db, nodeIds),
+      unattributed_spend_usd: spend.unattributedUsd,
+      unattributed_spend: spend.unattributed,
+      unattributed_unpriced_calls: spend.unattributedUnpriced,
     };
   } finally {
     db.close();
   }
 };
 
-export const clearReviewDecisionForViz = (listDir: string, rowId: string, stageId: string) => {
-  const db = openListDb({ listDir, readonly: false });
+const stepRecordSummary = (row: any) => Object.fromEntries(
+  Object.entries(row || {}).filter(([key]) => !RAW_RECORD_FIELDS.has(key)),
+);
+
+const recordsInIdOrder = (db: any, ids: string[]) => {
+  if (ids.length === 0) return [];
+  const rows = normalizedRows(db.prepare('SELECT * FROM records WHERE _row_id IN (SELECT value FROM json_each(?))').all(JSON.stringify(ids)));
+  const byId = new Map(rows.map((row: any) => [String(row._row_id), row]));
+  return ids.map((id) => byId.get(id)).filter(Boolean);
+};
+
+export const getPipelineStepRecordsForViz = (listDir: string, stepId: string, state: string, limit = 100, offset = 0) => {
+  if (!(PIPELINE_STEP_STATES as readonly string[]).includes(state)) {
+    throw new AgentOutboundError({
+      code: 'INVALID_ARGUMENT',
+      message: `Step record state must be one of: ${PIPELINE_STEP_STATES.join(', ')}.`,
+      retryable: false,
+    });
+  }
+  const pageLimit = Math.max(1, Math.min(500, Math.floor(Number(limit) || 100)));
+  const pageOffset = Math.max(0, Math.floor(Number(offset) || 0));
+  const db = openListDb({ listDir, readonly: true });
   try {
     const { config } = readConfig(listDir);
-    const write = db.transaction(() => {
-      const result = clearReviewDecision({ db, config, ref: rowId, stageId });
-      reconcileOverrides({ db });
-      const record = getRecordById({ db, id: String(result.record._row_id) }) || result.record;
-      return {
-        status: result.cleared.length > 0 ? 'review_cleared' : 'noop',
-        stage: result.stage,
-        cleared_count: result.cleared.length,
-        cleared: result.cleared.map((override: any) => ({
-          id: String(override.id || ''),
-          kind: String(override.kind || ''),
-          step_id: String(override.step_id || ''),
-          reason: String(override.reason || ''),
-        })),
-        record: reviewRecordLabel(record),
-        state: reviewRecordDecisionState(record),
-      };
+    const definitions = pipelineStepDefinitions(config, listDir);
+    const definition = definitions.find((candidate) => candidate.id === stepId);
+    if (!definition && stepId !== SOURCE_NODE_ID) {
+      throw new AgentOutboundError({ code: 'NOT_FOUND', message: `Unknown pipeline step "${stepId}".`, retryable: false });
+    }
+    const page = (total: number, rows: any[]) => ({
+      step_id: stepId,
+      state,
+      total,
+      limit: pageLimit,
+      offset: pageOffset,
+      records: rows.map(stepRecordSummary),
     });
-    return write();
+    if (stepId === SOURCE_NODE_ID) {
+      if (state !== 'passed') return page(0, []);
+      const total = Number(db.prepare('SELECT COUNT(*) AS count FROM records').get()?.count || 0);
+      return page(total, normalizedRows(db.prepare('SELECT * FROM records ORDER BY _row_id ASC LIMIT ? OFFSET ?').all(pageLimit, pageOffset)));
+    }
+    const isReviewStage = !definition!.group && configuredReviewStages(config).some((stage) => stage.id === stepId);
+    if (state === 'waiting' && isReviewStage) {
+      const queue = reviewQueuePageForViz({ db, config, stageId: stepId, limit: pageLimit, offset: pageOffset });
+      return page(queue.total, recordsInIdOrder(db, queue.records.map((row: any) => String(row._row_id))));
+    }
+    if (state === 'dropped') {
+      const where = droppedAtStepSql('?');
+      const total = Number(db.prepare(`SELECT COUNT(*) AS count FROM records record WHERE ${where}`).get(stepId, stepId)?.count || 0);
+      const rows = normalizedRows(db.prepare(`
+        SELECT record.*, record.disqualify_reason AS __step_reason, record.disqualified_at AS __step_at
+        FROM records record
+        WHERE ${where}
+        ORDER BY record.disqualified_at DESC, record._row_id ASC
+        LIMIT ? OFFSET ?
+      `).all(stepId, stepId, pageLimit, pageOffset));
+      return page(total, rows);
+    }
+    const isTurnStep = Boolean(definition!.group);
+    if (isTurnStep && !hasTurnTables(db)) return page(0, []);
+    if (!isTurnStep && !tableExists(db, 'pipeline_events')) return page(0, []);
+    const source = isTurnStep ? turnStepStateSql(true) : stepStateSql(db, true);
+    const params = isTurnStep ? [stepId] : stepStateParams(stepId);
+    const total = Number(db.prepare(`SELECT COUNT(*) AS count FROM (${source}) WHERE state = ?`).get(...params, state)?.count || 0);
+    const rows = normalizedRows(db.prepare(`
+      SELECT record.*, classified.reason AS __step_reason, classified.state_at AS __step_at
+      FROM (${source}) classified
+      JOIN records record ON record._row_id = classified.record_id
+      WHERE classified.state = ?
+      ORDER BY classified.state_at DESC, record._row_id ASC
+      LIMIT ? OFFSET ?
+    `).all(...params, state, pageLimit, pageOffset));
+    return page(total, rows);
   } finally {
     db.close();
   }
@@ -1290,10 +2168,8 @@ export const getRecordDetail = (listDir: string, rowId: string) => {
 export const getProgress = (listDir: string) => {
   const db = openListDb({ listDir, readonly: true });
   try {
-    if (!tableExists(db, 'run_state')) return { run: null };
-    const row: any = db.prepare('SELECT * FROM run_state ORDER BY updated_at DESC LIMIT 1').get();
+    const row: any = latestRunState(db);
     if (!row) return { run: null };
-    const updatedAtMs = Date.parse(String(row.updated_at || ''));
     return {
       run: {
         run_id: String(row.run_id || ''),
@@ -1308,7 +2184,7 @@ export const getProgress = (listDir: string) => {
         error: String(row.error || ''),
         started_at: String(row.started_at || ''),
         updated_at: String(row.updated_at || ''),
-        age_ms: Number.isFinite(updatedAtMs) ? Math.max(0, Date.now() - updatedAtMs) : null,
+        age_ms: runAgeMs(row),
       },
     };
   } finally {

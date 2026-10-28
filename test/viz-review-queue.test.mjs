@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { applyReviewDecisionsForViz } from '../dist/viz/data.js';
+import { reviewTabFromParam, reviewTabParam } from '../dist/viz/review-presentation.js';
 import { getAllReviewQueue, getReviewQueue } from '../dist/orchestrator/pipeline/review.js';
 import { ensureRecordColumns, openListDb, upsertRecord } from '../dist/orchestrator/runtime/db.js';
 
@@ -247,5 +248,24 @@ test('a combined-queue decision uses the row stage rather than another active st
     }
   } finally {
     try { db.close(); } catch {}
+  }
+});
+
+// Kills: a pipeline link landing on the wrong tab, an unknown or non-review
+// step id leaving the page with no tab, and the all-stages tab not surviving a
+// reload.
+test('the review stage tab comes from ?stage= and falls back to the first stage', () => {
+  const stages = ['review_alpha', 'review_beta'];
+  assert.deepEqual(reviewTabFromParam('review_beta', stages), { kind: 'stage', stageId: 'review_beta' });
+  assert.deepEqual(reviewTabFromParam('all', stages), { kind: 'all' });
+  for (const param of [null, '', 'enrich_step', 'turns.review_reply']) {
+    assert.deepEqual(reviewTabFromParam(param, stages), { kind: 'stage', stageId: 'review_alpha' }, String(param));
+  }
+  assert.equal(reviewTabFromParam('review_alpha', []), null);
+  assert.equal(reviewTabFromParam('all', []), null);
+  assert.equal(reviewTabParam({ kind: 'all' }), 'all');
+  assert.equal(reviewTabParam({ kind: 'stage', stageId: 'review_beta' }), 'review_beta');
+  for (const tab of [{ kind: 'all' }, { kind: 'stage', stageId: 'review_beta' }]) {
+    assert.deepEqual(reviewTabFromParam(reviewTabParam(tab), stages), tab, 'round trip');
   }
 });

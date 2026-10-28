@@ -23,6 +23,7 @@ const scoreStagesFrom = (config: Record<string, unknown>): ScoreStage[] => (
       id: String(step.id || '').trim(),
       key: String(step.key || '').trim(),
       model: String(step.model || '').trim(),
+      temperature: typeof step.temperature === 'number' ? step.temperature : undefined,
       criteria: Array.isArray(step.criteria) ? step.criteria as ScoreStage['criteria'] : [],
       inputs: step.inputs,
       outputs: step.outputs && typeof step.outputs === 'object' && !Array.isArray(step.outputs)

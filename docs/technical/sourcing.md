@@ -8,6 +8,8 @@ For the user-facing description, see `../product/sourcing.md`.
 
 Each search entry in `source.searches` describes a query against a specific source. The orchestrator runs all searches in parallel and invokes `execute-step` for each. The AI SDK call has the search's pinned toolkit loaded (whichever local-business-search toolkit the config author selected from Composio); the model calls the tool, interprets results, and emits structured business data via a declared schema.
 
+A search can return rows through the structured final `results` payload or directly from its tool invocation. A direct result may be a row array or an object with one array-valued field. The orchestrator treats those rows as search results and applies the search's existing `output_map` before insertion.
+
 The orchestrator:
 - Writes returned businesses as new records
 - Assigns a stable `_row_id`
@@ -15,9 +17,13 @@ The orchestrator:
 - Merges data when a duplicate is found
 - Tracks search results in the sourcing log
 
+For a `keyword_geo` strategy, the orchestrator expands the current `keywords` or `keywords_from` value on every run. Each keyword/geography pair has durable task state. Newly added pairs are created as pending tasks without re-running completed pairs; pending work that has never run is selected before retried or resumed work. `source.budget.max_calls` limits each run, so repeated `source` runs continue through any remaining pending pairs. The sourcing summary reports newly created tasks and the pending count remaining after the run.
+
+Record field names may use SQL keywords such as `group`, `order`, and `select`. Agent Outbound quotes record identifiers when it creates and updates dynamic record columns; field checks and review fields use those names directly. In SQL supplied to `query` or `--where`, quote such names with double quotes (for example, `"group" = 'enterprise'`).
+
 ### Deduplication
 
-Dedup is AI-driven, using vector similarity search followed by AI confirmation. See below for the full dedup pipeline.
+Dedup first applies the configured exact `dedup_key`. AI dedup then uses vector similarity search followed by AI confirmation only when the row has a fuzzy identity. A row whose configured exact key is its identity, or whose sole identity is an opaque 24-character hex external ID, skips AI dedup by default; `source.ai_dedup: on` explicitly enables it.
 
 #### Identity
 
@@ -46,11 +52,17 @@ When a new record arrives during sourcing:
 3. Load all existing embeddings and compute dot product (cosine similarity, since vectors are L2-normalized) against each
 4. Any existing records above a similarity threshold of 0.85 become **candidate duplicates**
 
+AI confirmation considers only the top `source.ai_dedup_max_candidates` candidates by similarity (default `3`). It makes no more than `source.ai_dedup_max_calls` confirmation calls in one sourcing run (default `100`), including refresh and child relinking. On reaching that ceiling, sourcing stops AI dedup for the run, returns a warning, and marks remaining AI-dedup rows `needs_review` rather than continuing comparisons.
+
 For the record counts in a typical list (hundreds to low thousands), in-memory dot product is fast — no vector index extension needed.
 
 #### AI Confirmation
 
-Each candidate pair is sent to a fast evaluation-tier model (resolved from `ai.defaults.evaluation`) via structured output. The model sees both full records and returns:
+When `ai.decide` is configured, each candidate pair is sent to the decide provider as one yes/no question: “Do records A and B refer to the same real-world entity (the same person or the same business)?” The `noul` answer is interpreted as the probability of yes: yes at confidence `>= 0.7` is confirmed, yes below that threshold needs review, and no is not linked. Without `ai.decide`, confirmation falls back to the fast evaluation-tier model resolved from `ai.defaults.evaluation`, using the same question and state.
+
+Neither path receives full records. Confirmation sends only the project-defined `source.ai_dedup_fields` payload: the same ordered, labelled `label: value` lines for record A and record B. A bare string is shorthand for `{ field: <name> }`; an object can supply a display label, and dotted paths traverse a JSON-typed record field. Empty values are omitted. `source.ai_dedup: on` requires a non-empty payload specification. Each value is capped by `source.ai_dedup_max_chars_per_field` (default `500`). `source.ai_dedup_context` optionally describes the record population for the question, such as “people who own small consulting firms; same person even if title differs.”
+
+The fallback model returns:
 
 ```
 { same: boolean, confidence: number, reasoning: string }
@@ -59,6 +71,8 @@ Each candidate pair is sent to a fast evaluation-tier model (resolved from `ai.d
 - `confidence >= 0.7` and `same = true` → auto-linked as duplicate
 - `confidence < 0.7` → flagged as `needs_review` for operator resolution
 - `same = false` → not linked
+
+Every AI confirmation call, including a non-match, is written to the cost ledger as `sourcing:dedup` (or `sourcing:dedup_relink` during relinking), so `ai-usage` reports the total confirmation spend.
 
 #### Linking
 
@@ -105,6 +119,18 @@ A record that previously failed can become "passed" if filter config or upstream
 
 ```yaml
 source:
+  # Optional. Exact-key identities skip AI dedup by default; fuzzy identities run it.
+  # Set on only when an exact-key identity also needs fuzzy AI matching.
+  ai_dedup: on # on | off
+  # Required when ai_dedup is on. The exact A/B confirmation payload, in order.
+  ai_dedup_fields:
+    - { field: first_name, label: First name }
+    - { field: company, label: Firm }
+    - { field: extra_json.headline, label: Headline }
+  ai_dedup_max_chars_per_field: 200
+  ai_dedup_context: people who own small consulting firms; same person even if title differs
+  ai_dedup_max_candidates: 3 # top vector candidates confirmed per row
+  ai_dedup_max_calls: 100 # total confirmation calls per sourcing run
   searches:
     - source: local_business_search
       query: "plumber Boise Idaho"

@@ -340,6 +340,7 @@ export const executeStepAction = async ({
       role,
       aiConfig,
       reasoning: stepConfig?.reasoning === true,
+      temperature: stepConfig?.temperature,
       schema: buildExecuteStepResultSchema(outputSchema),
       prompt: userPrompt,
       systemPrompt,
@@ -361,6 +362,7 @@ export const executeStepAction = async ({
       usage: withModelContextTelemetry(result.usage, modelContext.telemetry),
       model: result.model,
       provider: result.provider,
+      tool_results: getToolResultData(result.raw),
     };
   } catch (error) {
     if (isBudgetExceededError(error)) throw error;

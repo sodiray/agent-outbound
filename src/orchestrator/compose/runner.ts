@@ -29,6 +29,7 @@ type DbLike = {
 type ComposeStep = {
   id?: string;
   model?: string;
+  temperature?: number;
   structure?: Record<string, string | string[]>;
   inputs?: Record<string, { from?: string; value?: string; required?: boolean }>;
   rules?: string[];
@@ -42,6 +43,7 @@ export const composeDependencyHash = ({ step, record }: { step: ComposeStep; rec
   inputs: declaredInputs({ step, record }),
   config: {
     model: step.model || '',
+    temperature: step.temperature,
     inputs: step.inputs || {},
     structure: step.structure || {},
     rules: step.rules || [],
@@ -60,6 +62,7 @@ export type ComposeGenerator = (input: {
   systemPrompt: string;
   toolSpec: Record<string, never>;
   maxSteps: number;
+  temperature?: number;
 }) => Promise<{
   object: unknown;
   usage: Record<string, unknown>;
@@ -412,6 +415,7 @@ export const runComposeStep = async ({
         model: String(step.model || ''),
         role: 'copywriting',
         aiConfig: config.ai && typeof config.ai === 'object' ? config.ai as Record<string, unknown> : {},
+        temperature: step.temperature,
         schema: resultSchema,
         prompt: composePrompt({ step, inputs }),
         systemPrompt: 'You are a constrained text composer. Facts are closed-world data; unknown is forbidden.',

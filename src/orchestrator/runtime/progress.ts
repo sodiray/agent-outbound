@@ -40,24 +40,27 @@ export const DEFAULT_STALE_RUNNING_MS = 30_000;
 export const pipelineRunTerminalStatus = (summary: {
   errored?: number;
   awaiting_review?: number;
+  deferred?: number;
 }): 'done' | 'incomplete' | 'error' => {
   if (Number(summary.errored || 0) > 0) return 'error';
-  if (Number(summary.awaiting_review || 0) > 0) return 'incomplete';
+  if (Number(summary.awaiting_review || 0) > 0 || Number(summary.deferred || 0) > 0) return 'incomplete';
   return 'done';
 };
 
 export const pipelineRunTerminalMessage = (summary: {
   errored?: number;
   awaiting_review?: number;
+  deferred?: number;
   survivors?: number;
 }): string => {
   const errored = Number(summary.errored || 0);
   const awaiting = Number(summary.awaiting_review || 0);
+  const deferred = Number(summary.deferred || 0);
   const survivors = Number(summary.survivors || 0);
-  if (errored > 0 || awaiting > 0) {
-    return `Pipeline incomplete · ${errored} errored records need retry · ${awaiting} awaiting review`;
+  if (errored > 0 || awaiting > 0 || deferred > 0) {
+    return `Pipeline incomplete · ${errored} errored records need retry · ${awaiting} awaiting review · ${deferred} deferred`;
   }
-  return `Pipeline complete · ${survivors} survivors · ${awaiting} awaiting review`;
+  return `Pipeline complete · ${survivors} survivors · ${awaiting} awaiting review · ${deferred} deferred`;
 };
 
 /**

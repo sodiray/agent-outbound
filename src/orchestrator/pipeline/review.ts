@@ -1,4 +1,6 @@
 import { AgentOutboundError } from '../runtime/contract.js';
+import { ensureRecordColumns, upsertRecord } from '../runtime/db.js';
+import { appendTransitionAudit } from '../policy/transition-audit.js';
 import {
   clearOverrides,
   getRecordById,
@@ -16,6 +18,7 @@ export type ReviewStage = {
   label: string;
   description: string;
   fields: string[];
+  edit_fields: string[];
   title_field?: string;
   detail?: ReviewDetailSection[];
 };
@@ -60,6 +63,9 @@ export const configuredReviewStages = (config: any): ReviewStage[] => (
       fields: Array.isArray(step?.fields)
         ? step.fields.map((field: unknown) => String(field || '').trim()).filter(Boolean)
         : [],
+      edit_fields: Array.isArray(step?.edit_fields)
+        ? step.edit_fields.map((field: unknown) => String(field || '').trim()).filter(Boolean)
+        : [],
       ...(titleField ? { title_field: titleField } : {}),
       detail: Array.isArray(step?.detail) ? step.detail as ReviewDetailSection[] : undefined,
     };
@@ -91,7 +97,7 @@ export const requireResolvedReviewStage = ({
   availableColumns: recordColumns(db),
 });
 
-const awaitingReviewWhere = (stageCondition = 'event.step_id = ?') => `
+export const awaitingReviewWhere = (stageCondition = 'event.step_id = ?') => `
   event.kind = 'review'
   AND ${stageCondition}
   AND event.passed = 0
@@ -449,6 +455,7 @@ export const insertReviewDecision = ({
   stageId,
   verdict,
   reason = '',
+  edits = {},
 }: {
   db: any;
   config: any;
@@ -456,6 +463,7 @@ export const insertReviewDecision = ({
   stageId: string;
   verdict: string;
   reason?: string;
+  edits?: Record<string, string>;
 }) => {
   const stage = requireResolvedReviewStage({ db, config, stageId });
   const requestedVerdict = String(verdict || '').trim().toLowerCase();
@@ -481,6 +489,29 @@ export const insertReviewDecision = ({
     });
   }
   const record = resolveRecordRef({ db, ref });
+  const normalizedEdits = Object.fromEntries(Object.entries(edits).map(([field, value]) => [String(field).trim(), String(value)]).filter(([field]) => Boolean(field)));
+  const forbidden = Object.keys(normalizedEdits).filter((field) => !stage.edit_fields.includes(field));
+  if (forbidden.length > 0) {
+    throw new AgentOutboundError({
+      code: 'INVALID_ARGUMENT',
+      message: `Review stage "${stage.id}" does not allow edits to: ${forbidden.join(', ')}.`,
+      retryable: false,
+    });
+  }
+  if (Object.keys(normalizedEdits).length > 0) {
+    ensureRecordColumns({ db, columns: [...Object.keys(normalizedEdits), 'transition_audit_json'] });
+    const audit = appendTransitionAudit(record.transition_audit_json, {
+      audit_id: `review_edit_${Date.now()}`,
+      account_id: String(record._row_id),
+      kind: 'human_decision',
+      reason: `review:${stage.id}: edited ${Object.keys(normalizedEdits).join(', ')}`,
+      evidence_ids: [],
+      actor: 'human',
+      occurred_at: new Date().toISOString(),
+      policy_version: 'review-edit-v1',
+    });
+    upsertRecord({ db, row: { ...record, ...normalizedEdits, transition_audit_json: audit } });
+  }
   const override = insertOverride({
     db,
     recordId: String(record._row_id),

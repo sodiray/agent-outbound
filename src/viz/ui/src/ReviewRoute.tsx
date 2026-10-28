@@ -1,14 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { APIProvider, Map as GoogleMap, Marker } from '@vis.gl/react-google-maps';
 import {
-  clearReviewDecision,
   fetchAllReviewQueue,
   fetchMeta,
-  fetchRecordDetail,
   fetchReviewQueue,
-  submitReviewDecisions,
 } from './api.js';
 import { DetailDrawer } from './DetailDrawer.js';
+import { useRecordDetail } from './RecordDetailView.js';
+import {
+  actionInProgress,
+  actionLabel,
+  actionPastTense,
+  isReviewActivationTarget,
+  isReviewTypingTarget,
+  releasePointerFocus,
+  restoreRecordInOrder as restoreQueueRecordInOrder,
+  submitReviewVerdict,
+  undoReviewVerdict,
+  type ReviewActionVerdict,
+} from './reviewDecisions.js';
 import { RouteNav } from './RouteNav.js';
 import {
   canRenderReviewDetailMap,
@@ -16,11 +27,15 @@ import {
   reviewDetailHref,
   reviewDetailLinkText,
 } from '../../review-detail.js';
+import { canDecide, reviewShortcut, undoTargetFor } from '../../review-gate.js';
 import {
   reviewIdentityAddsInformation,
   reviewLabelFor,
   reviewRecordName,
+  reviewTabFromParam,
+  reviewTabParam,
   shouldShowReviewIdentityColumn,
+  type ReviewTab,
 } from '../../review-presentation.js';
 import type {
   MetaResponse,
@@ -32,8 +47,6 @@ import type {
 const ALL_STAGES_VIEW = 'all';
 const stageView = (stageId: string) => `stage:${stageId}`;
 const stageIdForView = (view: string) => view.startsWith('stage:') ? view.slice('stage:'.length) : '';
-
-type ReviewActionVerdict = 'approve' | 'reject';
 
 type DecisionHistoryItem = {
   sequence: number;
@@ -55,8 +68,6 @@ type DecisionFailure = {
   detail: string;
 };
 
-const DEFAULT_REJECT_REASON = 'reviewed: not a fit';
-
 const rowId = (record: RecordRow) => String(record._row_id ?? '');
 const reviewStageIdForRecord = (record: RecordRow) => String(record._review_stage_id ?? '');
 const queueRecordKey = (record: RecordRow) => `${reviewStageIdForRecord(record)}:${rowId(record)}`;
@@ -76,13 +87,6 @@ const displayValue = (value: RecordValue | undefined) => {
 };
 
 const recordName = (record: RecordRow, titleField?: string) => reviewRecordName({ record, titleField });
-
-const isTypingTarget = (target: EventTarget | null) => {
-  if (!(target instanceof HTMLElement)) return false;
-  return target.isContentEditable
-    || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
-    || Boolean(target.closest('.close-button, .scrim, .review-undo, .review-detail-undo'));
-};
 
 const coordinateValue = (value: RecordValue | undefined) => {
   if (!hasDisplayValue(value)) return null;
@@ -267,53 +271,37 @@ const DeclaredReviewDetail = ({
   );
 };
 
+// `detail` is the loaded detail of the record this drawer shows, or null while
+// it loads; the parent drops a detail that belongs to another record.
 const ReviewDetail = ({
-  rowIdValue,
+  detail,
+  loading,
+  error,
   mapsApiKey,
   detailDeclaration,
   titleField,
-  deciding,
+  canDecideRecord,
+  saving,
   undoLabel,
   canUndo,
   onApprove,
   onReject,
   onUndo,
 }: {
-  rowIdValue: string;
+  detail: RecordDetail | null;
+  loading: boolean;
+  error: string;
   mapsApiKey: string;
   detailDeclaration?: MetaResponse['review_stages'][number]['detail'];
   titleField?: string;
-  deciding: boolean;
+  canDecideRecord: boolean;
+  saving: boolean;
   undoLabel: string;
   canUndo: boolean;
   onApprove: () => void;
   onReject: () => void;
   onUndo: () => void;
 }) => {
-  const [detail, setDetail] = useState<RecordDetail | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    const request = { cancelled: false };
-    setLoading(true);
-    setError('');
-    setDetail(null);
-    fetchRecordDetail(rowIdValue)
-      .then((nextDetail) => {
-        if (!request.cancelled) setDetail(nextDetail);
-      })
-      .catch((nextError: Error) => {
-        if (!request.cancelled) setError(nextError.message);
-      })
-      .finally(() => {
-        if (!request.cancelled) setLoading(false);
-      });
-    return () => {
-      request.cancelled = true;
-    };
-  }, [rowIdValue]);
-
   const record = detail?.record || null;
   const hasDeclaredDetail = detailDeclaration !== undefined;
   const coordinates = !hasDeclaredDetail && record ? recordCoordinates(record) : null;
@@ -335,7 +323,7 @@ const ReviewDetail = ({
 
   return (
     <>
-      {loading ? <div className="drawer-loading">Loading detail...</div> : null}
+      {loading || (!detail && !error) ? <div className="drawer-loading">Loading detail...</div> : null}
       {error ? <div className="error-banner">{error}</div> : null}
       {detail && record ? (
         <>
@@ -347,11 +335,26 @@ const ReviewDetail = ({
             </div>
             <div className="review-detail-action-stack">
               <div className="review-detail-actions">
-                <button className="is-reject" type="button" onClick={onReject} disabled={deciding}>
+                <button
+                  className="is-reject"
+                  type="button"
+                  onClick={(event) => {
+                    releasePointerFocus(event);
+                    onReject();
+                  }}
+                  disabled={!canDecideRecord}
+                >
                   Reject
                 </button>
-                <button type="button" onClick={onApprove} disabled={deciding}>
-                  {deciding ? 'Saving…' : 'Approve'}
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    releasePointerFocus(event);
+                    onApprove();
+                  }}
+                  disabled={!canDecideRecord}
+                >
+                  {saving ? 'Saving…' : 'Approve'}
                 </button>
               </div>
               <button
@@ -423,20 +426,18 @@ const restoreRecordInOrder = ({
   records: RecordRow[];
   record: RecordRow;
   order: string[];
-}) => {
-  if (records.some((candidate) => queueRecordKey(candidate) === queueRecordKey(record))) return records;
-  const rank = new Map(order.map((id, index) => [id, index]));
-  return [...records, record].sort((left, right) => (
-    (rank.get(queueRecordKey(left)) ?? Number.MAX_SAFE_INTEGER)
-    - (rank.get(queueRecordKey(right)) ?? Number.MAX_SAFE_INTEGER)
-  ));
-};
+}) => restoreQueueRecordInOrder({ records, record, order, keyOf: queueRecordKey });
 
-const actionLabel = (verdict: ReviewActionVerdict) => verdict === 'approve' ? 'Approve' : 'Reject';
-const actionPastTense = (verdict: ReviewActionVerdict) => verdict === 'approve' ? 'Approved' : 'Rejected';
-const actionInProgress = (verdict: ReviewActionVerdict) => verdict === 'approve' ? 'Approving' : 'Rejecting';
+const viewForTab = (tab: ReviewTab | null) => (
+  !tab ? '' : tab.kind === 'all' ? ALL_STAGES_VIEW : stageView(tab.stageId)
+);
+
+const stageParamForView = (view: string) => reviewTabParam(
+  view === ALL_STAGES_VIEW ? { kind: 'all' } : { kind: 'stage', stageId: stageIdForView(view) },
+);
 
 export const ReviewRoute = () => {
+  const [search, setSearch] = useSearchParams();
   const [meta, setMeta] = useState<MetaResponse | null>(null);
   const [activeView, setActiveView] = useState('');
   const [allStage, setAllStage] = useState<MetaResponse['review_stages'][number] | null>(null);
@@ -459,18 +460,32 @@ export const ReviewRoute = () => {
   const actionSequence = useRef(0);
   const latestActionSequence = useRef(0);
 
+  // The tab is chosen in the same update that delivers meta, so the first
+  // render with meta already shows (and fetches) the tab the URL names.
   useEffect(() => {
+    const requestedStage = search.get('stage');
     fetchMeta()
       .then((nextMeta) => {
         setMeta(nextMeta);
-        setActiveView((current) => (
-          current === ALL_STAGES_VIEW || nextMeta.review_stages.some((stage) => stageView(stage.id) === current)
-            ? current
-            : (nextMeta.review_stages[0] ? stageView(nextMeta.review_stages[0].id) : '')
-        ));
+        setActiveView(viewForTab(reviewTabFromParam(requestedStage, nextMeta.review_stages.map((stage) => stage.id))));
       })
       .catch((nextError: Error) => setError(nextError.message));
+    // Read once on load; afterwards the page writes the URL, not the reverse.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Tab switches, including undo returning to another tab, rewrite `?stage=`
+  // in place so a reload or shared link restores the tab.
+  useEffect(() => {
+    if (!activeView) return;
+    const param = stageParamForView(activeView);
+    if (search.get('stage') === param) return;
+    setSearch((current) => {
+      const next = new URLSearchParams(current);
+      next.set('stage', param);
+      return next;
+    }, { replace: true });
+  }, [activeView, search, setSearch]);
 
   useEffect(() => {
     const queueKey = `${activeView}:${sort}:${dir}`;
@@ -564,6 +579,35 @@ export const ReviewRoute = () => {
       ? activeFailures.find((failure) => failure.row_id === rowId(panelRecord))
       : null
   ) || activeFailures.at(-1);
+  const panelRowId = panelRecord ? rowId(panelRecord) : '';
+  const panelDetailState = useRecordDetail(panelRowId || null);
+  // The hook still holds the previous record's detail on the render that
+  // switches records; that detail is never shown or decided on.
+  const panelDetail = panelDetailState.detail && rowId(panelDetailState.detail.record) === panelRowId
+    ? panelDetailState.detail
+    : null;
+  const decisionInFlight = history.some((item) => item.state === 'saving');
+
+  // A decision targets only the record on screen: with the drawer open, the
+  // drawer's record once its detail has loaded; with it closed, the table row
+  // (the selected row for keys, the button's own row for its buttons). The
+  // record must be in the loaded queue, and nothing may be in flight. Refs
+  // catch a second press before React re-renders.
+  const mayDecide = (record: RecordRow | null, { live = false } = {}) => {
+    if (!record) return false;
+    const targetKey = queueRecordKey(record);
+    return canDecide({
+      detailRowId: panelRecord
+        ? (queueRecordKey(panelRecord) === targetKey && panelDetail ? rowId(panelDetail.record) : '')
+        : rowId(record),
+      targetRowId: rowId(record),
+      loading: Boolean(panelRecord) && panelDetailState.loading,
+      busy: live
+        ? inFlightDecisions.current.size > 0 || undoingRef.current
+        : decisionInFlight || undoing,
+      awaiting: activeRecords.some((candidate) => queueRecordKey(candidate) === targetKey),
+    });
+  };
 
   useEffect(() => {
     setCursor((current) => Math.max(0, Math.min(current, activeRecords.length - 1)));
@@ -631,12 +675,11 @@ export const ReviewRoute = () => {
     verdict: ReviewActionVerdict,
     record: RecordRow | null = panelRecord || selectedRecord,
   ) => {
-    if (!record || !activeStage || undoingRef.current) return;
+    if (!record || !activeStage || !mayDecide(record, { live: true })) return;
     const stageId = isAllStages ? reviewStageIdForRecord(record) : activeStage.id;
     if (!stageId) return;
     const recordId = rowId(record);
     const key = decisionKey({ stage_id: stageId, row_id: recordId });
-    if (inFlightDecisions.current.has(key)) return;
     const recordKey = queueRecordKey(record);
     const changesAllAwaitingCount = isAllStages && !activeRecords.some((candidate) => (
       rowId(candidate) === recordId && queueRecordKey(candidate) !== recordKey
@@ -673,13 +716,7 @@ export const ReviewRoute = () => {
     setMessage(`${actionInProgress(verdict)} ${recordLabel(record)}…`);
 
     try {
-      const response = await submitReviewDecisions(stageId, [{
-        row_id: recordId,
-        verdict,
-        reason: verdict === 'reject' ? DEFAULT_REJECT_REASON : undefined,
-      }]);
-      const result = response.results[0];
-      if (!result?.ok) throw new Error(String(result?.error || 'The decision was not applied.'));
+      await submitReviewVerdict({ stageId, rowId: recordId, verdict });
       inFlightDecisions.current.delete(key);
       setHistory((current) => current.map((item) => (
         item.sequence === sequence ? { ...item, state: 'saved' } : item
@@ -718,7 +755,7 @@ export const ReviewRoute = () => {
   };
 
   const undoLast = async () => {
-    const last = history.at(-1);
+    const last = undoTargetFor(history);
     if (!last) {
       setMessage('Nothing to undo.');
       return;
@@ -727,7 +764,7 @@ export const ReviewRoute = () => {
       setMessage('Wait for the current decision to finish before undoing it.');
       return;
     }
-    if (undoingRef.current) return;
+    if (undoingRef.current || inFlightDecisions.current.size > 0) return;
 
     const key = decisionKey(last);
     const panelBeforeUndo = panelRecord;
@@ -757,7 +794,7 @@ export const ReviewRoute = () => {
     setMessage(`Undoing ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordLabel(last.record)}…`);
 
     try {
-      await clearReviewDecision(last.stage_id, last.row_id);
+      await undoReviewVerdict({ stageId: last.stage_id, rowId: last.row_id });
       setMessage(`Undid ${actionPastTense(last.verdict).toLowerCase()} decision for ${recordLabel(last.record)}.`);
     } catch (nextError) {
       removeRecord(last.queue_key, last.stage_id, last.row_id);
@@ -791,41 +828,35 @@ export const ReviewRoute = () => {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (isTypingTarget(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key === 'j' || event.key === 'J' || event.key === 'ArrowDown') {
+      const activation = event.key === ' ' || event.key === 'Enter';
+      const onControl = isReviewActivationTarget(event.target, event.key);
+      // A held Enter clicks a focused button again on every repeat; no button
+      // here (decision, undo, tab) should fire more than once per press.
+      if (onControl && event.repeat) {
         event.preventDefault();
+        return;
+      }
+      const typing = isReviewTypingTarget(event.target);
+      const modified = event.metaKey || event.ctrlKey || event.altKey;
+      const shortcut = reviewShortcut({ key: event.key, repeat: event.repeat, modified, typing, onControl });
+      // Space would otherwise scroll the queue, including on a held repeat.
+      if (shortcut || (activation && !typing && !modified && !onControl)) event.preventDefault();
+      if (shortcut === 'next' || shortcut === 'previous') {
         if (panelDecision) return;
         setCursor((current) => {
-          const next = Math.min(current + 1, Math.max(0, activeRecords.length - 1));
+          const next = shortcut === 'next'
+            ? Math.min(current + 1, Math.max(0, activeRecords.length - 1))
+            : Math.max(0, current - 1);
           if (panelRecord) setPanelRecord(activeRecords[next] || null);
           return next;
         });
         return;
       }
-      if (event.key === 'k' || event.key === 'K' || event.key === 'ArrowUp') {
-        event.preventDefault();
-        if (panelDecision) return;
-        setCursor((current) => {
-          const next = Math.max(0, current - 1);
-          if (panelRecord) setPanelRecord(activeRecords[next] || null);
-          return next;
-        });
+      if (shortcut === 'approve' || shortcut === 'reject') {
+        void applyDecision(shortcut);
         return;
       }
-      if (event.key === ' ' || event.key === 'Enter') {
-        event.preventDefault();
-        void applyDecision('approve');
-        return;
-      }
-      if (event.key === 'x' || event.key === 'X') {
-        event.preventDefault();
-        void applyDecision('reject');
-        return;
-      }
-      if (event.key === 'u' || event.key === 'U') {
-        event.preventDefault();
-        void undoLast();
-      }
+      if (shortcut === 'undo') void undoLast();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
@@ -872,7 +903,8 @@ export const ReviewRoute = () => {
               type="button"
               role="tab"
               aria-selected={isAllStages}
-              onClick={() => {
+              onClick={(event) => {
+                releasePointerFocus(event);
                 setActiveView(ALL_STAGES_VIEW);
                 setCursor(0);
                 setPanelRecord(null);
@@ -888,7 +920,8 @@ export const ReviewRoute = () => {
                 type="button"
                 role="tab"
                 aria-selected={stageView(stage.id) === activeView}
-                onClick={() => {
+                onClick={(event) => {
+                  releasePointerFocus(event);
                   setActiveView(stageView(stage.id));
                   setCursor(0);
                   setPanelRecord(null);
@@ -941,7 +974,7 @@ export const ReviewRoute = () => {
                     className="review-undo"
                     type="button"
                     onClick={() => void undoLast()}
-                    disabled={!lastDecision || lastDecision.state === 'saving' || undoing}
+                    disabled={!lastDecision || decisionInFlight || undoing}
                   >
                     {undoing ? 'Undoing…' : 'Undo last'}
                   </button>
@@ -1017,8 +1050,10 @@ export const ReviewRoute = () => {
                               <button
                                 className="is-reject"
                                 type="button"
+                                disabled={!mayDecide(record)}
                                 onClick={(event) => {
                                   event.stopPropagation();
+                                  releasePointerFocus(event);
                                   setCursor(index);
                                   void applyDecision('reject', record);
                                 }}
@@ -1027,8 +1062,10 @@ export const ReviewRoute = () => {
                               </button>
                               <button
                                 type="button"
+                                disabled={!mayDecide(record)}
                                 onClick={(event) => {
                                   event.stopPropagation();
+                                  releasePointerFocus(event);
                                   setCursor(index);
                                   void applyDecision('approve', record);
                                 }}
@@ -1059,13 +1096,16 @@ export const ReviewRoute = () => {
         ) : null}
         {panelRecord ? (
           <ReviewDetail
-            rowIdValue={rowId(panelRecord)}
+            detail={panelDetail}
+            loading={panelDetailState.loading}
+            error={panelDetailState.error}
             mapsApiKey={meta.mapsApiKey}
             detailDeclaration={panelStage?.detail}
             titleField={panelStage?.title_field}
-            deciding={Boolean(panelDecision)}
+            canDecideRecord={mayDecide(panelRecord)}
+            saving={Boolean(panelDecision)}
             undoLabel={panelUndoLabel}
-            canUndo={Boolean(lastDecision && lastDecision.state === 'saved' && !undoing)}
+            canUndo={Boolean(lastDecision && !decisionInFlight && !undoing)}
             onApprove={() => void applyDecision('approve', panelRecord)}
             onReject={() => void applyDecision('reject', panelRecord)}
             onUndo={() => void undoLast()}

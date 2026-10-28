@@ -272,6 +272,68 @@ test('a skipped gate resolves normally, so its dependent runs unchanged', async 
   });
 });
 
+const branchJoinSteps = [
+  { id: 'apollo_prescreen', kind: 'enrich', deps: [], executable: true, step: { kind: 'enrich' } },
+  { id: 'approve_apollo_spend', kind: 'review', deps: ['apollo_prescreen'], executable: true, step: { kind: 'review' } },
+  { id: 'apollo_corporate_email', kind: 'filter', deps: ['approve_apollo_spend'], executable: true, step: { kind: 'filter' } },
+  { id: 'exa_location', kind: 'enrich', deps: [], executable: true, step: { kind: 'enrich' } },
+  { id: 'exa_us_only', kind: 'filter', deps: ['exa_location'], executable: true, step: { kind: 'filter' } },
+  { id: 'exa_ready', kind: 'assign', deps: ['exa_us_only'], executable: true, step: { kind: 'assign' } },
+  { id: 'fetch_joined_contents', kind: 'enrich', deps: ['apollo_corporate_email', 'exa_ready'], executable: true, step: { kind: 'enrich' } },
+];
+
+const branchOutcome = (record, step, { parkApolloReview = false } = {}) => {
+  const apollo = record.kind === 'apollo';
+  const onApolloBranch = step.id.startsWith('apollo_') || step.id === 'approve_apollo_spend';
+  if (onApolloBranch !== apollo) return { passed: true, executed: false, reason: 'skipped:other_branch' };
+  if (parkApolloReview && step.id === 'approve_apollo_spend') return { passed: false, parked: true, reason: 'awaiting_review' };
+  return { passed: true, reason: '' };
+};
+
+test('when-separated branch joins resolve skipped filters and reviews exactly once', async () => {
+  const calls = [];
+  await runDataflowCore({
+    records: [{ _row_id: 'apollo', kind: 'apollo' }, { _row_id: 'exa', kind: 'exa' }],
+    steps: branchJoinSteps,
+    concurrency: 2,
+    isTimeReady: () => true,
+    loadStep: async (step, record) => {
+      calls.push(`${record._row_id}:${step.id}`);
+      return branchOutcome(record, step);
+    },
+    onStepOutcome: async (recordState, _step, outcome) => ({
+      record: recordState.record,
+      pending: Boolean(outcome.parked),
+      resolved: !outcome.parked,
+    }),
+  });
+  assert.equal(calls.filter((call) => call.endsWith(':fetch_joined_contents')).length, 2);
+  assert.equal(calls.filter((call) => call === 'apollo:fetch_joined_contents').length, 1);
+  assert.equal(calls.filter((call) => call === 'exa:fetch_joined_contents').length, 1);
+  assert.ok(calls.includes('exa:apollo_corporate_email'));
+});
+
+test('a parked branch review blocks its own join but not the skipped branch', async () => {
+  const calls = [];
+  await runDataflowCore({
+    records: [{ _row_id: 'apollo', kind: 'apollo' }, { _row_id: 'exa', kind: 'exa' }],
+    steps: branchJoinSteps,
+    concurrency: 2,
+    isTimeReady: () => true,
+    loadStep: async (step, record) => {
+      calls.push(`${record._row_id}:${step.id}`);
+      return branchOutcome(record, step, { parkApolloReview: true });
+    },
+    onStepOutcome: async (recordState, _step, outcome) => ({
+      record: recordState.record,
+      pending: Boolean(outcome.parked),
+      resolved: !outcome.parked,
+    }),
+  });
+  assert.ok(!calls.includes('apollo:fetch_joined_contents'));
+  assert.equal(calls.filter((call) => call === 'exa:fetch_joined_contents').length, 1);
+});
+
 test('a step with no when always runs', async () => {
   await withDb(async ({ db, root, records }) => {
     const step = { ...extractStep };
@@ -324,6 +386,13 @@ pipeline:
     row: { _row_id: 'filter_dropped', business_name: 'Gamma', tier: 'B', evaluate_gate: 'yes' },
   });
   db.close();
+
+  // The preview must honour `when` exactly as the run does: the skipped record is neither evaluated nor dropped.
+  const preview = await runPipelineDataflow({ listDir: root, dryRun: true });
+  const previewed = preview.steps.find((step) => step.id === 'tier_a_gate');
+  assert.equal(previewed?.would_evaluate, 2);
+  assert.equal(previewed?.would_skip_when, 1);
+  assert.equal(previewed?.would_drop, 1);
 
   await runPipelineDataflow({ listDir: root });
 

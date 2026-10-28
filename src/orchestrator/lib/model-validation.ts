@@ -5,6 +5,7 @@ import {
   resolveConfiguredModelRef,
 } from '../runtime/models.js';
 import { assertSupportedModel } from '../runtime/model-store.js';
+import { modelParameterSupport } from '../runtime/model-store.js';
 import { flattenPipelineSteps } from './subpipelines.js';
 
 type ModelRef = {
@@ -14,7 +15,9 @@ type ModelRef = {
   resolved: boolean;
 };
 
-const MODEL_FREE_PIPELINE_KINDS = new Set(['contact_source']);
+const MODEL_FREE_PIPELINE_KINDS = new Set(['contact_source', 'action', 'await_event', 'decide', 'review']);
+
+const isLlmPipelineStep = (kind: string) => kind !== 'assign' && !MODEL_FREE_PIPELINE_KINDS.has(kind);
 
 const asArray = (value: any) => (Array.isArray(value) ? value : []);
 
@@ -55,7 +58,9 @@ const collectConfigModelRefs = (config: any): ModelRef[] => {
   }
   for (const [index, step] of flattenPipelineSteps(config).entries()) {
     const kind = String(step?.kind || '');
-    addExplicitRef(refs, `pipeline[${index}].model`, step?.model, kind === 'filter' ? 'evaluation' : 'research');
+    if (isLlmPipelineStep(kind)) {
+      addExplicitRef(refs, `pipeline[${index}].model`, step?.model, kind === 'filter' ? 'evaluation' : 'research');
+    }
     if (kind === 'assign') {
       for (const [ruleIndex, rule] of asArray(step?.rules).entries()) {
         addExplicitRef(refs, `pipeline[${index}].rules[${ruleIndex}].model`, rule?.model, 'evaluation');
@@ -76,13 +81,15 @@ const collectPhaseModelRefs = ({ config, phase }: { config: any; phase: 'source'
     for (const [index, search] of asArray(config?.source?.searches).entries()) {
       addResolvedRef(refs, `source.searches[${index}]`, search?.model, 'research', aiConfig);
     }
-    addResolvedRef(refs, 'source.dedup', '', 'evaluation', aiConfig);
+    if (!String(aiConfig?.decide?.model || '').trim()) {
+      addResolvedRef(refs, 'source.dedup', '', 'evaluation', aiConfig);
+    }
     return refs;
   }
   if (phase === 'pipeline') {
     for (const [index, step] of flattenPipelineSteps(config).entries()) {
       const kind = String(step?.kind || '');
-      if (kind !== 'assign' && !MODEL_FREE_PIPELINE_KINDS.has(kind)) {
+      if (isLlmPipelineStep(kind)) {
         addResolvedRef(refs, `pipeline[${index}]`, step?.model, kind === 'filter' ? 'evaluation' : 'research', aiConfig);
       }
       if (kind === 'assign') {
@@ -143,6 +150,19 @@ const assertRefModel = (ref: ModelRef) => {
   }
 };
 
+const assertTemperatureSupport = ({ path, model, temperature }: { path: string; model: string; temperature: unknown }) => {
+  if (temperature === undefined) return;
+  const parsed = parseProviderModel(model);
+  if (modelParameterSupport({ modelRef: parsed.modelRef, parameter: 'temperature' }) !== 'unsupported') return;
+  throw new AgentOutboundError({
+    code: 'INVALID_ARGUMENT',
+    message: `${path}.temperature is not supported by ${parsed.modelRef}. Remove temperature or choose a model that supports it.`,
+    retryable: false,
+    fields: { path, model: parsed.modelRef, parameter: 'temperature' },
+    status: 400,
+  });
+};
+
 const dedupeRefs = (refs: ModelRef[]) => {
   const seen = new Set<string>();
   const out: ModelRef[] = [];
@@ -159,6 +179,17 @@ export const assertConfigModelReferences = (config: any) => {
   const refs = dedupeRefs(collectConfigModelRefs(config || {}));
   for (const ref of refs) {
     assertRefModel(ref);
+  }
+  for (const [index, step] of flattenPipelineSteps(config || {}).entries()) {
+    if (step?.temperature === undefined) continue;
+    const kind = String(step?.kind || '');
+    if (!isLlmPipelineStep(kind)) continue;
+    const resolved = resolveConfiguredModelRef({
+      model: String(step?.model || '').trim(),
+      role: kind === 'filter' || kind === 'score' ? 'evaluation' : kind === 'compose' ? 'copywriting' : 'research',
+      aiConfig: config?.ai || {},
+    });
+    assertTemperatureSupport({ path: `pipeline[${index}]`, model: resolved.modelRef, temperature: step.temperature });
   }
 };
 

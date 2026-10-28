@@ -107,9 +107,7 @@ test('a declared author effect is invoked once, not once per run', async () => {
   }
 });
 
-// Control: the same step without the declaration re-invokes every run. Without
-// this, the test above would pass just as well against a step that never runs.
-test('without the declaration the same effect re-runs every pass', async () => {
+test('a paid side-effecting tool does not replay identical resolved inputs without idempotency', async () => {
   const step = purchaseStep({ memoize: {} });
   const { db, root, record } = setup(step);
   const attempts = [];
@@ -117,7 +115,7 @@ test('without the declaration the same effect re-runs every pass', async () => {
     const { first, second } = await runApprovedTwice({ db, root, record, step, attempts });
     assert.equal(first?.passed, true);
     assert.equal(second?.passed, true);
-    assert.equal(attempts.length, 2, 'side-effecting steps never gain duplicate-execution protection from memoization');
+    assert.equal(attempts.length, 1, 'paid side-effecting tools retain their settled result when tool inputs are unchanged');
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM idempotency').get().n, 0);
   } finally {
     db.close();

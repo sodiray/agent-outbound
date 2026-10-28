@@ -94,6 +94,7 @@ See [Compliance](./compliance.md).
 - [CRM](./crm.md), [Compliance](./compliance.md), [Integrations](./integrations.md) — cross-cutting concerns
 - [Operator](./operator.md), [User flows](./user-flows.md), [Watch](./watch.md) — day-to-day use
 - [Data Access](./data-access.md) — the query, export, and schema surface the agent uses to read state
+- [Viewer](./viewer.md) — the local table, pipeline canvas, and review panels
 - [Models](./models.md) — which LLM providers are supported, how to pin a model per step, why this matters
 - [AI Usage](./ai-usage.md) — what the tool tracks for cost (AI only) and what it doesn't
 - [Safety and Preview](./safety-and-preview.md) — dry-run, sample, snapshot, revert, idempotency

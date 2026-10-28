@@ -40,7 +40,7 @@ import {
 } from '../lib/sequence-resolution.js';
 import { createBatchLoader } from './batch-loader.js';
 import { executeStepBatch, type StepExecutionOutcome } from './step-executor.js';
-import { isSkippedWhenOutcome } from '../lib/step-when.js';
+import { isSkippedWhenOutcome, shouldRunForRecord, whenPredicateForStep } from '../lib/step-when.js';
 import { computeWaitWakeAt } from './sequence-step-runtime.js';
 import { countAwaitingReviewRecords } from './review.js';
 import { ensureStageReviewOnManualTaskPark } from '../policy/manual-task-stage-review.js';
@@ -65,6 +65,7 @@ import {
   loadCanaryConfig,
 } from '../policy/canary-isolation.js';
 import { reconcileSequenceReachability } from '../policy/sequence-reachability-reconcile.js';
+import { runEventTurns } from './on-event-turns.js';
 
 /** Reason recorded when a prior pass is re-executed because declared inputs moved. */
 export const REEXAMINED_INPUTS_CHANGED_REASON = 'reexamined:inputs_changed';
@@ -104,6 +105,7 @@ type RecordState = {
   pending: Set<string>;
   attempted: Set<string>;
   errored: Set<string>;
+  skipped: Set<string>;
   status: { dropped: boolean };
 };
 
@@ -124,7 +126,9 @@ type DataflowCoreOptions = {
   steps: DataflowStep[];
   concurrency: number;
   initialResolvedByRecord?: Map<string, Set<string>>;
+  initialSkippedByRecord?: Map<string, Set<string>>;
   isApplicable?: (recordState: RecordState, step: DataflowStep) => boolean;
+  isDependencyResolved?: (recordState: RecordState, step: DataflowStep, dependencyId: string) => boolean;
   isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
   onStepOutcome: (recordState: RecordState, step: DataflowStep, outcome: StepExecutionOutcome) => Promise<{ record?: DataflowRecord; dropped?: boolean; resolved?: boolean; errored?: boolean; pending?: boolean }>;
   onStepNotAttempted?: (recordState: RecordState, step: DataflowStep, reason: string) => Promise<void>;
@@ -144,7 +148,7 @@ const stepTier = (step: any) => {
   if ((kind === 'filter' || kind === 'exit') && String(step?.type || 'semantic').trim().toLowerCase() === 'field_check') return 0;
   if (kind === 'review') return 1;
   if (kind === 'filter' || kind === 'exit') return 1;
-  if (kind === 'enrich') return 2;
+  if (kind === 'enrich' || kind === 'decide') return 2;
   return 3;
 };
 
@@ -215,7 +219,7 @@ const buildSteps = ({ db, steps }: { db?: any; steps: any[] }): DataflowStep[] =
     executable: (() => {
       // generate is executable on the normal path when selected by selectDataflowSteps
       // (critical-path / AO_RUN_GENERATE / run_in_pipeline / fixture).
-      const base = ['filter', 'enrich', 'extract', 'contact_source', 'compose', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate', 'score'];
+      const base = ['action', 'await_event', 'filter', 'enrich', 'extract', 'contact_source', 'compose', 'assign', 'review', 'wait', 'send_email', 'send_sms', 'linkedin_connect', 'manual_task', 'exit', 'generate', 'score', 'decide'];
       // Deterministic pipeline fixture mode also executes sourcing-like kinds via fixtures.
       if (String(process.env.AO_PIPELINE_FIXTURE || '').trim() === '1') {
         return [...base, 'geo_tiles', 'linkedin_profile_search', 'pipeline'].includes(kind);
@@ -315,43 +319,57 @@ const defaultApplicable = (recordState: RecordState, step: DataflowStep) => (
   && !recordState.errored.has(step.id)
 );
 
-const dataReady = (recordState: RecordState, step: DataflowStep, applicable: (recordState: RecordState, step: DataflowStep) => boolean) => (
+const dataReady = ({
+  recordState,
+  step,
+  applicable,
+  isDependencyResolved,
+}: {
+  recordState: RecordState;
+  step: DataflowStep;
+  applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isDependencyResolved: (recordState: RecordState, step: DataflowStep, dependencyId: string) => boolean;
+}) => (
   applicable(recordState, step)
-  && step.deps.every((dep) => recordState.resolved.has(dep))
+  && step.deps.every((dep) => isDependencyResolved(recordState, step, dep))
 );
 
 export const timeReady = ({
   recordState,
   step,
   applicable,
+  isDependencyResolved,
   isTimeReady,
 }: {
   recordState: RecordState;
   step: DataflowStep;
   applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isDependencyResolved: (recordState: RecordState, step: DataflowStep, dependencyId: string) => boolean;
   isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
-}) => dataReady(recordState, step, applicable) && isTimeReady(recordState, step);
+}) => dataReady({ recordState, step, applicable, isDependencyResolved }) && isTimeReady(recordState, step);
 
 const economicallyReady = ({
   recordState,
   step,
   steps,
   applicable,
+  isDependencyResolved,
   isTimeReady,
 }: {
   recordState: RecordState;
   step: DataflowStep;
   steps: DataflowStep[];
   applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isDependencyResolved: (recordState: RecordState, step: DataflowStep, dependencyId: string) => boolean;
   isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
 }) => {
-  if (!timeReady({ recordState, step, applicable, isTimeReady })) return false;
+  if (!timeReady({ recordState, step, applicable, isDependencyResolved, isTimeReady })) return false;
   return !steps.some((candidate) => (
     candidate.dropGate
     && !recordState.resolved.has(candidate.id)
     && (
       recordState.pending.has(candidate.id)
-      || timeReady({ recordState, step: candidate, applicable, isTimeReady })
+      || timeReady({ recordState, step: candidate, applicable, isDependencyResolved, isTimeReady })
     )
     && compareCost(candidate, step) < 0
   ));
@@ -361,18 +379,20 @@ const nextStep = ({
   recordState,
   steps,
   applicable,
+  isDependencyResolved,
   isTimeReady,
 }: {
   recordState: RecordState;
   steps: DataflowStep[];
   applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isDependencyResolved: (recordState: RecordState, step: DataflowStep, dependencyId: string) => boolean;
   isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
 }) => steps
   .filter((step) => economicallyReady({
     recordState,
     step,
     steps,
-    applicable,
+    applicable, isDependencyResolved,
     isTimeReady,
   }))
   .sort(compareCost)[0] || null;
@@ -382,12 +402,14 @@ const notAttemptedReason = ({
   step,
   steps,
   applicable,
+  isDependencyResolved,
   isTimeReady,
 }: {
   recordState: RecordState;
   step: DataflowStep;
   steps: DataflowStep[];
   applicable: (recordState: RecordState, step: DataflowStep) => boolean;
+  isDependencyResolved: (recordState: RecordState, step: DataflowStep, dependencyId: string) => boolean;
   isTimeReady: (recordState: RecordState, step: DataflowStep) => boolean;
 }) => {
   if (recordState.status.dropped) return 'skipped:record_dropped';
@@ -408,7 +430,7 @@ const notAttemptedReason = ({
   if (!step.executable) return `skipped:unsupported_step_kind:${step.kind || 'unknown'}`;
   if (recordState.resolved.has(step.id)) return 'skipped:already_resolved';
   if (recordState.pending.has(step.id)) return 'skipped:pending';
-  const unmet = step.deps.filter((dep) => !recordState.resolved.has(dep));
+  const unmet = step.deps.filter((dep) => !isDependencyResolved(recordState, step, dep));
   if (unmet.length > 0) return `skipped:unresolved_dependencies:${unmet.join(',')}`;
   if (!applicable(recordState, step)) return 'skipped:not_applicable';
   if (!isTimeReady(recordState, step)) return 'skipped:not_time_ready';
@@ -458,7 +480,9 @@ export const runDataflowCore = async ({
   steps,
   concurrency,
   initialResolvedByRecord = new Map<string, Set<string>>(),
+  initialSkippedByRecord = new Map<string, Set<string>>(),
   isApplicable = defaultApplicable,
+  isDependencyResolved = (recordState, _step, dependencyId) => recordState.resolved.has(dependencyId),
   isTimeReady,
   onStepOutcome,
   onStepNotAttempted,
@@ -474,6 +498,7 @@ export const runDataflowCore = async ({
   const pendingByRecord = new Map<string, Set<string>>();
   const attemptedByRecord = new Map<string, Set<string>>();
   const erroredByRecord = new Map<string, Set<string>>();
+  const skippedByRecord = new Map<string, Set<string>>();
   const statusByRecord = new Map<string, { dropped: boolean }>();
   const sharedSet = (sets: Map<string, Set<string>>, id: string, initial?: Set<string>) => {
     const existing = sets.get(id);
@@ -495,6 +520,7 @@ export const runDataflowCore = async ({
     pending: sharedSet(pendingByRecord, getRecordRowId(record)),
     attempted: sharedSet(attemptedByRecord, getRecordRowId(record)),
     errored: sharedSet(erroredByRecord, getRecordRowId(record)),
+    skipped: sharedSet(skippedByRecord, getRecordRowId(record), initialSkippedByRecord.get(getRecordRowId(record))),
     status: sharedStatus(getRecordRowId(record)),
   }));
   // One advance coroutine per input row. For a given record it is fully serial:
@@ -508,6 +534,7 @@ export const runDataflowCore = async ({
         recordState,
         steps,
         applicable: isApplicable,
+        isDependencyResolved,
         isTimeReady,
       });
       if (candidate) recordState.pending.add(candidate.id);
@@ -522,6 +549,7 @@ export const runDataflowCore = async ({
             step,
             steps,
             applicable: isApplicable,
+            isDependencyResolved,
             isTimeReady,
           }))));
       }
@@ -549,6 +577,7 @@ export const runDataflowCore = async ({
     recordState.pending.delete(selected.id);
     if (persisted.pending) recordState.pending.add(selected.id);
     if (persisted.errored) recordState.errored.add(selected.id);
+    if (outcomePromise.executed === false) recordState.skipped.add(selected.id);
     recordState.record = persisted.record || recordState.record;
     if (persisted.resolved !== false) recordState.resolved.add(selected.id);
     recordState.status.dropped = Boolean(recordState.status.dropped || persisted.dropped);
@@ -577,6 +606,23 @@ const readPassedPipelineEvents = ({ db, recordIds }: { db: any; recordIds: strin
     state.set(recordId, new Set([...(state.get(recordId) || new Set<string>()), stepId]));
   });
   return state;
+};
+
+const readSkippedPipelineEvents = ({ db, recordIds }: { db: any; recordIds: string[] }) => {
+  if (recordIds.length === 0) return new Map<string, Set<string>>();
+  const placeholders = recordIds.map(() => '?').join(', ');
+  const rows = db.prepare(`
+    SELECT record_id, step_id
+    FROM pipeline_events
+    WHERE passed = 1 AND reason LIKE 'skipped:%' AND record_id IN (${placeholders})
+  `).all(...recordIds);
+  return rows.reduce((state: Map<string, Set<string>>, row: any) => {
+    const recordId = String(row?.record_id || '').trim();
+    const stepId = String(row?.step_id || '').trim();
+    if (!recordId || !stepId) return state;
+    state.set(recordId, new Set([...(state.get(recordId) || new Set<string>()), stepId]));
+    return state;
+  }, new Map<string, Set<string>>());
 };
 
 const refreshRecord = ({ db, record }: { db: any; record: DataflowRecord }) => (
@@ -697,9 +743,21 @@ const makeTimeReadiness = ({
   clock?: PipelineClock;
   config: Record<string, unknown>;
 }) => (recordState: RecordState, step: DataflowStep) => {
-  if (step.kind !== 'wait') return true;
   const recordId = getRecordRowId(recordState.record);
   const now = clockIso(clock);
+  if (step.kind === 'action') {
+    const deferred = db.prepare(`
+      SELECT wake_at
+      FROM pipeline_events
+      WHERE record_id = ? AND step_id = ? AND passed = 0
+        AND reason GLOB 'deferred:*' AND COALESCE(wake_at, '') != ''
+      ORDER BY occurred_at DESC, rowid DESC
+      LIMIT 1
+    `).get(recordId, step.id);
+    const retryAfter = String(deferred?.wake_at || '');
+    return !retryAfter || new Date(retryAfter).getTime() <= new Date(now).getTime();
+  }
+  if (step.kind !== 'wait') return true;
   const persistedWakeAt = existingWakeAt({ db, recordId, stepId: step.id });
   const wakeAt = persistedWakeAt || (() => {
     const stepConfig = step.step && typeof step.step === 'object'
@@ -790,7 +848,7 @@ const initializeResolved = ({
       // Transform stages own their staleness checks. Never pre-resolve them
       // from a historical pass event: that would hide declared-input changes.
       if (step.kind === 'extract' || step.kind === 'generate' || step.kind === 'compose') return false;
-      if (step.kind === 'enrich') return false;
+      if (step.kind === 'enrich' || step.kind === 'decide') return false;
       if (step.kind === 'contact_source') return false;
       if (step.kind === 'review') {
         if (!hasAwaitingReviewEvent({ db, recordId, stepId: step.id })) return true;
@@ -889,17 +947,41 @@ const makeApplicable = ({ db, listDir, config, force }: { db: any; listDir: stri
   };
 };
 
+const makeDependencyResolved = ({
+  listDir,
+  steps,
+}: {
+  listDir: string;
+  steps: DataflowStep[];
+}) => {
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  return (recordState: RecordState, _step: DataflowStep, dependencyId: string) => {
+    if (recordState.resolved.has(dependencyId)) return true;
+    const dependency = byId.get(dependencyId);
+    if (dependency?.kind !== 'review') return false;
+    const predicate = whenPredicateForStep({ step: dependency.step, stepConfig: dependency.step });
+    if (!predicate) return false;
+    return !shouldRunForRecord({
+      record: recordState.record,
+      predicate,
+      listDir,
+    }).passed;
+  };
+};
+
 const createLazyExecutionContext = ({
   db,
   listDir,
   config,
   force,
+  rerunStepIds = new Set<string>(),
   clock,
 }: {
   db: any;
   listDir: string;
   config: any;
   force: boolean;
+  rerunStepIds?: Set<string>;
   clock?: PipelineClock;
 }) => {
   const state: { mcp: any; toolCatalog: any } = { mcp: null, toolCatalog: null };
@@ -922,7 +1004,7 @@ const createLazyExecutionContext = ({
       aiConfig: config?.ai || {},
       mcp: state.mcp,
       toolCatalog: state.toolCatalog,
-      force,
+      force: force || rerunStepIds.has(step.id),
       now: clockIso(clock),
     };
   };
@@ -940,6 +1022,7 @@ export const runPipelineDataflow = async ({
   dryRun = false,
   force = false,
   reapply = false,
+  rerunSteps = [],
   concurrency,
   clock,
 }: {
@@ -950,6 +1033,7 @@ export const runPipelineDataflow = async ({
   dryRun?: boolean;
   force?: boolean;
   reapply?: boolean;
+  rerunSteps?: string[];
   concurrency?: number;
   clock?: PipelineClock;
 }) => {
@@ -972,7 +1056,7 @@ export const runPipelineDataflow = async ({
     config: {
       ...config,
       pipeline: flattenPipelineSteps(config)
-        .filter((step) => String(step?.kind || '') !== 'wait'),
+        .filter((step) => !['wait', 'on_event'].includes(String(step?.kind || ''))),
     },
     phase: 'pipeline',
   });
@@ -980,7 +1064,7 @@ export const runPipelineDataflow = async ({
   graph.warnings.forEach((warning) => console.warn(warning));
   if (graph.errors.length > 0) throw new Error(`Invalid pipeline graph: ${graph.errors.join('; ')}`);
 
-  const rawSteps: any[] = flattenPipelineSteps(config);
+    const rawSteps: any[] = flattenPipelineSteps(config).filter((step) => String(step?.kind || '') !== 'on_event');
   const db = openListDb({ listDir, readonly: dryRun });
   let runId = '';
   try {
@@ -994,7 +1078,32 @@ export const runPipelineDataflow = async ({
     // run before reachability reconciliation: an unreachable record can carry
     // the field or provider result that repairs its delivery state.
     // Filter canary before limit so excluded production rows cannot starve allowlist.
-    const requestedRows = readInPlayRows({ db, where, limit: 0, includeOptedOut: true });
+    const gateIds = steps
+      .filter((step) => step.kind === 'filter' || step.kind === 'exit')
+      .map((step) => step.id);
+    const reexamineDropped = gateIds.length === 0
+      ? []
+      : db.prepare(`
+        SELECT record.*
+        FROM records record
+        WHERE COALESCE(record.disqualified_at, '') != ''
+          AND record.disqualified_gate IN (${gateIds.map(() => '?').join(', ')})
+          AND NOT EXISTS (
+            SELECT 1 FROM overrides override
+            WHERE override.record_id = record._row_id
+              AND (override.cleared_at IS NULL OR override.cleared_at = '')
+          )
+          ${where ? `AND (${where})` : ''}
+      `).all(...gateIds).filter((record: DataflowRecord) => {
+        const step = steps.find((candidate) => candidate.id === String(record.disqualified_gate || ''));
+        if (!step) return false;
+        const cached = readStaleness({ db, recordId: getRecordRowId(record), stepId: filterStalenessStepId(step.id) });
+        return !isFilterDefFresh({ cached, stepConfig: step.step, listDir, record });
+      });
+    const requestedRows = [
+      ...readInPlayRows({ db, where, limit: 0, includeOptedOut: true }),
+      ...reexamineDropped,
+    ].filter((record, index, all) => all.findIndex((candidate) => getRecordRowId(candidate) === getRecordRowId(record)) === index);
     const inPlayRows = requestedRows.filter((record) => String(record.sequence_status || '').trim().toLowerCase() !== 'opted_out');
     const canaryRows = filterRecordsForCanary(inPlayRows, canaryConfig);
     const reachesContacts = canRepairReachability(steps);
@@ -1071,6 +1180,7 @@ export const runPipelineDataflow = async ({
           baseRows: rows,
           force,
           reapply,
+          rerunSteps,
         }),
         selection,
       };
@@ -1103,6 +1213,7 @@ export const runPipelineDataflow = async ({
       errors: unsupportedStepErrors(steps) as any[],
     };
     const resolvedByRecord = initializeResolved({ db, listDir, config, rows, steps, force, reapply, overridesByRecord });
+    const skippedByRecord = readSkippedPipelineEvents({ db, recordIds: rows.map((row) => getRecordRowId(row)) });
     summary.skipped_passed = rows.reduce((total, row) => total + steps.filter((step) => (
       (step.kind === 'filter' || step.kind === 'exit')
       && resolvedByRecord.get(getRecordRowId(row))?.has(step.id)
@@ -1158,6 +1269,7 @@ export const runPipelineDataflow = async ({
       listDir,
       config,
       force,
+      rerunStepIds: new Set(rerunSteps.map((id) => String(id).trim()).filter(Boolean)),
       clock,
     });
     const loaders = new Map<string, ReturnType<typeof createBatchLoader<DataflowRecord, StepExecutionOutcome>>>();
@@ -1187,7 +1299,9 @@ export const runPipelineDataflow = async ({
       steps,
       concurrency: globalConcurrency,
       initialResolvedByRecord: resolvedByRecord,
+      initialSkippedByRecord: skippedByRecord,
       isApplicable: makeApplicable({ db, listDir, config, force }),
+      isDependencyResolved: makeDependencyResolved({ listDir, steps }),
       isTimeReady: makeTimeReadiness({ db, clock, config }),
       loadStep: async (step, record, inFlight) => {
         emitActivity({ event: 'step_start', phase: 'pipeline', step: step.id, kind: step.kind, rows: 1 });
@@ -1283,7 +1397,7 @@ export const runPipelineDataflow = async ({
           };
         }
         // enrich + generate both write fields then must refresh so dependents (policy_apply) see them.
-        if (step.kind === 'enrich' || step.kind === 'extract' || step.kind === 'contact_source' || step.kind === 'generate' || step.kind === 'compose' || step.kind === 'score') {
+        if (step.kind === 'enrich' || step.kind === 'decide' || step.kind === 'extract' || step.kind === 'contact_source' || step.kind === 'generate' || step.kind === 'compose' || step.kind === 'score') {
           if (outcome.errored) {
             const error = String(outcome.reason || 'failed');
             if (step.kind === 'score') {
@@ -1329,6 +1443,7 @@ export const runPipelineDataflow = async ({
               occurred_at: now,
             },
           });
+          if (outcome.executed !== false) byStep[step.id] = Number(byStep[step.id] || 0) + 1;
           summary.processed += outcome.passed ? 1 : 0;
           summary.failed += outcome.passed ? 0 : 1;
           if (!outcome.passed) summary.errors.push({ step: step.id, record_id: recordId, error: String(outcome.reason || 'failed') });
@@ -1485,9 +1600,10 @@ export const runPipelineDataflow = async ({
           return { record: refreshRecord({ db, record: recordState.record }), resolved: false };
         }
 
-        if (step.kind === 'wait' || PIPELINE_ACTION_KINDS.has(step.kind)) {
+        if (step.kind === 'action' || step.kind === 'await_event' || step.kind === 'wait' || PIPELINE_ACTION_KINDS.has(step.kind)) {
           const reason = String(outcome.reason || '');
-          const parked = Boolean(outcome.parked);
+          const deferred = Boolean(outcome.deferred);
+          const parked = Boolean(outcome.parked) || deferred;
           const alreadyParked = parked && Boolean(db.prepare(`
             SELECT 1 AS ok
             FROM pipeline_events
@@ -1504,7 +1620,8 @@ export const runPipelineDataflow = async ({
                 step_id: step.id,
                 kind: step.kind,
                 passed: outcome.passed,
-                reason,
+                reason: deferred ? `deferred:${reason}` : reason,
+                wake_at: deferred ? String(outcome.retryAfter || '') : '',
                 side_effecting: Boolean(step.step?.side_effecting),
                 occurred_at: now,
               },
@@ -1512,6 +1629,7 @@ export const runPipelineDataflow = async ({
           }
           summary.processed += outcome.passed ? 1 : 0;
           summary.failed += outcome.passed || parked ? 0 : 1;
+          if (deferred) summary.deferred += 1;
           if (parked) summary.newly_parked += alreadyParked ? 0 : 1;
           if (!outcome.passed && !parked) {
             summary.errors.push({
@@ -1591,6 +1709,13 @@ export const runPipelineDataflow = async ({
             reason,
             drop: step.dropGate,
           });
+        if (effectivePassed && String(currentRecord.disqualified_gate || '') === step.id) {
+          db.prepare(`
+            UPDATE records
+            SET disqualified_at = '', disqualified_gate = '', disqualify_reason = '', updated_at = ?
+            WHERE _row_id = ?
+          `).run(now, recordId);
+        }
         if (action === 'dropped') byStep[step.id] = Number(byStep[step.id] || 0) + 1;
         if (action === 'review_flagged') summary.review_flagged += 1;
         progressState.done += 1;
@@ -1603,6 +1728,12 @@ export const runPipelineDataflow = async ({
       },
       onStepNotAttempted: async (recordState, step, reason) => {
         const recordId = getRecordRowId(recordState.record);
+        const deferred = step.kind === 'action' && reason === 'skipped:not_time_ready' && Boolean(db.prepare(`
+          SELECT 1
+          FROM pipeline_events
+          WHERE record_id = ? AND step_id = ? AND passed = 0 AND reason GLOB 'deferred:*'
+          LIMIT 1
+        `).get(recordId, step.id));
         insertPipelineEvent({
           db,
           event: {
@@ -1616,6 +1747,7 @@ export const runPipelineDataflow = async ({
           },
         });
         summary.not_attempted += 1;
+        if (deferred) summary.deferred += 1;
         emitActivity({ event: 'row_skipped', phase: 'pipeline', step: step.id, kind: step.kind, row: recordId, reason });
       },
     }).finally(async () => {
@@ -1640,6 +1772,13 @@ export const runPipelineDataflow = async ({
         reconcileSequenceReachability({ db, record: current });
       });
     }
+
+    await runEventTurns({
+      db,
+      listDir,
+      config,
+      recordIds: rows.map((row) => getRecordRowId(row)),
+    });
 
     summary.survivors = Number(db.prepare(`SELECT COUNT(*) AS n FROM records WHERE ${inPlayWhere()}`).get()?.n || 0);
     summary.awaiting_review = countAwaitingReviewRecords({ db, config });

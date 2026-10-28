@@ -61,3 +61,19 @@ export const shouldShowReviewIdentityColumn = ({
   titleField: titleFieldForRecord(record),
   visibleFields,
 }));
+
+// The Review page carries its active tab in `?stage=`: a review stage id, or
+// `all` for the all-stages tab. A missing or unknown value (including a step
+// that is not a review stage) falls back to the first stage.
+const REVIEW_ALL_STAGES_PARAM = 'all';
+
+export type ReviewTab = { kind: 'all' } | { kind: 'stage'; stageId: string };
+
+export const reviewTabFromParam = (param: string | null, stageIds: readonly string[]): ReviewTab | null => {
+  const value = param || '';
+  if (value && stageIds.includes(value)) return { kind: 'stage', stageId: value };
+  if (value === REVIEW_ALL_STAGES_PARAM && stageIds.length > 0) return { kind: 'all' };
+  return stageIds[0] ? { kind: 'stage', stageId: stageIds[0] } : null;
+};
+
+export const reviewTabParam = (tab: ReviewTab) => (tab.kind === 'all' ? REVIEW_ALL_STAGES_PARAM : tab.stageId);

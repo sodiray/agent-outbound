@@ -180,7 +180,7 @@ export const writeFilterFailure = ({ db, record, stepId, reason, drop }: { db: a
   return softDrop ? 'review_flagged' : (drop ? 'dropped' : 'flagged');
 };
 
-export const simulatePipeline = ({ db, listDir, config, steps, baseRows, force, reapply }: { db: any; listDir: string; config: unknown; steps: any[]; baseRows: any[]; force: boolean; reapply: boolean }) => {
+export const simulatePipeline = ({ db, listDir, config, steps, baseRows, force, reapply, rerunSteps = [] }: { db: any; listDir: string; config: unknown; steps: any[]; baseRows: any[]; force: boolean; reapply: boolean; rerunSteps?: string[] }) => {
   const holdingPipelines = new Set(
     steps
       .filter((step) => (
@@ -219,7 +219,7 @@ export const simulatePipeline = ({ db, listDir, config, steps, baseRows, force, 
     ));
 
     if (kind === 'enrich') {
-      const work = countEnrichWorkForStep({ db, listDir, step, stepId, rows: active, force });
+      const work = countEnrichWorkForStep({ db, listDir, step, stepId, rows: active, force: force || rerunSteps.includes(stepId) });
       const estCost = avgStepCostUsd({ db, stepId }) * work.would_enrich;
       state.estTotalCostUsd += estCost;
       state.stepReports.push({
@@ -340,9 +340,20 @@ export const simulatePipeline = ({ db, listDir, config, steps, baseRows, force, 
       return !isFilterDefFresh({ cached, stepConfig: step, listDir, record });
     });
     const skippedPassed = active.length - evalRows.length;
+    // A filter skipped by `when` passes the record through at runtime, so the preview must not evaluate or drop it.
+    const whenRows = evalRows.filter((record) => {
+      if (!step?.when || typeof step.when !== 'object') return true;
+      return evaluateFieldCheckGroup({
+        row: record,
+        conditions: Array.isArray(step.when.conditions) ? step.when.conditions : [],
+        match: step.when.match || 'all',
+        listDir,
+      }).passed;
+    });
+    const skippedWhen = evalRows.length - whenRows.length;
 
     if (filterType === 'field_check') {
-      const counts = evalRows.reduce((acc, record) => {
+      const counts = whenRows.reduce((acc, record) => {
         const outcome = evaluateFieldCheckGroup({
           row: record,
           conditions: Array.isArray(step?.conditions) ? step.conditions : [],
@@ -356,17 +367,17 @@ export const simulatePipeline = ({ db, listDir, config, steps, baseRows, force, 
       }, { wouldDrop: 0, wouldDropCommitted: 0 });
       state.stepReports.push({
         id: stepId, kind, type: 'field_check',
-        would_evaluate: evalRows.length, would_skip_passed: skippedPassed,
+        would_evaluate: whenRows.length, would_skip_passed: skippedPassed, would_skip_when: skippedWhen,
         would_drop: counts.wouldDrop, would_review_flag: counts.wouldDropCommitted, est_cost_usd: 0,
       });
       return;
     }
 
-    const estCost = avgStepCostUsd({ db, stepId }) * evalRows.length;
+    const estCost = avgStepCostUsd({ db, stepId }) * whenRows.length;
     state.estTotalCostUsd += estCost;
     state.stepReports.push({
       id: stepId, kind, type: 'semantic',
-      would_evaluate: evalRows.length, would_skip_passed: skippedPassed,
+      would_evaluate: whenRows.length, would_skip_passed: skippedPassed, would_skip_when: skippedWhen,
       would_drop: null, note: 'semantic verdicts not simulated', est_cost_usd: Number(estCost.toFixed(4)),
     });
   });

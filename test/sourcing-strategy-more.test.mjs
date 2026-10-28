@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { sourceCommand, sourceMoreCommand } from '../dist/commands/index.js';
+import { runSourcing } from '../dist/orchestrator/sourcing/runner.js';
+import { openListDb } from '../dist/orchestrator/runtime/db.js';
 
 const createList = ({ resultRows, source = {} }) => {
   const listDir = mkdtempSync(join(tmpdir(), 'agent-outbound-sourcing-more-'));
@@ -70,6 +72,50 @@ test('source --more runs declared strategy tasks', async () => {
     assert.equal(result.search_calls_made, 1);
     assert.equal(result.inserted_total, 1);
     assert.equal(result.zero_search_reason, undefined);
+  } finally {
+    rmSync(listDir, { recursive: true, force: true });
+  }
+});
+
+test('source searches insert rows returned directly by a tool through output_map', async () => {
+  const listDir = createList({
+    resultRows: [],
+    source: {
+      searches: [{
+        id: 'direct_tool_rows',
+        query: 'ignored by fixture',
+        model: 'anthropic/claude-haiku-4-5-20251001',
+        tool: { server: 'fixture', tools: ['FIXTURE_SEARCH'] },
+        output_map: { external_id: 'place_id', display_label: 'business_name' },
+      }],
+    },
+  });
+  try {
+    const result = await runSourcing({
+      listDir,
+      executeAction: async () => ({
+        artifacts: {},
+        outputs: {},
+        tool_results: [[
+          { external_id: 'direct-1', display_label: 'Direct One' },
+          { external_id: 'direct-2', display_label: 'Direct Two' },
+        ]],
+        usage: { tool_calls: [{ tool: 'FIXTURE_SEARCH' }] },
+        model: 'fixture',
+        provider: 'fixture',
+      }),
+    });
+    const db = openListDb({ listDir, readonly: true });
+    try {
+      const inserted = db.prepare('SELECT place_id, business_name FROM records ORDER BY place_id').all();
+      assert.equal(result.inserted_total, 2);
+      assert.deepEqual(inserted, [
+        { place_id: 'direct-1', business_name: 'Direct One' },
+        { place_id: 'direct-2', business_name: 'Direct Two' },
+      ]);
+    } finally {
+      db.close();
+    }
   } finally {
     rmSync(listDir, { recursive: true, force: true });
   }

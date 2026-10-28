@@ -1,4 +1,5 @@
 import { executeEnrichmentStepOnRecords } from '../enrichment/runner.js';
+import { executeDecideStepOnRecords } from '../decide/runner.js';
 import { executeExtractStepOnRecords } from '../extract/runner.js';
 import type { ComposeGenerator } from '../compose/runner.js';
 import { evaluateFieldCheckGroup, evaluateSemanticFilterBatches } from '../lib/conditions.js';
@@ -6,12 +7,16 @@ import { resolveFieldCheckConditions } from '../lib/field-check-values.js';
 import { isPresentDeclaredOutputValue } from '../lib/declared-outputs.js';
 import { getRecordRowId } from '../lib/record.js';
 import { randomUUID } from 'node:crypto';
+import { externalOperationKey, withExternalOperation, operationOutputs } from '../runtime/external-operations.js';
+import { executeExternalAction } from '../runtime/external-action.js';
+import { consumeExternalEvent } from '../runtime/external-events.js';
 import { insertDraft, upsertRecord } from '../runtime/db.js';
 import {
   buildIdempotencyKey,
   claimIdempotency,
   completeIdempotency,
   failIdempotency,
+  releaseIdempotency,
 } from '../runtime/idempotency.js';
 import {
   flattenPipelineSteps,
@@ -32,12 +37,15 @@ import { stageInputRecord } from '../lib/stage-inputs.js';
 import { runScoreStage, type ScoreStage } from '../scoring/stage-runner.js';
 import type { EmailVerificationProvider } from '../runtime/providers/email-verification/index.js';
 import { resolveReviewPresentation } from '../policy/review-presentation.js';
+import { mapWithConcurrency } from '../lib/concurrency.js';
 
 export type StepExecutionOutcome = {
   passed: boolean;
   reason: string;
   errored?: boolean;
   parked?: boolean;
+  deferred?: boolean;
+  retryAfter?: string;
   /**
    * Did this step actually run for this record?
    *
@@ -184,6 +192,8 @@ export const declaredOutputWriteFailures = ({
 const HARD_REJECTED_ACTION_SKIP = /\b(prohibits?|prohibited|forbidden)\b/i;
 
 const WHEN_GATED_STEP_KINDS = new Set([
+  'action',
+  'await_event',
   'filter',
   'compose',
   'extract',
@@ -197,6 +207,7 @@ const WHEN_GATED_STEP_KINDS = new Set([
   'manual_task',
   'score',
   'exit',
+  'decide',
 ]);
 
 /** Engine-owned send steps: must never re-run after a prior pass (double-contact guard). */
@@ -323,7 +334,7 @@ const executeWithIdempotency = async (
       db: ctx.db,
       idemKey,
       scope: spec.scope,
-      payload: { step_id: stepId, kind: textValue(step.kind) },
+      payload: { step_id: stepId, kind: textValue(step.kind), record_id: recordId, operation_key: externalOperationKey(ctx.listDir, spec.scope, idemKey) },
     });
     if (claim.claimed) {
       claimed.push({ record, idemKey, claimId: claim.claim_id });
@@ -349,7 +360,14 @@ const executeWithIdempotency = async (
 
   let executed: Map<string, StepExecutionOutcome>;
   try {
-    executed = await executeStepBatchUnchecked(ctx, step, stepId, claimed.map((entry) => entry.record));
+    if (step.kind === 'action') {
+      const batches = await mapWithConcurrency(claimed, (entry) => withExternalOperation({
+        key: externalOperationKey(ctx.listDir, spec.scope, entry.idemKey), recordId: getRecordRowId(entry.record), stepId,
+      }, () => executeStepBatchUnchecked(ctx, step, stepId, [entry.record])), Number(step.concurrency || 4));
+      executed = new Map(batches.flatMap((batch) => [...batch]));
+    } else {
+      executed = await executeStepBatchUnchecked(ctx, step, stepId, claimed.map((entry) => entry.record));
+    }
   } catch (error) {
     // The batch died mid-flight: we cannot tell which effects landed. Never
     // silently re-run an author's effect on the strength of a thrown error.
@@ -373,13 +391,31 @@ const executeWithIdempotency = async (
       reason: 'step_outcome_missing',
     };
     const ran = outcome.passed && !outcome.errored;
-    if (ran) {
+    if (outcome.deferred) {
+      const released = releaseIdempotency({
+        db: ctx.db,
+        idemKey: entry.idemKey,
+        scope: spec.scope,
+        claimId: entry.claimId,
+      });
+      if (!released.released) {
+        failIdempotency({
+          db: ctx.db,
+          idemKey: entry.idemKey,
+          scope: spec.scope,
+          claimId: entry.claimId,
+          payload: { provider_uncertain: true, reason: `deferred_claim_release_${released.reason}` },
+        });
+        outcomes.set(recordId, { passed: false, errored: true, reason: `deferred_claim_release_${released.reason}` });
+        continue;
+      }
+    } else if (ran) {
       completeIdempotency({
         db: ctx.db,
         idemKey: entry.idemKey,
         scope: spec.scope,
         claimId: entry.claimId,
-        payload: { reason: textValue(outcome.reason) },
+        payload: { reason: textValue(outcome.reason), outputs: operationOutputs(ctx.db, recordId, step) },
       });
     } else {
       // A failing step the author declared world-touching did not necessarily
@@ -624,6 +660,21 @@ const executeEnrichBatch = async (
   return outcomes;
 };
 
+const executeDecideBatch = async (
+  ctx: StepExecutionContext,
+  step: PipelineStepLike,
+  stepId: string,
+  rows: Array<Record<string, unknown>>,
+) => executeDecideStepOnRecords({
+  db: ctx.db,
+  listDir: ctx.listDir,
+  config: (ctx.config || { ai: ctx.aiConfig || {} }) as Record<string, unknown>,
+  step,
+  stepId,
+  rows,
+  force: Boolean(ctx.force),
+});
+
 const executeExtractBatch = async (
   ctx: StepExecutionContext,
   step: PipelineStepLike,
@@ -717,6 +768,7 @@ const executeScoreBatch = async (
     id: stepId,
     key: textValue(step.key),
     model: textValue(step.model),
+    temperature: typeof step.temperature === 'number' ? step.temperature : undefined,
     criteria: Array.isArray(step.criteria) ? step.criteria as ScoreStage['criteria'] : [],
     inputs: step.inputs,
     outputs: step.outputs && typeof step.outputs === 'object' && !Array.isArray(step.outputs)
@@ -1185,6 +1237,22 @@ const executeStepBatchUnchecked = async (
   rows: Array<Record<string, unknown>>,
 ): Promise<Map<string, StepExecutionOutcome>> => {
   const kind = textValue(step.kind);
+  if (kind === 'action' || kind === 'await_event') {
+    const executeRecord = async (record: Record<string, unknown>) => {
+      try {
+        const result = kind === 'action'
+          ? await executeExternalAction({ ...ctx, db: ctx.db, mcp: ctx.mcp, step, record } as Parameters<typeof executeExternalAction>[0])
+          : consumeExternalEvent({ db: ctx.db, config: ctx.config, listDir: ctx.listDir, step, record });
+        return [getRecordRowId(record), result] as const;
+      } catch (error) {
+        return [getRecordRowId(record), { passed: false, errored: true, reason: String((error as Error).message || error) }] as const;
+      }
+    };
+    const entries = kind === 'action'
+      ? await mapWithConcurrency(rows, executeRecord, Number(step.concurrency || 4))
+      : await Promise.all(rows.map(executeRecord));
+    return new Map(entries);
+  }
   if (kind === 'filter' || kind === 'exit') {
     const filterType = textValue(step.type, 'semantic').toLowerCase();
     if (filterType === 'field_check') return executeFieldCheckBatch(ctx, step, rows);
@@ -1237,6 +1305,7 @@ const executeStepBatchUnchecked = async (
   }
 
   if (kind === 'enrich') return executeEnrichBatch(ctx, step, stepId, rows);
+  if (kind === 'decide') return executeDecideBatch(ctx, step, stepId, rows);
   if (kind === 'extract') return executeExtractBatch(ctx, step, rows);
   if (kind === 'contact_source') return executeContactSourceBatch(ctx, step, stepId, rows);
   if (kind === 'compose') return executeComposeBatch(ctx, step, stepId, rows);

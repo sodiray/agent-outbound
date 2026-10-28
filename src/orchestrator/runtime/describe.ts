@@ -25,6 +25,16 @@ const COMMON_OUTPUT = {
 
 const CATALOG: CommandDefinition[] = [
   {
+    name: 'events', aliases: ['events ingest','events list','events resolve'], description: 'Ingest, inspect or resolve provider-neutral external events.', mutating: true,
+    flags: ['--file','--source','--id','--row','--status'].map((name) => ({ name, type: 'string', description: 'External event input or selection.' })),
+    input_schema: { list: 'string', action: 'ingest|list|resolve' }, output_schema: { ...COMMON_OUTPUT, result: 'object' }, examples: ['agent-outbound events ingest project --file events.json'],
+  },
+  {
+    name: 'operations', aliases: ['operations list','operations reconcile'], description: 'Inspect generic effects and reconcile an external operation receipt.', mutating: true,
+    flags: [{ name: '--file', type: 'string', description: 'Successful external receipt JSON.' }],
+    input_schema: { list: 'string', action: 'list|reconcile' }, output_schema: { ...COMMON_OUTPUT, result: 'object' }, examples: ['agent-outbound operations list project'],
+  },
+  {
     name: 'context',
     description: 'Compile concise project operating context for an agent.',
     mutating: false,
@@ -380,7 +390,7 @@ const CATALOG: CommandDefinition[] = [
   },
   {
     name: 'ai-usage',
-    description: 'LLM token and dollar usage by scope.',
+    description: 'AI provider token and dollar usage by scope.',
     mutating: false,
     flags: [
       { name: '--step', type: 'string', required: false, description: 'Filter by step.' },

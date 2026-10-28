@@ -9,6 +9,9 @@ import type {
   ReviewDecisionBatchResponse,
   ReviewDecisionInput,
   ReviewQueueResponse,
+  PipelineResponse,
+  PipelineStepRecordsResponse,
+  PipelineStepState,
   SortDir,
 } from './types.js';
 
@@ -72,6 +75,22 @@ export const fetchRecords = ({ sort, dir, q, filters }: RecordsParams) => {
 };
 
 export const fetchRecordDetail = (rowId: string) => getJson<RecordDetail>(`/api/records/${encodeURIComponent(rowId)}`);
+export const fetchPipeline = () => getJson<PipelineResponse>('/api/pipeline');
+
+export const fetchPipelineStepRecords = ({
+  stepId,
+  state,
+  limit,
+  offset,
+}: {
+  stepId: string;
+  state: PipelineStepState;
+  limit: number;
+  offset: number;
+}) => {
+  const params = new URLSearchParams({ state, limit: String(limit), offset: String(offset) });
+  return getJson<PipelineStepRecordsResponse>(`/api/pipeline/steps/${encodeURIComponent(stepId)}/records?${params.toString()}`);
+};
 
 type ReviewQueueParams = {
   sort: string;

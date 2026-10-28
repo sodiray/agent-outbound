@@ -22,6 +22,7 @@ export const PROVIDER_RETURNED_NO_CONTENT_REASON = 'provider_returned_no_content
 
 type ToolCallActionResult = {
   outputs: Record<string, unknown>;
+  rawResult?: unknown;
   usage?: Record<string, unknown>;
   model?: string;
   provider?: string;
@@ -305,6 +306,7 @@ export const executeToolCallAction = async ({
     }
     return {
       outputs,
+      rawResult: outputs,
       usage: {
         input_tokens: 0,
         output_tokens: 0,
@@ -386,6 +388,7 @@ export const executeToolCallAction = async ({
 
   return {
     outputs: mapOutputsFromResult(walked.result, outputMap),
+    rawResult: walked.result,
     usage: walked.usage || undefined,
     provider: walked.provider || '',
     waterfall_attempts: walked.attempts,

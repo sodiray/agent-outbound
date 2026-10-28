@@ -10,12 +10,15 @@
   },
   "dependencies": {
     "@vis.gl/react-google-maps": "^1.8.3",
+    "@xyflow/react": "12.8.2",
+    "dagre": "0.8.5",
     "marked": "^12.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.30.4"
   },
   "devDependencies": {
+    "@types/dagre": "0.7.52",
     "@types/google.maps": "^3.65.0",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.0",

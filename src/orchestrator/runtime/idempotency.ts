@@ -383,6 +383,35 @@ export const completeIdempotency = ({
 };
 
 /**
+ * Release an owned pending claim when the tool attests that it did not execute.
+ * A deleted claim has no settled effect and may be claimed by a later run.
+ */
+export const releaseIdempotency = ({
+  db,
+  idemKey,
+  scope = 'list',
+  claimId,
+}: {
+  db: any;
+  idemKey: string;
+  scope?: string;
+  claimId: string;
+}) => {
+  const existing = getIdempotencyRecord({ db, idemKey, scope });
+  if (!existing) return { released: false, reason: 'missing' as const };
+  const owner = String(parsePayload(existing.payload_json)._claim_id || '');
+  const want = String(claimId || '').trim();
+  if (!want || owner !== want) return { released: false, reason: 'not_owner' as const };
+  const result = db.prepare(`
+    DELETE FROM idempotency
+    WHERE idem_key = ? AND scope = ? AND status = 'pending' AND payload_json = ?
+  `).run(idemKey, scope, existing.payload_json);
+  return Number(result?.changes || 0) === 1
+    ? { released: true, reason: 'released' as const }
+    : { released: false, reason: 'race_lost' as const };
+};
+
+/**
  * Reconcile a provider-accepted send after a crash: if status is pending but we
  * have a provider id from the provider, mark sent without re-sending.
  */

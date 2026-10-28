@@ -79,6 +79,7 @@ export type ReviewStage = {
   label: string;
   description: string;
   fields: string[];
+  edit_fields?: string[];
   title_field?: string;
   detail?: ReviewDetailSection[];
   awaiting_count: number;
@@ -106,6 +107,9 @@ export type ReviewQueueResponse = {
   stage: ReviewStage;
   total: number;
   unique_total?: number;
+  numeric_sort_fields?: string[];
+  around?: string;
+  around_position?: number | null;
   limit: number;
   offset: number;
   records: RecordRow[];
@@ -118,6 +122,69 @@ export type ReviewDecisionInput = {
   row_id: string;
   verdict: ReviewVerdictInput;
   reason?: string;
+  edits?: Record<string, string>;
+};
+
+export type PipelineStepState =
+  | 'waiting'
+  | 'deferred'
+  | 'passed'
+  | 'dropped'
+  | 'skipped_when'
+  | 'skipped_other'
+  | 'failed'
+  | 'blocked_by_error'
+  | 'errored';
+
+export type PipelineCounts = Record<PipelineStepState, number> & { awaiting_review: number };
+
+export type PipelineGroup = { id: string; label: string; parent_id: string };
+
+export type PipelineNode = {
+  id: string;
+  label: string;
+  description?: string;
+  kind: string;
+  tool_or_model?: string;
+  when?: { summary: string };
+  inputs: string[];
+  outputs: string[];
+  depends_on: string[];
+  inferred_depends_on: string[];
+  review?: { fields: string[]; edit_fields: string[]; title_field?: string };
+  group?: PipelineGroup;
+  sources?: Array<{ id: string; kind: string; tool_or_model?: string }>;
+  source_counts?: Array<{ source: string; count: number }>;
+  counts: PipelineCounts;
+  spend_usd: number | null;
+  spend_calls: number;
+  unpriced_calls: number;
+};
+
+export type PipelineEdge = {
+  from: string;
+  to: string;
+  origin: 'explicit' | 'inferred' | 'source';
+  implied?: boolean;
+};
+
+export type PipelineResponse = {
+  nodes: PipelineNode[];
+  edges: PipelineEdge[];
+  groups: PipelineGroup[];
+  active_step: string;
+  unattributed_spend_usd: number;
+  unattributed_spend: Array<{ step_id: string; spend_usd: number | null; calls: number; unpriced_calls: number }>;
+  unattributed_unpriced_calls: number;
+};
+
+export type PipelineStepRecordsResponse = {
+  step_id: string;
+  state: PipelineStepState;
+  total: number;
+  limit: number;
+  offset: number;
+  records: RecordRow[];
 };
 
 export type ReviewDecisionResult = {

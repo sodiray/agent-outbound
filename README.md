@@ -223,7 +223,13 @@ npx agent-outbound pipeline <list> --where "fit_score > 70"
 
 # Run at most N records
 npx agent-outbound pipeline <list> --limit 10
+
+# Preview calls and deliberately replay one settled step
+npx agent-outbound pipeline <list> --dry-run
+npx agent-outbound pipeline <list> --rerun-step account_lookup
 ```
+
+When a filter definition changes, records it previously dropped are re-evaluated automatically; passing records return to play without a keep override. A gate waits rather than dropping a record when one of its dependencies was skipped by `when:`.
 
 Run scoring separately after the pipeline when you want fresh priority ranks.
 

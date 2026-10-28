@@ -14,6 +14,8 @@ import {
   clearReviewDecisionForViz,
   getAllReviewQueueForViz,
   getCounts,
+  getPipelineForViz,
+  getPipelineStepRecordsForViz,
   getProgress,
   getRecordDetail,
   getRejectedRecordsForViz,
@@ -122,6 +124,16 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
     }
   });
 
+  app.get('/api/pipeline', (c) => {
+    try { return c.json(getPipelineForViz(listDir)); } catch (error) { return apiErrorResponse(c, error); }
+  });
+
+  app.get('/api/pipeline/steps/:stepId/records', (c) => {
+    try {
+      return c.json(getPipelineStepRecordsForViz(listDir, c.req.param('stepId'), String(c.req.query('state') || 'waiting'), Number(c.req.query('limit') || 100), Number(c.req.query('offset') || 0)));
+    } catch (error) { return apiErrorResponse(c, error); }
+  });
+
   app.get('/api/territories', (c) => {
     try {
       return c.json(getTerritories(listDir));
@@ -161,6 +173,7 @@ export const startViewServer = async ({ listDir, port, open }: { listDir: string
         Number(c.req.query('offset') || 0),
         String(c.req.query('sort') || ''),
         String(c.req.query('dir') || ''),
+        String(c.req.query('around') || ''),
       ));
     } catch (error) {
       return apiErrorResponse(c, error);

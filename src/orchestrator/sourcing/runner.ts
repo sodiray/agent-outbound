@@ -15,6 +15,7 @@ import {
   upsertSearchState,
   upsertSearchTask,
   updateSearchTaskResult,
+  quoteIdentifier,
 } from '../runtime/db.js';
 import { readConfig } from '../lib/config.js';
 import { getRecordRowId, isRecordScalarValue, makeRecordId, rowToRecordShape, stableHash } from '../lib/record.js';
@@ -23,7 +24,15 @@ import { emitActivity } from '../runtime/activity.js';
 import { beginRun, tickProgress, endRun, heartbeat } from '../runtime/progress.js';
 import { recordCostEvent } from '../lib/costs.js';
 import { getMcpClient } from '../runtime/mcp.js';
-import { aiDedupLink, buildIdentityHash, buildIdentityString, getIdentityFields, upsertRecordEmbedding } from './dedup.js';
+import {
+  aiDedupLink,
+  buildIdentityHash,
+  buildIdentityString,
+  createDedupRunState,
+  getIdentityFields,
+  upsertRecordEmbedding,
+  type DedupRunState,
+} from './dedup.js';
 import { findNearDuplicateMatch, type NearDuplicateConfig } from './near-duplicate.js';
 import { embed } from '../runtime/embeddings.js';
 import { mapWithConcurrency } from '../lib/concurrency.js';
@@ -74,6 +83,26 @@ const objectValue = (value: unknown): Record<string, unknown> => {
   }
 };
 
+const directToolRows = (value: unknown): unknown[] => {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return [];
+  const fields = Object.values(value as Record<string, unknown>);
+  return fields.length === 1 && Array.isArray(fields[0]) ? fields[0] : [];
+};
+
+export const searchRowsFromStepResult = (result: Record<string, unknown>): unknown[] => {
+  const artifacts = result.artifacts && typeof result.artifacts === 'object'
+    ? result.artifacts as Record<string, unknown>
+    : {};
+  if (Array.isArray(artifacts.results)) return artifacts.results;
+  const outputs = result.outputs && typeof result.outputs === 'object'
+    ? result.outputs as Record<string, unknown>
+    : {};
+  if (Array.isArray(outputs.results)) return outputs.results;
+  const toolResults = Array.isArray(result.tool_results) ? result.tool_results : [];
+  return toolResults.flatMap(directToolRows);
+};
+
 const toSearchRows = async ({
   mcp,
   listDir,
@@ -81,6 +110,7 @@ const toSearchRows = async ({
   toolCatalog,
   aiConfig,
   paginationState = null,
+  executeAction = executeStepAction,
 }: {
   mcp: any;
   listDir: string;
@@ -88,6 +118,7 @@ const toSearchRows = async ({
   toolCatalog: any;
   aiConfig: any;
   paginationState?: any;
+  executeAction?: typeof executeStepAction;
 }) => {
   const manual = Array.isArray(search?.manual_results) ? search.manual_results : [];
   if (manual.length > 0) return { rows: manual, usage: null, pagination: null, model: '', provider: '' };
@@ -121,7 +152,7 @@ const toSearchRows = async ({
     context.resume_instructions = 'Resume searching from the pagination_state position. Do not repeat earlier results.';
   }
 
-  const result = await executeStepAction({
+  const result = await executeAction({
     mcp,
     listDir,
     stepId: search?.id || 'source_search',
@@ -141,11 +172,7 @@ const toSearchRows = async ({
     role: 'research',
   });
 
-  const rows = Array.isArray(result?.artifacts?.results)
-    ? result.artifacts.results
-    : Array.isArray(result?.outputs?.results)
-      ? result.outputs.results
-      : [];
+  const rows = searchRowsFromStepResult(result as Record<string, unknown>);
   if (result?.defer) {
     throw new Error(`source.search: ${String(result?.reason || 'search step deferred')}`);
   }
@@ -588,7 +615,8 @@ export const loadExistingDedupValues = ({ db, dedupKey }: { db: any; dedupKey: s
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) return seen;
   const columns = new Set(db.prepare('PRAGMA table_info(records)').all().map((row: any) => String(row.name || '')));
   if (!columns.has(key)) return seen;
-  const rows = db.prepare(`SELECT ${key} AS value FROM records WHERE ${key} != ''`).all();
+  const identifier = quoteIdentifier(key);
+  const rows = db.prepare(`SELECT ${identifier} AS value FROM records WHERE ${identifier} != ''`).all();
   for (const row of rows) seen.add(String(row.value || '').trim());
   return seen;
 };
@@ -633,6 +661,12 @@ const zeroSearchReasonFor = ({
       message: 'All runnable source strategy tasks are parked after repeated errors.',
     };
   }
+  if (Number(summary?.search_tasks_completed || 0) > 0) {
+    return {
+      code: 'all_strategy_tasks_exhausted',
+      message: 'All declared source strategy tasks are already complete, capped, or exhausted.',
+    };
+  }
   if (Number(summary?.search_tasks_created || 0) === 0) {
     return {
       code: 'strategy_expanded_to_no_tasks',
@@ -660,11 +694,15 @@ const refreshEmbeddingsAndLinks = async ({
   listDir,
   identityFields,
   aiConfig,
+  dedupConfig,
+  dedupRunState,
 }: {
   db: any;
   listDir: string;
   identityFields: string[];
   aiConfig: any;
+  dedupConfig: any;
+  dedupRunState: DedupRunState;
 }) => {
   const refreshRows = db.prepare(`
     SELECT r.*, re.identity_hash
@@ -698,6 +736,17 @@ const refreshEmbeddingsAndLinks = async ({
       row: { ...row, _row_id: recordId },
       identityFields,
       aiConfig,
+      ...dedupConfig,
+      runState: dedupRunState,
+      onConfirmation: (confirmation) => recordCostEvent({
+        db,
+        listDir,
+        recordId,
+        stepId: 'sourcing:dedup_relink',
+        model: String(confirmation?.model || ''),
+        provider: String(confirmation?.provider || ''),
+        usage: confirmation?.usage || null,
+      }),
     });
     upsertRecord({
       db,
@@ -709,16 +758,6 @@ const refreshEmbeddingsAndLinks = async ({
         duplicate_status: relink.duplicate_status || '',
       },
     });
-    recordCostEvent({
-      db,
-      listDir,
-      recordId,
-      stepId: 'sourcing:dedup_relink',
-      model: String((relink as any)?.model || ''),
-      provider: String((relink as any)?.provider || ''),
-      usage: relink.usage || null,
-    });
-
     const linkedChildren = db.prepare('SELECT * FROM records WHERE duplicate_of = ?').all(recordId);
     for (const child of linkedChildren) {
       const childRelink = await aiDedupLink({
@@ -726,6 +765,17 @@ const refreshEmbeddingsAndLinks = async ({
         row: child,
         identityFields,
         aiConfig,
+        ...dedupConfig,
+        runState: dedupRunState,
+        onConfirmation: (confirmation) => recordCostEvent({
+          db,
+          listDir,
+          recordId: getRecordRowId(child),
+          stepId: 'sourcing:dedup_relink',
+          model: String(confirmation?.model || ''),
+          provider: String(confirmation?.provider || ''),
+          usage: confirmation?.usage || null,
+        }),
       });
       upsertRecord({
         db,
@@ -746,6 +796,10 @@ export const processAndInsertRows = async ({
   listName,
   listDir,
   aiConfig,
+  dedupConfig = {},
+  dedupRunState = createDedupRunState(),
+  confirmDedup,
+  embedDedupIdentity,
   excludeRules = [],
   nearDuplicate = {},
   limit = 0,
@@ -756,6 +810,10 @@ export const processAndInsertRows = async ({
   listName: string;
   listDir: string;
   aiConfig: any;
+  dedupConfig?: any;
+  dedupRunState?: DedupRunState;
+  confirmDedup?: any;
+  embedDedupIdentity?: any;
   excludeRules?: SourceExcludeRule[];
   nearDuplicate?: NearDuplicateConfig;
   limit?: number;
@@ -884,6 +942,19 @@ export const processAndInsertRows = async ({
         row: shape,
         identityFields,
         aiConfig,
+        ...dedupConfig,
+        runState: dedupRunState,
+        confirm: confirmDedup,
+        embedIdentity: embedDedupIdentity,
+        onConfirmation: (confirmation) => recordCostEvent({
+          db,
+          listDir,
+          recordId: getRecordRowId(shape),
+          stepId: 'sourcing:dedup',
+          model: String(confirmation?.model || ''),
+          provider: String(confirmation?.provider || ''),
+          usage: confirmation?.usage || null,
+        }),
       });
       shape.duplicate_status = dedup.duplicate_status;
       if (dedup.duplicate_of) {
@@ -903,15 +974,6 @@ export const processAndInsertRows = async ({
           identityHash: dedup.identity_hash,
         });
       }
-      recordCostEvent({
-        db,
-        listDir,
-        recordId: getRecordRowId(shape),
-        stepId: 'sourcing:dedup',
-        model: String((dedup as any)?.model || ''),
-        provider: String((dedup as any)?.provider || ''),
-        usage: dedup.usage || null,
-      });
       emitActivity({ event: 'row_complete', phase: 'sourcing', row: shape.business_name || shape.id });
     } catch (error) {
       errors.push(String((error as any)?.message || error));
@@ -949,7 +1011,17 @@ const searchConfigHash = (search: any) => stableHash({
   max_results: Number(search?.max_results || 0),
 });
 
-export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => {
+export const runSourcing = async ({
+  listDir,
+  limit = 0,
+  redensify = false,
+  executeAction = executeStepAction,
+}: {
+  listDir: string;
+  limit?: number;
+  redensify?: boolean;
+  executeAction?: typeof executeStepAction;
+}) => {
   const { config, errors } = readConfig(listDir);
   if (errors.length > 0) {
     throw new Error(`Invalid config: ${errors.join('; ')}`);
@@ -961,6 +1033,17 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
   const strategies = Array.isArray(config?.source?.strategies) ? config.source.strategies : [];
   const excludeRules = normalizeExcludeRules(config?.source?.exclude);
   const dedupKey = normalizeDedupKey(config?.source?.dedup_key || 'place_id');
+  const dedupConfig = {
+    dedupKey,
+    aiDedup: config?.source?.ai_dedup,
+    maxCandidates: Number(config?.source?.ai_dedup_max_candidates || 3),
+    fields: config?.source?.ai_dedup_fields,
+    maxCharsPerField: config?.source?.ai_dedup_max_chars_per_field,
+    context: config?.source?.ai_dedup_context,
+  };
+  const dedupRunState = createDedupRunState({
+    maxCalls: Number(config?.source?.ai_dedup_max_calls ?? 100),
+  });
   const nearDuplicate = config?.source?.near_duplicate || {};
   const maxCalls = config?.source?.budget?.max_calls === undefined
     ? null
@@ -969,6 +1052,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
     ? null
     : Math.max(0, Number(config.source.budget.max_results || 0));
   const db = openListDb({ listDir, readonly: false });
+  const seenDedupValues = loadExistingDedupValues({ db, dedupKey });
   const needsMcp = [
     ...searches
       .filter((search) => !Array.isArray(search?.manual_results) || search.manual_results.length === 0)
@@ -1016,6 +1100,9 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
     deduped_total: 0,
     filtered_out: 0,
     excluded_by_rule: {},
+    dedup_ai_calls: 0,
+    dedup_ai_call_ceiling: dedupRunState.maxCalls,
+    warnings: [],
     errors: [],
   };
 
@@ -1023,7 +1110,14 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
   const runId = beginRun(db, { phase: 'sourcing', target: sourceTarget, message: 'Sourcing started' });
 
   try {
-    await refreshEmbeddingsAndLinks({ db, listDir, identityFields, aiConfig: config?.ai || {} });
+    await refreshEmbeddingsAndLinks({
+      db,
+      listDir,
+      identityFields,
+      aiConfig: config?.ai || {},
+      dedupConfig,
+      dedupRunState,
+    });
 
     const allRows = [];
     for (const search of searches) {
@@ -1037,6 +1131,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         search,
         toolCatalog,
         aiConfig: config?.ai || {},
+        executeAction,
       });
       recordCostEvent({
         db,
@@ -1046,12 +1141,15 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         provider: String((searchResult as any)?.provider || ''),
         usage: searchResult.usage,
       });
-      for (const row of searchResult.rows || []) {
+      const mappedRows = (searchResult.rows || []).map((row: any) => {
         const mapped = mapSearchRow({ row, outputMap: search?.output_map || {} });
         mapped._row_id = mapped._row_id || mapped.id || makeRecordId(mapped);
         mapped.id = mapped._row_id;
-        allRows.push(mapped);
-      }
+        return mapped;
+      });
+      const dedupedRows = dedupRowsByKey({ rows: mappedRows, dedupKey, seen: seenDedupValues });
+      summary.deduped_total += dedupedRows.duplicates;
+      allRows.push(...dedupedRows.unique);
       const searchId = stableSearchId(search);
       const configHash = searchConfigHash(search);
       const pagination = Object.prototype.hasOwnProperty.call(searchResult, 'pagination')
@@ -1073,9 +1171,10 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
     if (strategies.length > 0) {
       const tasks = expandSourceStrategies({ listDir, strategies });
       summary.strategies_expanded = strategies.length;
-      summary.search_tasks_created = tasks.length;
       for (const task of tasks) {
+        const existingTask = getSearchTask({ db, id: task.id });
         upsertSearchTask({ db, task });
+        if (!existingTask) summary.search_tasks_created += 1;
       }
 
       if (redensify) {
@@ -1097,7 +1196,6 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         if (densification.children.length === 0) summary.tiles_saturated_at_floor += 1;
       }
 
-      const seenDedupValues = loadExistingDedupValues({ db, dedupKey });
       const taskQueue = listPendingSearchTasks({ db });
       const queuedTaskIds = new Set(taskQueue.map((task: any) => String(task.id || '')));
       const attemptedTaskIds = new Set<string>();
@@ -1291,6 +1389,8 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
             listName,
             listDir,
             aiConfig: config?.ai || {},
+            dedupConfig,
+            dedupRunState,
             excludeRules,
             nearDuplicate,
             limit: remaining,
@@ -1346,7 +1446,7 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       summary.search_result_budget_hit = strategyState.resultBudgetHit;
       summary.search_tasks_pending = remainingTasks.length;
       summary.search_tasks_parked = persistedTasks.filter((task: any) => task.status === 'failed').length;
-      summary.search_tasks_skipped = persistedTasks.filter((task: any) => (
+      summary.search_tasks_skipped = remainingTasks.filter((task: any) => (
         !attemptedTaskIds.has(String(task.id || ''))
       )).length;
       summary.search_tasks_completed = persistedTasks.filter((task: any) => (
@@ -1367,6 +1467,8 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
         listName,
         listDir,
         aiConfig: config?.ai || {},
+        dedupConfig,
+        dedupRunState,
         excludeRules,
         nearDuplicate,
         limit: legacyLimit,
@@ -1380,6 +1482,10 @@ export const runSourcing = async ({ listDir, limit = 0, redensify = false }) => 
       summary.errors.push(...processed.errors);
     }
 
+    summary.dedup_ai_calls = dedupRunState.calls;
+    if (dedupRunState.ceilingReached) {
+      summary.warnings.push(`AI dedup call ceiling (${dedupRunState.maxCalls}) reached; remaining rows were marked needs_review.`);
+    }
     summary.zero_search_reason = zeroSearchReasonFor({ searches, strategies, summary }) || undefined;
     summary.territories = assignTerritories({ listDir, config, db, rowIds: summary.inserted_ids });
     summary.status = summary.errors.length > 0 || summary.search_tasks_parked > 0 ? 'partial' : 'ok';

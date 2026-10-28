@@ -32,6 +32,7 @@ export type ScoreStage = {
   id: string;
   key: string;
   model: string;
+  temperature?: number;
   criteria?: ScoreCriterion[];
   inputs?: unknown;
   outputs?: Record<string, { type?: string }>;
@@ -440,6 +441,7 @@ export const runScoreStage = async ({
           model: step.model,
           role: 'evaluation',
           aiConfig: config.ai || {},
+          temperature: step.temperature,
           schema: ScoreResultSchema,
           prompt: modelContext.serialized,
           systemPrompt: scoreStagePrompt(step),

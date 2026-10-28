@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { generateText, Output } from 'ai';
 import { z } from 'zod';
 
@@ -10,6 +13,9 @@ import {
   resolveRuntimeModel,
 } from '../dist/orchestrator/runtime/models.js';
 import { getProviderById, getRegisteredProviders } from '../dist/orchestrator/runtime/providers.js';
+import { generateObjectWithTools } from '../dist/orchestrator/runtime/llm.js';
+import { writeModelsState } from '../dist/orchestrator/runtime/model-store.js';
+import { assertConfigModelReferences } from '../dist/orchestrator/lib/model-validation.js';
 
 test('OpenRouter is a registered runtime provider', () => {
   const provider = getRegisteredProviders().find((candidate) => candidate.id === 'openrouter');
@@ -79,6 +85,7 @@ test('OpenRouter sends strict structured output with the provider model id and h
     const resolved = await resolveRuntimeModel({
       model: 'openrouter/z-ai/glm-5.2',
       enforceSupported: false,
+      reasoning: true,
     });
     assert.deepEqual(resolved.providerOptions, { openrouter: { reasoning: { effort: 'high' } } });
     await generateText({
@@ -131,7 +138,7 @@ test('OpenRouter sends strict structured output with the provider model id and h
     assert.equal(bodies[1].response_format.json_schema.schema.properties.outputs.additionalProperties, false);
 
     process.env.AO_OPENROUTER_REASONING_EFFORT = 'medium';
-    assert.deepEqual(resolved.provider.getProviderOptions?.('z-ai/glm-5.2'), {
+    assert.deepEqual(resolved.provider.getProviderOptions?.('z-ai/glm-5.2', { reasoning: true }), {
       openrouter: { reasoning: { effort: 'medium' } },
     });
   } finally {
@@ -140,5 +147,73 @@ test('OpenRouter sends strict structured output with the provider model id and h
     else process.env.OPENROUTER_API_KEY = originalApiKey;
     if (originalReasoningEffort === undefined) delete process.env.AO_OPENROUTER_REASONING_EFFORT;
     else process.env.AO_OPENROUTER_REASONING_EFFORT = originalReasoningEffort;
+  }
+});
+
+test('OpenRouter sampling follows cached model capabilities and validates known rejections', async () => {
+  const originalApiKey = process.env.OPENROUTER_API_KEY;
+  const originalGlobalRoot = process.env.AO_GLOBAL_ROOT;
+  const originalFetch = globalThis.fetch;
+  const globalRoot = mkdtempSync(join(tmpdir(), 'ao-openrouter-sampling-'));
+  const bodies = [];
+  process.env.OPENROUTER_API_KEY = 'test-openrouter-key';
+  process.env.AO_GLOBAL_ROOT = globalRoot;
+  writeModelsState({
+    schema_version: '1.0.0',
+    updated_at: '',
+    providers: {
+      openrouter: {
+        provider: 'openrouter',
+        models: ['openai/gpt-4.1-mini', 'deepseek/deepseek-r1'],
+        capabilities: {
+          'openai/gpt-4.1-mini': ['temperature'],
+          'deepseek/deepseek-r1': ['reasoning'],
+        },
+        updated_at: '',
+      },
+    },
+  });
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body || '{}'));
+    bodies.push(body);
+    return new Response(JSON.stringify({
+      id: 'test-response', created: 0, model: body.model,
+      choices: [{ index: 0, message: { role: 'assistant', content: '{"ok":true}' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }), { headers: { 'content-type': 'application/json' } });
+  };
+
+  const call = ({ model, temperature } = {}) => generateObjectWithTools({
+    task: 'sampling-test',
+    model,
+    role: 'research',
+    schema: z.object({ ok: z.boolean() }),
+    prompt: 'Return JSON.',
+    toolSpec: {},
+    maxSteps: 1,
+    ...(temperature === undefined ? {} : { temperature }),
+  });
+
+  try {
+    await call({ model: 'openrouter/openai/gpt-4.1-mini' });
+    assert.equal(bodies.at(-1).temperature, 0);
+
+    await call({ model: 'openrouter/deepseek/deepseek-r1' });
+    assert.equal('temperature' in bodies.at(-1), false);
+
+    await call({ model: 'openrouter/openai/gpt-4.1-mini', temperature: 0 });
+    assert.equal(bodies.at(-1).temperature, 0);
+
+    assert.throws(() => assertConfigModelReferences({
+      ai: { default_model: 'openrouter/deepseek/deepseek-r1' },
+      pipeline: [{ kind: 'enrich', id: 'reasoning_step', temperature: 0 }],
+    }), /temperature is not supported by openrouter\/deepseek\/deepseek-r1/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(globalRoot, { recursive: true, force: true });
+    if (originalApiKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = originalApiKey;
+    if (originalGlobalRoot === undefined) delete process.env.AO_GLOBAL_ROOT;
+    else process.env.AO_GLOBAL_ROOT = originalGlobalRoot;
   }
 });

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { decideOutputColumnsFor } from '../decide/outputs.js';
 import { getTargetColumnsForStepConfig } from './step-columns.js';
 import { isReviewFieldAvailable } from './review-field-resolution.js';
 import { stageInputReferences } from './stage-inputs.js';
@@ -76,6 +77,19 @@ const configRecord = (value: unknown): Record<string, unknown> => (
     ? value as Record<string, unknown>
     : {}
 );
+
+const producedFieldsForOnEventStep = (step: Record<string, unknown>, options: PipelineGraphOptions) => {
+  const stepConfig = configRecord(step.config ?? step);
+  const outputs = Object.keys(configRecord(stepConfig.outputs));
+  const outputMapTargets = Object.values(configRecord(stepConfig.output_map))
+    .map((field) => String(field || '').trim())
+    .filter(Boolean);
+  const mappedTargets = getTargetColumnsForStepConfig(stepConfig).map((column) => column.name);
+  const decideOutputs = String(stepConfig.kind || '').trim() === 'decide'
+    ? decideOutputColumnsFor({ step: stepConfig, listDir: String(options.listDir || '') }).map((column) => column.name)
+    : [];
+  return [...new Set([...outputs, ...outputMapTargets, ...mappedTargets, ...decideOutputs])];
+};
 
 const stringArray = (value: unknown) => Array.isArray(value)
   ? value.map((entry) => String(entry || '').trim()).filter(Boolean)
@@ -690,6 +704,33 @@ export const validatePipelineGraph = (config: any, options: PipelineGraphOptions
   const indexById = new Map(ids.map((id, index) => [id, index]));
   const errors: string[] = [];
   const warnings: string[] = [];
+  const knownFields = new Set<string>([
+    ...Array.from(options.recordFields || []),
+    ...Array.from(options.seededFields || []),
+    ...Array.from(options.inboundFields || []),
+  ].map((field) => String(field).trim()).filter(Boolean));
+  for (const block of rawSteps.filter((step) => String(step?.kind || '') === 'on_event')) {
+    const blockId = stepId(block);
+    const inner = Array.isArray(block.steps) ? block.steps : [];
+    const innerIds = inner.map(stepId).filter(Boolean);
+    if (new Set(innerIds).size !== innerIds.length) errors.push(`on_event "${blockId}" has duplicate inner step ids.`);
+    if (inner.some((step) => step?.kind === 'on_event' || step?.kind === 'await_event')) {
+      errors.push(`on_event "${blockId}" cannot contain on_event or await_event steps.`);
+    }
+    const innerIdSet = new Set(innerIds);
+    for (const innerStep of inner) {
+      for (const dep of stringArray(innerStep?.depends_on)) {
+        if (!innerIdSet.has(dep)) errors.push(`on_event "${blockId}" inner step "${stepId(innerStep)}" depends on unknown sibling "${dep}".`);
+      }
+    }
+    const innerProducedFields = inner.flatMap((step) => producedFieldsForOnEventStep(step, options));
+    const available = new Set([...knownFields, ...Object.keys(configRecord(block.event_fields)), ...innerProducedFields]);
+    const until = configRecord(block.until);
+    for (const condition of Array.isArray(until.conditions) ? until.conditions : []) {
+      const field = String(condition?.field || '').trim();
+      if (field && knownFields.size > 0 && !available.has(field)) errors.push(`on_event "${blockId}" until references unknown field "${field}".`);
+    }
+  }
   const explicitEdges = new Map<string, Set<string>>();
   const reviewDependencies = positionalReviewDependencies(config);
   const hasLinkedinSource = (Array.isArray(config?.source?.strategies) ? config.source.strategies : [])

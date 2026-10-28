@@ -51,6 +51,8 @@ Each key in `outputs` is both the field name the LLM returns and the database co
 
 At config authoring time, the AI determines what outputs make sense for the step's purpose and declares their types and descriptions. This is the single source of truth for the LLM contract, the DB schema, and the dependency tracking.
 
+A successful tool or model result treats an explicitly returned declared key as a write, including `""`, `null`, and `[]`; it replaces any prior value with the corresponding empty stored value. A declared key omitted from a successful result leaves its prior value unchanged. Failed calls, timeouts, and `on_error: empty` preserve prior values, so transient provider failures cannot erase data. An explicit empty write participates in dependency hashing, so a downstream step re-evaluates when its input changes.
+
 ### Execution flow
 
 The orchestrator:
@@ -80,6 +82,8 @@ When `depends_on` uses qualified references (e.g., `website_research.owner_name`
 
 Cache TTL (`cache: 90d`) provides time-based expiration on top of the hash check.
 
+Paid and side-effecting `tool_call` steps instead fingerprint the resolved arguments delivered to the tool. Definition-only edits do not replay a settled call; a changed resolved argument does. Set `rerun: true` on the step or use `pipeline --rerun-step ID` for an intentional replay.
+
 ## Step Result Memoization
 
 Step-result memoization is on by default for `enrich`, `generate`, `compose`, and `score` steps. It replays a settled result within a bounded freshness window so repeat runs do not purchase the same derivation again.
@@ -99,7 +103,7 @@ pipeline:
 
 Set `memoize: false` on an individual supported step to deliberately re-derive on every run. Side-effecting and sending steps cannot enable memoization.
 
-The versioned fingerprint is built from the resolved declared inputs—the same values sent to the action—and the full resolved step definition plus execution context. This includes model, tool/server/tool-name, tool arguments, description, declared output schema, prompts, provider, mode, sample count, and future step settings. This supports both array and map input declarations; map aliases, literal values, and `max_chars` truncation participate in the key. Editing a step therefore invalidates its prior result.
+The versioned fingerprint is built from the resolved declared inputs—the same values sent to the action—and the full resolved step definition plus execution context. This includes model, tool/server/tool-name, tool arguments, description, declared output schema and output mappings, prompts, provider, mode, sample count, and future step settings. A memoized result serves only while it matches the step's current declared output set; adding, removing, renaming, or remapping an output invalidates the prior result and re-executes the step. This supports both array and map input declarations; map aliases, literal values, and `max_chars` truncation participate in the key. Editing a step therefore invalidates its prior result.
 
 Both non-empty outputs and an explicit empty output are settled results and are memoized. Exceptions and provider failures are never memoized, including permanent provider errors: the next run tries again. A hit is recorded as a `memoization_hit` row-skipped activity event and in the pipeline step result's `memoization_hits` count. Run `pipeline <list> --force` to deliberately bypass memoization and refresh a result.
 

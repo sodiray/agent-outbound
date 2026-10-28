@@ -6,6 +6,7 @@ import { readConfig } from '../orchestrator/lib/config.js';
 import { AgentOutboundError } from '../orchestrator/runtime/contract.js';
 import { openListDb } from '../orchestrator/runtime/db.js';
 import { getMcpClient } from '../orchestrator/runtime/mcp.js';
+import { listExternalEvents } from '../orchestrator/runtime/external-events.js';
 import { resolveListDir } from '../orchestrator/runtime/paths.js';
 import { runDeliveryPoll, runImapInboundPoll } from '../orchestrator/runtime/polling.js';
 
@@ -456,6 +457,11 @@ const candidatesForSelector = (
   selectorValue = '',
 ): Candidate[] => {
   const selector = `${rule.id} ${rule.observation || ''} ${rule.kind} ${selectorValue}`.toLowerCase();
+  if (selector.includes('external_event')) return listExternalEvents(db).filter((row: Record<string, unknown>) => ['unmatched','ambiguous'].includes(asString(row.status))).map((row: Record<string, unknown>) => ({
+    dedupeKey: `${rule.id}:${asString(row.source)}:${asString(row.event_id)}`, ruleId: rule.id, kind: rule.kind, priority: rule.priority,
+    subjectType: 'external_event', subjectId: asString(row.event_id), summary: `External event requires review: ${asString(row.status)}`,
+    context: row, sourceState: row,
+  }));
   if (
     selector.includes('reply')
     || selector.includes('reply_detected')

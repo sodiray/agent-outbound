@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { externalOperationEnv } from '../external-operations.js';
 import type { CommandServerDef, CommandToolDef } from '../../lib/provider-registry.js';
 import { expandRegistryEnv } from '../../lib/provider-registry.js';
 import type { ProviderToolSchema, ToolProvider } from './types.js';
@@ -198,7 +199,7 @@ export class CommandProvider implements ToolProvider {
         command: this.server.command,
         argv,
         cwd: this.server.cwd || undefined,
-        env: { ...this.env, ...(options.env || {}) },
+        env: { ...this.env, ...(options.env || {}), ...externalOperationEnv() },
         timeoutMs: DEFAULT_TIMEOUT_MS,
         label: `Command provider "${this.id}" tool "${slug}"`,
       });

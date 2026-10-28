@@ -432,7 +432,7 @@ export const ProviderModelSchema = z.string().trim().superRefine((value, ctx) =>
 });
 
 const ToolEffectSchema = z.object({
-  class: z.enum(['data_lookup', 'data_enrichment', 'human_contact']),
+  class: z.enum(['data_lookup', 'data_enrichment', 'human_contact', 'external_mutation']),
   channel: z.string().trim().min(1).optional(),
 }).strict();
 
@@ -1038,12 +1038,63 @@ const PipelineReviewStepSchema = z.object({
   runs_after: PipelineFilterStepSchema.shape.runs_after,
   label: z.string().default(''),
   fields: z.array(z.string()).default([]),
+  edit_fields: z.array(z.string().min(1)).default([]),
   title_field: z.string().min(1).optional(),
   detail: z.array(ReviewDetailSectionSchema).min(1).optional(),
   inputs: StageInputsSchema,
   ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
 });
+
+const DecideQuestionSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('choice'), instructions: z.unknown(), options: z.record(z.unknown()).optional(), options_file: z.string().min(1).optional(), option_text: z.string().min(1).optional() }),
+  z.object({ type: z.literal('score'), instructions: z.unknown(), levels: z.array(z.unknown()).min(2) }),
+  z.object({ type: z.literal('yes_no'), instructions: z.unknown() }),
+]);
+
+const decideOutputs = (questions: Record<string, z.infer<typeof DecideQuestionSchema>>) => Object.fromEntries(
+  Object.entries(questions).flatMap(([name, question]) => {
+    if (question.type === 'yes_no') return [[name, { type: 'number', description: `Jev probability for ${name}` }]];
+    return [
+      [name, { type: question.type === 'score' ? 'number' : 'string', description: `Jev ${question.type} for ${name}` }],
+      [`${name}_confidence`, { type: 'number', description: `Jev confidence for ${name}` }],
+      [`${name}_probabilities`, { type: 'string', description: `Jev probabilities for ${name}` }],
+    ];
+  }),
+);
+
+const withDeclaredDecideOutputs = (steps: unknown): unknown => (
+  Array.isArray(steps)
+    ? steps.map((raw) => {
+      const step = raw && typeof raw === 'object' && !Array.isArray(raw)
+        ? raw as Record<string, unknown>
+        : raw;
+      if (!step || typeof step !== 'object' || Array.isArray(step)) return step;
+      if (step.kind === 'decide') return { ...step, outputs: decideOutputs(step.questions as Record<string, z.infer<typeof DecideQuestionSchema>>) };
+      if (step.kind === 'pipeline' || step.kind === 'on_event') return { ...step, steps: withDeclaredDecideOutputs(step.steps) };
+      return step;
+    })
+    : steps
+);
+
+const PipelineDecideStepSchema = z.object({
+  kind: z.literal('decide'),
+  id: z.string().min(1),
+  description: z.string().default(''),
+  depends_on: z.array(z.string()).default([]),
+  runs_after: z.array(z.string()).default([]),
+  state: z.array(z.string().min(1)).min(1),
+  context: z.string().optional(),
+  questions: z.record(DecideQuestionSchema).refine((value) => Object.keys(value).length > 0, 'requires at least one question.'),
+  concurrency: z.coerce.number().int().min(1).max(200).default(10),
+  memoize: StepMemoizationSchema.optional(),
+  on_error: z.literal('fail').default('fail'),
+  inputs: StageInputsSchema,
+  ...PipelineAuthorStepVocabulary,
+  ...PipelineWhenFields,
+});
+
+const TemperatureSchema = z.coerce.number().min(0).max(2);
 
 const PipelineEnrichmentStepSchema = z.object({
   kind: z.literal('enrich'),
@@ -1052,6 +1103,7 @@ const PipelineEnrichmentStepSchema = z.object({
   depends_on: z.array(z.string()).default([]),
   runs_after: z.array(z.string()).default([]),
   model: ProviderModelSchema.optional(),
+  temperature: TemperatureSchema.optional(),
   // Opt-in chain-of-thought for reasoning models (default off = fast/cheap).
   reasoning: z.boolean().optional(),
   step_budget: z.coerce.number().int().min(1).max(40).default(8),
@@ -1068,6 +1120,7 @@ const PipelineEnrichmentStepSchema = z.object({
   provider: z.string().default(''),
   field: z.string().trim().default(''),
   unit_cost_usd: z.coerce.number().min(0).default(0),
+  rerun: z.boolean().default(false),
   mode: z.string().default(''),
   output_fields: z.record(z.string()).default({}),
   candidate_field: z.string().default(''),
@@ -1093,6 +1146,7 @@ const PipelineEnrichmentStepSchema = z.object({
   depends_on: true,
   runs_after: true,
   model: true,
+  temperature: true,
   step_budget: true,
   concurrency: true,
   cache: true,
@@ -1102,6 +1156,7 @@ const PipelineEnrichmentStepSchema = z.object({
   provider: true,
   field: true,
   unit_cost_usd: true,
+  rerun: true,
   mode: true,
   output_fields: true,
   candidate_field: true,
@@ -1165,6 +1220,7 @@ const PipelineGenerateStepSchema = z.object({
   label: z.string().optional(),
   depends_on: PipelineEnrichmentStepSchema.shape.depends_on,
   model: PipelineEnrichmentStepSchema.shape.model,
+  temperature: PipelineEnrichmentStepSchema.shape.temperature,
   reasoning: PipelineEnrichmentStepSchema.shape.reasoning,
   step_budget: PipelineEnrichmentStepSchema.shape.step_budget,
   concurrency: PipelineEnrichmentStepSchema.shape.concurrency,
@@ -1212,6 +1268,7 @@ const PipelineScoreStepSchema = z.object({
   runs_after: z.array(z.string()).default([]),
   inputs: StageInputsSchema,
   model: ProviderModelSchema,
+  temperature: TemperatureSchema.optional(),
   criteria: z.array(ScoreCriterionSchema).default([]),
   outputs: z.record(ScoreOutputDefSchema).default({}),
   memoize: StepMemoizationSchema.optional(),
@@ -1268,6 +1325,7 @@ const PipelineComposeStepSchema = z.object({
   depends_on: z.array(z.string()).default([]),
   runs_after: z.array(z.string()).default([]),
   model: ProviderModelSchema,
+  temperature: TemperatureSchema.optional(),
   structure: ComposeStructureSchema,
   inputs: z.record(ComposeInputSchema).refine(
     (inputs) => Object.keys(inputs).length > 0,
@@ -1289,6 +1347,42 @@ const PipelineComposeStepSchema = z.object({
   memoize: StepMemoizationSchema.optional(),
   ...PipelineAuthorStepVocabulary,
   ...PipelineWhenFields,
+}).strict();
+
+const PipelineActionStepSchema = PipelineSequenceStepBaseSchema.extend({
+  kind: z.literal('action'),
+  side_effecting: z.literal(true),
+  idempotency: z.object({ key_source: z.array(z.string().min(1)).min(1), scope: z.enum(['list','global']).default('list') }),
+  concurrency: z.coerce.number().int().min(1).max(200).default(4),
+  tool: ToolSpecSchema,
+  args: z.record(z.unknown()).default({}),
+  args_map: z.record(z.string()).default({}),
+  output_map: z.record(z.string()).default({}),
+  outputs: z.record(EnrichmentOutputDefSchema).default({}),
+  inputs: StageInputsSchema,
+  ...PipelineWhenFields,
+}).strict();
+
+const PipelineAwaitEventStepSchema = PipelineSequenceStepBaseSchema.extend({
+  kind: z.literal('await_event'),
+  source: z.string().trim().min(1),
+  event: z.string().trim().min(1),
+  reference_field: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  output_map: z.record(z.string()),
+  outputs: z.record(EnrichmentOutputDefSchema),
+  inputs: StageInputsSchema,
+  ...PipelineWhenFields,
+}).strict();
+
+const PipelineOnEventStepSchema = PipelineSequenceStepBaseSchema.extend({
+  kind: z.literal('on_event'),
+  source: z.string().trim().min(1),
+  event: z.string().trim().min(1),
+  reference_field: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  event_fields: z.record(z.string().min(1)).default({}),
+  until: FieldCheckPredicateSchema.strict().optional(),
+  on_new_event: z.enum(['supersede', 'queue']).default('supersede'),
+  steps: z.array(z.lazy(() => ExecutablePipelineStepSchema)).min(1),
 }).strict();
 
 const PipelineWaitStepSchema = PipelineSequenceStepBaseSchema.extend({
@@ -1357,6 +1451,8 @@ const PipelineExitStepSchema = PipelineFilterStepSchema.omit({ kind: true }).ext
 });
 
 const ExecutablePipelineStepSchemas = [
+  PipelineActionStepSchema,
+  PipelineAwaitEventStepSchema,
   PipelineEnrichmentStepSchema,
   PipelineExtractStepSchema,
   PipelineContactSourceStepSchema,
@@ -1366,6 +1462,7 @@ const ExecutablePipelineStepSchemas = [
   PipelineFilterStepSchema,
   PipelineAssignStepSchema,
   PipelineReviewStepSchema,
+  PipelineDecideStepSchema,
   PipelineWaitStepSchema,
   PipelineSendEmailStepSchema,
   PipelineSendSmsStepSchema,
@@ -1377,6 +1474,8 @@ const ExecutablePipelineStepSchemas = [
 export const ExecutablePipelineStepSchema = z.discriminatedUnion('kind', ExecutablePipelineStepSchemas);
 
 const SubpipelineStepSchema = z.discriminatedUnion('kind', [
+  PipelineActionStepSchema,
+  PipelineAwaitEventStepSchema,
   PipelineEnrichmentStepSchema,
   PipelineExtractStepSchema,
   PipelineContactSourceStepSchema,
@@ -1385,6 +1484,7 @@ const SubpipelineStepSchema = z.discriminatedUnion('kind', [
   PipelineComposeStepSchema,
   PipelineFilterStepSchema,
   PipelineReviewStepSchema,
+  PipelineDecideStepSchema,
   PipelineWaitStepSchema,
   PipelineSendEmailStepSchema,
   PipelineSendSmsStepSchema,
@@ -1407,6 +1507,7 @@ const PipelineSubpipelineStepSchema = z.object({
 
 export const PipelineStepSchema = z.discriminatedUnion('kind', [
   ...ExecutablePipelineStepSchemas,
+  PipelineOnEventStepSchema,
   PipelineSubpipelineStepSchema,
 ]);
 
@@ -2022,6 +2123,10 @@ const AiSchema = z.object({
     copywriting: 'anthropic/claude-opus-4-6',
     research: 'anthropic/claude-sonnet-4-6',
   }),
+  decide: z.object({
+    model: z.string().min(1),
+    api_key_env: z.string().min(1).default('JEV_API_KEY'),
+  }).partial().default({}),
 }).partial().default({
   default_model: 'anthropic/claude-sonnet-4-6',
   defaults: {
@@ -2029,6 +2134,7 @@ const AiSchema = z.object({
     copywriting: 'anthropic/claude-opus-4-6',
     research: 'anthropic/claude-sonnet-4-6',
   },
+  decide: {},
 });
 
 // Global business context: who WE are, what we sell, and what we always need
@@ -2261,9 +2367,28 @@ export const ConfigSchema = z.object({
     strategies: z.array(StrategySchema).default([]),
     exclude: z.array(SourceExcludeRuleSchema).default([]),
     dedup_key: z.string().default('place_id'),
+    ai_dedup: z.enum(['on', 'off']).optional(),
+    ai_dedup_fields: z.array(z.union([
+      z.string().trim().min(1),
+      z.object({
+        field: z.string().trim().min(1),
+        label: z.string().trim().min(1).optional(),
+      }).strict(),
+    ])).default([]),
+    ai_dedup_context: z.string().max(4_000).optional(),
+    ai_dedup_max_chars_per_field: z.coerce.number().int().min(1).max(100_000).default(500),
+    ai_dedup_max_candidates: z.coerce.number().int().min(1).max(100).default(3),
+    ai_dedup_max_calls: z.coerce.number().int().min(0).max(100_000).default(100),
     near_duplicate: NearDuplicateSchema,
     budget: SourceBudgetSchema.default({}),
-  }).partial().default({}),
+  }).partial().default({}).superRefine((source, ctx) => {
+    if (source.ai_dedup !== 'on' || (source.ai_dedup_fields || []).length > 0) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ai_dedup_fields'],
+      message: 'source.ai_dedup_fields must declare the exact payload fields when source.ai_dedup is on.',
+    });
+  }),
   record_title_field: z.string().trim().min(1).optional(),
   pipeline: z.array(PipelineStepSchema).default([]),
   score: ScoreSchema,
@@ -2795,6 +2920,13 @@ export const normalizeConfig = (value, options: {
       timezone: parsed.data?.operations?.timezone || 'UTC',
     };
   }
+  const pipelineWithDecideOutputs = withDeclaredDecideOutputs(parsed.data?.pipeline);
+  const sequencesWithDecideOutputs = Object.fromEntries(
+    Object.entries(withSequenceDefaults).map(([name, sequence]: [string, any]) => [
+      name,
+      { ...sequence, steps: withDeclaredDecideOutputs(sequence.steps) },
+    ]),
+  );
 
   const territories = (parsed.data?.territories || []).map((territory: any) => {
     const polygon = Array.isArray(territory?.polygon) ? territory.polygon : [];
@@ -2814,6 +2946,7 @@ export const normalizeConfig = (value, options: {
 
   const config = {
       ...parsed.data,
+      pipeline: pipelineWithDecideOutputs,
       territories,
       score: {
         ...(parsed.data?.score || {}),
@@ -2921,7 +3054,7 @@ export const normalizeConfig = (value, options: {
           ...(parsed.data?.ai?.defaults || {}),
         },
       },
-      sequences: withSequenceDefaults,
+      sequences: sequencesWithDecideOutputs,
     };
   const graph = validatePipelineGraph(config, options);
   const router = validateRouterConfig(parsed.data);
@@ -2931,6 +3064,14 @@ export const normalizeConfig = (value, options: {
       Array.isArray(sequence?.steps) ? sequence.steps : []
     )),
   ];
+  const decideSteps = flattenPipelineSteps(config).filter((step: any) => String(step?.kind || '') === 'decide');
+  const decideKeyEnv = String(config.ai?.decide?.api_key_env || 'JEV_API_KEY').trim() || 'JEV_API_KEY';
+  const decideErrors = decideSteps.length === 0
+    ? []
+    : [
+      ...(String(config.ai?.decide?.model || '').trim() ? [] : ['ai.decide.model is required when a decide step exists.']),
+      ...(String(process.env[decideKeyEnv] || '').trim() ? [] : [`ai.decide requires environment variable ${decideKeyEnv} to be set.`]),
+    ];
   const prohibitionErrors = findProhibitedSteps(configuredSteps, config.policy)
     .map((step) => step.reason);
   const inboundCapable = Boolean(config.mailboxes)
@@ -2956,6 +3097,7 @@ export const normalizeConfig = (value, options: {
     ...retiredGlobalScoreCriteriaErrors(config),
     ...channelDailyCapErrors,
     ...containerDependencyErrors,
+    ...decideErrors,
   ])];
 
   return {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer } from 'node:http';
 import test from 'node:test';
 
 import {
@@ -10,6 +11,7 @@ import {
   shouldGuardDeclaredOutputWrites,
 } from '../dist/orchestrator/pipeline/step-executor.js';
 import { executeEnrichmentStepOnRecords } from '../dist/orchestrator/enrichment/runner.js';
+import { executeDecideStepOnRecords } from '../dist/orchestrator/decide/runner.js';
 import { runGenerateStep } from '../dist/orchestrator/generate/runner.js';
 import { runComposeStep } from '../dist/orchestrator/compose/runner.js';
 import { runScoreStage } from '../dist/orchestrator/scoring/stage-runner.js';
@@ -44,12 +46,15 @@ const CACHED_PASS_KINDS = new Set([
   'compose',
   'score',
   'extract',
+  'await_event',
+  'decide',
 ]);
 
 const NO_CACHED_PASS_KINDS = {
   // Kinds with no cache/replay path of their own. Their only non-execution is
   // the shared `when` gate, which states `executed: false` in one place
   // (skippedWhenOutcome) and is pinned by pipeline-when-gates.test.mjs.
+  action: 'Uses the shared idempotency boundary; completed skips explicitly state non-execution.',
   filter: 'Re-evaluates its conditions on every run; nothing is cached.',
   exit: 'Re-evaluates its conditions on every run; nothing is cached.',
   contact_source: 'Promotes from the record every run; nothing is cached.',
@@ -58,6 +63,7 @@ const NO_CACHED_PASS_KINDS = {
   wait: 'Passes unconditionally; declares no outputs.',
   manual_task: 'Never passes from the engine — it parks for a human.',
   pipeline: 'A container; flattened before execution, never executed.',
+  on_event: 'A turn container; its inner steps execute through the event-turn runner.',
   send_email: 'Engine-owned transmitter; its skips are passed:false or state executed:false.',
   send_sms: 'Engine-owned transmitter; its skips are passed:false or state executed:false.',
   linkedin_connect: 'Engine-owned transmitter; its skips are passed:false or state executed:false.',
@@ -196,6 +202,46 @@ test('enrich: a cache hit states non-execution and never trips the declared-outp
     assertNotHardErrored(outcome, 'enrich cache hit');
     assert.equal(shouldGuardDeclaredOutputWrites(outcome), false, 'a claimless non-execution is exempt');
   }, { columns: ['resolution', 'rating_count'] });
+});
+
+test('decide: a cache hit states non-execution and never repeats the Jev request', async (t) => {
+  let calls = 0;
+  const server = createServer((_request, response) => {
+    calls += 1;
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ answers: { kind: { type: 'choice', choice: 'yes', confidence: 0.9, probabilities: { yes: 0.9, no: 0.1 } } }, usage: { input_tokens: 1, output_tokens: 1 } }));
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+  } catch (error) {
+    if (error?.code === 'EPERM') {
+      t.skip('local TCP listeners are unavailable in this sandbox');
+      return;
+    }
+    throw error;
+  }
+  const address = server.address();
+  const previousKey = process.env.JEV_API_KEY;
+  const previousUrl = process.env.JEV_BASE_URL;
+  process.env.JEV_API_KEY = 'test';
+  process.env.JEV_BASE_URL = `http://127.0.0.1:${address.port}`;
+  try {
+    await withDb(async ({ db, root, current }) => {
+      const step = { kind: 'decide', id: 'conformance_decide', state: ['website'], questions: { kind: { type: 'choice', instructions: 'classify', options: { yes: 'yes', no: 'no' } } } };
+      const config = { ai: { decide: { model: 'jev-1.13.0', api_key_env: 'JEV_API_KEY' } } };
+      await executeDecideStepOnRecords({ db, listDir: root, config, step, stepId: step.id, rows: [current()] });
+      const cached = await executeStepBatch({ ...context({ db, root }), config }, step, step.id, [current()]);
+      assertStatedNonExecution(cached.get(RECORD_ID), 'decide cache hit');
+      assert.equal(calls, 1);
+    });
+  } finally {
+    if (previousKey === undefined) delete process.env.JEV_API_KEY; else process.env.JEV_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.JEV_BASE_URL; else process.env.JEV_BASE_URL = previousUrl;
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('generate: a cache hit states non-execution and its claims stay checkable', async () => {
@@ -346,4 +392,18 @@ test('a step that did no work and claims nothing is exempt; a claim is always ch
   // nothing keeps the guard armed rather than silently disarming it.
   assert.equal(didExecuteStep({}), true);
   assert.equal(didExecuteStep({ executed: false }), false);
+});
+
+
+test('await_event: consumption replay carries declared write claims', async () => {
+  const { ingestExternalEvents } = await import('../dist/orchestrator/runtime/external-events.js');
+  await withDb(async ({ db, root, current }) => {
+    const step = {kind: 'await_event', id: 'external', source: 'fixture', event: 'ready', reference_field: 'ref', inputs: ['ref'], output_map: {value: 'text'}, outputs: {value: {type: 'string', description: 'Result'}}};
+    const config = {pipeline: [step]};
+    ingestExternalEvents({db, listDir: root, config, events: [{source: 'fixture', id: 'one', type: 'ready', reference: 'opaque', occurred_at: '2026-01-01T00:00:00.000Z', data: {text: 'result'}}]});
+    await executeStepBatch({...context({db, root}), config}, step, step.id, [current()]);
+    const replay = (await executeStepBatch({...context({db, root}), config}, step, step.id, [current()])).get(RECORD_ID);
+    assertGuardableOutcome(replay, 'await_event replay');
+    assertNotHardErrored(replay, 'await_event replay');
+  }, {columns: ['ref'], row: {ref: 'opaque'}});
 });

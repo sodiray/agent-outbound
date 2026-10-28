@@ -29,7 +29,7 @@ export type RuntimeProvider = {
     providerOptions?: Record<string, unknown>,
   ) => Promise<any>;
   resolveCredentials?: () => ProviderCredentials;
-  getProviderOptions?: (modelId: string, opts?: { reasoning?: boolean }) => Record<string, any>;
+  getProviderOptions?: (modelId: string, opts?: { reasoning?: boolean; temperature?: number }) => Record<string, any>;
   extractUsdCost: (result: any) => number | null;
 };
 
@@ -153,13 +153,13 @@ const getOpenRouterReasoningEffort = (): OpenRouterReasoningEffort => {
   return isOpenRouterReasoningEffort(configured) ? configured : 'high';
 };
 
-const getOpenRouterReasoningEffortFromOptions = (providerOptions?: Record<string, unknown>) => {
+const getOpenRouterReasoningEffortFromOptions = (providerOptions?: Record<string, unknown>): OpenRouterReasoningEffort | undefined => {
   const openRouterOptions = providerOptions?.openrouter;
-  if (!openRouterOptions || typeof openRouterOptions !== 'object') return getOpenRouterReasoningEffort();
+  if (!openRouterOptions || typeof openRouterOptions !== 'object') return undefined;
   const reasoning = (openRouterOptions as { reasoning?: unknown }).reasoning;
-  if (!reasoning || typeof reasoning !== 'object') return getOpenRouterReasoningEffort();
+  if (!reasoning || typeof reasoning !== 'object') return undefined;
   const effort = String((reasoning as { effort?: unknown }).effort || '').trim().toLowerCase();
-  return isOpenRouterReasoningEffort(effort) ? effort : getOpenRouterReasoningEffort();
+  return isOpenRouterReasoningEffort(effort) ? effort : undefined;
 };
 
 const strictOpenRouterResponseFormat = (body: Record<string, unknown>) => {
@@ -177,23 +177,27 @@ const strictOpenRouterResponseFormat = (body: Record<string, unknown>) => {
 
 const withOpenRouterReasoning = (
   fetchFn: typeof globalThis.fetch,
-  effort: OpenRouterReasoningEffort,
+  effort: OpenRouterReasoningEffort | undefined,
+  temperature: number | undefined,
 ): typeof globalThis.fetch => async (input, init) => {
   const request = (() => {
     if (typeof init?.body !== 'string') return init;
     try {
       const body = JSON.parse(init.body) as unknown;
       if (!body || typeof body !== 'object' || Array.isArray(body)) return init;
-      const existingReasoning = (body as { reasoning?: unknown }).reasoning;
-      const reasoning = existingReasoning && typeof existingReasoning === 'object' && !Array.isArray(existingReasoning)
-        ? existingReasoning
-        : {};
       return {
         ...init,
         body: JSON.stringify({
           ...body,
           ...strictOpenRouterResponseFormat(body as Record<string, unknown>),
-          reasoning: { ...reasoning, effort },
+          ...(effort ? (() => {
+            const existingReasoning = (body as { reasoning?: unknown }).reasoning;
+            const reasoning = existingReasoning && typeof existingReasoning === 'object' && !Array.isArray(existingReasoning)
+              ? existingReasoning
+              : {};
+            return { reasoning: { ...reasoning, effort } };
+          })() : {}),
+          ...(temperature === undefined ? {} : { temperature }),
         }),
       };
     } catch {
@@ -225,13 +229,14 @@ const withOpenRouterReasoning = (
   return response;
 };
 
-const getOpenRouterProviderOptions = () => ({
-  openrouter: {
-    reasoning: {
-      effort: getOpenRouterReasoningEffort(),
-    },
-  },
-});
+const getOpenRouterProviderOptions = (_modelId: string, { reasoning = false, temperature }: { reasoning?: boolean; temperature?: number } = {}) => (
+  reasoning || temperature !== undefined
+    ? { openrouter: {
+      ...(reasoning ? { reasoning: { effort: getOpenRouterReasoningEffort() } } : {}),
+      ...(temperature === undefined ? {} : { __ao_temperature: temperature }),
+    } }
+    : {}
+);
 
 const buildOpenRouterModel = async (
   modelId: string,
@@ -244,6 +249,10 @@ const buildOpenRouterModel = async (
   const id = String(modelId || '').trim();
   const resolvedBaseURL = String(baseURL || OPENROUTER_BASE_URL).trim();
   const reasoningEffort = getOpenRouterReasoningEffortFromOptions(providerOptions);
+  const openRouterOptions = providerOptions?.openrouter;
+  const temperature = openRouterOptions && typeof openRouterOptions === 'object'
+    ? Number((openRouterOptions as { __ao_temperature?: unknown }).__ao_temperature)
+    : Number.NaN;
   const openAiModule = providerModule as {
     createOpenAI?: (settings: {
       apiKey: string;
@@ -258,7 +267,7 @@ const buildOpenRouterModel = async (
       apiKey,
       baseURL: resolvedBaseURL,
       name: 'openrouter',
-      fetch: withOpenRouterReasoning(globalThis.fetch, reasoningEffort),
+      fetch: withOpenRouterReasoning(globalThis.fetch, reasoningEffort, Number.isFinite(temperature) ? temperature : undefined),
     });
     if (typeof openrouter.chat === 'function') return openrouter.chat(id);
     return openrouter(id);

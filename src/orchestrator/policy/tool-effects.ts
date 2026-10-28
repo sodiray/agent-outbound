@@ -4,6 +4,7 @@ export const TOOL_EFFECT_CLASSES = [
   'data_lookup',
   'data_enrichment',
   'human_contact',
+  'external_mutation',
 ] as const;
 
 export type ToolEffectClass = (typeof TOOL_EFFECT_CLASSES)[number];
@@ -41,6 +42,10 @@ export const assertToolCallEffectsAllowed = ({
     }
     if (!TOOL_EFFECT_CLASS_SET.has(effectClass)) {
       throw new Error(`tool_call:${stepId}: tool effect class "${effectClass}" is unrecognised.`);
+    }
+    if (effectClass === 'external_mutation') {
+      if (!externalSend) throw new Error(`tool_call:${stepId}: external mutations require an action boundary.`);
+      continue;
     }
     if (effectClass === 'data_lookup' || effectClass === 'data_enrichment') {
       if (!channel) continue;

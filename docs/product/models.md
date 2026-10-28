@@ -15,6 +15,24 @@ Some steps deserve the smartest model (email copy that lands). Most don't (decid
 
 Both keys are optional, but **at least one must be provided**. Connecting both is common — operators typically run most of the pipeline on DeepInfra for cost and keep Anthropic for copywriting.
 
+## Jev typed decisions
+
+Jev is a built-in optional dependency for pipeline `decide` steps. It is not a
+general LLM provider and does not participate in `default_model` resolution.
+Configure it only when a pipeline contains a `decide` step:
+
+```yaml
+ai:
+  decide:
+    model: jev-1.13.0
+    api_key_env: JEV_API_KEY
+```
+
+The API key remains in the environment, never in configuration. Validation
+requires the model and the configured key only for projects that use `decide`.
+Jev returns typed Choice, Score, and Noul answers with calibrated probabilities
+and confidence, and its input/output token usage appears in AI usage reports.
+
 ## Onboarding
 
 During `agent-outbound init`, the tool walks the operator through each supported provider. Each is skippable; the operator can add or swap providers later by re-running `init` or `models refresh`.
@@ -27,7 +45,11 @@ During `agent-outbound init`, the tool walks the operator through each supported
 2. Shows a short **recommended list** (6–8 curated models covering the useful tiers — a fast small model, a mid-size Llama, a large Llama, DeepSeek V3, Qwen 72B, etc.) as multi-select checkboxes.
 3. Offers a free-text step: "Paste any additional DeepInfra model IDs you want to support (one per line)." Every entry here is validated against DeepInfra's model-list endpoint before it's saved — typos fail loudly at init, not at runtime.
 
-The resulting set — Anthropic's full list plus the operator's chosen DeepInfra models — is stored in `~/.agent-outbound/models.json`. This is the canonical "models supported on this machine" list.
+The resulting set — including OpenRouter's returned model metadata — is stored
+in `~/.agent-outbound/models.json`. This is the canonical "models supported on
+this machine" list. For OpenRouter, the cached metadata includes each model's
+`supported_parameters`; Agent-Outbound uses it to decide whether it may send
+sampling settings such as `temperature`.
 
 ## Listing and Managing Models
 
@@ -58,6 +80,28 @@ When a step references a model, the tool checks it against `models.json` — no 
   > Or refresh the full list with: `agent-outbound models refresh`
 
 This runs at config save (in `author-config`) and again at the start of every `sequence run` / `enrich` / `source` — stale configs fail loud before they burn a single LLM call.
+
+## Sampling and OpenRouter capabilities
+
+Evaluation and research roles request `temperature: 0` for deterministic work
+when the chosen model accepts temperature. A per-step `temperature` setting
+from `0` through `2` overrides that default for any LLM-backed pipeline step:
+
+```yaml
+- kind: enrich
+  id: condense_evidence
+  model: openrouter/openai/gpt-4.1-mini
+  temperature: 0
+```
+
+For OpenRouter, this is capability-aware: the value is sent only if the local
+inventory says the model supports `temperature`. A known unsupported model
+causes `config validate` to fail clearly. When capability metadata is absent or
+stale, Agent-Outbound omits temperature rather than risking a rejected request;
+set `AO_DEBUG_LLM=1` to see that decision and run `agent-outbound models refresh`
+to refresh the metadata. Sampling is part of a step definition, so changing it
+makes memoized/free LLM work stale. It does not replay settled paid or
+side-effecting effects, whose freshness keys are their resolved arguments.
 
 ## Picking a Model Per Step
 
